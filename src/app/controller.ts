@@ -50,7 +50,12 @@ import {
 } from '../domain/goal-plan.ts';
 import { formatModelRef, type ModelSelection, sameModel } from '../domain/model-ref.ts';
 import { resolveModel } from '../domain/model-resolution.ts';
-import { type NativeGoal } from '../domain/native-goal.ts';
+import {
+  type GoalQueryFailure,
+  type NativeGoal,
+  type NativeGoalState,
+  verifiedGoal,
+} from '../domain/native-goal.ts';
 import {
   groupRows,
   groupSessions,
@@ -584,6 +589,16 @@ export class AppController {
     void this.track('catalog', this.loadCatalog(this.currentDirectory()));
     const route = this.state.route;
     if (route.kind === 'conversation') await this.loadConversation(route.sessionID);
+    // Goal reads that failed while disconnected are re-tried; a successful push or read
+    // during the outage already superseded them (version guard).
+    const unattached = Object.entries(this.state.nativeGoals)
+      .filter(
+        ([id, goal]) =>
+          goal.status === 'unavailable' &&
+          (route.kind !== 'conversation' || route.sessionID !== id),
+      )
+      .map(([id]) => id);
+    await Promise.all(unattached.map((id) => this.refreshNativeGoal(id)));
     for (const id of Object.keys(this.state.transcripts)) {
       if (route.kind !== 'conversation' || route.sessionID !== id) {
         this.setState('transcripts', id, 'stale', true);
@@ -640,7 +655,10 @@ export class AppController {
         return;
       case 'goal-changed':
         this.bumpGoalVersion(event.sessionID);
-        this.setState('nativeGoals', event.sessionID, event.goal);
+        this.setNativeGoalState(
+          event.sessionID,
+          event.goal === null ? { status: 'none' } : { status: 'verified', goal: event.goal },
+        );
         return;
       default:
         return;
@@ -2049,32 +2067,74 @@ export class AppController {
     return next;
   }
 
-  /** Native OpenCode goal for a session, re-read from the plugin. Also cached in state. */
+  /**
+   * Native OpenCode goal for a session, re-read from the plugin. A confirmed `null` means
+   * "no goal"; any failure is `unavailable` and keeps the last verified reading, marked
+   * stale. The last known value is never presented as authoritative after a failure.
+   */
   async refreshNativeGoal(sessionID: string): Promise<NativeGoal | null> {
     const version = this.bumpGoalVersion(sessionID);
     const directory = this.state.sessions[sessionID]?.directory;
+    const previous = this.state.nativeGoals[sessionID];
+    // Only show a spinner from a genuine unknown; a known reading stays on screen while the
+    // refresh runs, so a routine re-read never blinks the badge away.
+    if (previous === undefined || previous.status === 'unknown') {
+      this.setNativeGoalState(sessionID, { status: 'loading' });
+    }
     try {
       const goal = await this.deps.backend.getGoal(sessionID, directory);
       if (version !== this.goalVersions.get(sessionID)) return this.nativeGoalOf(sessionID);
-      this.setState('nativeGoals', sessionID, goal);
+      this.setNativeGoalState(
+        sessionID,
+        goal === null ? { status: 'none' } : { status: 'verified', goal },
+      );
       return goal;
     } catch (error) {
-      this.debugLog.write('backend-error', {
-        operation: 'opencode.goal.get',
-        kind: error instanceof BackendError ? error.kind : 'unknown',
-      });
+      const kind = error instanceof BackendError ? error.kind : 'unknown';
+      this.debugLog.write('backend-error', { operation: 'opencode.goal.get', kind });
       if (version !== this.goalVersions.get(sessionID)) return this.nativeGoalOf(sessionID);
-      // A failed read says nothing about the goal: keep what is known, and show no goal
-      // only when nothing was ever read (e.g. a server without the goal plugin).
-      if (this.state.nativeGoals[sessionID] === undefined) {
-        this.setState('nativeGoals', sessionID, null);
-      }
+      const last = this.lastVerifiedGoal(sessionID);
+      this.setNativeGoalState(sessionID, {
+        status: 'unavailable',
+        reason: goalFailureReason(kind),
+        message: errorText(error),
+        sessionID,
+        ...(directory === undefined ? {} : { directory }),
+        ...(last === undefined ? {} : { last }),
+      });
       return this.nativeGoalOf(sessionID);
     }
   }
 
+  /**
+   * Replaces the whole reading. A path setter would merge into the previous state and
+   * leave fields from another status (a stale `goal`, or an old failure) behind.
+   */
+  private setNativeGoalState(sessionID: string, goal: NativeGoalState): void {
+    this.setState(
+      'nativeGoals',
+      produce((goals) => {
+        goals[sessionID] = goal;
+      }),
+    );
+  }
+
+  /** The last goal the plugin actually returned, if that reading still exists. */
+  private lastVerifiedGoal(sessionID: string): NativeGoal | undefined {
+    const current = this.state.nativeGoals[sessionID];
+    if (current?.status === 'verified') return current.goal;
+    if (current?.status === 'unavailable') return current.last;
+    return undefined;
+  }
+
+  /** The goal currently believed to exist. A stale reading is never used for actions. */
   nativeGoalOf(sessionID: string): NativeGoal | null {
-    return this.state.nativeGoals[sessionID] ?? null;
+    return verifiedGoal(this.state.nativeGoals[sessionID]);
+  }
+
+  /** Full goal knowledge for a session, including stale/unavailable readings (for display). */
+  nativeGoalStateOf(sessionID: string): NativeGoalState | undefined {
+    return this.state.nativeGoals[sessionID];
   }
 
   private clearSteerIntent(sessionID: string): void {
@@ -2879,6 +2939,22 @@ export function mergeLatest(
 export function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/** Maps a normalized backend failure onto why a goal read is inconclusive. */
+function goalFailureReason(kind: BackendError['kind']): GoalQueryFailure {
+  switch (kind) {
+    case 'not-found':
+    case 'invalid':
+      // No goal plugin, or a plugin without the `get` RPC method.
+      return 'unsupported';
+    case 'unauthorized':
+      return 'unauthorized';
+    case 'transport':
+      return 'transport';
+    default:
+      return 'unknown';
+  }
 }
 
 function delay(ms: number): Promise<void> {

@@ -38,6 +38,41 @@ export function toNativeGoal(raw: unknown): NativeGoal | null {
   };
 }
 
+/** Why a goal read could not produce an authoritative answer. */
+export type GoalQueryFailure = 'unsupported' | 'unauthorized' | 'transport' | 'unknown';
+
+/**
+ * What is known about a session's native goal. A failed read is `unavailable`, which is
+ * never the same as a confirmed `none`: the last verified value may be kept for display,
+ * but it is stale and must not drive goal actions.
+ */
+export type NativeGoalState =
+  | { readonly status: 'unknown' }
+  | { readonly status: 'loading' }
+  | { readonly status: 'none' }
+  | { readonly status: 'verified'; readonly goal: NativeGoal }
+  | {
+      readonly status: 'unavailable';
+      readonly reason: GoalQueryFailure;
+      readonly message: string;
+      readonly sessionID: string;
+      readonly directory?: string;
+      /** Last verified reading (a goal, or null for a confirmed absence), if any. */
+      readonly last?: NativeGoal;
+    };
+
+export const unknownGoal: NativeGoalState = { status: 'unknown' };
+
+/** The last *verified* goal, or null. Stale or loading state never counts. */
+export function verifiedGoal(state: NativeGoalState | undefined): NativeGoal | null {
+  return state?.status === 'verified' ? state.goal : null;
+}
+
+/** True when a previous reading is being shown because the current one failed. */
+export function goalIsStale(state: NativeGoalState | undefined): boolean {
+  return state?.status === 'unavailable' && state.last !== undefined;
+}
+
 const statusGlyph: Readonly<Record<GoalStatus, string>> = {
   active: '◎',
   paused: '◌',
@@ -52,10 +87,21 @@ const statusWord: Readonly<Record<GoalStatus, string>> = {
 
 /**
  * The small footer badge. While a user-interrupt pause awaits a follow-up the badge says so
- * instead of pointing at an idle paused goal the user may not remember.
+ * instead of pointing at an idle paused goal the user may not remember. An unreadable goal
+ * is marked stale rather than shown as definitely active, and a failed read never claims
+ * that no goal is set.
  */
-export function goalBadge(goal: NativeGoal | null, awaitingSteer: string | undefined): string {
-  if (goal === null) return '';
+export function goalBadge(
+  state: NativeGoalState | undefined,
+  awaitingSteer: string | undefined,
+): string {
+  if (state === undefined || state.status === 'unknown' || state.status === 'loading') return '';
+  if (state.status === 'none') return '';
+  if (state.status === 'unavailable') {
+    if (state.last === undefined) return '';
+    return `${statusGlyph[state.last.status]} goal · stale`;
+  }
+  const goal = state.goal;
   if (awaitingSteer === goal.id && goal.status === 'paused')
     return `${statusGlyph.paused} goal · follow-up`;
   if (goal.status === 'active') return `${statusGlyph.active} goal · round ${goal.rounds}`;

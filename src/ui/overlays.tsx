@@ -418,26 +418,42 @@ function TasksDialog(props: {
   const session = () => props.controller.currentSession();
   const nativeGoal = () => {
     const current = session();
-    return current === undefined ? undefined : props.controller.state.nativeGoals[current.id];
+    return current === undefined ? undefined : props.controller.nativeGoalStateOf(current.id);
+  };
+  const nativeGoalObject = () => {
+    const known = nativeGoal();
+    if (known?.status === 'verified') return known.goal;
+    if (known?.status === 'unavailable') return known.last;
+    return undefined;
   };
   const nativeLine = () => {
-    const goal = nativeGoal();
-    if (goal === null || goal === undefined) return undefined;
-    const round = `round ${goal.rounds}/${goal.maxRounds}`;
-    if (goal.status === 'active') return `◎ active · ${round}`;
-    if (goal.status === 'complete') return `● complete · ${round}`;
-    return `◌ paused · ${round}${goal.reason === undefined ? '' : ` · ${goal.reason}`}`;
+    const known = nativeGoal();
+    if (known?.status === 'verified') {
+      const goal = known.goal;
+      const round = `round ${goal.rounds}/${goal.maxRounds}`;
+      if (goal.status === 'active') return `◎ active · ${round}`;
+      if (goal.status === 'complete') return `● complete · ${round}`;
+      return `◌ paused · ${round}${goal.reason === undefined ? '' : ` · ${goal.reason}`}`;
+    }
+    if (known?.status === 'unavailable') {
+      return known.last === undefined
+        ? `status unavailable (${known.reason}) · not a confirmed absence`
+        : `last known: ${known.last.status} · stale (${known.reason})`;
+    }
+    return undefined;
   };
   const criteria = () => doc()?.criteria ?? doc()?.goal?.acceptance ?? [];
   return (
     <box {...props.frame(title())}>
-      <Show when={nativeGoal()}>
-        {(goal: Accessor<NativeGoal>) => (
-          <box flexDirection="column">
-            <text fg={props.theme.accentLight}>{`Goal: ${goal().objective}`}</text>
-            <text fg={props.theme.dim}>{`  ${nativeLine() ?? ''}`}</text>
-          </box>
-        )}
+      <Show when={nativeGoalObject() !== undefined || nativeGoal()?.status === 'unavailable'}>
+        <box flexDirection="column">
+          <Show when={nativeGoalObject()}>
+            {(goal: Accessor<NativeGoal>) => (
+              <text fg={props.theme.accentLight}>{`Goal: ${goal().objective}`}</text>
+            )}
+          </Show>
+          <text fg={props.theme.dim}>{`  ${nativeLine() ?? ''}`}</text>
+        </box>
       </Show>
       <Show when={doc()?.goal}>
         {(goal: Accessor<Goal>) => (

@@ -8,7 +8,7 @@ import type { FormEditor, FormRequest } from '../domain/form.ts';
 import type { GoalPlanV1 } from '../domain/goal-plan.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
-import type { NativeGoal } from '../domain/native-goal.ts';
+import type { NativeGoalState } from '../domain/native-goal.ts';
 import type { PromptHistory } from '../domain/prompt-history.ts';
 import { createHistory } from '../domain/prompt-history.ts';
 import type { SessionSummary } from '../domain/session.ts';
@@ -81,10 +81,11 @@ export type AppState = {
   /** Goal/plan sidecar per session; absent until loaded. */
   goals: Record<string, GoalPlanV1>;
   /**
-   * The session's native opencode.goal plugin state, as last read from the plugin
-   * (undefined = not fetched yet, null = no goal set). Authoritative over any local memory.
+   * What is known about each session's native opencode.goal state. A confirmed absence and
+   * a failed read are different states: stale data is retained for display but never drives
+   * goal actions. Absent = never read.
    */
-  nativeGoals: Record<string, NativeGoal | null | undefined>;
+  nativeGoals: Record<string, NativeGoalState>;
   /**
    * Frontend-only intent, keyed by session: the goal ID that interrupted with a user
    * Esc/interrupt and now waits for the user's follow-up. Not a goal status; set only by

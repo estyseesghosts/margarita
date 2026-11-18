@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 
 import { FakeBackend } from '../../test/fake-backend.ts';
-import { BackendError, type PromptDraft } from '../adapter/backend.ts';
+import { BackendError, type BackendErrorKind, type PromptDraft } from '../adapter/backend.ts';
 import { defaultConfig } from '../config/config.ts';
 import type { AppConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
 import { composerFrom } from '../domain/composer.ts';
 import { buildKeymap } from '../domain/keymap.ts';
-import type { NativeGoal } from '../domain/native-goal.ts';
+import type { GoalQueryFailure, NativeGoal } from '../domain/native-goal.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { ToolCall, TranscriptMessage } from '../domain/transcript.ts';
 import { AppController } from './controller.ts';
@@ -1459,6 +1459,118 @@ describe('native opencode goal (issue #21)', () => {
       (call) => call.name === 'runCommand' && call.args[2] === 'resume',
     );
     expect(resumes).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('a confirmed null is "no goal", never confused with a failed read (issue #43)', async () => {
+    const { backend, controller } = await goalFixture();
+    delete backend.goals['ses_a'];
+    expect(await controller.refreshNativeGoal('ses_a')).toBeNull();
+    expect(controller.nativeGoalStateOf('ses_a')).toEqual({ status: 'none' });
+    expect(controller.nativeGoalOf('ses_a')).toBeNull();
+    controller.dispose();
+  });
+
+  test('a failed read keeps the last verified goal as stale and blocks goal actions', async () => {
+    const { backend, controller } = await goalFixture();
+    const verified = controller.nativeGoalStateOf('ses_a');
+    expect(verified?.status).toBe('verified');
+    backend.getGoal = async () => {
+      throw new BackendError('transport', 'opencode.goal.get', 'offline');
+    };
+    await controller.refreshNativeGoal('ses_a');
+    expect(controller.nativeGoalStateOf('ses_a')).toMatchObject({
+      status: 'unavailable',
+      reason: 'transport',
+      message: 'opencode.goal.get: offline',
+      sessionID: 'ses_a',
+      directory: '/work/kohjoh',
+      last: { id: 'goal_1', status: 'active' },
+    });
+    // The stale goal is displayable but never treated as the current one.
+    expect(controller.nativeGoalOf('ses_a')).toBeNull();
+    controller.dispose();
+  });
+
+  test('a disabled plugin and an unauthorized read are distinct and never "no goal"', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+
+    const failures: Record<string, BackendErrorKind> = {
+      unsupported: 'not-found',
+      invalid: 'invalid',
+      unauthorized: 'unauthorized',
+      transport: 'transport',
+      unknown: 'unknown',
+    };
+    const expected: Record<BackendErrorKind, GoalQueryFailure> = {
+      'not-found': 'unsupported',
+      invalid: 'unsupported',
+      unauthorized: 'unauthorized',
+      transport: 'transport',
+      unknown: 'unknown',
+      conflict: 'unknown',
+    };
+    for (const [name, kind] of Object.entries(failures)) {
+      backend.getGoal = async () => {
+        throw new BackendError(kind, 'opencode.goal.get', name);
+      };
+      await controller.refreshNativeGoal('ses_a');
+      const state = controller.nativeGoalStateOf('ses_a');
+      expect(state?.status).toBe('unavailable');
+      expect(state?.status === 'unavailable' ? state.reason : 'missing').toBe(expected[kind]);
+      expect(state?.status === 'unavailable' ? state.last : 'missing').toBeUndefined();
+    }
+    controller.dispose();
+  });
+
+  test('reconnect retries an unavailable goal read without overwriting a fresher push', async () => {
+    const { backend, controller } = await goalFixture();
+    let mode: 'fail' | 'hold' | 'ok' = 'fail';
+    let release: ((goal: NativeGoal | null) => void) | undefined;
+    const real = backend.getGoal.bind(backend);
+    backend.getGoal = async (sessionID, directory) => {
+      if (mode === 'fail') throw new BackendError('transport', 'opencode.goal.get', 'offline');
+      if (mode === 'hold') {
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+      }
+      return real(sessionID, directory);
+    };
+    await controller.refreshNativeGoal('ses_a');
+    expect(controller.nativeGoalStateOf('ses_a')?.status).toBe('unavailable');
+
+    mode = 'ok';
+    controller.onEvents([], true);
+    await flush();
+    await flush();
+    expect(controller.nativeGoalStateOf('ses_a')?.status).toBe('verified');
+
+    // A read in flight during reconnect answers after a newer push: the push wins.
+    mode = 'hold';
+    controller.onEvents([], true);
+    await flush();
+    controller.onEvents(
+      [
+        {
+          kind: 'goal-changed',
+          sessionID: 'ses_a',
+          goal: { id: 'goal_2', objective: 'newer', status: 'active', rounds: 1, maxRounds: 5 },
+        },
+      ],
+      false,
+    );
+    release?.(activeGoal('goal_1'));
+    await flush();
+    await flush();
+    expect(controller.nativeGoalStateOf('ses_a')).toMatchObject({
+      status: 'verified',
+      goal: { id: 'goal_2' },
+    });
     controller.dispose();
   });
 });
