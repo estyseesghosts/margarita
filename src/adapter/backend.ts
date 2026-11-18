@@ -83,6 +83,8 @@ export interface Backend {
   listMessages(sessionID: string, limit: number, cursor?: string): Promise<MessagePage>;
   listInbox(sessionID: string): Promise<QueuedInput[]>;
   cancelQueued(sessionID: string, inboxID: string): Promise<void>;
+  /** Server-side fuzzy file search scoped to `directory`; used for remote `@` mentions. */
+  findProjectFiles(directory: string, query: string, limit: number): Promise<string[]>;
   changeDelivery(sessionID: string, inboxID: string, delivery: Delivery): Promise<void>;
   prompt(sessionID: string, draft: PromptDraft): Promise<QueuedInput>;
   runCommand(sessionID: string, name: string, text: string): Promise<void>;
@@ -209,6 +211,19 @@ class OpenCodeBackend implements Backend {
       messages,
       ...(typeof older === 'string' && older !== '' ? { olderCursor: older } : {}),
     };
+  }
+
+  async findProjectFiles(directory: string, query: string, limit: number): Promise<string[]> {
+    if (query.trim() === '') return [];
+    const result = await call('file.find', () =>
+      this.client.file.find({
+        query,
+        type: 'file',
+        limit,
+        location: { directory },
+      }),
+    );
+    return result.data.map((entry) => entry.path);
   }
 
   async listInbox(sessionID: string): Promise<QueuedInput[]> {

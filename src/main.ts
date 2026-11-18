@@ -106,6 +106,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   for (const error of keymapBuild.errors) process.stderr.write(`keys: ${error}\n`);
 
   let backend: Backend;
+  let remoteFilesystem = false;
   try {
     const connection = await connect({
       ...(options.server === undefined ? {} : { server: options.server }),
@@ -118,6 +119,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     backend = createBackend(connection, {
       toolOutputChars: configLoad.config.transcript.toolOutputChars,
     });
+    remoteFilesystem = connection.origin === 'remote';
     debugLog.write('connected', { baseUrl: backend.baseUrl });
   } catch (error) {
     debugLog.write('connect-failed', {
@@ -146,6 +148,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     now: Date.now,
     saveLocalState: (state) => saveState(paths.stateFile, state),
     listFiles: (root) => listProjectFiles(root),
+    remoteFilesystem,
     requestExit: () => exit.request?.(),
     goalStore: fileGoalStore(join(paths.stateDir, 'goals'), () => new Date().toISOString()),
     debugLog,

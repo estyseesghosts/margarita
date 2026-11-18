@@ -67,6 +67,15 @@ import {
   recordEntry,
   searchHistory,
 } from '../domain/prompt-history.ts';
+import {
+  baseServerPath,
+  isServerAbsolutePath,
+  joinServerPath,
+  normalizeServerPath,
+  relativeServerPath,
+  serverFileUri,
+  serverPathShape,
+} from '../domain/server-path.ts';
 import type { Execution, SessionSummary } from '../domain/session.ts';
 import { completeCommand, type LocalCommandName, parseInput } from '../domain/slash-command.ts';
 import {
@@ -94,6 +103,11 @@ export type ControllerDeps = Readonly<{
   now: () => number;
   saveLocalState: (state: LocalState) => Promise<SaveResult | void>;
   listFiles: (root: string) => Promise<string[]>;
+  /**
+   * True when the connection has no shared filesystem with the server (explicit remote
+   * URL). Remote mentions are resolved via the server's file APIs instead of Bun.file.
+   */
+  remoteFilesystem?: boolean;
   requestExit: () => void;
   /** Writes an exported file; defaults to Bun.write. */
   writeFile?: (path: string, text: string) => Promise<void>;
@@ -919,7 +933,10 @@ export class AppController {
   private async completeFiles(partial: string, start: number): Promise<void> {
     const request = ++this.completionRequest;
     const root = this.currentDirectory();
-    const files = await this.filesFor(root);
+    const remote = this.deps.remoteFilesystem === true;
+    const files = remote
+      ? await this.deps.backend.findProjectFiles(root, partial, 50).catch(() => [] as string[]) // best-effort completion; unreadable server is silent here
+      : await this.filesFor(root);
     const mention = activeMention(this.state.composer.text, this.state.composer.cursor);
     if (
       request !== this.completionRequest || // a newer mention superseded this one
@@ -930,7 +947,8 @@ export class AppController {
     ) {
       return;
     }
-    const items = rankPaths(files, partial, 8).map((path) => ({
+    // Remote results arrive ranked by the server's own fuzzy search; trust that order.
+    const items = (remote ? files.slice(0, 8) : rankPaths(files, partial, 8)).map((path) => ({
       label: `@${path}`,
       detail: '',
       insert: `@${path} `,
@@ -1198,11 +1216,20 @@ export class AppController {
     }
   }
 
-  private async resolveFiles(text: string, directory: string): Promise<PromptFile[]> {
+  private resolveFiles(text: string, directory: string): Promise<PromptFile[]> {
+    if (this.deps.remoteFilesystem === true) return this.resolveRemoteFiles(text, directory);
+    return this.resolveLocalFiles(text, directory);
+  }
+
+  private async resolveLocalFiles(text: string, directory: string): Promise<PromptFile[]> {
     const files: PromptFile[] = [];
+    const missing: string[] = [];
     for (const mention of findFileMentions(text)) {
       const path = isAbsolute(mention.path) ? mention.path : resolve(directory, mention.path);
-      if (!(await Bun.file(path).exists())) continue;
+      if (!(await Bun.file(path).exists())) {
+        missing.push(mention.text);
+        continue;
+      }
       files.push({
         uri: pathToFileURL(path).href,
         name: mention.path,
@@ -1211,7 +1238,73 @@ export class AppController {
         text: mention.text,
       });
     }
+    this.reportUnresolved(missing);
     return files;
+  }
+
+  /**
+   * Remote mode: the server's filesystem is not this machine's. Relative references are
+   * resolved lexically against the session's project directory on the server (posix vs
+   * windows semantics) and verified through the server's file search; unverifiable references
+   * are reported and omitted instead of being sent as unreadable local paths.
+   */
+  private async resolveRemoteFiles(text: string, directory: string): Promise<PromptFile[]> {
+    const shape = serverPathShape(directory);
+    const files: PromptFile[] = [];
+    const missing: string[] = [];
+    for (const mention of findFileMentions(text)) {
+      if (isServerAbsolutePath(mention.path) && serverPathShape(mention.path) !== shape) {
+        missing.push(mention.text); // e.g. `C:\…` mentioned to a posix server
+        continue;
+      }
+      const serverPath = isServerAbsolutePath(mention.path)
+        ? mention.path
+        : joinServerPath(directory, mention.path);
+      const relative = relativeServerPath(directory, serverPath);
+      if (relative === undefined) {
+        missing.push(mention.text); // outside the project directory; cannot verify
+        continue;
+      }
+      let matched: string | undefined;
+      try {
+        // Exact path verified against the server's fuzzy search over the project; the base
+        // name as query guarantees the file appears in the hits when it exists.
+        const hits = await this.deps.backend.findProjectFiles(
+          directory,
+          baseServerPath(relative),
+          100,
+        );
+        matched = hits.find((hit) => normalizeServerPath(hit, shape) === relative);
+      } catch {
+        matched = undefined;
+      }
+      if (matched === undefined) {
+        missing.push(mention.text);
+        continue;
+      }
+      // Use the server's own spelling so case/separator differences do not leak into the URI.
+      const canonical = isServerAbsolutePath(matched)
+        ? matched
+        : joinServerPath(directory, matched);
+      files.push({
+        uri: serverFileUri(canonical),
+        name: mention.path,
+        start: mention.start,
+        end: mention.end,
+        text: mention.text,
+      });
+    }
+    this.reportUnresolved(missing, true);
+    return files;
+  }
+
+  private reportUnresolved(missing: readonly string[], remote = false): void {
+    if (missing.length === 0) return;
+    const where = remote ? ' on the server' : '';
+    this.showNotice(
+      `Could not resolve${where}: ${missing.join(', ')}. The reference was not sent.`,
+      'warn',
+    );
   }
 
   /** Creates a session in `directory`, sends the first prompt, then attaches. */

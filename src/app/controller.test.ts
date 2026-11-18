@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { FakeBackend } from '../../test/fake-backend.ts';
-import { BackendError } from '../adapter/backend.ts';
+import { BackendError, type PromptDraft } from '../adapter/backend.ts';
 import { defaultConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
 import { composerFrom } from '../domain/composer.ts';
@@ -94,6 +94,164 @@ describe('@file completion', () => {
     await flush();
 
     expect(controller.state.completion).toBeUndefined();
+    controller.dispose();
+  });
+});
+
+function remoteController(remoteFiles: string[], directory: string, cwd: string) {
+  const backend = new FakeBackend();
+  backend.remoteFiles = remoteFiles;
+  backend.sessions = [{ ...fakeSession('ses_remote'), directory }];
+  const controller = new AppController({
+    backend,
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'win32',
+    cwd,
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    remoteFilesystem: true,
+    requestExit: () => {},
+  });
+  return { backend, controller };
+}
+
+function isPromptDraft(value: unknown): value is PromptDraft {
+  return typeof value === 'object' && value !== null && 'text' in value && 'files' in value;
+}
+
+function promptDraft(backend: FakeBackend): PromptDraft {
+  const call = backend.calls.find((entry) => entry.name === 'prompt');
+  if (call === undefined) throw new Error('prompt was not recorded');
+  if (!isPromptDraft(call.args[1])) throw new Error('prompt draft missing');
+  return call.args[1];
+}
+
+describe('remote @file resolution (issue #9)', () => {
+  test('resolves a relative mention against the server project directory', async () => {
+    const { backend, controller } = remoteController(
+      ['src/main.ts', 'README.md'],
+      '/srv/proj',
+      'C:\\Users\\me\\proj',
+    );
+    await controller.bootstrap();
+    await controller.sendToSession('ses_remote', 'inspect @src/main.ts');
+
+    expect(promptDraft(backend).files).toEqual([
+      {
+        uri: 'file:///srv/proj/src/main.ts',
+        name: 'src/main.ts',
+        start: 8,
+        end: 20,
+        text: '@src/main.ts',
+      },
+    ]);
+    controller.dispose();
+  });
+
+  test('resolves an absolute mention inside the server project', async () => {
+    const { backend, controller } = remoteController(
+      ['src/main.ts'],
+      '/srv/proj',
+      'C:\\Users\\me\\proj',
+    );
+    await controller.bootstrap();
+    await controller.sendToSession('ses_remote', 'inspect @/srv/proj/src/main.ts');
+
+    expect(promptDraft(backend).files).toEqual([
+      {
+        uri: 'file:///srv/proj/src/main.ts',
+        name: '/srv/proj/src/main.ts',
+        start: 8,
+        end: 30,
+        text: '@/srv/proj/src/main.ts',
+      },
+    ]);
+    controller.dispose();
+  });
+
+  test('windows client paths resolve against a windows server case-insensitively', async () => {
+    const { backend, controller } = remoteController(
+      ['src\\main.ts'],
+      'C:\\Users\\u\\proj',
+      'C:\\Users\\me\\proj',
+    );
+    await controller.bootstrap();
+    await controller.sendToSession('ses_remote', 'inspect @SRC\\MAIN.TS');
+
+    expect(promptDraft(backend).files).toEqual([
+      {
+        uri: 'file:///C:/Users/u/proj/src/main.ts',
+        name: 'SRC\\MAIN.TS',
+        start: 8,
+        end: 20,
+        text: '@SRC\\MAIN.TS',
+      },
+    ]);
+    controller.dispose();
+  });
+
+  test('a cross-shape absolute mention is reported and not sent', async () => {
+    const { backend, controller } = remoteController(
+      ['src/main.ts'],
+      '/srv/proj',
+      'C:\\Users\\me\\proj',
+    );
+    await controller.bootstrap();
+    await controller.sendToSession('ses_remote', 'inspect @C:\\proj\\a.ts');
+
+    expect(promptDraft(backend).files).toEqual([]);
+    expect(controller.state.notice?.text).toBe(
+      'Could not resolve on the server: @C:\\proj\\a.ts. The reference was not sent.',
+    );
+    controller.dispose();
+  });
+
+  test('a reference escaping the project is reported and not sent', async () => {
+    const { backend, controller } = remoteController(
+      ['src/main.ts'],
+      '/srv/proj',
+      'C:\\Users\\me\\proj',
+    );
+    await controller.bootstrap();
+    await controller.sendToSession('ses_remote', 'inspect @../outside.ts');
+
+    expect(promptDraft(backend).files).toEqual([]);
+    expect(controller.state.notice?.text).toBe(
+      'Could not resolve on the server: @../outside.ts. The reference was not sent.',
+    );
+    controller.dispose();
+  });
+
+  test('a missing server file is reported and not sent', async () => {
+    const { backend, controller } = remoteController(
+      ['src/main.ts'],
+      '/srv/proj',
+      'C:\\Users\\me\\proj',
+    );
+    await controller.bootstrap();
+    await controller.sendToSession('ses_remote', 'inspect @src/missing.ts');
+
+    expect(promptDraft(backend).files).toEqual([]);
+    expect(controller.state.notice?.text).toBe(
+      'Could not resolve on the server: @src/missing.ts. The reference was not sent.',
+    );
+    controller.dispose();
+  });
+
+  test('completion is served by the server file index, not the local filesystem', async () => {
+    const { backend, controller } = remoteController(
+      ['src/main.ts', 'docs/remote.md'],
+      '/srv/proj',
+      'C:\\Users\\me\\proj',
+    );
+    controller.setComposer(composerFrom('@main'));
+    await flush();
+
+    expect(backend.calls.some((entry) => entry.name === 'findProjectFiles')).toBe(true);
+    expect(controller.state.completion?.items.map((item) => item.label)).toEqual(['@src/main.ts']);
     controller.dispose();
   });
 });
