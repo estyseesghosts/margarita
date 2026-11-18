@@ -138,11 +138,20 @@ export function classifyTool(name: string): ToolCategory {
   return categoryByName[name.toLowerCase()] ?? 'other';
 }
 
-/** Only quiet, inspection-style tools are folded; anything mutating stays visible. */
+/**
+ * Only quiet inspection/shell/edit calls fold; anything mutating the user's focus (user
+ * messages, failures) does not. Edits fold too: the diffs stay recoverable in the group.
+ */
 function isFoldable(tool: ToolCall): boolean {
   if (tool.status === 'error') return false;
   const category = classifyTool(tool.name);
-  return category === 'read' || category === 'search' || category === 'web' || category === 'shell';
+  return (
+    category === 'read' ||
+    category === 'search' ||
+    category === 'web' ||
+    category === 'shell' ||
+    category === 'edit'
+  );
 }
 
 export function groupKey(tools: readonly ToolCall[]): string {
@@ -158,6 +167,15 @@ export function foldTranscript(
   options: FoldOptions,
 ): TranscriptNode[] {
   const out: TranscriptNode[] = [];
+  // Brief progress notes fold into the activity group across a working run; the newest
+  // assistant message carries the user-visible answer, so its text never folds away.
+  let lastAssistantIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.kind === 'assistant') {
+      lastAssistantIndex = index;
+      break;
+    }
+  }
   /** Emits the marker for the message just appended, if the segment boundary falls there. */
   function appendBoundaryMarker(messageId: string) {
     const marker = options.markers?.get(messageId);
@@ -182,7 +200,12 @@ export function foldTranscript(
         break;
       }
       case 'assistant':
-        foldAssistant(message, options, out);
+        foldAssistant(
+          message,
+          options,
+          out,
+          lastAssistantIndex >= 0 && messages[lastAssistantIndex] === message,
+        );
         break;
       case 'shell':
         out.push({
@@ -284,32 +307,60 @@ function foldAssistant(
   message: Extract<TranscriptMessage, { kind: 'assistant' }>,
   options: FoldOptions,
   out: TranscriptNode[],
+  /** The newest assistant message's prose is the user-visible answer; never folded away. */
+  keepsText: boolean,
 ): void {
   let pending: ToolCall[] = [];
   let sawReasoningText = false;
+  const emitTool = (tool: ToolCall) => {
+    out.push({
+      kind: 'tool',
+      key: tool.id,
+      tool,
+      category: classifyTool(tool.name),
+      expanded:
+        options.detailed || tool.status === 'error' || options.expandedDiffs?.has(tool.id) === true,
+    });
+  };
+  const emitGroup = (tools: ToolCall[]) => {
+    const key = groupKey(tools);
+    out.push({
+      kind: 'tool-group',
+      key,
+      summary: summarizeTools(tools),
+      running: tools.some((tool) => tool.status === 'running' || tool.status === 'streaming'),
+      tools,
+      expanded: options.expandedGroups.has(key),
+    });
+  };
   const flush = () => {
     if (pending.length === 0) return;
     if (options.detailed) {
-      for (const tool of pending) {
-        out.push({
-          kind: 'tool',
-          key: tool.id,
-          tool,
-          category: classifyTool(tool.name),
-          expanded: options.detailed,
-        });
-      }
-    } else {
-      const key = groupKey(pending);
-      out.push({
-        kind: 'tool-group',
-        key,
-        summary: summarizeTools(pending),
-        running: pending.some((tool) => tool.status === 'running' || tool.status === 'streaming'),
-        tools: pending,
-        expanded: options.expandedGroups.has(key),
-      });
+      for (const tool of pending) emitTool(tool);
+      pending = [];
+      return;
     }
+    // Split into inspection and edit segments; consecutive same-category runs fold.
+    // A lone edit keeps its own row: the inline diff is the content the user asked
+    // to see, not noise to fold. Runs of 2+ edits fold like other activity.
+    let segment: ToolCall[] = [];
+    let segmentEdit: boolean | undefined;
+    const emitSegment = () => {
+      if (segment.length === 0) return;
+      if (segmentEdit === true && segment.length === 1) {
+        emitTool(segment[0]!);
+      } else {
+        emitGroup(segment);
+      }
+      segment = [];
+    };
+    for (const tool of pending) {
+      const isEdit = classifyTool(tool.name) === 'edit';
+      if (segmentEdit !== undefined && isEdit !== segmentEdit) emitSegment();
+      segmentEdit = isEdit;
+      segment.push(tool);
+    }
+    emitSegment();
     pending = [];
   };
   message.parts.forEach((part, index) => {
@@ -331,11 +382,18 @@ function foldAssistant(
             options.expandedDiffs?.has(part.tool.id) === true,
         });
         return;
-      case 'text':
-        if (part.text.trim() === '') return;
+      case 'text': {
+        const trimmed = part.text.trim();
+        if (trimmed === '') return;
+        // Brief progress notes interleaved with tool activity fold into the group; the
+        // latest assistant message keeps its prose so the final reply never disappears.
+        if (!options.detailed && !keepsText && trimmed.length <= 80 && !trimmed.includes('\n')) {
+          return;
+        }
         flush();
         out.push({ kind: 'text', key: `${message.id}:${index}`, text: part.text });
         return;
+      }
       case 'reasoning':
         if (part.text.trim() !== '') sawReasoningText = true;
         // Live reasoning status is the throbber's job; the transcript only shows

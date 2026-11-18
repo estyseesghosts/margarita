@@ -289,3 +289,116 @@ describe('grouping across messages', () => {
     );
   });
 });
+
+/** Assistant message carrying an id (existing helper hardcodes 'm1'). */
+function assistantWithId(id: string, parts: AssistantPart[]): TranscriptMessage {
+  return {
+    kind: 'assistant',
+    id,
+    createdAt: 1,
+    agent: 'build',
+    model: { providerID: 'p', modelID: 'm' },
+    parts,
+  };
+}
+const groupedBash = (id: string): AssistantPart => tool(id, 'bash');
+const groupedEdit = (
+  id: string,
+  filePath = `${id}.ts`,
+  status: ToolCall['status'] = 'completed',
+): AssistantPart => ({
+  kind: 'tool',
+  tool: {
+    id,
+    name: 'edit',
+    status,
+    input: { filePath },
+    startedAt: 0,
+    ...(status === 'error' ? { error: 'exit 1' } : {}),
+  },
+});
+
+function runFixture(): TranscriptMessage[] {
+  return [
+    assistantWithId('mA', [
+      ...Array.from({ length: 10 }, (_, index) => groupedBash(`s${index}`)),
+      { kind: 'text', text: 'Running the build.' },
+      tool('read1', 'read'),
+      tool('read2', 'read'),
+      tool('read3', 'read'),
+    ]),
+    assistantWithId('mB', [
+      ...Array.from({ length: 6 }, (_, index) => groupedEdit(`e${index}`, 'src/index.ts')),
+      groupedBash('s10'),
+    ]),
+    assistantWithId('mC', [groupedEdit('eFailed', 'src/fixed.ts', 'error')]),
+    assistantWithId('mD', [
+      { kind: 'text', text: 'The rewrite is complete: tests are green and the diff is ready.' },
+    ]),
+  ];
+}
+
+describe('grouped activity (issue #23)', () => {
+  test('a full run folds into a few meaningful rows; failure and final reply stay visible', () => {
+    const nodes = foldTranscript(runFixture(), compact);
+    expect(kinds(nodes)).toEqual(['group(20)', 'tool', 'text']);
+    const group = nodes[0];
+    expect(group?.kind === 'tool-group' && group.summary).toBe(
+      'Ran 11 shell commands, read 3 files, edited 6 files',
+    );
+    expect(group?.kind === 'tool-group' && group.tools.map((entry) => entry.id)).toEqual([
+      ...Array.from({ length: 10 }, (_, index) => `s${index}`),
+      'read1',
+      'read2',
+      'read3',
+      ...Array.from({ length: 6 }, (_, index) => `e${index}`),
+      's10',
+    ]);
+    const failed = nodes[1];
+    expect(failed?.kind === 'tool' && failed.tool.status).toBe('error');
+    expect(failed?.kind === 'tool' && failed.expanded).toBe(true);
+    expect(nodes[2]?.kind).toBe('text');
+    // The brief progress chatter folds away; it is not rendered as its own row.
+    expect(
+      nodes.some((node) => node.kind === 'text' && node.text.includes('Running the build')),
+    ).toBe(false);
+  });
+
+  test('detailed mode shows every underlying call in transcript order', () => {
+    const nodes = foldTranscript(runFixture(), detailed);
+    const ids = nodes.flatMap((node) => (node.kind === 'tool' ? [node.tool.id] : []));
+    expect(ids).toEqual([
+      ...Array.from({ length: 10 }, (_, index) => `s${index}`),
+      'read1',
+      'read2',
+      'read3',
+      ...Array.from({ length: 6 }, (_, index) => `e${index}`),
+      's10',
+      'eFailed',
+    ]);
+    const texts = nodes.flatMap((node) => (node.kind === 'text' ? [node.text] : []));
+    expect(texts).toContain('Running the build.');
+    expect(texts).toContain('The rewrite is complete: tests are green and the diff is ready.');
+  });
+
+  test('a singleton edit keeps its own inline-diff row instead of a group summary', () => {
+    const nodes = foldTranscript([assistantWithId('m1', [groupedEdit('only', 'f.ts')])], compact);
+    expect(nodes[0]?.kind).toBe('tool');
+    expect(nodes[0]?.kind === 'tool' && nodes[0].tool.id).toBe('only');
+  });
+
+  test('grouping is deterministic across canonical re-folds of a replayed history', () => {
+    const first = foldTranscript(runFixture(), compact);
+    // The server re-emits identical history as fresh objects; keys and shape are stable.
+    const replay = structuredClone(runFixture());
+    const second = foldTranscript(replay, compact);
+    expect(kinds(second)).toEqual(kinds(first));
+    expect(second.map((node) => node.key)).toEqual(first.map((node) => node.key));
+  });
+
+  test('a failure is never folded into the counts of the surrounding group', () => {
+    const nodes = foldTranscript(runFixture(), compact);
+    const failed = nodes[1];
+    expect(failed?.kind === 'tool' && failed.tool.error).toBe('exit 1');
+  });
+});

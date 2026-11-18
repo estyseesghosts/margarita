@@ -1261,3 +1261,142 @@ describe('inline diff stability (issue #26)', () => {
     controller.dispose();
   });
 });
+
+function groupedBashPart(id: string) {
+  return {
+    kind: 'tool' as const,
+    tool: {
+      id,
+      name: 'bash',
+      status: 'completed' as const,
+      input: { command: `bun run ${id}`, filePath: `${id}.log` },
+      startedAt: 2,
+      completedAt: 3,
+    },
+  };
+}
+function groupedEditPart(
+  id: string,
+  filePath: string,
+  status: 'completed' | 'error' = 'completed',
+) {
+  return {
+    kind: 'tool' as const,
+    tool: {
+      id,
+      name: 'edit',
+      status,
+      input: { filePath },
+      startedAt: 2,
+      completedAt: 3,
+      ...(status === 'error' ? { error: 'exit 1' } : {}),
+    },
+  };
+}
+
+function groupedBackend(): FakeBackend {
+  const backend = backendWithSession();
+  const model = { providerID: 'opencode', modelID: 'longcat' };
+  backend.messages = {
+    ses_a: [
+      { kind: 'user', id: 'm1', createdAt: 1, text: 'rewrite the renderer', attachments: [] },
+      {
+        kind: 'assistant',
+        id: 'mA',
+        createdAt: 2,
+        agent: 'build',
+        model,
+        parts: [
+          ...Array.from({ length: 10 }, (_, index) => groupedBashPart(`s${index}`)),
+          { kind: 'text', text: 'Running the build.' },
+          {
+            kind: 'tool',
+            tool: {
+              id: 'read1',
+              name: 'read',
+              status: 'completed',
+              input: { filePath: 'a.ts' },
+              startedAt: 3,
+              completedAt: 4,
+            },
+          },
+          {
+            kind: 'tool',
+            tool: {
+              id: 'read2',
+              name: 'read',
+              status: 'completed',
+              input: { filePath: 'b.ts' },
+              startedAt: 3,
+              completedAt: 4,
+            },
+          },
+        ],
+      },
+      {
+        kind: 'assistant',
+        id: 'mB',
+        createdAt: 5,
+        agent: 'build',
+        model,
+        parts: [
+          ...Array.from({ length: 6 }, (_, index) => groupedEditPart(`e${index}`, 'src/index.ts')),
+          groupedBashPart('s10'),
+        ],
+      },
+      {
+        kind: 'assistant',
+        id: 'mC',
+        createdAt: 6,
+        agent: 'build',
+        model,
+        parts: [groupedEditPart('eFailed', 'src/fixed.ts', 'error')],
+      },
+      {
+        kind: 'assistant',
+        id: 'mD',
+        createdAt: 7,
+        completedAt: 8,
+        agent: 'build',
+        model,
+        parts: [
+          {
+            kind: 'text',
+            text: 'The rewrite is complete: tests are green and the diff is ready.',
+          },
+        ],
+      },
+    ],
+  };
+  return backend;
+}
+
+describe('grouped activity (issue #23)', () => {
+  test('compact frame shows a few grouped rows, the visible failure and the final reply', async () => {
+    const { controller, setup } = await mount(groupedBackend());
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+
+    expect(frame).toContain('Ran 11 shell commands');
+    expect(frame).toContain('edited 6 files');
+    // The lone failure stays visible with its error; its name is not folded away.
+    expect(frame).toContain('edit src/fixed.ts');
+    expect(frame).toContain('exit 1');
+    // The final reply is visible.
+    expect(frame).toContain('The rewrite is complete');
+    // Brief progress chatter and individual call rows are folded away.
+    expect(frame).not.toContain('Running the build.');
+    expect(frame).not.toContain('bash s0.log');
+    expect(frame).not.toContain('Update(src/index.ts)');
+
+    controller.toggleDetails();
+    await settle(setup);
+    const detailedFrame = setup.captureCharFrame();
+    // Tall detailed transcript: viewport is bottom-anchored; individual calls are visible.
+    expect(detailedFrame).toContain('Changed(src/index.ts)');
+    expect(detailedFrame).toContain('bash s10.log');
+    expect(detailedFrame).toContain('edit src/fixed.ts');
+    controller.dispose();
+  });
+});
