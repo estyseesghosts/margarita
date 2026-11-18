@@ -84,6 +84,12 @@ function runAction(controller: AppController, action: ActionID, services: Router
     case 'transcript.details':
       controller.toggleDetails();
       return true;
+    case 'transcript.groupPrevious':
+      controller.moveGroupFocus(-1);
+      return true;
+    case 'transcript.groupNext':
+      controller.moveGroupFocus(1);
+      return true;
     case 'transcript.pageUp':
       services.scroll('pageUp');
       return true;
@@ -302,6 +308,8 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
     case 'return':
     case 'enter':
       if (key.shift) return edit(insertText(composer, '\n'));
+      // An empty prompt gives Enter the selected tool group first; otherwise it submits.
+      if (composer.text === '' && controller.toggleFocusedGroup()) return true;
       void controller.submit();
       return true;
     case 'linefeed':
@@ -339,6 +347,7 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
       return true;
     }
     case 'escape':
+      controller.clearGroupFocus();
       if (state.exitArmed || state.notice !== undefined) controller.clearNotice();
       return true;
     case 'tab':

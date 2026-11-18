@@ -67,7 +67,12 @@ import {
 } from '../domain/prompt-history.ts';
 import type { Execution, SessionSummary } from '../domain/session.ts';
 import { completeCommand, type LocalCommandName, parseInput } from '../domain/slash-command.ts';
-import { type TranscriptMessage, transcriptWindowStep } from '../domain/transcript.ts';
+import {
+  foldTranscript,
+  type TranscriptMessage,
+  type TranscriptNode,
+  transcriptWindowStep,
+} from '../domain/transcript.ts';
 import {
   type AppState,
   type DiffOverlay,
@@ -545,6 +550,7 @@ export class AppController {
       this.setState('route', { kind: 'conversation', sessionID });
       this.setState('overlay', { kind: 'none' });
       this.setState('completion', undefined);
+      this.setState('focusedGroup', undefined);
       this.setState('permissionChoice', 0);
       this.setState('openedAt', sessionID, this.deps.now());
       this.writeComposer(this.state.drafts[sessionID] ?? emptyComposer);
@@ -569,6 +575,7 @@ export class AppController {
       this.setState('route', { kind: 'new', directory });
       this.setState('overlay', { kind: 'none' });
       this.setState('completion', undefined);
+      this.setState('focusedGroup', undefined);
       this.setState('overview', 'directory', directory);
       this.writeComposer(this.state.drafts[`new:${directory}`] ?? emptyComposer);
     });
@@ -587,6 +594,7 @@ export class AppController {
       this.setState('route', { kind: 'overview' });
       this.setState('overlay', { kind: 'none' });
       this.setState('completion', undefined);
+      this.setState('focusedGroup', undefined);
       this.writeComposer(this.state.drafts['overview'] ?? emptyComposer);
       this.setState('overview', 'directory', directory);
       const first = this.overviewRows()[0];
@@ -679,6 +687,9 @@ export class AppController {
     batch(() => {
       this.writeComposer(composer);
       this.setState('exitArmed', false);
+      if (composer.text !== '' && this.state.focusedGroup !== undefined) {
+        this.setState('focusedGroup', undefined);
+      }
       if (this.state.history.index !== undefined) {
         this.setState('history', { entries: this.state.history.entries, savedDraft: '' });
       }
@@ -774,6 +785,7 @@ export class AppController {
     batch(() => {
       this.writeComposer({ text: next, cursor: completion.start + item.insert.length });
       this.setState('completion', undefined);
+      this.setState('focusedGroup', undefined);
     });
     return true;
   }
@@ -971,6 +983,7 @@ export class AppController {
       batch(() => {
         this.writeComposer(emptyComposer);
         this.setState('completion', undefined);
+        this.setState('focusedGroup', undefined);
       });
     }
   }
@@ -1617,6 +1630,7 @@ export class AppController {
   // ---------------------------------------------------------------- presentation
 
   toggleDetails(): void {
+    this.clearGroupFocus();
     this.setState('detailed', !this.state.detailed);
   }
 
@@ -1627,6 +1641,50 @@ export class AppController {
         else state.expandedGroups[key] = true;
       }),
     );
+  }
+
+  /** Tool groups in render order; empty outside conversations and in detailed mode. */
+  toolGroups(): Extract<TranscriptNode, { kind: 'tool-group' }>[] {
+    if (this.state.route.kind !== 'conversation') return [];
+    const target = this.state.route.sessionID;
+    const messages = this.state.transcripts[target]?.messages ?? [];
+    const nodes = foldTranscript(messages, {
+      detailed: this.state.detailed,
+      expandedGroups: new Set(Object.keys(this.state.expandedGroups)),
+    });
+    return nodes.filter((node) => node.kind === 'tool-group');
+  }
+
+  /** Ctrl+↑/↓ while reading: move the lightweight selection between tool groups. */
+  moveGroupFocus(direction: -1 | 1): void {
+    const groups = this.toolGroups();
+    if (groups.length === 0) return;
+    const current = this.state.focusedGroup;
+    const index = current === undefined ? -1 : groups.findIndex((group) => group.key === current);
+    const next =
+      index === -1
+        ? direction === -1
+          ? groups.length - 1
+          : 0
+        : Math.min(groups.length - 1, Math.max(0, index + direction));
+    const group = groups[next];
+    if (group !== undefined) this.setState('focusedGroup', group.key);
+  }
+
+  /** Enter on an empty prompt expands/collapses only the selected group. */
+  toggleFocusedGroup(): boolean {
+    const key = this.state.focusedGroup;
+    if (key === undefined) return false;
+    if (!this.toolGroups().some((group) => group.key === key)) {
+      this.setState('focusedGroup', undefined);
+      return false;
+    }
+    this.toggleGroup(key);
+    return true;
+  }
+
+  clearGroupFocus(): void {
+    if (this.state.focusedGroup !== undefined) this.setState('focusedGroup', undefined);
   }
 
   setOverlay(overlay: Overlay): void {

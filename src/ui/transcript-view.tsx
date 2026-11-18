@@ -171,6 +171,7 @@ export function Transcript(props: TranscriptProps) {
                 theme={props.theme}
                 detailed={state.detailed}
                 syntax={syntax()}
+                focused={node.kind === 'tool-group' && state.focusedGroup === node.key}
               />
             </box>
           )}
@@ -278,6 +279,7 @@ function NodeView(props: {
   theme: Theme;
   detailed: boolean;
   syntax: SyntaxStyle;
+  focused: boolean;
 }) {
   const theme = () => props.theme;
   return (
@@ -339,7 +341,11 @@ function NodeView(props: {
       <Match when={props.node.kind === 'tool-group' ? props.node : undefined}>
         {(node: Accessor<NodeOf<'tool-group'>>) => (
           <box flexDirection="column" marginTop={1}>
-            <text fg={theme().dim}>{`  ${node().summary}${node().running ? '…' : ''}`}</text>
+            <text fg={props.focused ? theme().accent : theme().dim}>
+              {`${props.focused ? '▸' : ' '}  ${node().summary}${node().running ? '…' : ''}${
+                props.focused ? '  (Enter)' : ''
+              }`}
+            </text>
             <Show when={node().expanded}>
               <For each={node().tools}>
                 {(tool) => (

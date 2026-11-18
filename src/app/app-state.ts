@@ -95,6 +95,8 @@ export type AppState = {
   /** Rendered node count per session (see `windowNodes`); grows as the user pages up. */
   transcriptWindow: Record<string, number>;
   expandedGroups: Record<string, true>;
+  /** Group key of the tool group selected for per-group toggle; absent when composer has focus. */
+  focusedGroup?: string;
   composer: Composer;
   completion?: Completion;
   drafts: Record<string, Composer>;
