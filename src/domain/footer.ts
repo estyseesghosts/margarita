@@ -10,6 +10,8 @@ export type FooterFacts = Readonly<{
   cost?: number;
   queued: number;
   stale: boolean;
+  /** Compact native-goal badge (e.g. `◎ goal · round 2`); dropped early to fit width. */
+  goal?: string;
 }>;
 
 /**
@@ -36,6 +38,12 @@ export function formatFooter(facts: FooterFacts, width: number): string {
   const queued = facts.queued > 0 ? `${facts.queued} queued` : undefined;
 
   const candidates: (string | undefined)[][] = [
+    [`${agent} (shift+tab)`, model, facts.state, queued, facts.goal, tokensLong, cost],
+    [agent, model, facts.state, queued, facts.goal, tokensLong, cost],
+    [agent, model, facts.state, facts.goal, tokensShort, cost],
+    [agent, variant, facts.state, facts.goal, tokensShort, cost],
+    [agent, facts.goal, tokensShort, cost],
+    [facts.goal, tokensShort, cost],
     [`${agent} (shift+tab)`, model, facts.state, queued, tokensLong, cost],
     [agent, model, facts.state, queued, tokensLong, cost],
     [agent, model, facts.state, tokensShort, cost],

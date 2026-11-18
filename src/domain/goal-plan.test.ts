@@ -8,13 +8,13 @@ import {
   acceptProposal,
   emptyGoalPlan,
   forkGoalPlan,
-  instructionText,
   nextTaskState,
   parseGoalPlan,
   parseSteps,
   progress,
   proposePlan,
   rejectProposal,
+  setAcceptance,
   setGoal,
   setTaskState,
   setUserPlan,
@@ -75,18 +75,26 @@ describe('goal plan', () => {
     expect(doc.plan?.revision).toBe(2);
   });
 
-  test('instruction text is compact and only includes accepted plans', () => {
-    const doc = proposePlan(setGoal(base, 'Hit 30 FPS', now), ['p'], now);
-    expect(instructionText(doc)).toContain('User goal (revision 0): Hit 30 FPS');
-    expect(instructionText(doc)).not.toContain('Accepted plan');
-    expect(instructionText(base)).toBe('');
+  test('criteria migrate from a legacy local goal and round-trip', () => {
+    const legacy = parseGoalPlan(
+      {
+        sessionID: 'ses_a',
+        goal: { title: 'Hit 30 FPS', acceptance: ['p95 < 16ms', 'no allocs'] },
+      },
+      now,
+    );
+    expect(legacy.criteria).toEqual(['p95 < 16ms', 'no allocs']);
+    const doc = setAcceptance(base, [' 60 FPS ', ''], now);
+    expect(doc.criteria).toEqual(['60 FPS']);
+    const roundTripped = parseGoalPlan(JSON.parse(JSON.stringify(doc)), now);
+    expect(roundTripped.criteria).toEqual(['60 FPS']);
   });
 
-  test('fork copies with a fresh identity and no sync', () => {
+  test('fork copies with a fresh identity', () => {
     const forked = forkGoalPlan({ ...setGoal(base, 'g', now), revision: 4 }, 'ses_b');
     expect(forked.sessionID).toBe('ses_b');
     expect(forked.revision).toBe(0);
-    expect(forked.modelInstructionSync).toBeUndefined();
+    expect(forked.criteria).toEqual([]);
   });
 });
 

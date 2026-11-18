@@ -456,25 +456,24 @@ describe('app', () => {
     expect(transcript?.olderCursor).toBeUndefined();
     expect(transcript?.messages[0]?.id).toBe('m0000');
   });
-  test('goal, plan and Ctrl+T checklist; sync failure stays local', async () => {
+  test('goal, plan and Ctrl+T checklist; native goal shows alongside', async () => {
     const backend = backendWithSession();
-    backend.instructionsUnavailable = true;
+    backend.serverCommands = [{ name: 'goal', description: 'Set the session goal' }];
     const { controller, setup } = await mount(backend);
     controller.openSession('ses_a');
     await settle(setup);
-    for (const command of ['/goal Hit 30 FPS', '/plan profile; cull; test', '/sync on']) {
+    for (const command of ['/goal Hit 30 FPS', '/plan profile; cull; test']) {
       await setup.mockInput.typeText(command);
       setup.mockInput.pressEnter();
       await settle(setup);
     }
-    expect(controller.state.notice?.text).toBe('Not synced to agent · local plan kept');
+    expect(backend.goals['ses_a']?.objective).toBe('Hit 30 FPS');
     expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
     setup.mockInput.pressKey('t', { ctrl: true });
     await settle(setup);
     let frame = setup.captureCharFrame();
     expect(frame).toContain('Goal: Hit 30 FPS');
     expect(frame).toContain('Tasks 0/3');
-    expect(frame).toContain('Not synced to agent');
     setup.mockInput.pressKey(' ');
     await settle(setup);
     setup.mockInput.pressKey(' ');
@@ -482,12 +481,11 @@ describe('app', () => {
     frame = setup.captureCharFrame();
     expect(frame).toContain('[x] profile');
     expect(frame).toContain('Tasks 1/3');
-    backend.instructionsUnavailable = false;
     setup.mockInput.pressArrow('down');
     setup.mockInput.pressKey(' ');
     await settle(setup);
-    const put = backend.calls.filter((call) => call.name === 'putInstruction').at(-1);
-    expect(String(put?.args[2])).toContain('cull [in progress]');
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('[~] cull');
   });
 
   test('agent proposals need acceptance; reject keeps the plan', async () => {

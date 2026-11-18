@@ -15,6 +15,7 @@ import {
 import { type Goal, progress, type TaskState } from '../domain/goal-plan.ts';
 import { actionIDs, formatBinding, type Keymap } from '../domain/keymap.ts';
 import { formatModelRef } from '../domain/model-ref.ts';
+import type { NativeGoal } from '../domain/native-goal.ts';
 import type { SessionSummary, TokenUsage } from '../domain/session.ts';
 import { localCommands } from '../domain/slash-command.ts';
 import { formatCost, formatTokenCount } from '../domain/usage-format.ts';
@@ -414,33 +415,44 @@ function TasksDialog(props: {
     const count = progress(shown());
     return `Tasks ${count.done}/${count.total} · Space state · b blocked · x cancel · e evidence`;
   };
-  const syncLine = () => {
-    const current = doc();
-    const session = props.controller.currentSession();
-    if (current?.modelInstructionSync?.enabled !== true || session === undefined) {
-      return 'Local plan · /sync on to share with the agent';
-    }
-    const result = props.controller.state.goalSync[session.id];
-    if (result?.status === 'removal-failed')
-      return `Still shared with the agent · revoke failed: ${result.error ?? 'unknown error'}`;
-    if (result?.status === 'pending-removal')
-      return 'Waiting for the agent to drop the instruction…';
-    if (result?.status === 'pending-sync') return 'Sharing with the agent · not yet confirmed';
-    if (result === undefined) return 'Shared with the agent · not yet confirmed';
-    if (result.status === 'error') return `Not synced to agent: ${result.error ?? 'unknown error'}`;
-    return `Shared with the agent · revision ${result.revision}`;
+  const session = () => props.controller.currentSession();
+  const nativeGoal = () => {
+    const current = session();
+    return current === undefined ? undefined : props.controller.state.nativeGoals[current.id];
   };
+  const nativeLine = () => {
+    const goal = nativeGoal();
+    if (goal === null || goal === undefined) return undefined;
+    const round = `round ${goal.rounds}/${goal.maxRounds}`;
+    if (goal.status === 'active') return `◎ active · ${round}`;
+    if (goal.status === 'complete') return `● complete · ${round}`;
+    return `◌ paused · ${round}${goal.reason === undefined ? '' : ` · ${goal.reason}`}`;
+  };
+  const criteria = () => doc()?.criteria ?? doc()?.goal?.acceptance ?? [];
   return (
     <box {...props.frame(title())}>
+      <Show when={nativeGoal()}>
+        {(goal: Accessor<NativeGoal>) => (
+          <box flexDirection="column">
+            <text fg={props.theme.accentLight}>{`Goal: ${goal().objective}`}</text>
+            <text fg={props.theme.dim}>{`  ${nativeLine() ?? ''}`}</text>
+          </box>
+        )}
+      </Show>
       <Show when={doc()?.goal}>
         {(goal: Accessor<Goal>) => (
           <box flexDirection="column">
-            <text fg={props.theme.accentLight}>{`Goal: ${goal().title}`}</text>
-            <For each={goal().acceptance}>
-              {(criterion) => <text fg={props.theme.dim}>{`  ✓ ${criterion}`}</text>}
-            </For>
+            <text fg={props.theme.accentLight}>{`Local goal: ${goal().title}`}</text>
           </box>
         )}
+      </Show>
+      <Show when={criteria().length > 0}>
+        <box flexDirection="column">
+          <text fg={props.theme.dim}>Acceptance:</text>
+          <For each={criteria()}>
+            {(criterion) => <text fg={props.theme.dim}>{`  ✓ ${criterion}`}</text>}
+          </For>
+        </box>
       </Show>
       <Show
         when={(shown()?.tasks.length ?? 0) > 0}
@@ -469,7 +481,6 @@ function TasksDialog(props: {
           }}
         </For>
       </Show>
-      <text fg={props.theme.dim}>{syncLine()}</text>
     </box>
   );
 }

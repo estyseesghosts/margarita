@@ -8,6 +8,7 @@ import type { FormEditor, FormRequest } from '../domain/form.ts';
 import type { GoalPlanV1 } from '../domain/goal-plan.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
+import type { NativeGoal } from '../domain/native-goal.ts';
 import type { PromptHistory } from '../domain/prompt-history.ts';
 import { createHistory } from '../domain/prompt-history.ts';
 import type { SessionSummary } from '../domain/session.ts';
@@ -50,15 +51,6 @@ export type DiffOverlay = {
   error?: string;
 };
 
-export type GoalSyncStatus =
-  'synced' | 'pending-sync' | 'pending-removal' | 'removal-failed' | 'error';
-
-export type GoalSyncResult = Readonly<{
-  revision: number;
-  status: GoalSyncStatus;
-  error?: string;
-}>;
-
 export type Notice = Readonly<{ text: string; tone: 'dim' | 'warn' | 'error'; id: number }>;
 
 export type TranscriptState = {
@@ -89,10 +81,16 @@ export type AppState = {
   /** Goal/plan sidecar per session; absent until loaded. */
   goals: Record<string, GoalPlanV1>;
   /**
-   * Last server-confirmed instruction outcome per session (not persisted). A failed
-   * revocation is never reported as "no longer shared": it stays visible until retried.
+   * The session's native opencode.goal plugin state, as last read from the plugin
+   * (undefined = not fetched yet, null = no goal set). Authoritative over any local memory.
    */
-  goalSync: Record<string, GoalSyncResult>;
+  nativeGoals: Record<string, NativeGoal | null | undefined>;
+  /**
+   * Frontend-only intent, keyed by session: the goal ID that interrupted with a user
+   * Esc/interrupt and now waits for the user's follow-up. Not a goal status; set only by
+   * this frontend after a successful interrupt of an active goal.
+   */
+  awaitingSteer: Record<string, string>;
   /** True while a permission or form reply is in flight; blocks double submits. */
   answering: boolean;
   /** Index of the focused permission choice in the permission card. */
@@ -159,7 +157,8 @@ export function initialState(directory: string): AppState {
     permissions: {},
     forms: {},
     goals: {},
-    goalSync: {},
+    nativeGoals: {},
+    awaitingSteer: {},
     answering: false,
     permissionChoice: 0,
     transcripts: {},

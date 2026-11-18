@@ -5,6 +5,7 @@ import type { Completion, Notice } from '../app/app-state.ts';
 import type { AppController } from '../app/controller.ts';
 import { splitAtCursor } from '../domain/composer.ts';
 import { formatFooter } from '../domain/footer.ts';
+import { goalBadge } from '../domain/native-goal.ts';
 import { directoryName } from '../domain/path-identity.ts';
 import { executionLabel } from '../domain/session.ts';
 import type { Theme } from './theme.ts';
@@ -88,6 +89,7 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
       );
     }
     const inbox = state.inbox[session.id] ?? [];
+    const badge = goalBadge(state.nativeGoals[session.id] ?? null, state.awaitingSteer[session.id]);
     return formatFooter(
       {
         ...(session.agent === undefined ? {} : { agent: session.agent }),
@@ -97,6 +99,7 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
         ...(session.cost === undefined ? {} : { cost: session.cost }),
         queued: inbox.length,
         stale: state.stream !== 'live',
+        ...(badge === '' ? {} : { goal: badge }),
       },
       props.width - 2,
     );

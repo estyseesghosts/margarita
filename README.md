@@ -75,10 +75,10 @@ Everything is a single key press. There are no chords. Rebind any of them in the
 
 ### Slash commands
 
-`/goal <title>` · `/criteria a; b` · `/plan step one; step two` · `/plan propose` · `/plan adopt` · `/sync on|off` ·
+`/goal <objective>` · `/criteria a; b` · `/plan step one; step two` · `/plan propose` · `/plan adopt` ·
 `/rename` · `/fork` · `/revert` · `/diff [turn]` · `/export [file]`
 
-Plans and goals are local (under margarita's state directory) until you run `/sync on`, which leaves a short note for the agent.
+`/goal` talks to the native OpenCode `opencode.goal` plugin (the same one OpenCode's own TUI drives): `/goal <objective>`, `/goal` status, `/goal pause|resume|clear`. Plans and acceptance criteria stay local under margarita's state directory and are supplemental; they are never mirrored to the agent.
 
 ### Config
 

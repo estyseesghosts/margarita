@@ -6,6 +6,7 @@ import type { FileDiff } from '../domain/diff.ts';
 import type { FormRequest, FormValue } from '../domain/form.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
+import { type NativeGoal, toNativeGoal } from '../domain/native-goal.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
 import type { Connection } from './connection.ts';
@@ -25,6 +26,7 @@ import {
 } from './wire-mapping.ts';
 
 export type { PermissionPrompt, QueuedInput } from './wire-mapping.ts';
+export type { NativeGoal } from '../domain/native-goal.ts';
 
 export type BackendErrorKind =
   'not-found' | 'conflict' | 'unauthorized' | 'invalid' | 'transport' | 'unknown';
@@ -111,6 +113,8 @@ export interface Backend {
   listPermissions(sessionID: string): Promise<PermissionPrompt[]>;
   listForms(sessionID: string): Promise<FormRequest[]>;
   replyForm(sessionID: string, formID: string, answer: Record<string, FormValue>): Promise<void>;
+  /** Native OpenCode goal for the session (plugin RPC `opencode.goal/get`); null when unset. */
+  getGoal(sessionID: string): Promise<NativeGoal | null>;
   cancelForm(sessionID: string, formID: string): Promise<void>;
   replyPermission(
     sessionID: string,
@@ -419,6 +423,18 @@ class OpenCodeBackend implements Backend {
     await call('permission.reply', () =>
       this.client.permission.reply({ sessionID, requestID, decision }),
     );
+  }
+
+  /**
+   * Native goal plugin's RPC, read-only. The plugin answers `null` when no goal is set; a
+   * server without the plugin (or one that cannot reach it) raises and this surfaces as the
+   * upstream error — callers treat it as "no goal to show", matching first-party behavior.
+   */
+  async getGoal(sessionID: string): Promise<NativeGoal | null> {
+    const result = await call('opencode.goal.get', () =>
+      this.client.rpc.call({ rpcID: 'opencode.goal', method: 'get', input: { sessionID } }),
+    );
+    return toNativeGoal(result.output);
   }
 
   async *events(signal: AbortSignal): AsyncIterable<BackendEvent> {

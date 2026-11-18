@@ -17,6 +17,7 @@ import type { FileDiff } from '../src/domain/diff.ts';
 import type { FormRequest, FormValue } from '../src/domain/form.ts';
 import type { ModelSelection } from '../src/domain/model-ref.ts';
 import type { CatalogModel } from '../src/domain/model-resolution.ts';
+import type { NativeGoal } from '../src/domain/native-goal.ts';
 import type { SessionSummary } from '../src/domain/session.ts';
 import type { TranscriptMessage } from '../src/domain/transcript.ts';
 
@@ -136,8 +137,54 @@ export class FakeBackend implements Backend {
     this.inboxSession[item.id] = sessionID;
     return { ...item };
   }
+  /** Native opencode.goal plugin emulator: session-scoped goals, updated by goal commands. */
+  goals: Record<string, NativeGoal | undefined> = {};
+  private goalSequence = 0;
+  async getGoal(sessionID: string): Promise<NativeGoal | null> {
+    this.calls.push({ name: 'getGoal', args: [sessionID] });
+    return this.goals[sessionID] ?? null;
+  }
   async runCommand(sessionID: string, name: string, text: string): Promise<void> {
     this.calls.push({ name: 'runCommand', args: [sessionID, name, text] });
+    if (name !== 'goal') return;
+    const args = text.trim();
+    const lower = args.toLowerCase();
+    const current = this.goals[sessionID];
+    if (args === '') return; // Status read; the plugin answers out-of-band.
+    if (lower === 'pause') {
+      if (current?.status !== 'active')
+        throw new BackendError('conflict', 'session.command', 'No active goal to pause.');
+      this.goals[sessionID] = {
+        ...current,
+        status: 'paused',
+        reason: 'Paused by the user',
+      };
+      return;
+    }
+    if (lower === 'resume') {
+      if (current?.status !== 'paused')
+        throw new BackendError('conflict', 'session.command', 'No paused goal to resume.');
+      this.goals[sessionID] = {
+        ...current,
+        status: 'active',
+        rounds: 1,
+      };
+      return;
+    }
+    if (lower === 'clear') {
+      if (current === undefined)
+        throw new BackendError('conflict', 'session.command', 'No goal is set.');
+      delete this.goals[sessionID];
+      return;
+    }
+    this.goalSequence += 1;
+    this.goals[sessionID] = {
+      id: `goal_${this.goalSequence}`,
+      objective: args,
+      status: 'active',
+      rounds: 0,
+      maxRounds: 50,
+    };
   }
   async runShell(sessionID: string, command: string): Promise<void> {
     this.calls.push({ name: 'runShell', args: [sessionID, command] });
@@ -147,6 +194,15 @@ export class FakeBackend implements Backend {
   }
   async interrupt(sessionID: string): Promise<boolean> {
     this.calls.push({ name: 'interrupt', args: [sessionID] });
+    // The goal plugin pauses an active goal on a user interrupt ('Stopped by the user').
+    const current = this.goals[sessionID];
+    if (current?.status === 'active') {
+      this.goals[sessionID] = {
+        ...current,
+        status: 'paused',
+        reason: 'Stopped by the user',
+      };
+    }
     return true;
   }
   diffs: FileDiff[] = [];

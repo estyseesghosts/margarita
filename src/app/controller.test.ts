@@ -1051,80 +1051,148 @@ describe('prompt history across project switches (issue #4)', () => {
   });
 });
 
-async function syncedFixture() {
-  const backend = new FakeBackend();
-  backend.sessions = [fakeSession('ses_a')];
-  backend.messages = { ses_a: [] };
-  const controller = makeController(() => Promise.resolve([]), backend);
-  await attach(controller, 'ses_a');
-  for (const text of ['/goal Test goal', '/sync on']) {
-    controller.setComposer(composerFrom(text));
-    await controller.submit();
-  }
-  return { backend, controller };
-}
-
 async function submitCommand(controller: AppController, text: string): Promise<void> {
   controller.setComposer(composerFrom(text));
   await controller.submit();
 }
 
-describe('instruction sync confirmation (issue #5)', () => {
-  test('a failed revocation never reports success and is not silently re-synced', async () => {
-    const { backend, controller } = await syncedFixture();
-    backend.removeInstructionError = new Error('network drop');
+async function goalFixture(objective = 'Ship the native goal') {
+  const backend = new FakeBackend();
+  backend.sessions = [fakeSession('ses_a')];
+  backend.messages = { ses_a: [] };
+  backend.goals = {
+    ses_a: {
+      id: 'goal_1',
+      objective,
+      status: 'active',
+      rounds: 3,
+      maxRounds: 50,
+    },
+  };
+  // The plugin registers the goal command in the server catalog once enabled.
+  backend.serverCommands = [{ name: 'goal', description: 'Set the session goal' }];
+  const controller = makeController(() => Promise.resolve([]), backend);
+  await attach(controller, 'ses_a');
+  return { backend, controller };
+}
 
-    await submitCommand(controller, '/sync off');
-    expect(controller.state.notice?.text).toContain('Could not revoke');
-    expect(controller.state.notice?.text).toContain('/sync off to retry');
-    expect(controller.goalOf('ses_a')?.modelInstructionSync?.enabled).toBe(true);
-    expect(controller.state.goalSync['ses_a']?.status).toBe('removal-failed');
+describe('native opencode goal (issue #21)', () => {
+  test('/goal sets a native goal through the server command, not a local one', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    // The plugin registers the goal command in the server catalog.
+    backend.serverCommands = [{ name: 'goal', description: 'Set the session goal' }];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
 
-    const puts = backend.calls.filter((call) => call.name === 'putInstruction').length;
-    await submitCommand(controller, '/plan step one');
-    expect(backend.calls.filter((call) => call.name === 'putInstruction')).toHaveLength(puts);
+    await submitCommand(controller, '/goal Hit 30 FPS');
+    const commands = backend.calls.filter((call) => call.name === 'runCommand');
+    expect(commands).toContainEqual({ name: 'runCommand', args: ['ses_a', 'goal', 'Hit 30 FPS'] });
+    expect(backend.goals['ses_a']?.objective).toBe('Hit 30 FPS');
+    expect(controller.nativeGoalOf('ses_a')?.objective).toBe('Hit 30 FPS');
+    expect(controller.state.goals['ses_a']).toBeUndefined();
     controller.dispose();
   });
 
-  test('a confirmed revocation disables sync and clears the pending state', async () => {
-    const { backend, controller } = await syncedFixture();
-    await submitCommand(controller, '/sync off');
-    expect(backend.calls.some((call) => call.name === 'removeInstruction')).toBe(true);
-    expect(controller.goalOf('ses_a')?.modelInstructionSync?.enabled).toBe(false);
-    expect(controller.state.goalSync['ses_a']).toBeUndefined();
-    expect(controller.state.notice?.text).toBe('No longer shared with the agent');
+  test('hydrates the native goal on attach and tracks it in state', async () => {
+    const { controller } = await goalFixture();
+    expect(controller.nativeGoalOf('ses_a')).toMatchObject({
+      objective: 'Ship the native goal',
+      status: 'active',
+      rounds: 3,
+    });
     controller.dispose();
   });
 
-  test('reconnect retries a failed revocation and finishes it', async () => {
-    const { backend, controller } = await syncedFixture();
-    backend.removeInstructionError = new Error('network drop');
-    await submitCommand(controller, '/sync off');
-    const removals = backend.calls.filter((call) => call.name === 'removeInstruction').length;
-
-    backend.removeInstructionError = undefined;
-    controller.onStreamStatus('reconnecting');
-    controller.onStreamStatus('live');
-    await flush();
-
-    expect(backend.calls.filter((call) => call.name === 'removeInstruction').length).toBe(
-      removals + 1,
+  test('a goal.changed event replaces the tracked native goal', async () => {
+    const { controller } = await goalFixture();
+    controller.onEvents(
+      [
+        {
+          kind: 'goal-changed',
+          sessionID: 'ses_a',
+          goal: {
+            id: 'goal_1',
+            objective: 'Ship the native goal',
+            status: 'complete',
+            rounds: 7,
+            maxRounds: 50,
+          },
+        },
+      ],
+      false,
     );
-    expect(controller.goalOf('ses_a')?.modelInstructionSync?.enabled).toBe(false);
-    expect(controller.state.goalSync['ses_a']).toBeUndefined();
+    expect(controller.nativeGoalOf('ses_a')).toMatchObject({ status: 'complete', rounds: 7 });
     controller.dispose();
   });
 
-  test('toggling back on after a failed revocation re-syncs the instruction', async () => {
-    const { backend, controller } = await syncedFixture();
-    backend.removeInstructionError = new Error('network drop');
-    await submitCommand(controller, '/sync off');
-    const puts = backend.calls.filter((call) => call.name === 'putInstruction').length;
+  test('an interrupted goal stays attached and a follow-up resumes it', async () => {
+    const { backend, controller } = await goalFixture();
+    await controller.interrupt();
+    // The plugin pauses an active goal with reason 'Stopped by the user'.
+    expect(controller.nativeGoalOf('ses_a')).toMatchObject({
+      status: 'paused',
+      reason: 'Stopped by the user',
+    });
+    expect(controller.state.awaitingSteer['ses_a']).toBe('goal_1');
 
-    backend.removeInstructionError = undefined;
-    await submitCommand(controller, '/sync on');
-    expect(backend.calls.filter((call) => call.name === 'putInstruction').length).toBe(puts + 1);
-    expect(controller.state.goalSync['ses_a']?.status).not.toBe('removal-failed');
+    await submitCommand(controller, 'Also inspect the Windows path issue');
+    const resume = backend.calls.findLast(
+      (call) => call.name === 'runCommand' && call.args[1] === 'goal',
+    );
+    expect(resume).toEqual({ name: 'runCommand', args: ['ses_a', 'goal', 'resume'] });
+    expect(controller.state.awaitingSteer['ses_a']).toBeUndefined();
+    expect(controller.nativeGoalOf('ses_a')).toMatchObject({ status: 'active', rounds: 1 });
+    controller.dispose();
+  });
+
+  test('a prompt submitted while idle resumes an interrupted goal; other pauses do not', async () => {
+    const { backend, controller } = await goalFixture();
+    backend.goals['ses_a'] = { ...backend.goals['ses_a']!, status: 'paused', reason: 'Stalled' };
+    await controller.interrupt();
+    // Not a user-stop pause: no follow-up intent is recorded.
+    expect(controller.state.awaitingSteer['ses_a']).toBeUndefined();
+    await submitCommand(controller, 'plain follow-up');
+    const resumes = backend.calls.filter(
+      (call) => call.name === 'runCommand' && call.args[2] === 'resume',
+    );
+    expect(resumes).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('explicit /goal pause stays paused across a follow-up until resumed', async () => {
+    const { backend, controller } = await goalFixture();
+    await submitCommand(controller, '/goal pause');
+    expect(controller.nativeGoalOf('ses_a')).toMatchObject({ status: 'paused' });
+
+    await submitCommand(controller, 'a follow-up after explicit pause');
+    const resumes = backend.calls.filter(
+      (call) => call.name === 'runCommand' && call.args[2] === 'resume',
+    );
+    expect(resumes).toHaveLength(0);
+    expect(controller.nativeGoalOf('ses_a')).toMatchObject({ status: 'paused' });
+
+    await submitCommand(controller, '/goal resume');
+    expect(controller.nativeGoalOf('ses_a')).toMatchObject({ status: 'active' });
+    controller.dispose();
+  });
+
+  test('the interruption intent is cleared by /goal clear and completion stops resuming', async () => {
+    const { backend, controller } = await goalFixture();
+    backend.serverCommands = [{ name: 'goal', description: 'goal control' }];
+    await controller.interrupt();
+    expect(controller.state.awaitingSteer['ses_a']).toBe('goal_1');
+
+    await submitCommand(controller, '/goal clear');
+    expect(controller.state.awaitingSteer['ses_a']).toBeUndefined();
+    expect(controller.nativeGoalOf('ses_a')).toBeNull();
+
+    await submitCommand(controller, 'anything else');
+    const resumes = backend.calls.filter(
+      (call) => call.name === 'runCommand' && call.args[2] === 'resume',
+    );
+    expect(resumes).toHaveLength(0);
     controller.dispose();
   });
 });

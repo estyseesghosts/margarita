@@ -37,15 +37,6 @@ export type Plan = Readonly<{
   tasks: readonly PlanTask[];
 }>;
 
-export type InstructionSync = Readonly<{
-  enabled: boolean;
-  key: string;
-  /** Document revision last acknowledged by the server. */
-  revision: number;
-  lastAckAt?: string;
-  error?: string;
-}>;
-
 export type GoalPlanV1 = Readonly<{
   schemaVersion: 1;
   /** File revision for compare-and-swap writes; bumps on every save. */
@@ -54,16 +45,15 @@ export type GoalPlanV1 = Readonly<{
   sessionID: string;
   projectID: string;
   goal?: Goal;
+  /** User-authored acceptance criteria; independent of any goal (local or native). */
+  criteria: readonly string[];
   plan?: Plan;
   /** A plan proposed by the agent, waiting for the user to accept or reject it. */
   proposal?: Plan;
-  modelInstructionSync?: InstructionSync;
 }>;
 
-export const instructionKey = 'margarita.goal.v1';
-
 export function emptyGoalPlan(backend: string, sessionID: string, projectID: string): GoalPlanV1 {
-  return { schemaVersion: 1, revision: 0, backend, sessionID, projectID };
+  return { schemaVersion: 1, revision: 0, backend, sessionID, projectID, criteria: [] };
 }
 
 // ---------- parsing and migration ----------
@@ -158,27 +148,20 @@ export function parseGoalPlan(raw: unknown, now: string): GoalPlanV1 {
   const goal = parseGoal(raw['goal'], now);
   const plan = parsePlan(raw['plan'], now);
   const proposal = parsePlan(raw['proposal'], now);
-  const sync = raw['modelInstructionSync'];
-  let modelInstructionSync: InstructionSync | undefined;
-  if (isRecord(sync)) {
-    const lastAckAt = text(sync['lastAckAt']);
-    modelInstructionSync = {
-      enabled: sync['enabled'] === true,
-      key: text(sync['key']) ?? instructionKey,
-      revision: typeof sync['revision'] === 'number' ? sync['revision'] : 0,
-      ...(lastAckAt === undefined ? {} : { lastAckAt }),
-    };
-  }
+  // Top-level criteria win; a legacy local goal carries acceptance as a fallback so
+  // nothing the user typed is lost on migration.
+  const criteria = strings(raw['criteria']);
+  const migrated = criteria.length > 0 ? criteria : (goal?.acceptance ?? []);
   return {
     schemaVersion: 1,
     revision: typeof raw['revision'] === 'number' ? raw['revision'] : 0,
     backend: text(raw['backend']) ?? 'local',
     sessionID,
     projectID: text(raw['projectID']) ?? '',
+    criteria: migrated,
     ...(goal === undefined ? {} : { goal }),
     ...(plan === undefined ? {} : { plan }),
     ...(proposal === undefined ? {} : { proposal }),
-    ...(modelInstructionSync === undefined ? {} : { modelInstructionSync }),
   };
 }
 
@@ -206,15 +189,11 @@ export function setAcceptance(
   criteria: readonly string[],
   now: string,
 ): GoalPlanV1 {
-  if (doc.goal === undefined) return doc;
-  return {
-    ...doc,
-    goal: {
-      ...doc.goal,
-      acceptance: criteria.filter((entry) => entry.trim() !== ''),
-      updatedAt: now,
-    },
-  };
+  const filtered = criteria.map((entry) => entry.trim()).filter((entry) => entry !== '');
+  // Migrated sidecars keep their legacy goal acceptance in sync so existing readers agree.
+  const goal =
+    doc.goal === undefined ? undefined : { ...doc.goal, acceptance: filtered, updatedAt: now };
+  return { ...doc, criteria: filtered, ...(goal === undefined ? {} : { goal }) };
 }
 
 /** Extracts list items (`- x`, `* x`, `1. x`, `1) x`) or, failing that, `;`-separated steps. */
@@ -329,23 +308,9 @@ export function addEvidence(
   }));
 }
 
-export function setSync(doc: GoalPlanV1, enabled: boolean): GoalPlanV1 {
-  return {
-    ...doc,
-    modelInstructionSync: {
-      enabled,
-      key: doc.modelInstructionSync?.key ?? instructionKey,
-      revision: doc.modelInstructionSync?.revision ?? 0,
-      ...(doc.modelInstructionSync?.lastAckAt === undefined
-        ? {}
-        : { lastAckAt: doc.modelInstructionSync.lastAckAt }),
-    },
-  };
-}
-
 /** Copies goal and plan into a forked session with fresh identity (docs/11: never alias). */
 export function forkGoalPlan(doc: GoalPlanV1, sessionID: string): GoalPlanV1 {
-  const { modelInstructionSync: _sync, proposal: _proposal, ...rest } = doc;
+  const { proposal: _proposal, ...rest } = doc;
   return { ...rest, sessionID, revision: 0 };
 }
 
@@ -363,28 +328,3 @@ export const taskStateLabel: Record<TaskState, string> = {
   done: 'done',
   cancelled: 'cancelled',
 };
-
-const maxSyncedTasks = 20;
-
-/** Compact model-facing summary (docs/11 example). Never a giant task dump. */
-export function instructionText(doc: GoalPlanV1): string {
-  const lines: string[] = [];
-  if (doc.goal !== undefined) {
-    lines.push(`User goal (revision ${doc.revision}): ${doc.goal.title}`);
-    if (doc.goal.detail !== undefined) lines.push(`Constraints: ${doc.goal.detail}`);
-  }
-  if (doc.plan !== undefined && doc.plan.accepted) {
-    const shown = doc.plan.tasks.slice(0, maxSyncedTasks);
-    const steps = shown.map(
-      (task, index) => `${index + 1}) ${task.title} [${taskStateLabel[task.state]}]`,
-    );
-    const more = doc.plan.tasks.length - shown.length;
-    lines.push(`Accepted plan: ${steps.join(', ')}${more > 0 ? `, +${more} more` : ''}.`);
-  }
-  if (doc.goal !== undefined && doc.goal.acceptance.length > 0) {
-    lines.push(`Acceptance: ${doc.goal.acceptance.join('; ')}.`);
-  }
-  if (lines.length === 0) return '';
-  lines.push('Do not assume UI task states are proof of implementation; cite tests/logs.');
-  return lines.join('\n');
-}

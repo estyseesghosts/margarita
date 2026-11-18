@@ -37,22 +37,19 @@ import {
   emptyGoalPlan,
   forkGoalPlan,
   type GoalPlanV1,
-  instructionKey,
-  instructionText,
   nextTaskState,
   parseSteps,
   progress,
   proposePlan,
   rejectProposal,
   setAcceptance,
-  setGoal,
-  setSync,
   setTaskState,
   setUserPlan,
   type TaskState,
 } from '../domain/goal-plan.ts';
 import { formatModelRef, type ModelSelection, sameModel } from '../domain/model-ref.ts';
 import { resolveModel } from '../domain/model-resolution.ts';
+import { type NativeGoal } from '../domain/native-goal.ts';
 import {
   groupRows,
   groupSessions,
@@ -153,8 +150,6 @@ export class AppController {
   private saveChain: Promise<void> = Promise.resolve();
   private saveError: string | undefined;
   private readonly goalStore: GoalStore;
-  /** Serializes instruction writes/removals per session so toggles cannot race. */
-  private readonly instructionQueue = new Map<string, Promise<void>>();
 
   constructor(private readonly deps: ControllerDeps) {
     this.debugLog = deps.debugLog ?? noDebugLog;
@@ -466,7 +461,7 @@ export class AppController {
     const reconnected = status === 'live' && this.state.stream === 'reconnecting';
     this.setState('stream', status);
     if (status === 'reconnecting') this.showNotice('Connection lost · retrying', 'warn', false);
-    if (reconnected) void this.track('retry-instructions', this.retryPendingRemovals());
+    if (reconnected) void this.track('resync', this.resync());
   }
 
   onEvents(events: readonly BackendEvent[], resync: boolean): void {
@@ -552,6 +547,9 @@ export class AppController {
         return;
       case 'input-requests-changed':
         void this.track('requests', this.refreshInputRequests(event.sessionID));
+        return;
+      case 'goal-changed':
+        this.setState('nativeGoals', event.sessionID, event.goal);
         return;
       default:
         return;
@@ -726,6 +724,7 @@ export class AppController {
       this.refreshInbox(sessionID),
       this.refreshInputRequests(sessionID),
       this.refreshSummary(sessionID),
+      this.refreshNativeGoal(sessionID),
     ]);
   }
 
@@ -1148,7 +1147,7 @@ export class AppController {
     const commandNotice =
       'The request may or may not have been delivered (connection problem); check for its effects before resending.';
     const isPromptDelivery = parsed.kind === 'prompt';
-    await this.admit(
+    const admitted = await this.admit(
       text,
       directory,
       async () => {
@@ -1177,6 +1176,18 @@ export class AppController {
       },
       isPromptDelivery ? undefined : commandNotice,
     );
+    if (admitted) {
+      if (parsed.kind === 'prompt') {
+        // The follow-up landed; reactivate the goal that Esc interrupted (if any).
+        await this.maybeResumeInterruptedGoal(sessionID);
+      } else if (parsed.kind === 'server' && parsed.name === 'goal') {
+        const command = parsed.args.trim().toLowerCase();
+        if (command === 'pause' || command === 'resume' || command === 'clear') {
+          this.clearSteerIntent(sessionID);
+        }
+        await this.refreshNativeGoal(sessionID);
+      }
+    }
   }
 
   /** Sends the current draft with steer delivery (Ctrl+Enter or /steer). */
@@ -1496,9 +1507,6 @@ export class AppController {
       case 'export':
         await this.exportChat(args);
         return;
-      case 'goal':
-        await this.goalCommand(args);
-        return;
       case 'criteria':
         await this.changeGoal(
           (doc) => setAcceptance(doc, parseSteps(args), this.isoNow()),
@@ -1507,9 +1515,6 @@ export class AppController {
         return;
       case 'plan':
         await this.planCommand(args);
-        return;
-      case 'sync':
-        await this.syncCommand(args);
         return;
       case 'rename':
         await this.renameCurrent(args);
@@ -1718,6 +1723,7 @@ export class AppController {
       const interrupted = await this.deps.backend.interrupt(session.id);
       this.debugLog.write('action', { action: 'interrupt', ok: interrupted });
       this.showNotice(interrupted ? 'Interrupted' : 'Nothing was running', 'dim');
+      if (interrupted) await this.captureInterruptSteerIntent(session.id);
     } catch (error) {
       this.debugLog.write('action', {
         action: 'interrupt',
@@ -1873,6 +1879,7 @@ export class AppController {
       this.showNotice(errorText(error), 'error');
     }
     await this.refreshInbox(session.id);
+    await this.maybeResumeInterruptedGoal(session.id);
   }
 
   /**
@@ -1893,6 +1900,74 @@ export class AppController {
       return;
     }
     await this.promoteQueued(next.id);
+  }
+
+  // ---------------------------------------------------------------- native goal
+
+  /** Ticket guard: only the newest opencode.goal/get result from this frontend lands. */
+  private goalFetchTicket = 0;
+
+  /** Native OpenCode goal for a session, re-read from the plugin. Also cached in state. */
+  async refreshNativeGoal(sessionID: string): Promise<NativeGoal | null> {
+    const ticket = ++this.goalFetchTicket;
+    try {
+      const goal = await this.deps.backend.getGoal(sessionID);
+      if (ticket !== this.goalFetchTicket) return this.nativeGoalOf(sessionID);
+      this.setState('nativeGoals', sessionID, goal);
+      return goal;
+    } catch (error) {
+      // A server without the goal plugin (or an unreachable one) shows no goal.
+      this.debugLog.write('backend-error', {
+        operation: 'opencode.goal.get',
+        kind: error instanceof BackendError ? error.kind : 'unknown',
+      });
+      if (ticket !== this.goalFetchTicket) return this.nativeGoalOf(sessionID);
+      this.setState('nativeGoals', sessionID, null);
+      return null;
+    }
+  }
+
+  nativeGoalOf(sessionID: string): NativeGoal | null {
+    return this.state.nativeGoals[sessionID] ?? null;
+  }
+
+  private clearSteerIntent(sessionID: string): void {
+    this.setState(
+      produce((state) => {
+        delete state.awaitingSteer[sessionID];
+      }),
+    );
+  }
+
+  /**
+   * Esc interrupts the execution but must not abandon the goal. The plugin pauses the
+   * active goal with reason 'Stopped by the user'; record that as a frontend-only intent
+   * so the user's next follow-up reactivates the same goal without /goal resume.
+   */
+  private async captureInterruptSteerIntent(sessionID: string): Promise<void> {
+    const goal = await this.refreshNativeGoal(sessionID);
+    if (goal?.status === 'paused' && goal.reason === 'Stopped by the user') {
+      this.setState('awaitingSteer', sessionID, goal.id);
+      return;
+    }
+    this.clearSteerIntent(sessionID);
+  }
+
+  /**
+   * The user's follow-up is already admitted by the time this runs, so its backend call
+   * executes after the follow-up prompt; the plugin's resume drives the next continuation
+   * from idle instead of racing it. Only an intent recorded at interrupt time qualifies.
+   */
+  private async maybeResumeInterruptedGoal(sessionID: string): Promise<void> {
+    const intent = this.state.awaitingSteer[sessionID];
+    if (intent === undefined) return;
+    this.clearSteerIntent(sessionID);
+    try {
+      await this.deps.backend.runCommand(sessionID, 'goal', 'resume');
+    } catch {
+      // Already active/cleared (e.g. resumed from another window): the refetch is truth.
+    }
+    await this.refreshNativeGoal(sessionID);
   }
 
   // ---------------------------------------------------------------- permissions
@@ -2309,21 +2384,7 @@ export class AppController {
     }
     this.setState('goals', sessionID, saved);
     if (notice !== undefined) this.showNotice(notice, 'dim');
-    await this.syncInstructions(sessionID);
     return saved;
-  }
-
-  private async goalCommand(args: string): Promise<void> {
-    if (this.requireSession() === undefined) return;
-    if (args === '') {
-      this.setOverlay({ kind: 'tasks', index: 0 });
-      return;
-    }
-    if (args === 'clear') {
-      await this.changeGoal((doc) => setGoal(doc, '', this.isoNow()), 'Goal cleared');
-      return;
-    }
-    await this.changeGoal((doc) => setGoal(doc, args, this.isoNow()), `Goal set: ${args}`);
   }
 
   private async planCommand(args: string): Promise<void> {
@@ -2444,132 +2505,6 @@ export class AppController {
         (current) => addEvidence(current, task.id, { messageID }, now),
         'Linked the latest agent message as evidence',
       );
-    }
-  }
-
-  private async syncCommand(args: string): Promise<void> {
-    const session = this.requireSession();
-    if (session === undefined) return;
-    if (args !== 'on' && args !== 'off') {
-      this.showNotice('Usage: /sync on|off', 'warn');
-      return;
-    }
-    const enabled = args === 'on';
-    if (!enabled) {
-      const revision = this.state.goals[session.id]?.revision ?? 0;
-      this.setState('goalSync', session.id, { revision, status: 'pending-removal' });
-      try {
-        await this.queueInstruction(session.id, () =>
-          this.deps.backend.removeInstruction(session.id, instructionKey),
-        );
-      } catch (error) {
-        // Keep local sync enabled and block re-syncing: the server entry may still exist.
-        this.setState('goalSync', session.id, {
-          revision,
-          status: 'removal-failed',
-          error: errorText(error),
-        });
-        this.showNotice(
-          `Could not revoke the shared instruction: ${errorText(error)} · /sync off to retry`,
-          'warn',
-          false,
-        );
-        return;
-      }
-      this.setState('goalSync', session.id, { revision, status: 'synced' });
-      await this.changeGoal((doc) => setSync(doc, false), 'No longer shared with the agent');
-      this.clearGoalSync(session.id);
-      return;
-    }
-    // Re-enabling supersedes a failed revocation: clear the block before re-syncing.
-    const pending = this.state.goalSync[session.id]?.status === 'removal-failed';
-    if (pending) this.clearGoalSync(session.id);
-    this.setState('goalSync', session.id, {
-      revision: this.state.goals[session.id]?.revision ?? 0,
-      status: 'pending-sync',
-    });
-    await this.changeGoal((doc) => setSync(doc, true), 'Goal and plan shared with the agent');
-  }
-
-  /**
-   * Writes the compact instruction entry when the user opted in. A pending or failed
-   * revocation blocks re-adding the instruction until the server confirms it is gone.
-   */
-  private async syncInstructions(sessionID: string): Promise<void> {
-    const doc = this.state.goals[sessionID];
-    const sync = doc?.modelInstructionSync;
-    if (doc === undefined || sync?.enabled !== true) return;
-    const blocked = this.state.goalSync[sessionID]?.status;
-    if (blocked === 'pending-removal' || blocked === 'removal-failed') return;
-    const text = instructionText(doc);
-    try {
-      await this.queueInstruction(sessionID, () =>
-        text === ''
-          ? this.deps.backend.removeInstruction(sessionID, sync.key)
-          : this.deps.backend.putInstruction(sessionID, sync.key, text),
-      );
-      this.setState('goalSync', sessionID, { revision: doc.revision, status: 'synced' });
-    } catch (error) {
-      this.setState('goalSync', sessionID, {
-        revision: doc.revision,
-        status: 'error',
-        error: errorText(error),
-      });
-      this.showNotice('Not synced to agent · local plan kept', 'warn');
-    }
-  }
-
-  /** Chain per-session instruction operations so an older toggle cannot overwrite a newer one. */
-  private queueInstruction(sessionID: string, work: () => Promise<void>): Promise<void> {
-    const prior = this.instructionQueue.get(sessionID) ?? Promise.resolve();
-    const settled = prior
-      .catch(() => {})
-      .then(work)
-      .finally(() => {
-        if (this.instructionQueue.get(sessionID) === settled)
-          this.instructionQueue.delete(sessionID);
-      });
-    this.instructionQueue.set(sessionID, settled);
-    // The chain is also held for the next operation; keep its rejection handled even
-    // when the caller ignores the returned promise.
-    void settled.catch(() => {});
-    return settled;
-  }
-
-  private clearGoalSync(sessionID: string): void {
-    this.setState(
-      produce((state) => {
-        delete state.goalSync[sessionID];
-      }),
-    );
-  }
-
-  /** After reconnect, finish revocations that could not be confirmed earlier. */
-  private async retryPendingRemovals(): Promise<void> {
-    const pending = Object.entries(this.state.goalSync).filter(
-      ([, result]) => result.status === 'removal-failed',
-    );
-    for (const [sessionID, result] of pending) {
-      if (this.state.goalSync[sessionID]?.status !== 'removal-failed') continue;
-      try {
-        await this.queueInstruction(sessionID, () =>
-          this.deps.backend.removeInstruction(sessionID, instructionKey),
-        );
-      } catch (error) {
-        this.setState('goalSync', sessionID, {
-          revision: result.revision,
-          status: 'removal-failed',
-          error: errorText(error),
-        });
-        continue;
-      }
-      this.setState('goalSync', sessionID, { revision: result.revision, status: 'synced' });
-      await this.changeGoal(
-        (doc) => setSync(doc, false),
-        'Shared instruction revoked after reconnect',
-        sessionID,
-      );
-      this.clearGoalSync(sessionID);
     }
   }
 

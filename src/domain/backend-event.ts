@@ -1,3 +1,4 @@
+import { type NativeGoal, toNativeGoal } from './native-goal.ts';
 import type { TokenUsage } from './session.ts';
 
 /**
@@ -18,6 +19,7 @@ export type BackendEvent =
   | { kind: 'transcript-changed'; sessionID: string }
   | { kind: 'inbox-changed'; sessionID: string }
   | { kind: 'input-requests-changed'; sessionID: string }
+  | { kind: 'goal-changed'; sessionID: string; goal: NativeGoal | null }
   | {
       kind: 'revert-changed';
       sessionID: string;
@@ -134,6 +136,10 @@ export function normalizeEvent(raw: unknown): BackendEvent | undefined {
   }
   if (inboxEvents.has(type)) return { kind: 'inbox-changed', sessionID };
   if (requestEvents.has(type)) return { kind: 'input-requests-changed', sessionID };
+  // The goal plugin publishes `changed` through the session event bus with this rpc-scoped type.
+  if (type === 'rpc.opencode.goal.changed') {
+    return { kind: 'goal-changed', sessionID, goal: toNativeGoal(data['goal']) };
+  }
   return undefined;
 }
 
