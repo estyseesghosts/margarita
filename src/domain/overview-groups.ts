@@ -1,11 +1,17 @@
 import { directoryName } from './path-identity.ts';
-import { projectKey, sessionKey, type SessionRef } from './server-identity.ts';
+import { localServerID, projectKey, sessionKey, type SessionRef } from './server-identity.ts';
 import type { SessionSummary } from './session.ts';
 
 export type ProjectGroup = Readonly<{
   key: string;
   /** Server that owns every session in this group. */
   serverID: string;
+  /** Display shortname; absent for the local server. */
+  serverLabel?: string;
+  /** True when this project lives on a paired remote server. */
+  remote: boolean;
+  /** True when the group is shown from cache while its server is offline. */
+  stale: boolean;
   name: string;
   directory: string;
   sessions: readonly SessionSummary[];
@@ -18,6 +24,10 @@ export type GroupOptions = Readonly<{
   showChildren: boolean;
   /** Stable activity time per session; avoids rows jumping on every streamed token. */
   activityOf: (session: SessionSummary) => number;
+  /** Display shortname per server; absent/undefined means the local server. */
+  serverLabelOf?: (serverID: string) => string | undefined;
+  /** False when a server is offline/unauthorized but its cached sessions stay visible. */
+  serverOnline?: (serverID: string) => boolean;
 }>;
 
 /**
@@ -48,9 +58,13 @@ export function groupSessions(
     });
     const first = sorted[0];
     if (first === undefined) continue;
+    const serverLabel = options.serverLabelOf?.(first.serverID);
     groups.push({
       key,
       serverID: first.serverID,
+      ...(serverLabel === undefined ? {} : { serverLabel }),
+      remote: first.serverID !== localServerID,
+      stale: options.serverOnline?.(first.serverID) === false,
       name: directoryName(first.directory),
       directory: first.directory,
       sessions: sorted,

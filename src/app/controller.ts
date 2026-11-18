@@ -166,6 +166,8 @@ export type ControllerDeps = Readonly<{
   pair?: (request: PairRequest) => Promise<{ shortname: string }>;
   /** Server registry management for /servers and /unpair. */
   serverAdmin?: ServerAdmin;
+  /** Display metadata for grouping: shortname and whether a server is currently online. */
+  serverInfo?: (serverID: string) => { label?: string; online: boolean } | undefined;
   /** Opt-in diagnostics sink (--debug-log); defaults to a silent no-op. */
   debugLog?: DebugLog;
 }>;
@@ -283,6 +285,8 @@ export class AppController {
       showArchived: this.deps.config.sessions.showArchived,
       showChildren: this.deps.config.sessions.showChildren,
       activityOf: (session) => this.lastUsed(session),
+      serverLabelOf: (serverID) => this.deps.serverInfo?.(serverID)?.label,
+      serverOnline: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
     });
   }
 

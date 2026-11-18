@@ -16,7 +16,12 @@ type RowOf<K extends OverviewRow['kind']> = Extract<OverviewRow, { kind: K }>;
  * Project-grouped session list (docs/04), most recently used first. Each project shows
  * six sessions; the rest expand inline behind a Show more/less row. Rows never animate.
  */
-export function Overview(props: { controller: AppController; theme: Theme; now: number }) {
+export function Overview(props: {
+  controller: AppController;
+  theme: Theme;
+  now: number;
+  ascii?: boolean;
+}) {
   const state = props.controller.state;
   const groups = () => props.controller.groups();
   const selected = (key: string) =>
@@ -53,6 +58,14 @@ export function Overview(props: { controller: AppController; theme: Theme; now: 
               <span style={{ fg: props.theme.text }}>
                 <b>{group.name}</b>
               </span>
+              <Show when={group.remote}>
+                <span style={{ fg: props.theme.accent }}>
+                  {`  ${props.ascii === true ? '[remote]' : '🖥'} ${group.serverLabel ?? 'remote'}`}
+                </span>
+              </Show>
+              <Show when={group.stale}>
+                <span style={{ fg: props.theme.dim }}>{'  [offline]'}</span>
+              </Show>
               <span style={{ fg: props.theme.dim }}>{`  ${group.directory}`}</span>
             </text>
             <For each={groupRows(group, state.overview.expanded[group.key] === true)}>

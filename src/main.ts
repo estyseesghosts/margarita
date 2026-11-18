@@ -284,6 +284,11 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
         await servers.remove(targetID);
       },
     },
+    serverInfo: (targetID) => {
+      const managed = servers.get(targetID);
+      if (managed === undefined) return undefined;
+      return { label: managed.label, online: managed.state === 'online' };
+    },
     debugLog,
   });
 

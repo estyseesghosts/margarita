@@ -100,4 +100,27 @@ describe('server-scoped overview groups', () => {
       new Set([localServerID, 'srv_1']),
     );
   });
+
+  test('groups carry remote markers and stale state without merging activity order', () => {
+    const groups = groupSessions(
+      [
+        session('ses_local', localServerID, '/work/lotus', 10),
+        session('ses_remote', 'srv_1', '/work/lotus', 30),
+      ],
+      {
+        platform: 'linux',
+        showArchived: false,
+        showChildren: true,
+        activityOf: (entry) => entry.updatedAt,
+        serverLabelOf: (serverID) => (serverID === 'srv_1' ? 'buildbox' : undefined),
+        serverOnline: (serverID) => serverID !== 'srv_1',
+      },
+    );
+    expect(
+      groups.map((group) => [group.name, group.remote, group.serverLabel, group.stale]),
+    ).toEqual([
+      ['lotus', true, 'buildbox', true],
+      ['lotus', false, undefined, false],
+    ]);
+  });
 });
