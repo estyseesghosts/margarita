@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { FakeBackend } from '../../test/fake-backend.ts';
+import { BackendError } from '../adapter/backend.ts';
 import { defaultConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
 import { composerFrom } from '../domain/composer.ts';
@@ -114,7 +115,7 @@ function onePerPageHook(
   };
 }
 
-describe('session directory-targeted search (issue #11)', () => {
+describe('continue/resume attach (issues #10 #11)', () => {
   test('findLatestSessionIn pages past the first pages for the target directory only', async () => {
     const backend = new FakeBackend();
     // 600 sessions in other directories; one older matching session in /work/kohjoh.
@@ -164,6 +165,45 @@ describe('session directory-targeted search (issue #11)', () => {
     });
     const controller = makeController(() => Promise.resolve([]), backend);
     expect(await controller.findLatestSessionIn('/work/kohjoh')).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('ensureSession stores a fetched summary before attach/prompt', async () => {
+    const backend = new FakeBackend();
+    const session = {
+      ...fakeSession('ses_x'),
+      directory: '/project-b',
+      model: { providerID: 'p', modelID: 'm' },
+    };
+    backend.sessions = [session];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    // Not loaded initially: state knows nothing about it.
+    expect(controller.state.sessions['ses_x']).toBeUndefined();
+    const ensured = await controller.ensureSession('ses_x');
+    expect(ensured?.directory).toBe('/project-b');
+    expect(controller.state.sessions['ses_x']?.model?.modelID).toBe('m');
+    controller.dispose();
+  });
+
+  test('ensureSession distinguishes a missing session from an unloaded one', async () => {
+    const backend = new FakeBackend();
+    backend.getSession = async () => {
+      throw new BackendError('not-found', 'getSession', 'nope');
+    };
+    const controller = makeController(() => Promise.resolve([]), backend);
+    expect(await controller.ensureSession('ses_nope')).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('sendToSession uses the fetched session directory for file mentions', async () => {
+    const backend = new FakeBackend();
+    const session = { ...fakeSession('ses_y'), directory: '/project-b' };
+    backend.sessions = [session];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    // Drop the in-memory copy so the fetch path is exercised.
+    controller.openOverview();
+    await controller.sendToSession('ses_y', 'inspect @src/a.ts');
     controller.dispose();
   });
 });

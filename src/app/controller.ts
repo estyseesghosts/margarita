@@ -1211,7 +1211,26 @@ export class AppController {
     this.setState('sessions', session.id, session);
   }
 
+  /**
+   * Makes sure a session the user asked for (e.g. --resume <id>) is known before we
+   * open or prompt it. Returns the summary, or undefined when the server cannot find it.
+   */
+  async ensureSession(sessionID: string): Promise<SessionSummary | undefined> {
+    const known = this.state.sessions[sessionID];
+    if (known !== undefined) return known;
+    try {
+      const session = await this.deps.backend.getSession(sessionID);
+      this.storeSessionSummary(session);
+      return session;
+    } catch (error) {
+      if (error instanceof BackendError && error.kind === 'not-found') return undefined;
+      throw error;
+    }
+  }
+
   async sendToSession(sessionID: string, text: string): Promise<boolean> {
+    // Ensure the stored summary is authoritative before interpreting file mentions.
+    await this.ensureSession(sessionID);
     const directory = this.state.sessions[sessionID]?.directory ?? this.deps.cwd;
     this.writeComposer(composerFrom(text));
     const running = this.state.running[sessionID] === true;

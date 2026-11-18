@@ -181,15 +181,12 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   const target = options.target;
   let existingSessionID: string | undefined;
   if (target.kind === 'resume') {
-    if (controller.state.sessions[target.sessionID] === undefined) {
-      try {
-        await backend.getSession(target.sessionID);
-      } catch {
-        process.stderr.write(`marg: session ${target.sessionID} not found.\n`);
-        return exitCodes.notFound;
-      }
+    const summary = await controller.ensureSession(target.sessionID);
+    if (summary === undefined) {
+      process.stderr.write(`marg: session ${target.sessionID} not found.\n`);
+      return exitCodes.notFound;
     }
-    existingSessionID = target.sessionID;
+    existingSessionID = summary.id;
   } else if (target.kind === 'continue') {
     const latest = await controller.findLatestSessionIn(cwd);
     existingSessionID = latest?.id;
