@@ -226,6 +226,42 @@ describe('runPrint', () => {
     expect(backend.pageLimits.length).toBeGreaterThan(1);
   });
 
+  test('a long run reads one page per poll, not the whole turn (#45)', async () => {
+    const backend = new ScriptedBackend();
+    const steps = 12;
+    const perPoll = 60;
+    backend.script = (poll, id) => {
+      const progress = Math.min(poll, steps);
+      const work = Array.from({ length: progress * perPoll }, (_, n) =>
+        assistant(`w${n}`, 21 + n, `step ${n}`),
+      );
+      return [
+        user(id, 20, 'run tests'),
+        ...work,
+        ...(poll >= steps ? [idle('i1', 10_000, 'succeeded')] : []),
+      ];
+    };
+    const result = await run(backend);
+    expect(result.code).toBe(exitCodes.ok);
+    expect(result.out).toContain(`step ${steps * perPoll - 1}`);
+    // Old behavior paged back to admission every poll: ~sum(1..7) pages; now ~1 per poll.
+    expect(backend.pageLimits.length).toBeLessThanOrEqual(steps + 6);
+  });
+
+  test('a burst larger than a page between polls is still read completely (#45)', async () => {
+    const backend = new ScriptedBackend();
+    backend.script = (poll, id) => [
+      user(id, 20, 'run tests'),
+      ...Array.from({ length: poll === 1 ? 5 : 450 }, (_, n) =>
+        assistant(`w${n}`, 21 + n, `s${n}`),
+      ),
+      ...(poll >= 3 ? [idle('i1', 10_000, 'succeeded')] : []),
+    ];
+    const result = await run(backend);
+    expect(result.code).toBe(exitCodes.ok);
+    expect(result.out).toContain('s449');
+  });
+
   test('a failed turn exits 1 and still prints the turn', async () => {
     const backend = new ScriptedBackend();
     backend.script = (_poll, id) => [

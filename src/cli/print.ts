@@ -88,26 +88,45 @@ export function findTurn(
   return { state: 'done', messages: turn, outcome: 'succeeded' };
 }
 
-const pageSize = 200;
+const pageSize = 100;
 const gracePolls = 3;
+/** Every this many polls the whole turn is re-read from the server, to pick up edits to old messages. */
+const reconcileEvery = 120;
 const eol = String.fromCharCode(10);
 
-/** Pages newest-first until the page reaches back before admission or history ends. */
-async function loadSince(
-  backend: Backend,
-  sessionID: string,
-  since: number,
-): Promise<TranscriptMessage[]> {
-  let collected: TranscriptMessage[] = [];
-  let cursor: string | undefined;
-  for (;;) {
-    const page = await backend.listMessages(sessionID, pageSize, cursor);
-    collected = [...page.messages, ...collected];
-    const oldest = collected[0];
-    if (page.olderCursor === undefined || (oldest !== undefined && oldest.createdAt < since)) {
-      return collected;
+/**
+ * Keeps the messages from admission onward. A normal poll reads only the newest page and
+ * merges it by ID into the cache; older pages are fetched only until they overlap what is
+ * already known (first poll: until admission), so traffic per poll stays bounded as the turn
+ * grows. A periodic full reload reconciles edits to older messages.
+ */
+class TurnReader {
+  private known = new Map<string, TranscriptMessage>();
+  private polls = 0;
+
+  constructor(
+    private readonly backend: Backend,
+    private readonly sessionID: string,
+    private readonly since: number,
+  ) {}
+
+  async read(): Promise<TranscriptMessage[]> {
+    this.polls += 1;
+    const full = this.known.size === 0 || this.polls % reconcileEvery === 0;
+    let cursor: string | undefined;
+    let collected: TranscriptMessage[] = [];
+    for (;;) {
+      const page = await this.backend.listMessages(this.sessionID, pageSize, cursor);
+      collected = [...page.messages, ...collected];
+      const oldest = collected[0];
+      const reachedAdmission = oldest !== undefined && oldest.createdAt < this.since;
+      const overlapsKnown = !full && collected.some((m) => this.known.has(m.id));
+      if (page.olderCursor === undefined || reachedAdmission || overlapsKnown) break;
+      cursor = page.olderCursor;
     }
-    cursor = page.olderCursor;
+    if (full) this.known = new Map();
+    for (const message of collected) this.known.set(message.id, message);
+    return [...this.known.values()];
   }
 }
 
@@ -135,12 +154,13 @@ export async function runPrint(request: PrintRequest): Promise<number> {
   // Consecutive polls that saw nothing to wait for; a short grace absorbs read-after-write lag.
   let vanished = 0;
   let inactiveWhileRunning = 0;
+  const reader = new TurnReader(backend, sessionID, admitted.createdAt);
   for (;;) {
     if (request.signal.aborted) return exitCodes.interrupted;
     await Bun.sleep(pollMs);
     if (request.signal.aborted) return exitCodes.interrupted;
 
-    const messages = await loadSince(backend, sessionID, admitted.createdAt);
+    const messages = await reader.read();
     const progress = findTurn(messages, admitted);
     if (progress.state === 'done') return report(request, sessionID, progress);
 
