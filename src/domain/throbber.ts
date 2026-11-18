@@ -117,7 +117,7 @@ function fit(label: string, meta: string, width: number, shorter: string): strin
 export const tips = [
   'Press Shift+Tab to switch agents',
   'Press Ctrl+O to show tool details',
-  'Press Esc to interrupt the running turn',
+  'Press Ctrl+C to interrupt the running turn',
   'Press Alt+Enter to steer instead of queueing',
   'Press F1 for all key bindings',
 ] as const;
