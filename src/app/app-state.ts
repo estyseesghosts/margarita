@@ -91,6 +91,8 @@ export type AppState = {
    * this frontend after a successful interrupt of an active goal.
    */
   awaitingSteer: Record<string, string>;
+  /** Cancelled queued messages whose text could not be placed yet; restored with Ctrl+S. */
+  recovered: { sessionID: string; inboxID: string; text: string }[];
   /** True while a permission or form reply is in flight; blocks double submits. */
   answering: boolean;
   /** Index of the focused permission choice in the permission card. */
@@ -159,6 +161,7 @@ export function initialState(directory: string): AppState {
     goals: {},
     nativeGoals: {},
     awaitingSteer: {},
+    recovered: [],
     answering: false,
     permissionChoice: 0,
     transcripts: {},

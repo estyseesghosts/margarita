@@ -1609,6 +1609,31 @@ describe(`Up recalls the newest queued follow-up (issue #30)`, () => {
     controller.dispose();
   });
 
+  test('a busy composer and occupied stash still keep the cancelled text recoverable', async () => {
+    const backend = queuedBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom('typing now'));
+    controller.toggleStash(); // occupy the stash
+    controller.setComposer(composerFrom('another draft'));
+    await controller.recallQueuedUp();
+    await flush();
+
+    expect(controller.state.composer.text).toBe('another draft');
+    expect(controller.state.stash).toBe('typing now');
+    expect(controller.state.recovered).toHaveLength(1);
+    const recovered = controller.state.recovered[0]?.text ?? '';
+    expect(recovered).not.toBe('');
+
+    controller.setComposer(composerFrom(''));
+    controller.toggleStash(); // stash first
+    controller.setComposer(composerFrom(''));
+    controller.toggleStash(); // then the recovery entry
+    expect(controller.state.composer.text).toBe(recovered);
+    expect(controller.state.recovered).toHaveLength(0);
+    controller.dispose();
+  });
+
   test('a parked recalled message is restored with Ctrl+S', async () => {
     const backend = queuedBackend();
     const controller = makeController(() => Promise.resolve([]), backend);

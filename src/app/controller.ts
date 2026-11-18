@@ -1137,6 +1137,13 @@ export class AppController {
         this.writeComposer(composerFrom(stash));
         this.setState('stash', undefined);
       });
+    } else if (this.state.recovered.length > 0) {
+      const [next, ...rest] = this.state.recovered;
+      if (next === undefined) return;
+      batch(() => {
+        this.writeComposer(composerFrom(next.text));
+        this.setState('recovered', rest);
+      });
     }
   }
 
@@ -1961,8 +1968,10 @@ export class AppController {
       this.showNotice('Queued message parked · Ctrl+S to restore', 'dim');
       return;
     }
+    // Both slots are busy: keep the text in its own recovery entry, never lost.
+    this.setState('recovered', (list) => [...list, { sessionID, inboxID, text: item.text }]);
     this.showNotice(
-      'Queued message cancelled, but the composer and the parked-draft slot were both busy.',
+      'Queued message cancelled and kept aside · clear the composer, then Ctrl+S to restore',
       'warn',
     );
   }
