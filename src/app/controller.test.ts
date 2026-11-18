@@ -114,6 +114,60 @@ function onePerPageHook(
   };
 }
 
+describe('session directory-targeted search (issue #11)', () => {
+  test('findLatestSessionIn pages past the first pages for the target directory only', async () => {
+    const backend = new FakeBackend();
+    // 600 sessions in other directories; one older matching session in /work/kohjoh.
+    const pages = Array.from({ length: 600 }, (_, index) => ({
+      ...fakeSession(`other-${index}`),
+      directory: '/elsewhere',
+      updatedAt: 10_000 + index,
+    }));
+    const match = { ...fakeSession('match'), updatedAt: 5 };
+    backend.listSessionsHook = async (query) => {
+      const start = query.cursor === undefined ? 0 : Number(query.cursor);
+      if (query.directory === '/work/kohjoh') {
+        return start === 0 ? { sessions: [match] } : { sessions: [] };
+      }
+      const slice = pages.slice(start, start + 100);
+      return {
+        sessions: slice,
+        ...(start + 100 < pages.length ? { nextCursor: String(start + 100) } : {}),
+      };
+    };
+    const controller = makeController(() => Promise.resolve([]), backend);
+    const found = await controller.findLatestSessionIn('/work/kohjoh');
+    expect(found?.id).toBe('match');
+    expect(controller.state.sessions['match']?.directory).toBe('/work/kohjoh');
+    controller.dispose();
+  });
+
+  test('findLatestSessionIn excludes archived and child sessions', async () => {
+    const backend = new FakeBackend();
+    const archived = { ...fakeSession('archived'), archived: true, updatedAt: 99 };
+    const child = { ...fakeSession('child'), parentID: 'parent', updatedAt: 100 };
+    const fresh = { ...fakeSession('fresh'), updatedAt: 50 };
+    backend.listSessionsHook = async (query) =>
+      query.directory === '/work/kohjoh'
+        ? { sessions: [archived, child, fresh] }
+        : { sessions: [] };
+    const controller = makeController(() => Promise.resolve([]), backend);
+    const found = await controller.findLatestSessionIn('/work/kohjoh');
+    expect(found?.id).toBe('fresh');
+    controller.dispose();
+  });
+
+  test('findLatestSessionIn returns nothing without a complete directory-targeted match', async () => {
+    const backend = new FakeBackend();
+    backend.listSessionsHook = async () => ({
+      sessions: [{ ...fakeSession('elsewhere'), directory: '/x' }],
+    });
+    const controller = makeController(() => Promise.resolve([]), backend);
+    expect(await controller.findLatestSessionIn('/work/kohjoh')).toBeUndefined();
+    controller.dispose();
+  });
+});
+
 describe('session pagination', () => {
   test('bootstrap caps the first load; Load more pages in older sessions keyboard-only', async () => {
     const backend = new FakeBackend();

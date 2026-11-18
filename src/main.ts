@@ -18,7 +18,6 @@ import { fileGoalStore } from './config/goal-store.ts';
 import { loadState, saveState } from './config/local-state.ts';
 import { appPaths } from './config/paths.ts';
 import { buildKeymap } from './domain/keymap.ts';
-import { directoryKey } from './domain/path-identity.ts';
 import { App } from './ui/app.tsx';
 import { pickTheme } from './ui/theme.ts';
 
@@ -192,7 +191,8 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     }
     existingSessionID = target.sessionID;
   } else if (target.kind === 'continue') {
-    existingSessionID = latestSessionIn(controller, cwd);
+    const latest = await controller.findLatestSessionIn(cwd);
+    existingSessionID = latest?.id;
     if (existingSessionID === undefined && options.print) {
       process.stderr.write('marg: no session to continue in this project.\n');
       return exitCodes.notFound;
@@ -285,18 +285,6 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   }
   controller.dispose();
   return exitCodes.ok;
-}
-
-function latestSessionIn(controller: AppController, cwd: string): string | undefined {
-  const key = directoryKey(cwd, process.platform);
-  return Object.values(controller.state.sessions)
-    .filter(
-      (session) =>
-        !session.archived &&
-        session.parentID === undefined &&
-        directoryKey(session.directory, process.platform) === key,
-    )
-    .toSorted((left, right) => right.updatedAt - left.updatedAt)[0]?.id;
 }
 
 function absolute(path: string): string {

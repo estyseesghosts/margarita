@@ -1155,7 +1155,62 @@ export class AppController {
     return session.id;
   }
 
-  /** Sends a prompt to an existing session (CLI `--continue/--resume "prompt"`). */
+  /**
+   * Directory-targeted search for the most recent session in `directory`. Unlike the
+   * overview listing (which only covers the first pages), this pages until the server
+   * says everything for that directory is loaded, so --continue works beyond the first
+   * 500 global sessions. Archived and child sessions are filtered here; the result is
+   * stored in state before attach so directory/model metadata is correct.
+   */
+  async findLatestSessionIn(directory: string): Promise<SessionSummary | undefined> {
+    const key = directoryKey(directory, this.deps.platform);
+    const directoryQuery = { directory };
+    let cursor: string | undefined;
+    let pages = 0;
+    let best: SessionSummary | undefined;
+    try {
+      do {
+        const page = await this.deps.backend.listSessions(
+          cursor === undefined ? directoryQuery : { directory, cursor },
+        );
+        for (const session of page.sessions) {
+          if (session.archived || session.parentID !== undefined) continue;
+          if (directoryKey(session.directory, this.deps.platform) !== key) continue;
+          if (best === undefined || session.updatedAt > best.updatedAt) best = session;
+        }
+        cursor = page.nextCursor;
+        pages += 1;
+      } while (cursor !== undefined && pages < 50);
+    } catch (error) {
+      // Directory filtering unsupported by this server (older builds ignored the
+      // parameter): pages already handled by the overview load are the best effort fallback.
+      if (best === undefined) {
+        this.debugLog.write('find-latest-fallback', { error: errorText(error) });
+        return this.latestSessionInState(directory);
+      }
+    }
+    if (best !== undefined) this.storeSessionSummary(best);
+    return best;
+  }
+
+  /** Fallback used only when the server cannot filter by directory: match loaded pages. */
+  private latestSessionInState(directory: string): SessionSummary | undefined {
+    const key = directoryKey(directory, this.deps.platform);
+    return Object.values(this.state.sessions)
+      .filter(
+        (session) =>
+          !session.archived &&
+          session.parentID === undefined &&
+          directoryKey(session.directory, this.deps.platform) === key,
+      )
+      .toSorted((left, right) => right.updatedAt - left.updatedAt)[0];
+  }
+
+  /** Stores a fetched/resolved summary before it is attached or prompted. */
+  private storeSessionSummary(session: SessionSummary): void {
+    this.setState('sessions', session.id, session);
+  }
+
   async sendToSession(sessionID: string, text: string): Promise<boolean> {
     const directory = this.state.sessions[sessionID]?.directory ?? this.deps.cwd;
     this.writeComposer(composerFrom(text));
