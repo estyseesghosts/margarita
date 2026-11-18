@@ -65,6 +65,7 @@ function backendWithSession(): FakeBackend {
   backend.sessions = [
     {
       id: 'ses_a',
+      serverID: 'local',
       projectID: 'p',
       directory: '/work/kohjoh',
       title: 'Renderer stalled near Goldenrod',
@@ -109,7 +110,11 @@ describe('app', () => {
     setup.mockInput.pressArrow('up');
     setup.mockInput.pressEnter();
     await settle(setup);
-    expect(controller.state.route).toEqual({ kind: 'conversation', sessionID: 'ses_a' });
+    expect(controller.state.route).toEqual({
+      kind: 'conversation',
+      serverID: 'local',
+      sessionID: 'ses_a',
+    });
     const frame = setup.captureCharFrame();
     if (process.env['DUMP'] !== undefined) console.log(frame);
     expect(frame).toContain('Welcome back!');
@@ -219,6 +224,7 @@ describe('app', () => {
     const backend = new FakeBackend();
     backend.sessions = Array.from({ length: 3 }, (_, index) => ({
       id: `ses_${index}`,
+      serverID: 'local',
       projectID: 'p',
       directory: '/work/kohjoh',
       title: `Session ${index}`,
@@ -256,6 +262,7 @@ describe('app', () => {
     const backend = new FakeBackend();
     backend.sessions = Array.from({ length: 60 }, (_, index) => ({
       id: `ses_${index}`,
+      serverID: 'local',
       projectID: 'p',
       directory: '/work/kohjoh',
       title: `Session number ${index}`,
@@ -299,6 +306,7 @@ describe('app', () => {
     const backend = new FakeBackend();
     backend.sessions = Array.from({ length: 8 }, (_, index) => ({
       id: `ses_${index}`,
+      serverID: 'local',
       projectID: 'p',
       directory: '/work/kohjoh',
       title: `Session number ${index}`,
@@ -1120,6 +1128,7 @@ describe('queued messages preview (issue #29)', () => {
     const backend = runningWithQueue();
     backend.sessions.push({
       id: 'ses_b',
+      serverID: 'local',
       projectID: 'p',
       directory: '/work/kohjoh',
       title: 'other',

@@ -856,6 +856,7 @@ describe('session pagination', () => {
 function fakeSession(id: string): SessionSummary {
   return {
     id,
+    serverID: 'local',
     projectID: 'p',
     directory: '/work/kohjoh',
     title: `Session ${id}`,
@@ -1055,7 +1056,11 @@ describe('tool-group focus', () => {
 
     controller.openSession('ses_b');
     await flush();
-    expect(controller.state.route).toEqual({ kind: 'conversation', sessionID: 'ses_b' });
+    expect(controller.state.route).toEqual({
+      kind: 'conversation',
+      serverID: 'local',
+      sessionID: 'ses_b',
+    });
 
     controller.openSession('ses_a');
     await flush();

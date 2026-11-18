@@ -12,7 +12,16 @@ function session(
   updatedAt: number,
   extra: Partial<SessionSummary> = {},
 ): SessionSummary {
-  return { id, projectID: 'p', directory, createdAt: 0, updatedAt, archived: false, ...extra };
+  return {
+    id,
+    serverID: 'local',
+    projectID: 'p',
+    directory,
+    createdAt: 0,
+    updatedAt,
+    archived: false,
+    ...extra,
+  };
 }
 
 const groupOptions = {
@@ -126,6 +135,7 @@ describe('usage formatting', () => {
 describe('groupRows', () => {
   const sessions = Array.from({ length: 8 }, (_, index) => ({
     id: `ses_${index}`,
+    serverID: 'local',
     projectID: 'p',
     directory: '/work/a',
     createdAt: 0,

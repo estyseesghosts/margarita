@@ -103,16 +103,47 @@ describe('goal store', () => {
     const dir = await mkdtemp(join(tmpdir(), 'marg-goals-'));
     try {
       const store = fileGoalStore(dir, () => now);
-      expect(await store.load('ses_a')).toBeUndefined();
+      expect(await store.load({ serverID: 'local', sessionID: 'ses_a' })).toBeUndefined();
       const first = await store.save(setGoal(base, 'one', now));
       expect(first.revision).toBe(1);
-      expect((await store.load('ses_a'))?.goal?.title).toBe('one');
+      expect((await store.load({ serverID: 'local', sessionID: 'ses_a' }))?.goal?.title).toBe(
+        'one',
+      );
       // A second instance still holding revision 0 must not silently overwrite.
       const stale = store.save(setGoal(base, 'two', now));
       expect(stale).rejects.toBeInstanceOf(GoalConflictError);
       await stale.catch(() => {});
       const second = await store.save(setGoal(first, 'three', now));
       expect(second.revision).toBe(2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('two servers with the same session ID keep separate sidecars', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'marg-goals-'));
+    try {
+      const store = fileGoalStore(dir, () => now);
+      const remote = { ...base, backend: 'srv_1' };
+      await store.save(setGoal(base, 'local goal', now));
+      await store.save(setGoal(remote, 'remote goal', now));
+      expect((await store.load({ serverID: 'local', sessionID: 'ses_a' }))?.goal?.title).toBe(
+        'local goal',
+      );
+      expect((await store.load({ serverID: 'srv_1', sessionID: 'ses_a' }))?.goal?.title).toBe(
+        'remote goal',
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('legacy local sidecars keep their bare filename', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'marg-goals-'));
+    try {
+      const store = fileGoalStore(dir, () => now);
+      await store.save(setGoal(base, 'legacy', now));
+      expect(await Bun.file(join(dir, 'ses_a.json')).exists()).toBe(true);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

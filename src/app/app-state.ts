@@ -22,8 +22,8 @@ import type { TranscriptMessage } from '../domain/transcript.ts';
  */
 export type Route =
   | { kind: 'overview' }
-  | { kind: 'new'; directory: string }
-  | { kind: 'conversation'; sessionID: string };
+  | { kind: 'new'; serverID: string; directory: string }
+  | { kind: 'conversation'; serverID: string; sessionID: string };
 
 export type Overlay =
   | { kind: 'none' }

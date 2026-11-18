@@ -67,6 +67,7 @@ export class FakeBackend implements Backend {
     this.calls.push({ name: 'createSession', args: [args] });
     const session: SessionSummary = {
       id: `ses_${this.sessions.length + 1}`,
+      serverID: 'local',
       projectID: 'p',
       directory: args.directory,
       createdAt: 1,

@@ -7,6 +7,7 @@ import type { FormRequest, FormValue } from '../domain/form.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
 import { type NativeGoal, toNativeGoal } from '../domain/native-goal.ts';
+import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
 import type { Connection } from './connection.ts';
@@ -128,6 +129,8 @@ export interface Backend {
 export type ServerCommand = Readonly<{ name: string; description?: string }>;
 
 export type BackendOptions = Readonly<{
+  /** Margarita-managed server identity stamped onto every session summary. */
+  serverID?: string;
   /** Output cap (characters, head+tail) applied when mapping tool output. */
   toolOutputChars?: number;
 }>;
@@ -147,6 +150,10 @@ class OpenCodeBackend implements Backend {
     private readonly options: BackendOptions = {},
   ) {}
 
+  private summary(info: Parameters<typeof toSessionSummary>[0]): SessionSummary {
+    return toSessionSummary(info, this.options.serverID ?? localServerID);
+  }
+
   async listSessions(query: {
     cursor?: string;
     directory?: string;
@@ -162,15 +169,13 @@ class OpenCodeBackend implements Backend {
     );
     const next = page.cursor.next;
     return {
-      sessions: page.data.map(toSessionSummary),
+      sessions: page.data.map((info) => this.summary(info)),
       ...(typeof next === 'string' && next !== '' ? { nextCursor: next } : {}),
     };
   }
 
   async getSession(sessionID: string): Promise<SessionSummary> {
-    return toSessionSummary(
-      await call('session.get', () => this.client.session.get({ sessionID })),
-    );
+    return this.summary(await call('session.get', () => this.client.session.get({ sessionID })));
   }
 
   async createSession(args: {
@@ -185,7 +190,7 @@ class OpenCodeBackend implements Backend {
         ...(args.model === undefined ? {} : { model: toWireModel(args.model) }),
       }),
     );
-    return toSessionSummary(info);
+    return this.summary(info);
   }
 
   async activeSessionIDs(): Promise<Set<string>> {
@@ -325,7 +330,7 @@ class OpenCodeBackend implements Backend {
         ...(beforeMessageID === undefined ? {} : { before: beforeMessageID }),
       }),
     );
-    return toSessionSummary(info);
+    return this.summary(info);
   }
 
   async stageRevert(sessionID: string, messageID: string): Promise<FileDiff[]> {

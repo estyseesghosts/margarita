@@ -18,6 +18,8 @@ export type StagedRevert = Readonly<{
 /** Server-reported session facts the frontend needs. Identity is `id`, never the title. */
 export type SessionSummary = Readonly<{
   id: string;
+  /** Margarita-managed server identity; `id` is only unique within one server. */
+  serverID: string;
   projectID: string;
   directory: string;
   parentID?: string;

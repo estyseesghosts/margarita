@@ -1,8 +1,11 @@
-import { directoryKey, directoryName } from './path-identity.ts';
+import { directoryName } from './path-identity.ts';
+import { projectKey, sessionKey, type SessionRef } from './server-identity.ts';
 import type { SessionSummary } from './session.ts';
 
 export type ProjectGroup = Readonly<{
   key: string;
+  /** Server that owns every session in this group. */
+  serverID: string;
   name: string;
   directory: string;
   sessions: readonly SessionSummary[];
@@ -29,7 +32,10 @@ export function groupSessions(
   for (const session of sessions) {
     if (session.archived && !options.showArchived) continue;
     if (session.parentID !== undefined && !options.showChildren) continue;
-    const key = directoryKey(session.directory, options.platform);
+    const key = projectKey(
+      { serverID: session.serverID, directory: session.directory },
+      options.platform,
+    );
     const bucket = buckets.get(key);
     if (bucket === undefined) buckets.set(key, [session]);
     else bucket.push(session);
@@ -44,6 +50,7 @@ export function groupSessions(
     if (first === undefined) continue;
     groups.push({
       key,
+      serverID: first.serverID,
       name: directoryName(first.directory),
       directory: first.directory,
       sessions: sorted,
@@ -68,8 +75,8 @@ export type OverviewRow =
   | Readonly<{ kind: 'toggle'; key: string; groupKey: string; expanded: boolean; hidden: number }>
   | Readonly<{ kind: 'loadmore'; key: typeof loadMoreRowKey }>;
 
-export function sessionRowKey(sessionID: string): string {
-  return `session:${sessionID}`;
+export function sessionRowKey(ref: SessionRef): string {
+  return `session:${sessionKey(ref)}`;
 }
 
 export function toggleRowKey(groupKey: string): string {
@@ -81,7 +88,7 @@ export function groupRows(group: ProjectGroup, expanded: boolean): OverviewRow[]
   const shown = expanded ? group.sessions : group.sessions.slice(0, collapsedSessionLimit);
   const rows: OverviewRow[] = shown.map((session) => ({
     kind: 'session',
-    key: sessionRowKey(session.id),
+    key: sessionRowKey({ serverID: session.serverID, sessionID: session.id }),
     groupKey: group.key,
     session,
   }));

@@ -19,6 +19,7 @@ import type { FormField, FormRequest } from '../domain/form.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
 import { sanitizeTerminalText } from '../domain/sanitize-text.ts';
+import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary, StagedRevert } from '../domain/session.ts';
 import type { AssistantPart, ToolCall, TranscriptMessage } from '../domain/transcript.ts';
 
@@ -44,7 +45,10 @@ export function toModelSelection(value: unknown): ModelSelection | undefined {
   };
 }
 
-export function toSessionSummary(info: SessionInfo): SessionSummary {
+export function toSessionSummary(
+  info: SessionInfo,
+  serverID: string = localServerID,
+): SessionSummary {
   const raw: unknown = info;
   if (!isRecord(raw) || typeof raw['id'] !== 'string' || !isRecord(raw['location'])) {
     throw new WireFormatError('Session payload is missing id or location.');
@@ -57,6 +61,7 @@ export function toSessionSummary(info: SessionInfo): SessionSummary {
   const tokens = readTokens(info.tokens);
   return {
     id: info.id,
+    serverID,
     projectID: typeof info.projectID === 'string' ? info.projectID : '',
     directory: typeof directory === 'string' ? directory : '',
     createdAt: created,

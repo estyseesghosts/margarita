@@ -82,7 +82,7 @@ export function App(props: AppProps) {
     <box flexDirection="column" width="100%" height="100%">
       <Switch>
         <Match when={state.route.kind === 'conversation' ? state.route : undefined}>
-          {(route: Accessor<{ kind: 'conversation'; sessionID: string }>) => (
+          {(route: Accessor<{ kind: 'conversation'; serverID: string; sessionID: string }>) => (
             <Transcript
               controller={controller}
               sessionID={route().sessionID}
@@ -97,7 +97,7 @@ export function App(props: AppProps) {
           )}
         </Match>
         <Match when={state.route.kind === 'new' ? state.route : undefined}>
-          {(route: Accessor<{ kind: 'new'; directory: string }>) => (
+          {(route: Accessor<{ kind: 'new'; serverID: string; directory: string }>) => (
             <NewSessionView
               controller={controller}
               directory={route().directory}
