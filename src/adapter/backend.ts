@@ -424,24 +424,92 @@ async function call<T>(operation: string, run: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * Maps the SDK's declared error bodies (errors with a `_tag`) and transport
+ * failures onto stable kinds. Anything we cannot positively identify stays
+ * `unknown` rather than being guessed into a success-adjacent bucket.
+ */
 export function toBackendError(operation: string, cause: unknown): BackendError {
   if (cause instanceof BackendError) return cause;
+  const tag = errorTag(cause);
+  if (tag !== undefined) {
+    return new BackendError(kindForTag(tag), operation, messageOf(cause) ?? tag, { cause });
+  }
   if (cause instanceof ClientError) {
-    const kind = cause.reason === 'Transport' ? 'transport' : 'unknown';
-    return new BackendError(kind, operation, cause.message, { cause });
+    if (cause.reason === 'Transport') {
+      return new BackendError('transport', operation, cause.message, { cause });
+    }
+    if (cause.reason === 'UnexpectedStatus') {
+      const status = statusOf(cause);
+      return new BackendError(kindForStatus(status), operation, cause.message, { cause });
+    }
+    return new BackendError('unknown', operation, cause.message, { cause });
   }
   if (cause instanceof Error) {
-    const tag = cause.name.toLowerCase();
-    const kind: BackendErrorKind = tag.includes('notfound')
-      ? 'not-found'
-      : tag.includes('conflict') || tag.includes('busy')
-        ? 'conflict'
-        : tag.includes('unauthorized') || tag.includes('forbidden')
-          ? 'unauthorized'
-          : tag.includes('badrequest') || tag.includes('invalid') || tag.includes('validation')
-            ? 'invalid'
-            : 'unknown';
-    return new BackendError(kind, operation, cause.message || cause.name, { cause });
+    return new BackendError('unknown', operation, cause.message || cause.name, { cause });
   }
   return new BackendError('unknown', operation, String(cause), { cause });
+}
+
+/** The SDK's declared errors carry `_tag` as an own property and as `name`. */
+function errorTag(cause: unknown): string | undefined {
+  if (typeof cause !== 'object' || cause === null) return undefined;
+  if (cause instanceof ClientError) return undefined;
+  const tag = Reflect.get(cause, '_tag');
+  if (typeof tag === 'string' && tag !== '') return tag;
+  if (cause instanceof Error && cause.name !== 'Error' && cause.name !== '') {
+    return cause.name;
+  }
+  return undefined;
+}
+
+const conflictTags = new Set(['ConflictError', 'SessionBusyError', 'FormAlreadySettledError']);
+const unauthorizedTags = new Set(['UnauthorizedError', 'ForbiddenError']);
+const invalidTags = new Set([
+  'InvalidRequestError',
+  'InvalidCursorError',
+  'FormInvalidAnswerError',
+  'UnsupportedModelError',
+  'InstructionEntryValueTooLargeError',
+]);
+const transportTags = new Set(['ServiceUnavailableError', 'RpcError', 'RpcInternalError']);
+
+function kindForTag(tag: string): BackendErrorKind {
+  if (tag.endsWith('NotFoundError')) return 'not-found';
+  if (conflictTags.has(tag)) return 'conflict';
+  if (unauthorizedTags.has(tag)) return 'unauthorized';
+  if (invalidTags.has(tag)) return 'invalid';
+  if (transportTags.has(tag)) return 'transport';
+  return 'unknown';
+}
+
+function kindForStatus(status: number | undefined): BackendErrorKind {
+  if (status === undefined) return 'unknown';
+  if (status === 400 || status === 422) return 'invalid';
+  if (status === 401 || status === 403) return 'unauthorized';
+  if (status === 404) return 'not-found';
+  if (status === 409) return 'conflict';
+  if (status === 502 || status === 503 || status === 504) return 'transport';
+  return 'unknown';
+}
+
+/** UnexpectedStatus carries the status on `cause.cause.status` and in `detail`. */
+function statusOf(cause: ClientError): number | undefined {
+  const inner = cause.cause;
+  if (typeof inner === 'object' && inner !== null) {
+    const status = Reflect.get(inner, 'status');
+    if (typeof status === 'number' && Number.isFinite(status)) return status;
+  }
+  const detail = cause.message.replace(/^UnexpectedStatus:\s*/, '');
+  const parsed = Number.parseInt(detail, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function messageOf(cause: unknown): string | undefined {
+  if (cause instanceof Error && cause.message !== '') return cause.message;
+  if (typeof cause === 'object' && cause !== null) {
+    const message = Reflect.get(cause, 'message');
+    if (typeof message === 'string' && message !== '') return message;
+  }
+  return undefined;
 }
