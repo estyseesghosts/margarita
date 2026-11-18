@@ -1,28 +1,16 @@
-# 🍹 margarita
+# margarita
 
 ```
  /\_/\
-( o.o )   a tiny, calm terminal home for your OpenCode agents
+( o.o )   an alternative frontend for opencode
  > ^ <
 ```
 
-**margarita** (`marg` for short) is a cozy terminal frontend for the [OpenCode](https://opencode.ai) v2 server.
-A running agent is a *conversation*, not a tab or a pane: no header bar, no sidebars, no window manager
-inside your window manager. Just you, a prompt, and a tidy transcript.
+![margarita](margarita.png)
 
-## ✨ What it does
+**margarita** (`marg`) is a terminal frontend for the [OpenCode](https://opencode.ai) v2 server. it makes opencode feel more like claude or codex.
 
-- 💬 **Conversation-first.** One chat fills the terminal. Press `Left` on an empty prompt to peek at everything else you have running.
-- 🗂️ **Overview of all your sessions**, grouped by project folder and sorted by recent activity. Switching away never stops an agent, so you can juggle several at once.
-- 🧺 **Quiet transcript.** Reads, searches and shell commands fold into one line (`Read 3 files, ran 2 shell commands`). Edits show a real syntax-highlighted diff with line numbers. Failures are never hidden.
-- 📌 **Sticky prompt header.** Scroll back through a long chat and the prompt for the part you're reading stays pinned to the top.
-- 📝 **Markdown that looks like Markdown**: headings, lists, tables and highlighted code blocks.
-- 🔍 **`Ctrl+O` for details**: exact tool inputs and outputs, timings and any reasoning the model provides.
-- 🎯 **Goals, plans and a task checklist** (`Ctrl+T`) that survive restarts.
-- 🧮 **A tiny footer** with agent, model, state, tokens and what the session has cost so far.
-- 🔐 **The server stays in charge.** Permissions, agents and history all live in OpenCode; margarita only asks nicely.
-
-## 🌱 Getting started
+## Getting started
 
 ### What you need
 
@@ -52,7 +40,7 @@ bun run build bun-linux-x64    # cross-compile for another target
 The result bundles the Bun runtime and OpenTUI's native library, so you can copy it anywhere on your `PATH`
 (for example `%USERPROFILE%\.local\bin` on Windows or `~/.local/bin` elsewhere). More in [ADR-0006](adr/0006-packaging.md).
 
-## 🧭 Using it
+## Using `marg`
 
 ```sh
 marg                                  # new session in this directory
@@ -66,7 +54,7 @@ marg --help
 
 Print mode is always explicit: giving a prompt never silently turns it on.
 
-### ⌨️ Keys
+### Keys
 
 | Key | Does |
 | --- | --- |
@@ -85,14 +73,14 @@ Print mode is always explicit: giving a prompt never silently turns it on.
 
 Everything is a single key press. There are no chords. Rebind any of them in the config below.
 
-### 🪄 Slash commands
+### Slash commands
 
 `/goal <title>` · `/criteria a; b` · `/plan step one; step two` · `/plan propose` · `/plan adopt` · `/sync on|off` ·
 `/rename` · `/fork` · `/revert` · `/diff [turn]` · `/export [file]`
 
 Plans and goals are local (under margarita's state directory) until you run `/sync on`, which leaves a short note for the agent.
 
-### ⚙️ Config
+### Config
 
 `%LOCALAPPDATA%\margarita\config.jsonc` on Windows, or your XDG config directory elsewhere:
 
@@ -107,7 +95,7 @@ Plans and goals are local (under margarita's state directory) until you run `/sy
 
 Environment knobs: `NO_COLOR`, `MARGARITA_NO_ANIMATION=1`, `MARGARITA_ASCII=1`, and `MARGARITA_SERVER_PASSWORD` (for `--server`).
 
-## 🛠️ Development
+## Development
 
 ```sh
 bun run verify     # format check + oxlint (type-aware) + typecheck + tests
@@ -117,13 +105,13 @@ bun run verify     # format check + oxlint (type-aware) + typecheck + tests
 - Code layout: `src/domain` (pure logic) · `src/adapter` (OpenCode client and events) · `src/app` (controller, keys) · `src/ui` (OpenTUI + Solid) · `src/cli` (args, print mode).
 - Code style lives in the TypeScript guide used across this project: Bun, strict TS, small modules.
 
-### 📚 Design docs
+### Design docs
 
 The product spec and decisions live in [`docs/`](docs/) (start with [01-product-contract](docs/01-product-contract.md)),
 [`adr/`](adr/) and [`checklists/`](checklists/). The upstream API notes are in
 [02-upstream-source-map](docs/02-upstream-source-map.md); check them whenever OpenCode changes versions.
 
-## 💌 Status
+## Status
 
 Early days: version **0.0.1**. It works against OpenCode v2.3.0, and some terminals (Windows Terminal, Ghostty, tmux)
 still want a manual look-over; see [checklists/release-candidate.md](checklists/release-candidate.md).
