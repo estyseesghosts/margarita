@@ -53,7 +53,7 @@ async function mount(backend: FakeBackend, goalStore?: GoalStore) {
     localState: emptyState,
     platform: 'linux',
     cwd: '/work/kohjoh',
-    version: '0.1.0',
+    version: '0.0.1',
     now: () => 10_000,
     saveLocalState: async () => {},
     listFiles: async () => [],
