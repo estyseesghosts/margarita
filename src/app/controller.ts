@@ -102,6 +102,7 @@ import {
   serverFileUri,
   serverPathShape,
 } from '../domain/server-path.ts';
+import { classifySessionStatus, type SessionStatus } from '../domain/session-status.ts';
 import type { Execution, SessionSummary } from '../domain/session.ts';
 import {
   completeCommand,
@@ -295,6 +296,15 @@ export class AppController {
       outcome: this.state.sessions[this.sessionKeyOf(sessionID)]?.outcome,
       permissionIDs: permissions.map((permission) => permission.id),
       formCount: (this.state.forms[this.sessionKeyOf(sessionID)] ?? []).length,
+    });
+  }
+
+  /** The single classifier for dots, counts, and tabs; never a per-view heuristic. */
+  statusOf(session: SessionSummary): SessionStatus {
+    return classifySessionStatus({
+      online: this.deps.serverInfo?.(session.serverID)?.online ?? true,
+      execution: this.executionOf(session.id),
+      archived: session.archived,
     });
   }
 

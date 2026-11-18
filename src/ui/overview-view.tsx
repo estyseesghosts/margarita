@@ -80,6 +80,7 @@ export function Overview(props: {
                         session={sessionRow().session}
                         selected={selected(row.key)}
                         id={rowID(row.key)}
+                        ascii={props.ascii}
                       />
                     )}
                   </Match>
@@ -142,6 +143,7 @@ function SessionLine(props: {
   session: SessionSummary;
   selected: boolean;
   id: string;
+  ascii?: boolean | undefined;
 }) {
   const execution = () => props.controller.executionOf(props.session.id);
   const tasks = () => {
@@ -150,14 +152,26 @@ function SessionLine(props: {
   };
   const status = () =>
     `${executionLabel(execution())}${tasks()} · ${formatAge(props.controller.lastUsed(props.session), props.now)}`;
-  const attention = () =>
-    execution().state === 'waiting' ||
-    (execution().state === 'idle' && props.session.outcome === 'failed');
+  const state = () => props.controller.statusOf(props.session);
+  const dot = () =>
+    props.ascii === true
+      ? { idle: 'o', failed: '!', 'needs-input': '?', working: '*', unknown: '.' }[state()]
+      : { idle: '●', failed: '●', 'needs-input': '●', working: '●', unknown: '○' }[state()];
+  const attention = () => state() === 'needs-input' || state() === 'failed';
+  const dotColor = () =>
+    ({
+      idle: props.theme.dim,
+      failed: props.theme.error,
+      'needs-input': props.theme.warn,
+      working: props.theme.accent,
+      unknown: props.theme.dim,
+    })[state()];
   return (
     <box id={props.id} flexDirection="row" flexShrink={0}>
       <text fg={props.selected ? props.theme.accent : props.theme.dim}>
         {props.selected ? '  ❯ ' : '    '}
       </text>
+      <text fg={dotColor()}>{`${dot()} `}</text>
       <text flexGrow={1} fg={props.theme.text}>
         {props.session.title ?? props.session.id}
       </text>
