@@ -12,7 +12,7 @@ import type { Theme } from './theme.ts';
 /** Prompt rule, composer and completion list. The cursor is an inverse cell. */
 export function ComposerView(props: { controller: AppController; theme: Theme; width: number }) {
   const state = props.controller.state;
-  const active = () => state.route.kind === 'conversation' || state.overview.focus === 'composer';
+  const active = () => state.route.kind !== 'overview' || state.overview.focus === 'composer';
   const parts = () => splitAtCursor(state.composer);
   const before = () => parts().before;
   // A newline under the cursor is drawn as a space cell and kept in the trailing text.
@@ -21,7 +21,9 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
   const placeholder = () =>
     state.route.kind === 'overview'
       ? `New session in ${directoryName(state.overview.directory)}`
-      : '← overview · Shift+Tab agent · Ctrl+O details';
+      : state.route.kind === 'new'
+        ? `New session in ${directoryName(state.route.directory)} · ← overview`
+        : '← overview · Shift+Tab agent · Ctrl+O details';
   const rule = () => '─'.repeat(Math.max(0, props.width));
 
   return (

@@ -12,7 +12,7 @@ import { editExternally } from './external-editor.ts';
 import { OverlayView } from './overlays.tsx';
 import { Overview } from './overview-view.tsx';
 import type { Theme } from './theme.ts';
-import { Transcript } from './transcript-view.tsx';
+import { NewSessionView, Transcript } from './transcript-view.tsx';
 
 export type AppProps = Readonly<{
   controller: AppController;
@@ -41,8 +41,8 @@ export function App(props: AppProps) {
   const dimensions = useTerminalDimensions();
   const controller = props.controller;
   const state = controller.state;
-  const [now, setNow] = createSignal(Date.now());
-  const clock = setInterval(() => setNow(Date.now()), 30_000);
+  const [now, setNow] = createSignal(controller.now());
+  const clock = setInterval(() => setNow(controller.now()), 30_000);
   onCleanup(() => clearInterval(clock));
   let editing = false;
 
@@ -88,6 +88,16 @@ export function App(props: AppProps) {
               width={width()}
               animate={props.animate}
               ascii={props.ascii}
+            />
+          )}
+        </Match>
+        <Match when={state.route.kind === 'new' ? state.route : undefined}>
+          {(route: Accessor<{ kind: 'new'; directory: string }>) => (
+            <NewSessionView
+              controller={controller}
+              directory={route().directory}
+              theme={props.theme}
+              width={width()}
             />
           )}
         </Match>

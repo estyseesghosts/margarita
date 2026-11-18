@@ -55,3 +55,41 @@ export function groupSessions(
     return delta !== 0 ? delta : left.key.localeCompare(right.key);
   });
 }
+
+/** Sessions shown per project before the rest collapse behind a toggle row. */
+export const collapsedSessionLimit = 6;
+
+/** One selectable overview line: a session, or the inline Show more/less toggle. */
+export type OverviewRow =
+  | Readonly<{ kind: 'session'; key: string; groupKey: string; session: SessionSummary }>
+  | Readonly<{ kind: 'toggle'; key: string; groupKey: string; expanded: boolean; hidden: number }>;
+
+export function sessionRowKey(sessionID: string): string {
+  return `session:${sessionID}`;
+}
+
+export function toggleRowKey(groupKey: string): string {
+  return `toggle:${groupKey}`;
+}
+
+/** Visible rows of one group: up to the limit when collapsed, plus a toggle when needed. */
+export function groupRows(group: ProjectGroup, expanded: boolean): OverviewRow[] {
+  const shown = expanded ? group.sessions : group.sessions.slice(0, collapsedSessionLimit);
+  const rows: OverviewRow[] = shown.map((session) => ({
+    kind: 'session',
+    key: sessionRowKey(session.id),
+    groupKey: group.key,
+    session,
+  }));
+  const hidden = group.sessions.length - collapsedSessionLimit;
+  if (hidden > 0) {
+    rows.push({
+      kind: 'toggle',
+      key: toggleRowKey(group.key),
+      groupKey: group.key,
+      expanded,
+      hidden,
+    });
+  }
+  return rows;
+}

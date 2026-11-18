@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { type AgentDescriptor, defaultAgent, nextAgent, selectableAgents } from './agent-cycle.ts';
-import { groupSessions } from './overview-groups.ts';
+import { groupRows, groupSessions } from './overview-groups.ts';
 import { directoryKey, directoryName, isWithin } from './path-identity.ts';
 import type { SessionSummary } from './session.ts';
 import { formatAge, formatCost, formatTokenCount, formatTokens } from './usage-format.ts';
@@ -120,5 +120,49 @@ describe('usage formatting', () => {
     expect(formatAge(0, 30_000)).toBe('now');
     expect(formatAge(0, 9 * 60_000)).toBe('9m');
     expect(formatAge(0, 3 * 3_600_000)).toBe('3h');
+  });
+});
+
+describe('groupRows', () => {
+  const sessions = Array.from({ length: 8 }, (_, index) => ({
+    id: `ses_${index}`,
+    projectID: 'p',
+    directory: '/work/a',
+    createdAt: 0,
+    updatedAt: index,
+    archived: false,
+  }));
+  const [group] = groupSessions(sessions, {
+    platform: 'linux',
+    showArchived: false,
+    showChildren: false,
+    activityOf: (entry) => entry.updatedAt,
+  });
+
+  test('collapses past six sessions behind a toggle, newest first', () => {
+    if (group === undefined) throw new Error('missing group');
+    const rows = groupRows(group, false);
+    expect(rows.map((row) => row.key)).toEqual([
+      'session:ses_7',
+      'session:ses_6',
+      'session:ses_5',
+      'session:ses_4',
+      'session:ses_3',
+      'session:ses_2',
+      `toggle:${group.key}`,
+    ]);
+    expect(rows.at(-1)).toMatchObject({ kind: 'toggle', expanded: false, hidden: 2 });
+  });
+
+  test('expanded shows every session and a Show less toggle', () => {
+    if (group === undefined) throw new Error('missing group');
+    const rows = groupRows(group, true);
+    expect(rows).toHaveLength(9);
+    expect(rows.at(-1)).toMatchObject({ kind: 'toggle', expanded: true });
+  });
+
+  test('no toggle at or below the limit', () => {
+    if (group === undefined) throw new Error('missing group');
+    expect(groupRows({ ...group, sessions: group.sessions.slice(0, 6) }, false)).toHaveLength(6);
   });
 });

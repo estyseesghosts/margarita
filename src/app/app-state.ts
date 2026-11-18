@@ -10,8 +10,15 @@ import { createHistory } from '../domain/prompt-history.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
 
-/** Only two routes exist (ADR-0002). Dialogs are overlays, never routes. */
-export type Route = { kind: 'overview' } | { kind: 'conversation'; sessionID: string };
+/**
+ * Overview and conversation (ADR-0002), plus `new`: an unsent conversation in a
+ * directory. The server session is created only when its first prompt is sent.
+ * Dialogs are overlays, never routes.
+ */
+export type Route =
+  | { kind: 'overview' }
+  | { kind: 'new'; directory: string }
+  | { kind: 'conversation'; sessionID: string };
 
 export type Overlay =
   | { kind: 'none' }
@@ -66,11 +73,16 @@ export type AppState = {
   admitting: boolean;
   overview: {
     focus: 'list' | 'composer';
-    selectedSessionID?: string;
+    /** Row key from `overviewRows()`: a session or a Show more/less toggle. */
+    selectedRow?: string;
+    /** Project groups showing every session instead of the collapsed few. */
+    expanded: Record<string, true>;
     directory: string;
     agent?: string;
     model?: ModelSelection;
   };
+  /** When this frontend last opened each session; counts as use for recency sorting. */
+  openedAt: Record<string, number>;
   history: PromptHistory;
   recentModels: ModelSelection[];
   /** Pending confirmation for Ctrl+C / Ctrl+D exit. */
@@ -96,10 +108,11 @@ export function initialState(directory: string): AppState {
     serverCommands: [],
     detailed: false,
     expandedGroups: {},
-    composer: emptyComposer,
+    composer: { ...emptyComposer },
     drafts: {},
     admitting: false,
-    overview: { focus: 'composer', directory },
+    overview: { focus: 'composer', directory, expanded: {} },
+    openedAt: {},
     history: createHistory([]),
     recentModels: [],
     exitArmed: false,

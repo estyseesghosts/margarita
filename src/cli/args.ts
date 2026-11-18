@@ -164,7 +164,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   } else if (prompt !== undefined) {
     target = { kind: 'new', prompt };
   } else {
-    target = { kind: 'overview' };
+    target = { kind: 'new' };
   }
 
   if (print && (target.kind === 'overview' || target.prompt === undefined)) {
@@ -177,12 +177,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   };
 }
 
-export const helpText = `margarita — a conversation-first terminal frontend for OpenCode
+export const helpText = `marg (margarita) — a conversation-first terminal frontend for OpenCode
 
 Usage:
-  margarita [options] [prompt...]
+  marg [options] [prompt...]
 
-With no prompt, opens the session overview. A prompt starts a new interactive session.
+With no prompt, opens a new session in the current directory (Left on an empty
+prompt shows the overview). A prompt is sent as the first turn of that session.
 
 Options:
   --provider <id>        Provider for --model

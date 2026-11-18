@@ -10,7 +10,7 @@ function run(argv: string[]) {
 
 describe('parseArgs', () => {
   test('no arguments opens the overview', () => {
-    expect(run([]).target).toEqual({ kind: 'overview' });
+    expect(run([]).target).toEqual({ kind: 'new' });
   });
   test('a positional prompt starts an interactive session', () => {
     const options = run([

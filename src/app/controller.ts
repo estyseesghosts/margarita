@@ -21,7 +21,12 @@ import { projectExecution } from '../domain/execution.ts';
 import { activeMention, findFileMentions, rankPaths } from '../domain/file-reference.ts';
 import { formatModelRef, type ModelSelection, sameModel } from '../domain/model-ref.ts';
 import { resolveModel } from '../domain/model-resolution.ts';
-import { groupSessions, type ProjectGroup } from '../domain/overview-groups.ts';
+import {
+  groupRows,
+  groupSessions,
+  type OverviewRow,
+  type ProjectGroup,
+} from '../domain/overview-groups.ts';
 import { directoryKey } from '../domain/path-identity.ts';
 import {
   createHistory,
@@ -110,13 +115,25 @@ export class AppController {
       platform: this.deps.platform,
       showArchived: this.deps.config.sessions.showArchived,
       showChildren: this.deps.config.sessions.showChildren,
-      activityOf: (session) => session.updatedAt,
+      activityOf: (session) => this.lastUsed(session),
     });
   }
 
-  /** Flattened overview rows in display order, for keyboard navigation. */
-  overviewSessionIDs(): string[] {
-    return this.groups().flatMap((group) => group.sessions.map((session) => session.id));
+  /** Most recent use: server activity or this frontend opening the session. */
+  lastUsed(session: SessionSummary): number {
+    return Math.max(session.updatedAt, this.state.openedAt[session.id] ?? 0);
+  }
+
+  /** Flattened selectable overview rows in display order, for keyboard navigation. */
+  overviewRows(): OverviewRow[] {
+    return this.groups().flatMap((group) =>
+      groupRows(group, this.state.overview.expanded[group.key] === true),
+    );
+  }
+
+  /** Injected clock, so ages and recency are testable. */
+  now(): number {
+    return this.deps.now();
   }
 
   get version(): string {
@@ -433,7 +450,8 @@ export class AppController {
       this.setState('overlay', { kind: 'none' });
       this.setState('completion', undefined);
       this.setState('permissionChoice', 0);
-      this.setState('composer', this.state.drafts[sessionID] ?? emptyComposer);
+      this.setState('openedAt', sessionID, this.deps.now());
+      this.writeComposer(this.state.drafts[sessionID] ?? emptyComposer);
       if (transcript === undefined) {
         this.setState('transcripts', sessionID, { messages: [], loading: true, stale: false });
       }
@@ -443,72 +461,124 @@ export class AppController {
     void this.track('attach', this.loadConversation(sessionID));
   }
 
-  /** View change only: the session keeps running on the server. */
+  /**
+   * An unsent conversation in `directory`. Nothing is created on the server until the
+   * first prompt is submitted, so opening margarita never leaves empty sessions behind.
+   */
+  startNewSession(directory: string): void {
+    this.saveDraft();
+    batch(() => {
+      this.setState('route', { kind: 'new', directory });
+      this.setState('overlay', { kind: 'none' });
+      this.setState('completion', undefined);
+      this.setState('overview', 'directory', directory);
+      this.writeComposer(this.state.drafts[`new:${directory}`] ?? emptyComposer);
+    });
+    this.loadHistoryFor(directory);
+  }
+
+  /**
+   * View change only: the session keeps running on the server. The cursor starts on
+   * the first row; typing still goes straight to the new-session prompt.
+   */
   openOverview(): void {
     this.saveDraft();
-    const previous =
-      this.state.route.kind === 'conversation' ? this.state.route.sessionID : undefined;
+    const directory = this.currentDirectory();
     batch(() => {
       this.setState('route', { kind: 'overview' });
       this.setState('overlay', { kind: 'none' });
       this.setState('completion', undefined);
-      this.setState('composer', this.state.drafts['overview'] ?? emptyComposer);
-      this.setState('overview', 'focus', 'composer');
-      if (previous !== undefined) {
-        this.setState('overview', 'selectedSessionID', previous);
-        const directory = this.state.sessions[previous]?.directory;
-        if (directory !== undefined) this.setState('overview', 'directory', directory);
+      this.writeComposer(this.state.drafts['overview'] ?? emptyComposer);
+      this.setState('overview', 'directory', directory);
+      const first = this.overviewRows()[0];
+      if (first === undefined) {
+        this.setState('overview', 'focus', 'composer');
+        this.setState('overview', 'selectedRow', undefined);
+      } else {
+        this.selectRow(first);
       }
     });
     this.loadHistoryFor(this.state.overview.directory);
   }
 
+  /**
+   * Replaces the composer with a fresh object. A path setter would shallow-merge into
+   * the stored object, which may be shared (a draft, or the `emptyComposer` constant).
+   */
+  private writeComposer(composer: Composer): void {
+    this.setState({ composer: { ...composer } });
+  }
+
   private saveDraft(): void {
     const key = routeKey(this.state.route);
-    this.setState('drafts', key, this.state.composer);
+    this.setState('drafts', key, { ...this.state.composer });
+  }
+
+  private selectRow(row: OverviewRow): void {
+    this.setState('overview', 'focus', 'list');
+    this.setState('overview', 'selectedRow', row.key);
+    const directory =
+      row.kind === 'session'
+        ? row.session.directory
+        : this.groups().find((group) => group.key === row.groupKey)?.directory;
+    if (directory !== undefined) this.setState('overview', 'directory', directory);
+  }
+
+  selectedOverviewRow(): OverviewRow | undefined {
+    const key = this.state.overview.selectedRow;
+    return key === undefined ? undefined : this.overviewRows().find((row) => row.key === key);
   }
 
   moveOverviewSelection(direction: -1 | 1): void {
-    const ids = this.overviewSessionIDs();
-    if (ids.length === 0) return;
-    const current = this.state.overview.selectedSessionID;
-    const index = current === undefined ? -1 : ids.indexOf(current);
+    const rows = this.overviewRows();
+    if (rows.length === 0) return;
+    const current = this.state.overview.selectedRow;
+    const index = current === undefined ? -1 : rows.findIndex((row) => row.key === current);
     let next: number;
     if (this.state.overview.focus === 'composer') {
       if (direction === 1) return;
-      next = ids.length - 1;
+      next = rows.length - 1;
     } else {
       next = index + direction;
-      if (next >= ids.length) {
+      if (next >= rows.length) {
         this.setState('overview', 'focus', 'composer');
         return;
       }
       if (next < 0) next = 0;
     }
-    const id = ids[next];
-    if (id === undefined) return;
-    batch(() => {
-      this.setState('overview', 'focus', 'list');
-      this.setState('overview', 'selectedSessionID', id);
-      const directory = this.state.sessions[id]?.directory;
-      if (directory !== undefined) this.setState('overview', 'directory', directory);
-    });
+    const row = rows[next];
+    if (row !== undefined) batch(() => this.selectRow(row));
   }
 
   focusOverviewComposer(): void {
     this.setState('overview', 'focus', 'composer');
   }
 
+  /** Enter on a row: attach a session, or expand/collapse a project inline. */
   attachSelected(): void {
-    const id = this.state.overview.selectedSessionID;
-    if (id !== undefined && this.state.sessions[id] !== undefined) this.openSession(id);
+    const row = this.selectedOverviewRow();
+    if (row === undefined) return;
+    if (row.kind === 'toggle') {
+      this.toggleOverviewGroup(row.groupKey);
+      return;
+    }
+    this.openSession(row.session.id);
+  }
+
+  toggleOverviewGroup(groupKey: string): void {
+    this.setState(
+      produce((state) => {
+        if (state.overview.expanded[groupKey] === true) delete state.overview.expanded[groupKey];
+        else state.overview.expanded[groupKey] = true;
+      }),
+    );
   }
 
   // ---------------------------------------------------------------- composer
 
   setComposer(composer: Composer): void {
     batch(() => {
-      this.setState('composer', composer);
+      this.writeComposer(composer);
       this.setState('exitArmed', false);
       if (this.state.history.index !== undefined) {
         this.setState('history', { entries: this.state.history.entries, savedDraft: '' });
@@ -574,7 +644,7 @@ export class AppController {
     const { text, cursor } = this.state.composer;
     const next = text.slice(0, completion.start) + item.insert + text.slice(cursor);
     batch(() => {
-      this.setState('composer', { text: next, cursor: completion.start + item.insert.length });
+      this.writeComposer({ text: next, cursor: completion.start + item.insert.length });
       this.setState('completion', undefined);
     });
     return true;
@@ -589,7 +659,7 @@ export class AppController {
     if (step === undefined) return false;
     batch(() => {
       this.setState('history', step.history);
-      this.setState('composer', composerFrom(step.text));
+      this.writeComposer(composerFrom(step.text));
     });
     return true;
   }
@@ -599,7 +669,7 @@ export class AppController {
     if (step === undefined) return false;
     batch(() => {
       this.setState('history', step.history);
-      this.setState('composer', composerFrom(step.text));
+      this.writeComposer(composerFrom(step.text));
     });
     return true;
   }
@@ -609,13 +679,13 @@ export class AppController {
     if (text !== '') {
       batch(() => {
         this.setState('stash', text);
-        this.setState('composer', emptyComposer);
+        this.writeComposer(emptyComposer);
       });
       this.showNotice('Draft stashed · Ctrl+S to restore', 'dim');
     } else if (this.state.stash !== undefined) {
       const stash = this.state.stash;
       batch(() => {
-        this.setState('composer', composerFrom(stash));
+        this.writeComposer(composerFrom(stash));
         this.setState('stash', undefined);
       });
     }
@@ -652,7 +722,7 @@ export class AppController {
   acceptHistorySearch(): void {
     const match = this.historySearchMatch();
     batch(() => {
-      if (match !== undefined) this.setState('composer', composerFrom(match));
+      if (match !== undefined) this.writeComposer(composerFrom(match));
       this.setState('overlay', { kind: 'none' });
     });
   }
@@ -689,12 +759,12 @@ export class AppController {
       this.showNotice(`Unknown command /${parsed.name}. Type / to see commands.`, 'warn');
       return;
     }
-    if (this.state.route.kind === 'overview') {
+    if (this.state.route.kind !== 'conversation') {
       if (parsed.kind !== 'prompt') {
         this.showNotice('Start a session before running commands.', 'warn');
         return;
       }
-      await this.createSessionWithPrompt(this.state.overview.directory, text);
+      await this.createSessionWithPrompt(this.currentDirectory(), text);
       return;
     }
     const sessionID = this.state.route.sessionID;
@@ -765,7 +835,7 @@ export class AppController {
   private clearComposer(submitted: string): void {
     if (this.state.composer.text === submitted) {
       batch(() => {
-        this.setState('composer', emptyComposer);
+        this.writeComposer(emptyComposer);
         this.setState('completion', undefined);
       });
     }
@@ -812,7 +882,7 @@ export class AppController {
     if (text !== undefined) {
       this.clearComposer(text);
       this.openSession(session.id);
-      this.setState('composer', composerFrom(text));
+      this.writeComposer(composerFrom(text));
       const sent = await this.admit(text, directory, async () => {
         await this.deps.backend.prompt(session.id, {
           text,
@@ -830,7 +900,7 @@ export class AppController {
   /** Sends a prompt to an existing session (CLI `--continue/--resume "prompt"`). */
   async sendToSession(sessionID: string, text: string): Promise<boolean> {
     const directory = this.state.sessions[sessionID]?.directory ?? this.deps.cwd;
-    this.setState('composer', composerFrom(text));
+    this.writeComposer(composerFrom(text));
     const running = this.state.running[sessionID] === true;
     return this.admit(text, directory, async () => {
       await this.deps.backend.prompt(sessionID, {
@@ -851,12 +921,7 @@ export class AppController {
         this.openOverview();
         return;
       case 'new':
-        if (this.state.route.kind === 'conversation') {
-          const directory = this.currentDirectory();
-          this.openOverview();
-          this.setState('overview', 'directory', directory);
-        }
-        this.focusOverviewComposer();
+        this.startNewSession(this.currentDirectory());
         return;
       case 'agent':
         if (args === '') await this.cycleAgent(1);
@@ -893,7 +958,7 @@ export class AppController {
           this.showNotice('Usage: /steer <text>', 'warn');
           return;
         }
-        this.setState('composer', composerFrom(args));
+        this.writeComposer(composerFrom(args));
         await this.steer();
         return;
       case 'quit':
@@ -1101,7 +1166,7 @@ export class AppController {
       await this.deps.backend.cancelQueued(session.id, inboxID);
       // The server cannot edit queued text; restore it to the composer instead.
       if (item !== undefined && this.state.composer.text === '') {
-        this.setState('composer', composerFrom(item.text));
+        this.writeComposer(composerFrom(item.text));
       }
     } catch (error) {
       if (
@@ -1211,6 +1276,7 @@ export class AppController {
   }
 
   currentDirectory(): string {
+    if (this.state.route.kind === 'new') return this.state.route.directory;
     return this.currentSession()?.directory ?? this.state.overview.directory;
   }
 
@@ -1237,7 +1303,14 @@ export class AppController {
 }
 
 function routeKey(route: Route): string {
-  return route.kind === 'overview' ? 'overview' : route.sessionID;
+  switch (route.kind) {
+    case 'overview':
+      return 'overview';
+    case 'new':
+      return `new:${route.directory}`;
+    default:
+      return route.sessionID;
+  }
 }
 
 /**

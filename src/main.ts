@@ -29,10 +29,10 @@ async function main(argv: readonly string[]): Promise<number> {
       process.stdout.write(helpText);
       return exitCodes.ok;
     case 'version':
-      process.stdout.write(`margarita ${version}\n`);
+      process.stdout.write(`marg ${version}\n`);
       return exitCodes.ok;
     case 'error':
-      process.stderr.write(`margarita: ${parsed.message}\nRun margarita --help for usage.\n`);
+      process.stderr.write(`marg: ${parsed.message}\nRun marg --help for usage.\n`);
       return exitCodes.usage;
     case 'run':
       return run(parsed.options);
@@ -63,7 +63,7 @@ async function run(options: CliOptions): Promise<number> {
     });
     backend = createBackend(connection);
   } catch (error) {
-    process.stderr.write(`margarita: ${errorText(error)}\n`);
+    process.stderr.write(`marg: ${errorText(error)}\n`);
     if (error instanceof ConnectionError) {
       process.stderr.write(
         'Start OpenCode yourself, pass --server <url>, or use --start-server to launch it.\n',
@@ -92,9 +92,7 @@ async function run(options: CliOptions): Promise<number> {
   try {
     await controller.bootstrap();
   } catch (error) {
-    process.stderr.write(
-      `margarita: could not load from ${backend.baseUrl}: ${errorText(error)}\n`,
-    );
+    process.stderr.write(`marg: could not load from ${backend.baseUrl}: ${errorText(error)}\n`);
     return error instanceof BackendError && error.kind === 'unauthorized'
       ? exitCodes.unauthorized
       : exitCodes.unavailable;
@@ -102,7 +100,7 @@ async function run(options: CliOptions): Promise<number> {
 
   const agent = controller.resolveCliAgent(options.agent);
   if (!agent.ok) {
-    process.stderr.write(`margarita: ${agent.message}\n`);
+    process.stderr.write(`marg: ${agent.message}\n`);
     return exitCodes.modelUnavailable;
   }
   const model = controller.resolveCliModel({
@@ -111,7 +109,7 @@ async function run(options: CliOptions): Promise<number> {
     ...(options.effort === undefined ? {} : { effort: options.effort }),
   });
   if (!model.ok) {
-    process.stderr.write(`margarita: ${model.message}\n`);
+    process.stderr.write(`marg: ${model.message}\n`);
     return exitCodes.modelUnavailable;
   }
   controller.setNewSessionDefaults(agent.agent, model.model);
@@ -123,7 +121,7 @@ async function run(options: CliOptions): Promise<number> {
       try {
         await backend.getSession(target.sessionID);
       } catch {
-        process.stderr.write(`margarita: session ${target.sessionID} not found.\n`);
+        process.stderr.write(`marg: session ${target.sessionID} not found.\n`);
         return exitCodes.notFound;
       }
     }
@@ -131,7 +129,7 @@ async function run(options: CliOptions): Promise<number> {
   } else if (target.kind === 'continue') {
     existingSessionID = latestSessionIn(controller, cwd);
     if (existingSessionID === undefined && options.print) {
-      process.stderr.write('margarita: no session to continue in this project.\n');
+      process.stderr.write('marg: no session to continue in this project.\n');
       return exitCodes.notFound;
     }
   }
@@ -139,7 +137,7 @@ async function run(options: CliOptions): Promise<number> {
   if (options.print) {
     const prompt = 'prompt' in target ? target.prompt : undefined;
     if (prompt === undefined || prompt.trim() === '') {
-      process.stderr.write('margarita: --print needs a prompt.\n');
+      process.stderr.write('marg: --print needs a prompt.\n');
       return exitCodes.usage;
     }
     const abort = new AbortController();
@@ -157,7 +155,7 @@ async function run(options: CliOptions): Promise<number> {
         signal: abort.signal,
       });
     } catch (error) {
-      process.stderr.write(`margarita: ${errorText(error)}\n`);
+      process.stderr.write(`marg: ${errorText(error)}\n`);
       return exitCodes.failed;
     }
   }
@@ -201,7 +199,10 @@ async function run(options: CliOptions): Promise<number> {
     controller.openSession(existingSessionID);
     if (prompt !== undefined) await controller.sendToSession(existingSessionID, prompt);
   } else if (target.kind === 'new' || target.kind === 'continue') {
-    if (prompt !== undefined) await controller.createSessionWithPrompt(cwd, prompt);
+    if (prompt === undefined) controller.startNewSession(cwd);
+    else await controller.createSessionWithPrompt(cwd, prompt);
+  } else {
+    controller.openOverview();
   }
 
   await finished.promise;

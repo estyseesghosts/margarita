@@ -3,7 +3,7 @@ import { createMemo, For, Match, Show, Switch } from 'solid-js';
 
 import type { PermissionPrompt } from '../adapter/backend.ts';
 import type { AppController } from '../app/controller.ts';
-import { formatModelRef } from '../domain/model-ref.ts';
+import { formatModelRef, type ModelSelection } from '../domain/model-ref.ts';
 import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
 import type { ThrobberFacts } from '../domain/throbber.ts';
 import { latestTurn } from '../domain/throbber.ts';
@@ -44,7 +44,14 @@ export function Transcript(props: TranscriptProps) {
 
   return (
     <scrollbox flexGrow={1} stickyScroll stickyStart="bottom" paddingLeft={1} paddingRight={1}>
-      <WelcomePanel {...props} />
+      <WelcomePanel
+        controller={props.controller}
+        theme={props.theme}
+        width={props.width}
+        agent={state.sessions[props.sessionID]?.agent}
+        model={state.sessions[props.sessionID]?.model}
+        directory={state.sessions[props.sessionID]?.directory}
+      />
       <Show when={transcript()?.olderCursor !== undefined}>
         <text fg={props.theme.dim}> … earlier messages not loaded</text>
       </Show>
@@ -70,13 +77,19 @@ export function Transcript(props: TranscriptProps) {
 
 const cat = [' /\\_/\\ ', '( o.o )', ' > ^ < '];
 
+export type WelcomeProps = Readonly<{
+  controller: AppController;
+  theme: Theme;
+  width: number;
+  agent: string | undefined;
+  model: ModelSelection | undefined;
+  directory: string | undefined;
+}>;
+
 /** Inline welcome panel; it scrolls away with the conversation (docs/13). */
-function WelcomePanel(props: TranscriptProps) {
-  const session = () => props.controller.state.sessions[props.sessionID];
-  const model = () => {
-    const current = session()?.model;
-    return current === undefined ? 'server default model' : formatModelRef(current);
-  };
+export function WelcomePanel(props: WelcomeProps) {
+  const model = () =>
+    props.model === undefined ? 'server default model' : formatModelRef(props.model);
   const wide = () => props.width >= 70;
   return (
     <box
@@ -97,8 +110,8 @@ function WelcomePanel(props: TranscriptProps) {
         <text fg={props.theme.text}>
           <b>Welcome back!</b>
         </text>
-        <text fg={props.theme.dim}>{`${session()?.agent ?? 'build'} · ${model()}`}</text>
-        <text fg={props.theme.dim}>{session()?.directory ?? props.controller.cwd}</text>
+        <text fg={props.theme.dim}>{`${props.agent ?? 'build'} · ${model()}`}</text>
+        <text fg={props.theme.dim}>{props.directory ?? props.controller.cwd}</text>
       </box>
       <Show when={wide()}>
         <box flexDirection="column" marginLeft={2}>
@@ -297,4 +310,26 @@ function PermissionCard(props: { controller: AppController; theme: Theme }) {
 
 function label(choice: string): string {
   return choice === 'once' ? 'Allow once' : choice === 'always' ? 'Always allow' : 'Reject';
+}
+
+/** A conversation not yet created on the server: welcome panel plus the prompt below. */
+export function NewSessionView(props: {
+  controller: AppController;
+  directory: string;
+  theme: Theme;
+  width: number;
+}) {
+  const overview = () => props.controller.state.overview;
+  return (
+    <scrollbox flexGrow={1} stickyScroll stickyStart="bottom" paddingLeft={1} paddingRight={1}>
+      <WelcomePanel
+        controller={props.controller}
+        theme={props.theme}
+        width={props.width}
+        agent={overview().agent}
+        model={overview().model}
+        directory={props.directory}
+      />
+    </scrollbox>
+  );
 }

@@ -256,10 +256,7 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
     case 'delete':
       return edit(deleteForward(composer));
     case 'left':
-      if (
-        state.route.kind === 'conversation' &&
-        leftOpensOverview(composer, blockers(controller))
-      ) {
+      if (state.route.kind !== 'overview' && leftOpensOverview(composer, blockers(controller))) {
         controller.openOverview();
         return true;
       }
