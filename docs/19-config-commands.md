@@ -35,6 +35,7 @@ Proposed frontend-specific settings: `~/.config/unnamed/config.jsonc` under XDG 
     "chords": false
   },
   "models": { "recentLimit": 8 },
+  "transcript": { "toolOutputChars": 64000 },
   "goals": { "syncInstructionEntries": "opt-in" },
   "keys": {
     "agent.cycle": "shift+tab",

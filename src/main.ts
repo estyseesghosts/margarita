@@ -115,7 +115,9 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
         : { remotePassword: env['MARGARITA_SERVER_PASSWORD'] }),
       onStarting: () => process.stderr.write('Starting OpenCode service…\n'),
     });
-    backend = createBackend(connection);
+    backend = createBackend(connection, {
+      toolOutputChars: configLoad.config.transcript.toolOutputChars,
+    });
     debugLog.write('connected', { baseUrl: backend.baseUrl });
   } catch (error) {
     debugLog.write('connect-failed', {

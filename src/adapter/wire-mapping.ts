@@ -132,9 +132,13 @@ export function toQueuedInput(item: SessionInboxInfo): QueuedInput {
   };
 }
 
-const maxToolOutputChars = 64_000;
+/** Default cap for tool output retained in the transcript (head+tail are both kept). */
+export const maxToolOutputChars = 64_000;
 
-function toolText(content: unknown): string | undefined {
+function toolText(
+  content: unknown,
+  maxChars: number,
+): { text: string; truncated: boolean } | undefined {
   if (!Array.isArray(content)) return undefined;
   const text = content
     .map((entry: unknown) => {
@@ -146,16 +150,25 @@ function toolText(content: unknown): string | undefined {
       return '';
     })
     .join('\n');
-  // Bounded: transcripts must not hold unbounded tool output in memory.
-  const capped =
-    text.length > maxToolOutputChars
-      ? `${text.slice(0, maxToolOutputChars)}\n… output truncated (${text.length} chars)`
-      : text;
-  return sanitizeTerminalText(capped);
+  // Bounded, but keep both ends: failures usually live in the tail.
+  if (text.length > maxChars) {
+    const head = Math.floor(maxChars / 2);
+    const tail = maxChars - head;
+    const omitted = text.length - maxChars;
+    const capped = `${text.slice(0, head)}\n… ${omitted} characters omitted from the middle of this output (${text.length} chars total) …\n${text.slice(text.length - tail)}`;
+    return { text: sanitizeTerminalText(capped), truncated: true };
+  }
+  return { text: sanitizeTerminalText(text), truncated: false };
 }
+
+export type WireMappingOptions = Readonly<{
+  /** Override the output cap (defaults to `maxToolOutputChars`). */
+  maxToolOutputChars?: number;
+}>;
 
 function toToolCall(
   part: Extract<SessionMessageAssistant['content'][number], { type: 'tool' }>,
+  mapping: WireMappingOptions = {},
 ): ToolCall {
   const state: unknown = part.state;
   const status = isRecord(state) ? state['status'] : undefined;
@@ -164,13 +177,22 @@ function toToolCall(
       ? status
       : 'running';
   const input = isRecord(state) && isRecord(state['input']) ? state['input'] : {};
-  const output = isRecord(state) ? toolText(state['content']) : undefined;
+  const output = isRecord(state)
+    ? toolText(state['content'], mapping.maxToolOutputChars ?? maxToolOutputChars)
+    : undefined;
   const error =
     isRecord(state) && isRecord(state['error']) && typeof state['error']['message'] === 'string'
       ? sanitizeTerminalText(state['error']['message'])
       : undefined;
   const metadata = isRecord(state) && isRecord(state['metadata']) ? state['metadata'] : {};
   const diff = typeof metadata['diff'] === 'string' ? metadata['diff'] : undefined;
+  // Servers may flag their own truncation in metadata; that takes precedence in the label.
+  const serverTruncated = metadata['truncated'] === true;
+  const outputTruncated = serverTruncated
+    ? 'server'
+    : output?.truncated === true
+      ? 'frontend'
+      : undefined;
   return {
     id: part.id,
     name: sanitizeTerminalText(part.name),
@@ -178,13 +200,17 @@ function toToolCall(
     input,
     startedAt: part.time.created,
     ...(part.time.completed === undefined ? {} : { completedAt: part.time.completed }),
-    ...(output === undefined || output === '' ? {} : { output }),
+    ...(output === undefined || output.text === '' ? {} : { output: output.text }),
+    ...(outputTruncated === undefined ? {} : { outputTruncated }),
     ...(error === undefined ? {} : { error }),
     ...(diff === undefined || diff === '' ? {} : { diff }),
   };
 }
 
-function toAssistantParts(message: SessionMessageAssistant): AssistantPart[] {
+function toAssistantParts(
+  message: SessionMessageAssistant,
+  mapping: WireMappingOptions = {},
+): AssistantPart[] {
   const parts: AssistantPart[] = [];
   for (const part of message.content) {
     switch (part.type) {
@@ -199,7 +225,7 @@ function toAssistantParts(message: SessionMessageAssistant): AssistantPart[] {
         });
         break;
       case 'tool':
-        parts.push({ kind: 'tool', tool: toToolCall(part) });
+        parts.push({ kind: 'tool', tool: toToolCall(part, mapping) });
         break;
       default:
         // Unknown part types from newer servers are skipped, not guessed at.
@@ -210,7 +236,10 @@ function toAssistantParts(message: SessionMessageAssistant): AssistantPart[] {
 }
 
 /** Returns `undefined` for message kinds this frontend does not render. */
-export function toTranscriptMessage(message: SessionMessageInfo): TranscriptMessage | undefined {
+export function toTranscriptMessage(
+  message: SessionMessageInfo,
+  mapping: WireMappingOptions = {},
+): TranscriptMessage | undefined {
   switch (message.type) {
     case 'user':
       return {
@@ -228,7 +257,7 @@ export function toTranscriptMessage(message: SessionMessageInfo): TranscriptMess
         createdAt: message.time.created,
         agent: message.agent,
         model,
-        parts: toAssistantParts(message),
+        parts: toAssistantParts(message, mapping),
         ...(message.time.completed === undefined ? {} : { completedAt: message.time.completed }),
         ...(message.tokens === undefined ? {} : { reasoningTokens: message.tokens.reasoning }),
         ...(message.error === undefined
@@ -248,6 +277,7 @@ export function toTranscriptMessage(message: SessionMessageInfo): TranscriptMess
         ...(message.output === undefined
           ? {}
           : { output: sanitizeTerminalText(message.output.output) }),
+        ...(message.output?.truncated === true ? { outputTruncated: 'server' as const } : {}),
       };
     }
     case 'agent-switched':

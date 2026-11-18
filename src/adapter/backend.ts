@@ -10,6 +10,7 @@ import type { SessionSummary } from '../domain/session.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
 import type { Connection } from './connection.ts';
 import {
+  maxToolOutputChars,
   type PermissionPrompt,
   type QueuedInput,
   toAgentDescriptor,
@@ -120,18 +121,24 @@ export interface Backend {
 
 export type ServerCommand = Readonly<{ name: string; description?: string }>;
 
-export function createBackend(connection: Connection): Backend {
+export type BackendOptions = Readonly<{
+  /** Output cap (characters, head+tail) applied when mapping tool output. */
+  toolOutputChars?: number;
+}>;
+
+export function createBackend(connection: Connection, options: BackendOptions = {}): Backend {
   const client: OpenCodeClient = OpenCode.make({
     baseUrl: connection.baseUrl,
     headers: { ...connection.headers },
   });
-  return new OpenCodeBackend(client, connection.baseUrl);
+  return new OpenCodeBackend(client, connection.baseUrl, options);
 }
 
 class OpenCodeBackend implements Backend {
   constructor(
     private readonly client: OpenCodeClient,
     readonly baseUrl: string,
+    private readonly options: BackendOptions = {},
   ) {}
 
   async listSessions(query: {
@@ -190,7 +197,11 @@ class OpenCodeBackend implements Backend {
       }),
     );
     const messages = page.data
-      .map(toTranscriptMessage)
+      .map((message) =>
+        toTranscriptMessage(message, {
+          maxToolOutputChars: this.options.toolOutputChars ?? maxToolOutputChars,
+        }),
+      )
       .filter((message) => message !== undefined)
       .toReversed();
     const older = page.cursor.next;

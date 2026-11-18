@@ -389,7 +389,16 @@ function NodeView(props: {
               {`  └ ${node().status}${node().exitCode === undefined ? '' : ` (exit ${node().exitCode})`}`}
             </text>
             <Show when={node().output}>
-              {(output: Accessor<string>) => <text fg={theme().dim}>{preview(output())}</text>}
+              {(output: Accessor<string>) => (
+                <box flexDirection="column">
+                  <text fg={theme().dim}>{preview(output())}</text>
+                  <Show when={node().outputTruncated === 'server'}>
+                    <text fg={theme().warn}>
+                      {'  └ output truncated by the server; full text not shown'}
+                    </text>
+                  </Show>
+                </box>
+              )}
             </Show>
           </box>
         )}
@@ -435,7 +444,7 @@ function ToolView(props: {
   });
   const showFullDiff = () => props.expanded || (clamped()?.hidden ?? 0) === 0;
   const lineWidth = () => Math.max(8, props.width - 4);
-  // Ctrl+O shows exact output (sanitized, untruncated) and timing.
+  // Ctrl+O shows the retained output (unelided beyond the configured cap) and timing.
   const render = (text: string) => (props.detailed ? full(text) : preview(text));
   const failed = () => props.tool.status === 'error';
   const bullet = () =>
@@ -511,6 +520,13 @@ function ToolView(props: {
         }
       >
         <text fg={props.theme.dim}>{`  └ ${render(props.tool.output ?? '')}`}</text>
+      </Show>
+      <Show when={props.tool.outputTruncated !== undefined}>
+        <text fg={props.theme.warn}>
+          {props.tool.outputTruncated === 'server'
+            ? '  └ output truncated by the server; the full text is not available here'
+            : '  └ output elided by this program (middle omitted); the full text was not retained'}
+        </text>
       </Show>
     </box>
   );

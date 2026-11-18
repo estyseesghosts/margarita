@@ -8,6 +8,7 @@ export type AppConfig = Readonly<{
   input: Readonly<{ enterWhileRunning: 'queue' | 'steer' }>;
   models: Readonly<{ recentLimit: number }>;
   history: Readonly<{ limit: number }>;
+  transcript: Readonly<{ toolOutputChars: number }>;
   keys: Readonly<Record<string, string>>;
   ui: Readonly<{ theme: ThemeName; animation: boolean; ascii: boolean }>;
 }>;
@@ -21,6 +22,7 @@ export const defaultConfig: AppConfig = {
   input: { enterWhileRunning: 'queue' },
   models: { recentLimit: 8 },
   history: { limit: 200 },
+  transcript: { toolOutputChars: 64_000 },
   keys: {},
   ui: { theme: 'dark', animation: true, ascii: false },
 };
@@ -46,6 +48,20 @@ export async function loadConfig(path: string): Promise<ConfigLoad> {
   return parseConfig(raw);
 }
 
+function toolOutputCap(value: unknown, path: string, fallback: number, warnings: string[]): number {
+  if (value === undefined) return fallback;
+  if (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 1_000 &&
+    value <= 1_000_000
+  ) {
+    return value;
+  }
+  warnings.push(`${path} must be an integer between 1000 and 1000000`);
+  return fallback;
+}
+
 export function parseConfig(raw: unknown): ConfigLoad {
   const warnings: string[] = [];
   if (!isRecord(raw)) return { config: defaultConfig, warnings: ['config root must be an object'] };
@@ -57,6 +73,7 @@ export function parseConfig(raw: unknown): ConfigLoad {
     'input',
     'models',
     'history',
+    'transcript',
     'keys',
     'ui',
   ]);
@@ -75,6 +92,7 @@ export function parseConfig(raw: unknown): ConfigLoad {
   const input = section('input');
   const models = section('models');
   const history = section('history');
+  const transcript = section('transcript');
   const keysRaw = section('keys');
   const ui = section('ui');
 
@@ -146,6 +164,14 @@ export function parseConfig(raw: unknown): ConfigLoad {
         ),
       },
       history: { limit: count(history['limit'], 'history.limit', defaultConfig.history.limit) },
+      transcript: {
+        toolOutputChars: toolOutputCap(
+          transcript['toolOutputChars'],
+          'transcript.toolOutputChars',
+          defaultConfig.transcript.toolOutputChars,
+          warnings,
+        ),
+      },
       keys,
       ui: {
         theme,

@@ -9,7 +9,13 @@ export type ToolCall = Readonly<{
   name: string;
   status: ToolStatus;
   input: Readonly<Record<string, unknown>>;
+  /**
+   * Bounded preview of the tool output. When `outputTruncated` is set, only this preview
+   * exists in the frontend; the rest was elided before or by this program.
+   */
   output?: string;
+  /** 'frontend' when the wire mapping elided the middle, 'server' when the server said it truncated. */
+  outputTruncated?: 'frontend' | 'server';
   /** The server's unified diff for an edit, with real file line numbers. */
   diff?: string;
   error?: string;
@@ -43,6 +49,8 @@ export type TranscriptMessage =
       status: 'running' | 'exited' | 'timeout' | 'killed';
       exitCode?: number;
       output?: string;
+      /** The server truncated this output; the full text is available via its cursor RPC. */
+      outputTruncated?: 'server';
     }
   | { kind: 'agent-switched'; id: string; createdAt: number; agent: string }
   | { kind: 'model-switched'; id: string; createdAt: number; model: ModelSelection }
@@ -79,6 +87,7 @@ export type TranscriptNode =
       status: string;
       exitCode?: number;
       output?: string;
+      outputTruncated?: 'server';
     }
   | { kind: 'notice'; key: string; text: string; tone: 'dim' | 'error' | 'warn' }
   | { kind: 'meta'; key: string; text: string };
@@ -160,6 +169,9 @@ export function foldTranscript(
           status: message.status,
           ...(message.exitCode === undefined ? {} : { exitCode: message.exitCode }),
           ...(message.output === undefined ? {} : { output: message.output }),
+          ...(message.outputTruncated === undefined
+            ? {}
+            : { outputTruncated: message.outputTruncated }),
         });
         break;
       case 'agent-switched':
