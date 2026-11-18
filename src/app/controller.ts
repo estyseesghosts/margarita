@@ -122,6 +122,7 @@ export type ControllerDeps = Readonly<{
 const transcriptPageSize = 120;
 const transcriptCacheLimit = 8;
 const sessionPageLimit = 5;
+const reconcileConcurrency = 8;
 const exportPageSize = 500;
 /** Lines a diff patch scrolls per PageUp/PageDown; matches the rendered window. */
 export const diffPageLines = 18;
@@ -357,11 +358,16 @@ export class AppController {
       pages += 1;
     } while (cursor !== undefined && pages < sessionPageLimit);
     const active = await this.deps.backend.activeSessionIDs();
+    const fresh = Object.fromEntries(loaded.map((session) => [session.id, session]));
+    // Deletions while the stream was down are never replayed, and absence from the first
+    // pages only means "not loaded". Ask the server about each cached ID the pages missed.
+    const reconciled = await this.reconcileKnownSessions(
+      Object.keys(this.state.sessions).filter((id) => fresh[id] === undefined),
+    );
     batch(() => {
-      const fresh = Object.fromEntries(loaded.map((session) => [session.id, session]));
-      // Keep sessions revealed by loadMoreSessions beyond the first pages; deletions
-      // arrive as session-deleted events.
-      this.setState('sessions', (current) => ({ ...current, ...fresh }));
+      // Keep sessions revealed by loadMoreSessions beyond the first pages.
+      this.setState('sessions', (current) => ({ ...current, ...reconciled.found, ...fresh }));
+      for (const id of reconciled.deleted) this.forgetSession(id);
       this.setState('sessionsComplete', cursor === undefined);
       this.setState('sessionsCursor', cursor);
       this.setState('sessionsLoading', false);
@@ -370,6 +376,50 @@ export class AppController {
     });
     // Running sessions are the ones that can be blocked on input right now.
     await Promise.all([...active].map((id) => this.refreshInputRequests(id)));
+  }
+
+  /** Looks up cached sessions the listing did not return; only a definite not-found deletes. */
+  private async reconcileKnownSessions(
+    ids: readonly string[],
+  ): Promise<{ found: Record<string, SessionSummary>; deleted: string[] }> {
+    const found: Record<string, SessionSummary> = {};
+    const deleted: string[] = [];
+    for (let start = 0; start < ids.length; start += reconcileConcurrency) {
+      await Promise.all(
+        ids.slice(start, start + reconcileConcurrency).map(async (id) => {
+          try {
+            found[id] = await this.deps.backend.getSession(id);
+          } catch (error) {
+            if (error instanceof BackendError && error.kind === 'not-found') deleted.push(id);
+            // Any other failure proves nothing: keep the row.
+          }
+        }),
+      );
+    }
+    return { found, deleted };
+  }
+
+  /** Drops every cached trace of a session the server no longer has. */
+  private forgetSession(sessionID: string): void {
+    this.setState(
+      produce((state) => {
+        delete state.sessions[sessionID];
+        delete state.transcripts[sessionID];
+        delete state.inbox[sessionID];
+        delete state.permissions[sessionID];
+        delete state.forms[sessionID];
+        delete state.goals[sessionID];
+        delete state.nativeGoals[sessionID];
+        delete state.awaitingSteer[sessionID];
+        delete state.running[sessionID];
+      }),
+    );
+    this.goalVersions.delete(sessionID);
+    const route = this.state.route;
+    if (route.kind === 'conversation' && route.sessionID === sessionID) {
+      this.setState('route', { kind: 'overview' });
+      this.showNotice('This session was deleted on the server.', 'warn');
+    }
   }
 
   /**
@@ -511,16 +561,7 @@ export class AppController {
         this.scheduleSummary(event.sessionID);
         return;
       case 'session-deleted':
-        this.setState(
-          produce((state) => {
-            delete state.sessions[event.sessionID];
-            delete state.transcripts[event.sessionID];
-          }),
-        );
-        if (attached === event.sessionID) {
-          this.setState('route', { kind: 'overview' });
-          this.showNotice('This session was deleted on the server.', 'warn');
-        }
+        this.forgetSession(event.sessionID);
         return;
       case 'usage':
         if (this.state.sessions[event.sessionID] !== undefined) {

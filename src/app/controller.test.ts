@@ -616,6 +616,71 @@ describe('staged revert recovery (issue #8)', () => {
   });
 });
 
+/** Bootstrap lists everything; after `narrow()` the listing shows only the first row. */
+function reconnectFixture() {
+  const backend = new FakeBackend();
+  backend.sessions = ['ses_a', 'ses_b', 'ses_c'].map(fakeSession);
+  backend.messages = { ses_a: [], ses_b: [], ses_c: [] };
+  let narrowed = false;
+  backend.listSessionsHook = async () => ({
+    sessions: narrowed ? backend.sessions.slice(0, 1) : backend.sessions,
+  });
+  return { backend, narrow: () => (narrowed = true) };
+}
+
+describe('reconnect reconciliation (issue #36)', () => {
+  test('a session deleted while disconnected is pruned, an unloaded one is kept', async () => {
+    const { backend, narrow } = reconnectFixture();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    narrow();
+    expect(Object.keys(controller.state.sessions).toSorted()).toEqual(['ses_a', 'ses_b', 'ses_c']);
+
+    backend.sessions = backend.sessions.filter((session) => session.id !== 'ses_b');
+    controller.onEvents([], true);
+    await flush();
+    expect(Object.keys(controller.state.sessions).toSorted()).toEqual(['ses_a', 'ses_c']);
+    controller.dispose();
+  });
+
+  test('a transient lookup failure does not delete the row', async () => {
+    const { backend, narrow } = reconnectFixture();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    narrow();
+    backend.getSession = async () => {
+      throw new BackendError('transport', 'session.get', 'down');
+    };
+    controller.onEvents([], true);
+    await flush();
+    expect(controller.state.sessions['ses_b']).toBeDefined();
+    controller.dispose();
+  });
+
+  test('a moved or archived session is refreshed and the deleted attached one leaves', async () => {
+    const { backend, narrow } = reconnectFixture();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    narrow();
+    controller.openSession('ses_b');
+    await flush();
+    backend.sessions = backend.sessions
+      .filter((session) => session.id !== 'ses_b')
+      .map((session) =>
+        session.id === 'ses_c' ? { ...session, archived: true, directory: '/moved' } : session,
+      );
+    controller.onEvents([], true);
+    await flush();
+    expect(controller.state.sessions['ses_c']).toMatchObject({
+      archived: true,
+      directory: '/moved',
+    });
+    expect(controller.state.sessions['ses_b']).toBeUndefined();
+    expect(controller.state.route.kind).toBe('overview');
+    controller.dispose();
+  });
+});
+
 describe('session pagination', () => {
   test('bootstrap caps the first load; Load more pages in older sessions keyboard-only', async () => {
     const backend = new FakeBackend();

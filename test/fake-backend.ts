@@ -54,7 +54,9 @@ export class FakeBackend implements Backend {
   }
   async getSession(sessionID: string): Promise<SessionSummary> {
     const session = this.sessions.find((entry) => entry.id === sessionID);
-    if (session === undefined) throw new Error('NotFound');
+    if (session === undefined) {
+      throw new BackendError('not-found', 'session.get', `No session ${sessionID}.`);
+    }
     return session;
   }
   async createSession(args: {
