@@ -295,6 +295,15 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
         return edit(moveWordLeft(composer));
       case 'right':
         return edit(moveWordRight(composer));
+      case 'return':
+        // Empty composer: contextual send-now for the next queued follow-up (FIFO);
+        // with draft text, steer the draft as before.
+        if (composer.text === '') {
+          void controller.promoteNextQueued();
+          return true;
+        }
+        void controller.steer();
+        return true;
       default:
         return false;
     }

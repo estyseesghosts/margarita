@@ -63,7 +63,7 @@ The mapping is deliberately not an exact Claude clone. `Shift+Tab` must never fl
 | Permission dialog | `Left` / `Right` | Navigate choices; never overview |
 | Global | `?` | Keybinding help when not editing |
 
-`Ctrl+Enter` may be indistinguishable from Enter in terminals without extended keyboard protocols: **never claim it worked**. Expose explicit `/steer` or `Alt+Enter` as a tested one-keystroke alternative if it is reliably decoded. Primary Enter always queues while busy. Backend delivery modes are `queue` and `steer`; test semantics with the real server rather than client-side buffering. [OpenCode API](https://opencode.ai/docs/api).
+`Ctrl+Enter` is the default steer binding, but it may be indistinguishable from Enter in terminals without extended keyboard protocols: **never claim it worked** for a terminal you have not tested. Keep `Alt+Enter` or `/steer` as a tested one-keystroke alternative for terminals that misdecode it. Primary Enter always queues while busy. Backend delivery modes are `queue` and `steer`; test semantics with the real server rather than client-side buffering. [OpenCode API](https://opencode.ai/docs/api).
 
 ## Input state machine
 

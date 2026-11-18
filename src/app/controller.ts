@@ -1179,7 +1179,7 @@ export class AppController {
     );
   }
 
-  /** Sends the current draft with steer delivery (Alt+Enter or /steer). */
+  /** Sends the current draft with steer delivery (Ctrl+Enter or /steer). */
   async steer(): Promise<void> {
     if (this.state.route.kind !== 'conversation') return;
     await this.submit('steer');
@@ -1876,7 +1876,7 @@ export class AppController {
   }
 
   /**
-   * Alt+Enter on an empty composer sends now the next pending queued user message (FIFO):
+   * Ctrl+Enter on an empty composer sends now the next pending queued user message (FIFO):
    * the same promote mechanism, offered positionally as the send-now hint above the active
    * task. With no queued follow-up it falls back to steering whatever the empty composer
    * would have meant before.

@@ -55,7 +55,7 @@ export const defaultBindings: Readonly<Record<ActionID, string>> = {
   'composer.stash': 'ctrl+s',
   'composer.editor': 'ctrl+g',
   'composer.newline': 'ctrl+j',
-  'composer.steer': 'alt+enter',
+  'composer.steer': 'ctrl+enter',
   'screen.redraw': 'ctrl+l',
   'tasks.toggle': 'ctrl+t',
   'tools.background': 'ctrl+b',

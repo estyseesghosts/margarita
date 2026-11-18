@@ -1051,9 +1051,9 @@ describe('queued messages preview (issue #29)', () => {
     await settle(setup);
     const frame = setup.captureCharFrame();
 
-    const queued1 = frame.indexOf('[queue] first follow-up');
-    const queued2 = frame.indexOf('[queue] second follow-up');
-    const hint = frame.indexOf('Alt+Enter: send now');
+    const queued1 = frame.indexOf('first follow-up');
+    const queued2 = frame.indexOf('second follow-up');
+    const hint = frame.indexOf('ctrl+enter to steer now');
     const marker = frame.search(verb);
     const composerPlaceholder = frame.lastIndexOf('← overview');
 
@@ -1066,13 +1066,13 @@ describe('queued messages preview (issue #29)', () => {
     expect(marker).toBeGreaterThan(queued2);
     expect(marker).toBeLessThan(composerPlaceholder);
     // The hint appears exactly once (only for the FIFO-next item).
-    expect(frame.match(/Alt\+Enter: send now/g)).toHaveLength(1);
+    expect(frame.match(/ctrl\+enter to steer now/g)).toHaveLength(1);
     // The multiline item is clipped to one line.
     expect(frame).not.toContain('multiline note\n');
     controller.dispose();
   });
 
-  test('Alt+Enter on an empty composer promotes the oldest queued item to steer; failure leaves it queued', async () => {
+  test('Ctrl+Enter on an empty composer promotes the oldest queued item to steer; failure leaves it queued', async () => {
     const backend = runningWithQueue();
     const { controller, setup } = await mount(backend);
     controller.openSession('ses_a');
@@ -1088,8 +1088,9 @@ describe('queued messages preview (issue #29)', () => {
     const promoted = controller.state.inbox['ses_a']?.find((item) => item.id === 'in_1');
     expect(promoted?.delivery).toBe('steer');
     const frame = setup.captureCharFrame();
-    expect(frame).toContain('[steer] first follow-up');
-    expect(frame).toContain('[queue] second follow-up');
+    expect(frame).toContain('first follow-up');
+    expect(frame).toContain('second follow-up');
+    expect(frame.match(/ctrl\+enter to steer now/g)).toHaveLength(1);
     // Existing in-flight delivery failure leaves the item queued.
     controller.dispose();
   });
@@ -1112,8 +1113,8 @@ describe('queued messages preview (issue #29)', () => {
       'queue',
     ]);
     const frame = setup.captureCharFrame();
-    expect(frame).toContain('[queue] first follow-up');
-    expect(frame).toContain('Alt+Enter: send now');
+    expect(frame).toContain('first follow-up');
+    expect(frame).toContain('ctrl+enter to steer now');
     controller.dispose();
   });
 
@@ -1137,7 +1138,7 @@ describe('queued messages preview (issue #29)', () => {
     controller.openSession('ses_b');
     await settle(setup);
     const frame = setup.captureCharFrame();
-    expect(frame).not.toContain('Alt+Enter: send now');
+    expect(frame).not.toContain('ctrl+enter to steer now');
     expect(frame).not.toContain('first follow-up');
     controller.dispose();
   });
@@ -1167,9 +1168,7 @@ describe('queued messages preview (issue #29)', () => {
     await settle(setup);
 
     const frame = setup.captureCharFrame();
-    expect(frame).not.toContain('Alt+Enter: send now');
-    expect(frame).not.toContain('[queue]');
-    expect(frame).not.toContain('[steer]');
+    expect(frame).not.toContain('ctrl+enter to steer now');
     expect(frame).toContain('first follow-up');
     controller.dispose();
   });

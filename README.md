@@ -65,7 +65,7 @@ Print mode is always explicit: giving a prompt never silently turns it on.
 | `Ctrl+R` | Search prompt history |
 | `Ctrl+S` | Stash the current draft |
 | `Ctrl+G` | Edit the prompt in `$EDITOR` |
-| `Ctrl+J` / `Alt+Enter` | Newline / steer the running agent |
+| `Ctrl+J` / `Ctrl+Enter` (or `Alt+Enter`) | Newline / steer the running agent |
 | `Ctrl+T` | Goal and task checklist |
 | `Ctrl+B` | Move running tools to the background |
 | `Ctrl+C` | Interrupt, clear, then exit |

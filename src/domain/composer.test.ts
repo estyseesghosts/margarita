@@ -113,13 +113,16 @@ describe('keymap', () => {
     expect(parseBinding('ctrl+x a').ok).toBe(false);
     expect(parseBinding('hyper+a').ok).toBe(false);
   });
-  test('defaults map shift+tab to agent cycling', () => {
+  test('defaults map shift+tab to agent cycling and ctrl+enter to steer', () => {
     const { keymap } = buildKeymap({});
     expect(actionFor(keymap, { name: 'tab', ctrl: false, alt: false, shift: true })).toBe(
       'agent.cycle',
     );
     expect(actionFor(keymap, { name: 'o', ctrl: true, alt: false, shift: false })).toBe(
       'transcript.details',
+    );
+    expect(actionFor(keymap, { name: 'return', ctrl: true, alt: false, shift: false })).toBe(
+      'composer.steer',
     );
   });
   test('duplicate and unknown overrides are reported and defaults kept', () => {
