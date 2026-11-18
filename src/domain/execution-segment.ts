@@ -93,6 +93,8 @@ export function executionMarkers(
         accum.assistantCreated ??= message.createdAt;
         if (message.completedAt !== undefined) accum.assistantCompleted = message.completedAt;
         accum.worked = true;
+        // Model output after a compaction means the compaction is over.
+        accum.compacting = false;
         for (const part of message.parts) {
           if (part.kind === 'tool') {
             accum.toolCategory = classifyTool(part.tool.name);
@@ -106,7 +108,8 @@ export function executionMarkers(
       case 'compaction':
         if (accum === undefined) accum = startSegment(message);
         accum.lastMessageId = message.id;
-        if (message.state === 'running') accum.compacting = true;
+        // Each compaction record replaces the previous status: completed/failed ends it.
+        accum.compacting = message.state === 'running';
         accum.worked = true;
         break;
       case 'idle':

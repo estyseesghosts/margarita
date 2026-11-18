@@ -38,6 +38,20 @@ function idle(
 const markerAt = (messages: readonly TranscriptMessage[], running: boolean) =>
   executionMarkers(messages, running);
 
+const reasoningMessage = (id: string, at: number) =>
+  ({
+    kind: 'assistant',
+    id,
+    createdAt: at,
+    agent: 'build',
+    model,
+    parts: [{ kind: 'reasoning', text: 'hmm', done: false }],
+  }) as const;
+const compactionRecord = (id: string, state: 'running' | 'completed' | 'failed', at: number) =>
+  ({ kind: 'compaction', id, createdAt: at, state }) as const;
+const activityOf = (messages: Parameters<typeof markerAt>[0]) =>
+  markerAt(messages, true)[0]?.activity;
+
 describe('executionMarkers', () => {
   test('a bare queued user message produces no marker', () => {
     expect(markerAt([user('u', 10)], false)).toEqual([]);
@@ -179,6 +193,37 @@ describe('executionMarkers', () => {
       true,
     );
     expect(markers[0]?.activity).toBe('Thinking');
+  });
+
+  test('running → completed → reasoning never leaves a stale compaction status (#39)', () => {
+    expect(
+      activityOf([
+        user('u', 10),
+        reasoningMessage('a', 11),
+        compactionRecord('c', 'running', 12),
+        compactionRecord('c2', 'completed', 13),
+        reasoningMessage('b', 14),
+      ]),
+    ).toBe('Thinking');
+    // Model output after a still-"running" record also ends the status.
+    expect(
+      activityOf([user('u', 10), compactionRecord('c', 'running', 12), reasoningMessage('b', 14)]),
+    ).toBe('Thinking');
+    expect(
+      activityOf([
+        user('u', 10),
+        compactionRecord('c', 'running', 12),
+        compactionRecord('c2', 'failed', 13),
+      ]),
+    ).toBeUndefined();
+    expect(
+      activityOf([
+        user('u', 10),
+        compactionRecord('c', 'completed', 12),
+        compactionRecord('c3', 'running', 20),
+      ]),
+    ).toBe('Compacting conversation');
+    expect(activityOf([user('u', 10), compactionRecord('c', 'completed', 12)])).toBeUndefined();
   });
 
   test('an interrupted assistant message with no idle of its own still terminates via idle', () => {
