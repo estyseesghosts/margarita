@@ -6,9 +6,9 @@
  > ^ <
 ```
 
-**margarita** (`marg`) is a terminal frontend for the [OpenCode](https://opencode.ai) v2 server. it makes opencode feel more like claude or codex.
-
 ![margarita](margarita.png)
+
+**margarita** (`marg`) is a terminal frontend for the [OpenCode](https://opencode.ai) v2 server. it makes opencode feel more like claude or codex.
 
 ## Getting started
 
