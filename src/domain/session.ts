@@ -1,3 +1,4 @@
+import type { FileDiff } from './diff.ts';
 import type { ModelSelection } from './model-ref.ts';
 
 export type TokenUsage = Readonly<{
@@ -6,6 +7,12 @@ export type TokenUsage = Readonly<{
   reasoning: number;
   cacheRead: number;
   cacheWrite: number;
+}>;
+
+/** A revert staged server-side on the session (message it will rewind to). */
+export type StagedRevert = Readonly<{
+  messageID: string;
+  files?: readonly FileDiff[];
 }>;
 
 /** Server-reported session facts the frontend needs. Identity is `id`, never the title. */
@@ -21,6 +28,8 @@ export type SessionSummary = Readonly<{
   cost?: number;
   tokens?: TokenUsage;
   outcome?: 'succeeded' | 'failed' | 'interrupted';
+  /** Present only while a revert is staged on the server (not yet committed or cleared). */
+  revert?: StagedRevert;
   createdAt: number;
   updatedAt: number;
   archived: boolean;

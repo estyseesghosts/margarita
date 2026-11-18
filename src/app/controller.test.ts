@@ -331,6 +331,131 @@ describe('project-scoped catalogs (issue #2)', () => {
   });
 });
 
+function revertBackend() {
+  const backend = new FakeBackend();
+  backend.sessions = [
+    {
+      ...fakeSession('ses_a'),
+      revert: {
+        messageID: 'm_user',
+        files: [
+          {
+            file: 'src/a.ts',
+            patch: '',
+            additions: 3,
+            deletions: 1,
+            status: 'modified',
+            truncated: false,
+          },
+        ],
+      },
+    },
+  ];
+  backend.messages = { ses_a: [] };
+  return backend;
+}
+
+describe('staged revert recovery (issue #8)', () => {
+  test('attaching reveals a server-staged revert as a recovery dialog', async () => {
+    const backend = revertBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    expect(controller.state.overlay).toMatchObject({
+      kind: 'revert',
+      sessionID: 'ses_a',
+      messageID: 'm_user',
+    });
+    controller.dispose();
+  });
+
+  test('Esc on the recovery dialog clears the server stage', async () => {
+    const backend = revertBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    controller.revertKey({ name: 'escape' });
+    await flush();
+    expect(backend.calls.some((call) => call.name === 'clearRevert')).toBe(true);
+    expect(backend.calls.some((call) => call.name === 'commitRevert')).toBe(false);
+    expect(controller.state.overlay.kind).toBe('none');
+    controller.dispose();
+  });
+
+  test('an action is refused when the stage vanished under the dialog', async () => {
+    const backend = revertBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    // Another client resolves the stage before the user answers.
+    const index = backend.sessions.findIndex((entry) => entry.id === 'ses_a');
+    const session = backend.sessions[index];
+    if (session !== undefined) {
+      const { revert: _revert, ...rest } = session;
+      backend.sessions.splice(index, 1, rest);
+    }
+    controller.revertKey({ name: 'return' });
+    await flush();
+    expect(backend.calls.some((call) => call.name === 'commitRevert')).toBe(false);
+    expect(controller.state.overlay.kind).toBe('none');
+    controller.dispose();
+  });
+
+  test('a commit is refused when the stage cannot be verified', async () => {
+    const backend = revertBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    backend.getSession = async () => {
+      throw new Error('network down');
+    };
+    controller.revertKey({ name: 'return' });
+    await flush();
+    expect(backend.calls.some((call) => call.name === 'commitRevert')).toBe(false);
+    // The dialog stays open so the user can retry or cancel once the server is reachable.
+    expect(controller.state.overlay).toMatchObject({ kind: 'revert', busy: false });
+    controller.dispose();
+  });
+
+  test('exiting with a pending revert clears it; nothing pending, nothing to do', async () => {
+    const backend = revertBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    expect(await controller.flushRevertOnExit()).toBeUndefined();
+    expect(backend.calls.some((call) => call.name === 'clearRevert')).toBe(true);
+    expect(controller.state.overlay.kind).toBe('none');
+    // Second call is a no-op.
+    expect(await controller.flushRevertOnExit()).toBeUndefined();
+    expect(backend.calls.filter((call) => call.name === 'clearRevert')).toHaveLength(1);
+    controller.dispose();
+  });
+
+  test('a staged revert that resolves elsewhere dismisses the dialog', async () => {
+    const backend = revertBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    expect(controller.state.overlay.kind).toBe('revert');
+    const index = backend.sessions.findIndex((entry) => entry.id === 'ses_a');
+    const session = backend.sessions[index];
+    if (session !== undefined) {
+      const { revert: _revert, ...rest } = session;
+      backend.sessions.splice(index, 1, rest);
+    }
+    controller.onEvents([{ kind: 'revert-changed', sessionID: 'ses_a', action: 'cleared' }], false);
+    await flush();
+    expect(controller.state.overlay.kind).toBe('none');
+    controller.dispose();
+  });
+});
+
 describe('session pagination', () => {
   test('bootstrap caps the first load; Load more pages in older sessions keyboard-only', async () => {
     const backend = new FakeBackend();

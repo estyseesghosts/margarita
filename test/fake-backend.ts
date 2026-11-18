@@ -140,15 +140,28 @@ export class FakeBackend implements Backend {
     this.sessions.push(fork);
     return fork;
   }
+  private setRevertState(sessionID: string, revert: SessionSummary['revert']): void {
+    const session = this.sessions.find((entry) => entry.id === sessionID);
+    if (session === undefined) return;
+    const { revert: _revert, ...rest } = session;
+    const next = revert === undefined ? rest : { ...rest, revert };
+    this.sessions.splice(this.sessions.indexOf(session), 1, next);
+  }
   async stageRevert(sessionID: string, messageID: string): Promise<FileDiff[]> {
     this.calls.push({ name: 'stageRevert', args: [sessionID, messageID] });
+    this.setRevertState(sessionID, { messageID, files: [...this.revertFiles] });
     return this.revertFiles;
+  }
+  private clearRevertState(sessionID: string): void {
+    this.setRevertState(sessionID, undefined);
   }
   async commitRevert(sessionID: string): Promise<void> {
     this.calls.push({ name: 'commitRevert', args: [sessionID] });
+    this.clearRevertState(sessionID);
   }
   async clearRevert(sessionID: string): Promise<void> {
     this.calls.push({ name: 'clearRevert', args: [sessionID] });
+    this.clearRevertState(sessionID);
   }
   async putInstruction(sessionID: string, key: string, value: string): Promise<void> {
     this.calls.push({ name: 'putInstruction', args: [sessionID, key, value] });

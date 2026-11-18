@@ -282,6 +282,10 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   } catch (error) {
     process.stderr.write(`marg: local state was not fully saved: ${errorText(error)}\n`);
   }
+  const revertError = await controller.flushRevertOnExit();
+  if (revertError !== undefined) {
+    process.stderr.write(`marg: could not cancel the staged revert: ${revertError}\n`);
+  }
   controller.dispose();
   return exitCodes.ok;
 }

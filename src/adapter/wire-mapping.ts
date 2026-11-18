@@ -18,7 +18,7 @@ import type { FormField, FormRequest } from '../domain/form.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
 import { sanitizeTerminalText } from '../domain/sanitize-text.ts';
-import type { SessionSummary } from '../domain/session.ts';
+import type { SessionSummary, StagedRevert } from '../domain/session.ts';
 import type { AssistantPart, ToolCall, TranscriptMessage } from '../domain/transcript.ts';
 
 /**
@@ -68,6 +68,18 @@ export function toSessionSummary(info: SessionInfo): SessionSummary {
     ...(typeof info.cost === 'number' ? { cost: info.cost } : {}),
     ...(tokens === undefined ? {} : { tokens }),
     ...(info.outcome === undefined ? {} : { outcome: info.outcome }),
+    ...toStagedRevert(info.revert),
+  };
+}
+
+function toStagedRevert(value: unknown): { revert?: StagedRevert } {
+  if (!isRecord(value) || typeof value['messageID'] !== 'string') return {};
+  const files = Array.isArray(value['files']) ? value['files'].map(toFileDiff) : undefined;
+  return {
+    revert: {
+      messageID: value['messageID'],
+      ...(files === undefined || files.length === 0 ? {} : { files }),
+    },
   };
 }
 

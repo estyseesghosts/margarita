@@ -18,6 +18,11 @@ export type BackendEvent =
   | { kind: 'transcript-changed'; sessionID: string }
   | { kind: 'inbox-changed'; sessionID: string }
   | { kind: 'input-requests-changed'; sessionID: string }
+  | {
+      kind: 'revert-changed';
+      sessionID: string;
+      action: 'staged' | 'cleared' | 'committed';
+    }
   | { kind: 'catalog-changed' };
 
 const transcriptEvents = new Set([
@@ -118,6 +123,15 @@ export function normalizeEvent(raw: unknown): BackendEvent | undefined {
   }
   if (transcriptEvents.has(type)) return { kind: 'transcript-changed', sessionID };
   if (summaryEvents.has(type)) return { kind: 'session-changed', sessionID };
+  if (type === 'session.revert.staged') {
+    return { kind: 'revert-changed', sessionID, action: 'staged' };
+  }
+  if (type === 'session.revert.cleared') {
+    return { kind: 'revert-changed', sessionID, action: 'cleared' };
+  }
+  if (type === 'session.revert.committed') {
+    return { kind: 'revert-changed', sessionID, action: 'committed' };
+  }
   if (inboxEvents.has(type)) return { kind: 'inbox-changed', sessionID };
   if (requestEvents.has(type)) return { kind: 'input-requests-changed', sessionID };
   return undefined;

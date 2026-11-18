@@ -2,7 +2,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { batch } from 'solid-js';
-import { createStore, produce, type SetStoreFunction } from 'solid-js/store';
+import { createStore, produce, reconcile, type SetStoreFunction } from 'solid-js/store';
 
 import {
   type Backend,
@@ -20,7 +20,7 @@ import { mergeState } from '../config/local-state.ts';
 import { defaultAgent, nextAgent, selectableAgents } from '../domain/agent-cycle.ts';
 import type { BackendEvent } from '../domain/backend-event.ts';
 import { type Composer, composerFrom, emptyComposer, insertText } from '../domain/composer.ts';
-import { type DiffScope, patchLines, turnStart } from '../domain/diff.ts';
+import { type DiffScope, type FileDiff, patchLines, turnStart } from '../domain/diff.ts';
 import { hasOversizedDiff } from '../domain/edit-diff.ts';
 import { projectExecution } from '../domain/execution.ts';
 import { activeMention, findFileMentions, rankPaths } from '../domain/file-reference.ts';
@@ -488,6 +488,11 @@ export class AppController {
       case 'catalog-changed':
         void this.track('catalog', this.loadCatalog(this.currentDirectory()));
         return;
+      case 'revert-changed':
+        // Immediate reconcile (not debounced): opens the recovery dialog for a staged
+        // revert we do not know about, or drops one resolved elsewhere.
+        void this.track('revert', this.refreshSummary(event.sessionID));
+        return;
       case 'session-changed':
         this.scheduleSummary(event.sessionID);
         return;
@@ -555,7 +560,9 @@ export class AppController {
   private async refreshSummary(sessionID: string): Promise<void> {
     try {
       const session = await this.deps.backend.getSession(sessionID);
-      this.setState('sessions', sessionID, session);
+      // reconcile replaces the stored summary wholesale: absent `revert` is removed again.
+      this.setState('sessions', sessionID, reconcile(session));
+      this.reconcileStagedRevert(sessionID);
     } catch (error) {
       if (error instanceof BackendError && error.kind === 'not-found') return;
       throw error;
@@ -2435,6 +2442,35 @@ export class AppController {
     }
   }
 
+  /**
+   * Keeps the revert dialog honest after any summary refresh (attach, events, reconnect):
+   * opens the recovery dialog for a server-staged revert this instance has no overlay for,
+   * or drops a dialog whose staged revert vanished. A dialog the user is actively
+   * confirming/cancelling (`busy`) is left alone.
+   */
+  private reconcileStagedRevert(sessionID: string): void {
+    const session = this.state.sessions[sessionID];
+    const overlay = this.state.overlay;
+    const staged = session?.revert;
+    if (staged !== undefined) {
+      if (overlay.kind === 'revert' && overlay.sessionID === sessionID) return;
+      if (overlay.kind === 'revert') return; // another session's dialog is in front
+      this.setOverlay({
+        kind: 'revert',
+        sessionID,
+        messageID: staged.messageID,
+        files: staged.files === undefined ? [] : [...staged.files],
+        busy: false,
+      });
+      this.showNotice('A revert was staged on this session. Confirm or cancel it.', 'warn');
+      return;
+    }
+    if (overlay.kind === 'revert' && overlay.sessionID === sessionID && !overlay.busy) {
+      this.closeOverlay();
+      this.showNotice('The staged revert was resolved elsewhere.', 'dim');
+    }
+  }
+
   /** Stages a revert to the last user message and asks before committing. */
   private async stageRevert(): Promise<void> {
     const session = this.requireSession();
@@ -2460,20 +2496,82 @@ export class AppController {
     const cancel = key.name === 'escape' || key.text === 'n';
     if (!confirm && !cancel) return;
     this.setOverlay({ ...overlay, busy: true });
-    const work = confirm
-      ? this.deps.backend.commitRevert(overlay.sessionID)
-      : this.deps.backend.clearRevert(overlay.sessionID);
-    void work.then(
-      () => {
-        this.closeOverlay();
-        this.showNotice(confirm ? 'Reverted' : 'Revert cancelled; files restored', 'dim');
-        if (confirm) void this.track('refresh', this.loadConversation(overlay.sessionID));
-      },
-      (error: unknown) => {
-        this.setOverlay({ ...overlay, busy: false });
-        this.showNotice(`Revert failed: ${errorText(error)}`, 'error');
-      },
-    );
+    // Verify the stage is still the one the dialog was opened for before acting on it.
+    void this.verifyAndRunRevert(overlay, confirm).catch((error: unknown) => {
+      this.setOverlay({ ...overlay, busy: false });
+      this.showNotice(`Revert failed: ${errorText(error)}`, 'error');
+    });
+  }
+
+  private async verifyAndRunRevert(
+    overlay: {
+      kind: 'revert';
+      sessionID: string;
+      messageID: string;
+      files: FileDiff[];
+      busy: boolean;
+    },
+    confirm: boolean,
+  ): Promise<void> {
+    let summary;
+    try {
+      summary = await this.deps.backend.getSession(overlay.sessionID);
+    } catch (error) {
+      // Can't verify: do not act blindly on the worktree.
+      this.setOverlay({ ...overlay, busy: false });
+      this.showNotice(
+        `Revert not ${confirm ? 'committed' : 'cancelled'}: could not verify the staged revert (${errorText(error)}).`,
+        'error',
+      );
+      return;
+    }
+    const staged = summary?.revert;
+    this.storeSessionSummary(summary);
+    if (staged?.messageID !== overlay.messageID) {
+      // The stage changed or vanished under us (another client committed/cleared it).
+      this.closeOverlay();
+      this.showNotice(
+        'The staged revert changed or was resolved elsewhere. Nothing was applied by this dialog.',
+        'warn',
+      );
+      return;
+    }
+    try {
+      if (confirm) await this.deps.backend.commitRevert(overlay.sessionID);
+      else await this.deps.backend.clearRevert(overlay.sessionID);
+    } catch (error) {
+      this.setState('overlay', (current) =>
+        current.kind === 'revert' && current.sessionID === overlay.sessionID
+          ? { ...current, busy: false }
+          : current,
+      );
+      this.showNotice(`Revert failed: ${errorText(error)}`, 'error');
+      return;
+    }
+    this.closeOverlay();
+    this.showNotice(confirm ? 'Reverted' : 'Revert cancelled; files restored', 'dim');
+    if (confirm) void this.track('refresh', this.loadConversation(overlay.sessionID));
+  }
+
+  /**
+   * Best-effort safe clear of a staged revert when the user is exiting: abandoning the
+   * dialog means restoring the files, never leaving the mutation silently staged.
+   * Returns an error message if the clear failed (caller should surface it).
+   */
+  async flushRevertOnExit(): Promise<string | undefined> {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'revert') return undefined;
+    if (overlay.busy) {
+      // An action is in flight; the server will end up consistent either way.
+      return undefined;
+    }
+    try {
+      await this.deps.backend.clearRevert(overlay.sessionID);
+      this.setOverlay({ kind: 'none' });
+      return undefined;
+    } catch (error) {
+      return errorText(error);
+    }
   }
 
   private async track(label: string, work: Promise<unknown>): Promise<void> {
