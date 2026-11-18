@@ -69,7 +69,7 @@ bun run build                       # → dist/marg.exe (dist/marg elsewhere)
 bun run build bun-linux-x64         # cross-compile for another target
 ```
 
-Copy `dist/marg.exe` into any directory on PATH (for example `%USERPROFILE%.localin`). Alternatively `bun link` registers `marg` from source.
+Copy `dist/marg.exe` into any directory on PATH (for example `%USERPROFILE%\.local\bin`). Alternatively `bun link` registers `marg` from source.
 
 ```sh
 marg                                # new session in the current directory (Left → overview)
@@ -85,7 +85,22 @@ From a checkout, `bun run start …` is equivalent.
 
 The overview lists sessions by project, most recently used first, six per project; `[Show more]` expands the rest inline.
 
-Keys: `Left` on an empty prompt opens the overview · `Shift+Tab` agent · `Alt+P` model · `F2` recent model · `Ctrl+O` details · `Ctrl+R` history search · `Ctrl+S` stash · `Ctrl+G` `$EDITOR` · `Ctrl+J` newline · `Alt+Enter` steer · `Ctrl+C` interrupt/clear/exit · `F1` help. Override in `%LOCALAPPDATA%\margarita\config.jsonc` (XDG config dir elsewhere).
+Packaging rationale: [ADR-0006](adr/0006-packaging.md).
+
+Keys: `Left` on an empty prompt opens the overview · `Shift+Tab` agent · `Alt+P` model · `F2` recent model · `Ctrl+O` details · `Ctrl+R` history search · `Ctrl+S` stash · `Ctrl+G` `$EDITOR` · `Ctrl+J` newline · `Alt+Enter` steer · `Ctrl+T` goal and task checklist · `Ctrl+B` move running tools to the background · `Ctrl+C` interrupt/clear/exit · `F1` help. Override in `%LOCALAPPDATA%\margarita\config.jsonc` (XDG config dir elsewhere).
+
+Goals and plans: `/goal <title>`, `/criteria a; b`, `/plan step one; step two` (or a pasted list), `/plan propose` asks the agent and `/plan adopt` turns its reply into a proposal you accept (`a`) or reject (`r`) in Ctrl+T. Plans are local (`goals/` under margarita's state directory) until you run `/sync on`, which writes a short instruction entry the agent sees; `/sync off` removes it. Session tools: `/rename`, `/fork`, `/revert` (confirm or restore), `/diff [turn]`, `/export [file]` (full chat log as JSON).
+
+Config (`config.jsonc`):
+
+```jsonc
+{
+  "agents": { "default": "build", "cycle": ["build", "plan"] },
+  "input": { "enterWhileRunning": "queue" },       // or "steer"
+  "keys": { "tasks.toggle": "alt+t" },              // single keys only, no chords; see F1 for action IDs
+  "ui": { "theme": "dark", "animation": true, "ascii": false }  // theme: dark | light | high-contrast
+}
+```
 
 Environment: `NO_COLOR`, `MARGARITA_NO_ANIMATION=1` (static activity indicator), `MARGARITA_ASCII=1` (ASCII spinner frames), `MARGARITA_SERVER_PASSWORD` (for `--server`).
 
