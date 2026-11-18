@@ -11,6 +11,8 @@ export type Theme = Readonly<{
   success: string;
   border: string;
   selectionBg: string;
+  addedBg: string;
+  removedBg: string;
 }>;
 
 const dark: Theme = {
@@ -25,6 +27,8 @@ const dark: Theme = {
   success: '#7fc77f',
   border: '#5a5a5a',
   selectionBg: '#444466',
+  addedBg: '#1f3a26',
+  removedBg: '#46232a',
 };
 
 /** For light terminal backgrounds; all text pairs keep at least 4.5:1 contrast on white. */
@@ -40,6 +44,8 @@ const light: Theme = {
   success: '#2d6a2d',
   border: '#9a9a9a',
   selectionBg: '#d0d8f0',
+  addedBg: '#d6f0d6',
+  removedBg: '#f6d5d9',
 };
 
 /** Maximum contrast; state is never conveyed by colour alone (marks and words carry it). */
@@ -55,6 +61,8 @@ const highContrast: Theme = {
   success: '#55ff55',
   border: '#ffffff',
   selectionBg: '#0000aa',
+  addedBg: '#003300',
+  removedBg: '#550000',
 };
 
 const plain: Theme = {
@@ -69,6 +77,8 @@ const plain: Theme = {
   success: '#ffffff',
   border: '#ffffff',
   selectionBg: '#000000',
+  addedBg: '#000000',
+  removedBg: '#000000',
 };
 
 const themes = { dark, light, 'high-contrast': highContrast } as const;

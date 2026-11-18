@@ -10,6 +10,8 @@ export type ToolCall = Readonly<{
   status: ToolStatus;
   input: Readonly<Record<string, unknown>>;
   output?: string;
+  /** The server's unified diff for an edit, with real file line numbers. */
+  diff?: string;
   error?: string;
   startedAt: number;
   completedAt?: number;
@@ -103,6 +105,7 @@ const categoryByName: Readonly<Record<string, ToolCategory>> = {
   multiedit: 'edit',
   bash: 'shell',
   shell: 'shell',
+  execute: 'shell',
   webfetch: 'web',
   websearch: 'web',
   fetch: 'web',
@@ -118,7 +121,7 @@ export function classifyTool(name: string): ToolCategory {
 function isFoldable(tool: ToolCall): boolean {
   if (tool.status === 'error') return false;
   const category = classifyTool(tool.name);
-  return category === 'read' || category === 'search' || category === 'web';
+  return category === 'read' || category === 'search' || category === 'web' || category === 'shell';
 }
 
 export function groupKey(tools: readonly ToolCall[]): string {
@@ -201,7 +204,44 @@ export function foldTranscript(
         assertNever(message);
     }
   }
-  return out;
+  return options.detailed ? out : mergeAdjacentGroups(out, options);
+}
+
+type GroupNode = Extract<TranscriptNode, { kind: 'tool-group' }>;
+
+/** Calls split across assistant messages still read as one uninterrupted activity segment. */
+function mergeAdjacentGroups(nodes: TranscriptNode[], options: FoldOptions): TranscriptNode[] {
+  const merged: TranscriptNode[] = [];
+  let run: GroupNode[] = [];
+  const flush = () => {
+    const first = run[0];
+    if (first === undefined) return;
+    if (run.length === 1) {
+      merged.push(first);
+    } else {
+      const tools = run.flatMap((group) => group.tools);
+      const key = groupKey(tools);
+      merged.push({
+        kind: 'tool-group',
+        key,
+        summary: summarizeTools(tools),
+        running: run.some((group) => group.running),
+        tools,
+        expanded: run.some((group) => group.expanded) || options.expandedGroups.has(key),
+      });
+    }
+    run = [];
+  };
+  for (const node of nodes) {
+    if (node.kind === 'tool-group') {
+      run.push(node);
+    } else {
+      flush();
+      merged.push(node);
+    }
+  }
+  flush();
+  return merged;
 }
 
 function foldAssistant(
@@ -213,7 +253,7 @@ function foldAssistant(
   let sawReasoningText = false;
   const flush = () => {
     if (pending.length === 0) return;
-    if (pending.length === 1 || options.detailed) {
+    if (options.detailed) {
       for (const tool of pending) {
         out.push({
           kind: 'tool',
@@ -297,23 +337,27 @@ function foldAssistant(
 
 const verbs: Readonly<Record<ToolCategory, (count: number) => string>> = {
   read: (count) => `Read ${count} ${count === 1 ? 'file' : 'files'}`,
-  search: (count) => `searched ${count} ${count === 1 ? 'time' : 'times'}`,
-  edit: (count) => `edited ${count} ${count === 1 ? 'file' : 'files'}`,
-  shell: (count) => `ran ${count} ${count === 1 ? 'command' : 'commands'}`,
-  web: (count) => `fetched ${count} ${count === 1 ? 'page' : 'pages'}`,
-  delegate: (count) => `delegated ${count} ${count === 1 ? 'task' : 'tasks'}`,
-  other: (count) => `${count} other ${count === 1 ? 'tool' : 'tools'}`,
+  search: (count) => `Searched for ${count} ${count === 1 ? 'pattern' : 'patterns'}`,
+  edit: (count) => `Edited ${count} ${count === 1 ? 'file' : 'files'}`,
+  shell: (count) => `Ran ${count} shell ${count === 1 ? 'command' : 'commands'}`,
+  web: (count) => `Fetched ${count} ${count === 1 ? 'page' : 'pages'}`,
+  delegate: (count) => `Delegated ${count} ${count === 1 ? 'task' : 'tasks'}`,
+  other: (count) => `Ran ${count} other ${count === 1 ? 'tool' : 'tools'}`,
 };
 
-/** `Read 3 files · searched 2 times`, derived from data only. */
+/** `Read 3 files, searched for 2 patterns, ran 1 shell command`, derived from data only. */
 export function summarizeTools(tools: readonly ToolCall[]): string {
   const counts = new Map<ToolCategory, number>();
   for (const tool of tools) {
     const category = classifyTool(tool.name);
     counts.set(category, (counts.get(category) ?? 0) + 1);
   }
-  const text = [...counts.entries()].map(([category, count]) => verbs[category](count)).join(' · ');
-  return text.charAt(0).toUpperCase() + text.slice(1);
+  return [...counts.entries()]
+    .map(([category, count], index) => {
+      const phrase = verbs[category](count);
+      return index === 0 ? phrase : phrase.charAt(0).toLowerCase() + phrase.slice(1);
+    })
+    .join(', ');
 }
 
 const argumentKeys = ['filePath', 'path', 'pattern', 'command', 'url', 'query', 'description'];

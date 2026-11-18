@@ -169,6 +169,8 @@ function toToolCall(
     isRecord(state) && isRecord(state['error']) && typeof state['error']['message'] === 'string'
       ? sanitizeTerminalText(state['error']['message'])
       : undefined;
+  const metadata = isRecord(state) && isRecord(state['metadata']) ? state['metadata'] : {};
+  const diff = typeof metadata['diff'] === 'string' ? metadata['diff'] : undefined;
   return {
     id: part.id,
     name: sanitizeTerminalText(part.name),
@@ -178,6 +180,7 @@ function toToolCall(
     ...(part.time.completed === undefined ? {} : { completedAt: part.time.completed }),
     ...(output === undefined || output === '' ? {} : { output }),
     ...(error === undefined ? {} : { error }),
+    ...(diff === undefined || diff === '' ? {} : { diff }),
   };
 }
 

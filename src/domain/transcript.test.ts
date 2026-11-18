@@ -59,7 +59,9 @@ describe('foldTranscript', () => {
     );
     expect(kinds(nodes)).toEqual(['group(3)']);
     const [group] = nodes;
-    expect(group?.kind === 'tool-group' && group.summary).toBe('Read 2 files · searched 1 time');
+    expect(group?.kind === 'tool-group' && group.summary).toBe(
+      'Read 2 files, searched for 1 pattern',
+    );
   });
 
   test('a failure splits groups and is shown expanded', () => {
@@ -105,7 +107,7 @@ describe('foldTranscript', () => {
       ],
       compact,
     );
-    expect(kinds(nodes)).toEqual(['group(2)', 'text', 'tool']);
+    expect(kinds(nodes)).toEqual(['group(2)', 'text', 'group(1)']);
   });
 
   test('expanded group state is keyed by the first child ID', () => {
@@ -199,5 +201,23 @@ describe('windowNodes', () => {
     expect(formatToolTiming(call, testClock)).toBe('t1000');
     expect(formatToolTiming({ ...call, completedAt: 2234 }, testClock)).toBe('t1000 · 1.2s');
     expect(formatToolTiming({ ...call, completedAt: 61_000 }, testClock)).toBe('t1000 · 60s');
+  });
+});
+
+describe('grouping across messages', () => {
+  test('calls split over consecutive assistant messages form one group', () => {
+    const nodes = foldTranscript(
+      [
+        assistant([tool('a', 'bash')]),
+        assistant([tool('b', 'bash')]),
+        assistant([tool('c', 'grep')]),
+      ],
+      compact,
+    );
+    expect(kinds(nodes)).toEqual(['group(3)']);
+    const group = nodes[0];
+    expect(group?.kind === 'tool-group' && group.summary).toBe(
+      'Ran 2 shell commands, searched for 1 pattern',
+    );
   });
 });

@@ -483,3 +483,77 @@ describe('app', () => {
     expect(controller.currentSession()?.id).not.toBe('ses_a');
   });
 });
+
+function richTurn(index: number) {
+  return [
+    {
+      kind: 'user' as const,
+      id: `u${index}`,
+      createdAt: index * 10,
+      text: `question number ${index}`,
+      attachments: [],
+    },
+    {
+      kind: 'assistant' as const,
+      id: `a${index}`,
+      createdAt: index * 10 + 1,
+      completedAt: index * 10 + 2,
+      agent: 'build',
+      model: { providerID: 'opencode', modelID: 'longcat' },
+      parts: [
+        {
+          kind: 'text' as const,
+          text: `## Answer ${index}\n\n${Array.from({ length: 6 }, (_, line) => `- point ${line}`).join('\n')}`,
+        },
+        {
+          kind: 'tool' as const,
+          tool: {
+            id: `t${index}`,
+            name: 'edit',
+            status: 'completed' as const,
+            input: { filePath: 'src/a.ts', oldString: 'const a = 1;', newString: 'const a = 2;' },
+            startedAt: 1,
+            completedAt: 2,
+          },
+        },
+      ],
+    },
+  ];
+}
+
+function richBackend(): FakeBackend {
+  const backend = backendWithSession();
+  backend.messages = { ses_a: [1, 2, 3, 4].flatMap(richTurn) };
+  return backend;
+}
+
+describe('transcript rendering (docs/22, docs/23)', () => {
+  test('renders markdown, diff gutter and a sticky header for an earlier prompt', async () => {
+    const { controller, setup } = await mount(richBackend());
+    controller.openSession('ses_a');
+    await settle(setup);
+    const bottom = setup.captureCharFrame();
+    if (process.env['DUMP'] !== undefined) console.log(bottom);
+    expect(bottom).not.toContain('## Answer');
+    expect(bottom).toContain('Answer 4');
+    expect(bottom).toContain('const a = 2;');
+    // The latest prompt is visible, so it is not duplicated as a sticky copy.
+    expect(bottom.split('question number 4').length).toBe(2);
+
+    setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    const middle = setup.captureCharFrame();
+    if (process.env['DUMP'] !== undefined) console.log(middle);
+    const header = /^ ❯ question number (\d)/.exec(middle.split('\n')[0] ?? '');
+    expect(header).not.toBeNull();
+    // The header names a prompt that is not also in the viewport body.
+    expect(middle.split(`question number ${header?.[1]}`).length).toBe(2);
+
+    for (let page = 0; page < 20; page += 1) setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    const top = setup.captureCharFrame();
+    if (process.env['DUMP'] !== undefined) console.log(top);
+    // At the very top the original prompts are visible, so nothing is duplicated.
+    expect(top.split('question number 1').length).toBe(2);
+  });
+});

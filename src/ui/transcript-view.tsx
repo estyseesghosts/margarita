@@ -1,14 +1,28 @@
-import type { ScrollBoxRenderable } from '@opentui/core';
+import type { ScrollBoxRenderable, SyntaxStyle } from '@opentui/core';
+import { getTreeSitterClient } from '@opentui/core';
+import { useRenderer } from '@opentui/solid';
 import type { Accessor } from 'solid-js';
-import { createMemo, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  Match,
+  onCleanup,
+  onMount,
+  Show,
+  Switch,
+} from 'solid-js';
 
 import type { PermissionPrompt } from '../adapter/backend.ts';
 import type { AppController } from '../app/controller.ts';
 import type { ScrollMove } from '../app/key-router.ts';
+import { diffCounts, editDiff } from '../domain/edit-diff.ts';
 import type { FormRequest } from '../domain/form.ts';
 import { formatModelRef, type ModelSelection } from '../domain/model-ref.ts';
 import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
 import { assertNever } from '../domain/session.ts';
+import { stickyPrompt, truncatePrompt } from '../domain/sticky-prompt.ts';
 import type { ThrobberFacts } from '../domain/throbber.ts';
 import { latestTurn } from '../domain/throbber.ts';
 import {
@@ -19,6 +33,7 @@ import {
   type TranscriptNode,
   windowNodes,
 } from '../domain/transcript.ts';
+import { createSyntaxStyle } from './syntax.ts';
 import type { Theme } from './theme.ts';
 import { Throbber } from './throbber-view.tsx';
 
@@ -50,6 +65,30 @@ export function Transcript(props: TranscriptProps) {
     windowNodes(nodes(), props.controller.transcriptWindow(props.sessionID)),
   );
   let box: ScrollBoxRenderable | undefined;
+  const renderer = useRenderer();
+  const syntax = createMemo(() => createSyntaxStyle(props.theme, renderer.nativeScene));
+  const [sticky, setSticky] = createSignal<string | undefined>(undefined);
+
+  /** Recomputes which earlier prompt, if any, has scrolled out above the viewport. */
+  const updateSticky = () => {
+    if (box === undefined) return;
+    const scrollbox = box;
+    const positions = windowed().visible.flatMap((node) => {
+      if (node.kind !== 'user') return [];
+      const element = scrollbox.findDescendantById(nodeID(node.key));
+      if (element === undefined) return [];
+      // The wrapper starts with the prompt's top margin row.
+      const top = element.y + 1 - scrollbox.y;
+      return [
+        { key: node.key, text: node.text, top, bottom: top + Math.max(1, element.height - 1) },
+      ];
+    });
+    setSticky(stickyPrompt(positions)?.text);
+  };
+  createEffect(() => {
+    windowed();
+    box?.afterLayout(updateSticky);
+  });
 
   const scroll = (move: ScrollMove) => {
     if (box === undefined) return;
@@ -83,7 +122,10 @@ export function Transcript(props: TranscriptProps) {
         assertNever(move);
     }
   };
-  onMount(() => props.onScrollHandle?.(scroll));
+  onMount(() => {
+    props.onScrollHandle?.(scroll);
+    if (box !== undefined) box.verticalScrollBar.onChange = updateSticky;
+  });
   onCleanup(() => props.onScrollHandle?.(undefined));
 
   const turn = createMemo(() =>
@@ -91,56 +133,82 @@ export function Transcript(props: TranscriptProps) {
   );
 
   return (
-    <scrollbox
-      ref={(element: ScrollBoxRenderable) => {
-        box = element;
-      }}
-      flexGrow={1}
-      stickyScroll
-      stickyStart="bottom"
-      viewportCulling
-      paddingLeft={1}
-      paddingRight={1}
-    >
-      <WelcomePanel
-        controller={props.controller}
-        theme={props.theme}
-        width={props.width}
-        agent={state.sessions[props.sessionID]?.agent}
-        model={state.sessions[props.sessionID]?.model}
-        directory={state.sessions[props.sessionID]?.directory}
-      />
-      <Show when={windowed().hidden > 0 || transcript()?.olderCursor !== undefined}>
-        <text fg={props.theme.dim}>
-          {transcript()?.loading === true
-            ? ' … loading earlier messages'
-            : ' … earlier messages · PageUp at the top to show them'}
-        </text>
-      </Show>
-      <Show when={transcript()?.loading === true && nodes().length === 0}>
-        <text fg={props.theme.dim}> Loading conversation…</text>
-      </Show>
-      <For each={windowed().visible}>
-        {(node) => (
-          <box id={nodeID(node.key)} flexDirection="column" flexShrink={0}>
-            <NodeView node={node} theme={props.theme} detailed={state.detailed} />
+    <box flexGrow={1} flexDirection="column">
+      <scrollbox
+        ref={(element: ScrollBoxRenderable) => {
+          box = element;
+        }}
+        flexGrow={1}
+        stickyScroll
+        stickyStart="bottom"
+        viewportCulling
+        paddingLeft={1}
+        paddingRight={1}
+      >
+        <WelcomePanel
+          controller={props.controller}
+          theme={props.theme}
+          width={props.width}
+          agent={state.sessions[props.sessionID]?.agent}
+          model={state.sessions[props.sessionID]?.model}
+          directory={state.sessions[props.sessionID]?.directory}
+        />
+        <Show when={windowed().hidden > 0 || transcript()?.olderCursor !== undefined}>
+          <text fg={props.theme.dim}>
+            {transcript()?.loading === true
+              ? ' … loading earlier messages'
+              : ' … earlier messages · PageUp at the top to show them'}
+          </text>
+        </Show>
+        <Show when={transcript()?.loading === true && nodes().length === 0}>
+          <text fg={props.theme.dim}> Loading conversation…</text>
+        </Show>
+        <For each={windowed().visible}>
+          {(node) => (
+            <box id={nodeID(node.key)} flexDirection="column" flexShrink={0}>
+              <NodeView
+                node={node}
+                theme={props.theme}
+                detailed={state.detailed}
+                syntax={syntax()}
+              />
+            </box>
+          )}
+        </For>
+        <Show when={turn()}>
+          {(facts: Accessor<ThrobberFacts>) => (
+            <Throbber
+              facts={facts()}
+              width={props.width - 2}
+              theme={props.theme}
+              animate={props.animate}
+              ascii={props.ascii}
+            />
+          )}
+        </Show>
+        <PermissionCard controller={props.controller} theme={props.theme} />
+        <FormCard controller={props.controller} theme={props.theme} />
+      </scrollbox>
+      <Show when={sticky()}>
+        {(text: Accessor<string>) => (
+          <box
+            position="absolute"
+            top={0}
+            left={0}
+            right={0}
+            height={1}
+            backgroundColor={props.theme.userBg}
+            flexDirection="row"
+            paddingLeft={1}
+          >
+            <text fg={props.theme.dim}>❯ </text>
+            <text fg={props.theme.user}>
+              {truncatePrompt(sanitizeText(text()), props.width - 6)}
+            </text>
           </box>
         )}
-      </For>
-      <Show when={turn()}>
-        {(facts: Accessor<ThrobberFacts>) => (
-          <Throbber
-            facts={facts()}
-            width={props.width - 2}
-            theme={props.theme}
-            animate={props.animate}
-            ascii={props.ascii}
-          />
-        )}
       </Show>
-      <PermissionCard controller={props.controller} theme={props.theme} />
-      <FormCard controller={props.controller} theme={props.theme} />
-    </scrollbox>
+    </box>
   );
 }
 
@@ -197,7 +265,12 @@ function nodeID(key: string): string {
   return `node:${key}`;
 }
 
-function NodeView(props: { node: TranscriptNode; theme: Theme; detailed: boolean }) {
+function NodeView(props: {
+  node: TranscriptNode;
+  theme: Theme;
+  detailed: boolean;
+  syntax: SyntaxStyle;
+}) {
   const theme = () => props.theme;
   return (
     <Switch>
@@ -216,7 +289,14 @@ function NodeView(props: { node: TranscriptNode; theme: Theme; detailed: boolean
         {(node: Accessor<NodeOf<'text'>>) => (
           <box marginTop={1} flexDirection="row">
             <text fg={theme().text}>● </text>
-            <text fg={theme().text}>{sanitizeText(node().text)}</text>
+            <markdown
+              content={sanitizeText(node().text)}
+              syntaxStyle={props.syntax}
+              treeSitterClient={getTreeSitterClient()}
+              fg={theme().text}
+              flexGrow={1}
+              flexShrink={1}
+            />
           </box>
         )}
       </Match>
@@ -244,6 +324,7 @@ function NodeView(props: { node: TranscriptNode; theme: Theme; detailed: boolean
             expanded={node().expanded}
             detailed={props.detailed}
             theme={theme()}
+            syntax={props.syntax}
           />
         )}
       </Match>
@@ -254,7 +335,13 @@ function NodeView(props: { node: TranscriptNode; theme: Theme; detailed: boolean
             <Show when={node().expanded}>
               <For each={node().tools}>
                 {(tool) => (
-                  <ToolView tool={tool} expanded detailed={props.detailed} theme={theme()} />
+                  <ToolView
+                    tool={tool}
+                    expanded
+                    detailed={props.detailed}
+                    theme={theme()}
+                    syntax={props.syntax}
+                  />
                 )}
               </For>
             </Show>
@@ -301,7 +388,14 @@ function NodeView(props: { node: TranscriptNode; theme: Theme; detailed: boolean
   );
 }
 
-function ToolView(props: { tool: ToolCall; expanded: boolean; detailed: boolean; theme: Theme }) {
+function ToolView(props: {
+  tool: ToolCall;
+  expanded: boolean;
+  detailed: boolean;
+  theme: Theme;
+  syntax: SyntaxStyle;
+}) {
+  const edit = createMemo(() => (props.tool.status === 'error' ? undefined : editDiff(props.tool)));
   // Ctrl+O shows exact output (sanitized, untruncated) and timing.
   const render = (text: string) => (props.detailed ? full(text) : preview(text));
   const failed = () => props.tool.status === 'error';
@@ -315,7 +409,13 @@ function ToolView(props: { tool: ToolCall; expanded: boolean; detailed: boolean;
     <box flexDirection="column" marginTop={1}>
       <box flexDirection="row">
         <text fg={bullet()}>● </text>
-        <text fg={props.theme.text}>{sanitizeText(describeTool(props.tool))}</text>
+        <text fg={props.theme.text}>
+          {sanitizeText(
+            edit() === undefined
+              ? describeTool(props.tool)
+              : `${props.tool.name === 'write' ? 'Write' : 'Update'}(${describeTool(props.tool).slice(props.tool.name.length + 1)})`,
+          )}
+        </text>
         <Show when={props.detailed}>
           <text fg={props.theme.dim}>{`  ${formatToolTiming(props.tool, clock)}`}</text>
         </Show>
@@ -326,11 +426,45 @@ function ToolView(props: { tool: ToolCall; expanded: boolean; detailed: boolean;
           <text fg={props.theme.error}>{`  └ ${render(error())}`}</text>
         )}
       </Show>
-      <Show when={props.expanded && props.tool.output !== undefined && !failed()}>
+      <Show when={edit()}>
+        {(shown: Accessor<NonNullable<ReturnType<typeof editDiff>>>) => (
+          <box flexDirection="column" paddingLeft={2}>
+            <text fg={props.theme.dim}>{`└ ${changeSummary(diffCounts(shown().diff))}`}</text>
+            <diff
+              diff={shown().diff}
+              view="unified"
+              showLineNumbers
+              syntaxStyle={props.syntax}
+              treeSitterClient={getTreeSitterClient()}
+              filetype={shown().filetype}
+              fg={props.theme.text}
+              lineNumberFg={props.theme.dim}
+              addedBg={props.theme.addedBg}
+              removedBg={props.theme.removedBg}
+              addedSignColor={props.theme.success}
+              removedSignColor={props.theme.error}
+              wrapMode="none"
+            />
+          </box>
+        )}
+      </Show>
+      <Show
+        when={
+          edit() === undefined && props.expanded && props.tool.output !== undefined && !failed()
+        }
+      >
         <text fg={props.theme.dim}>{`  └ ${render(props.tool.output ?? '')}`}</text>
       </Show>
     </box>
   );
+}
+
+function plural(count: number): string {
+  return `${count} ${count === 1 ? 'line' : 'lines'}`;
+}
+
+function changeSummary(counts: { additions: number; deletions: number }): string {
+  return `Added ${plural(counts.additions)}, removed ${plural(counts.deletions)}`;
 }
 
 function full(text: string): string {
