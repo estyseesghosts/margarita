@@ -1,3 +1,4 @@
+import type { ExecutionMarker } from './execution-segment.ts';
 import type { ModelSelection } from './model-ref.ts';
 import { assertNever } from './session.ts';
 
@@ -92,7 +93,9 @@ export type TranscriptNode =
       outputTruncated?: 'server';
     }
   | { kind: 'notice'; key: string; text: string; tone: 'dim' | 'error' | 'warn' }
-  | { kind: 'meta'; key: string; text: string };
+  | { kind: 'meta'; key: string; text: string }
+  /** Lifecycle marker attached after a turn's own output; static when the run finished. */
+  | { kind: 'execution'; key: string; segment: ExecutionMarker };
 
 export type FoldOptions = Readonly<{
   detailed: boolean;
@@ -100,6 +103,11 @@ export type FoldOptions = Readonly<{
   expandedGroups: ReadonlySet<string>;
   /** Tool IDs whose oversized inline diff the user expanded; see `clampDiffPatch`. */
   expandedDiffs?: ReadonlySet<string>;
+  /**
+   * Execution markers keyed by the message id the marker is emitted after (the segment's
+   * total extent: its idle message, or its last message while running).
+   */
+  markers?: ReadonlyMap<string, ExecutionMarker>;
 }>;
 
 const categoryByName: Readonly<Record<string, ToolCategory>> = {
@@ -150,9 +158,21 @@ export function foldTranscript(
   options: FoldOptions,
 ): TranscriptNode[] {
   const out: TranscriptNode[] = [];
+  /** Emits the marker for the message just appended, if the segment boundary falls there. */
+  function appendBoundaryMarker(messageId: string) {
+    const marker = options.markers?.get(messageId);
+    if (marker !== undefined) {
+      out.push({
+        kind: 'execution',
+        key: `seg:${marker.id}`,
+        segment: marker,
+      });
+    }
+  }
+
   for (const message of messages) {
     switch (message.kind) {
-      case 'user':
+      case 'user': {
         out.push({
           kind: 'user',
           key: message.id,
@@ -160,6 +180,7 @@ export function foldTranscript(
           attachments: message.attachments,
         });
         break;
+      }
       case 'assistant':
         foldAssistant(message, options, out);
         break;
@@ -217,6 +238,7 @@ export function foldTranscript(
       default:
         assertNever(message);
     }
+    appendBoundaryMarker(message.id);
   }
   return options.detailed ? out : mergeAdjacentGroups(out, options);
 }

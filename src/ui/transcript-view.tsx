@@ -19,13 +19,13 @@ import type { AppController } from '../app/controller.ts';
 import type { ScrollMove } from '../app/key-router.ts';
 import type { PatchLine } from '../domain/diff.ts';
 import { clampDiffPatch, diffCounts, editDiff, isEditLike, toolPath } from '../domain/edit-diff.ts';
+import { type ExecutionMarker, executionMarkers } from '../domain/execution-segment.ts';
 import type { FormRequest } from '../domain/form.ts';
 import { formatModelRef, type ModelSelection } from '../domain/model-ref.ts';
 import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
 import { assertNever } from '../domain/session.ts';
 import { stickyPrompt, truncatePrompt } from '../domain/sticky-prompt.ts';
-import type { ThrobberFacts } from '../domain/throbber.ts';
-import { latestTurn } from '../domain/throbber.ts';
+import { formatElapsed, type ThrobberFacts } from '../domain/throbber.ts';
 import {
   describeTool,
   foldTranscript,
@@ -56,13 +56,21 @@ type NodeOf<K extends TranscriptNode['kind']> = Extract<TranscriptNode, { kind: 
 export function Transcript(props: TranscriptProps) {
   const state = props.controller.state;
   const transcript = () => state.transcripts[props.sessionID];
-  const nodes = createMemo(() =>
-    foldTranscript(transcript()?.messages ?? [], {
+  const nodes = createMemo(() => {
+    const messages = transcript()?.messages ?? [];
+    const markers = new Map(
+      executionMarkers(messages, state.running[props.sessionID] === true).map((marker) => [
+        marker.afterMessageId,
+        marker,
+      ]),
+    );
+    return foldTranscript(messages, {
       detailed: state.detailed,
       expandedGroups: new Set(Object.keys(state.expandedGroups)),
       expandedDiffs: new Set(Object.keys(state.expandedDiffs)),
-    }),
-  );
+      markers,
+    });
+  });
   const windowed = createMemo(() =>
     windowNodes(nodes(), props.controller.transcriptWindow(props.sessionID)),
   );
@@ -130,10 +138,6 @@ export function Transcript(props: TranscriptProps) {
   });
   onCleanup(() => props.onScrollHandle?.(undefined));
 
-  const turn = createMemo(() =>
-    latestTurn(transcript()?.messages ?? [], state.running[props.sessionID] === true),
-  );
-
   return (
     <box flexGrow={1} flexDirection="column">
       <scrollbox
@@ -182,21 +186,12 @@ export function Transcript(props: TranscriptProps) {
                       ? state.focusedGroup === `diff:${node.tool.id}`
                       : false)
                 }
+                animate={props.animate}
+                ascii={props.ascii}
               />
             </box>
           )}
         </For>
-        <Show when={turn()}>
-          {(facts: Accessor<ThrobberFacts>) => (
-            <Throbber
-              facts={facts()}
-              width={props.width - 2}
-              theme={props.theme}
-              animate={props.animate}
-              ascii={props.ascii}
-            />
-          )}
-        </Show>
         <PermissionCard controller={props.controller} theme={props.theme} />
         <FormCard controller={props.controller} theme={props.theme} />
       </scrollbox>
@@ -291,6 +286,8 @@ function NodeView(props: {
   syntax: SyntaxStyle;
   width: number;
   focused: boolean;
+  animate: boolean;
+  ascii: boolean;
 }) {
   const theme = () => props.theme;
   return (
@@ -419,10 +416,87 @@ function NodeView(props: {
           </text>
         )}
       </Match>
+      <Match when={props.node.kind === 'execution' ? props.node : undefined}>
+        {(node: Accessor<NodeOf<'execution'>>) => (
+          <ExecutionMarkerView
+            segment={node().segment}
+            width={props.width}
+            theme={theme()}
+            animate={props.animate}
+            ascii={props.ascii}
+          />
+        )}
+      </Match>
       <Match when={props.node.kind === 'meta' ? props.node : undefined}>
         {(node: Accessor<NodeOf<'meta'>>) => <text fg={theme().dim}>{`  ${node().text}`}</text>}
       </Match>
     </Switch>
+  );
+}
+
+const timeFormat = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
+
+/** Renders one execution marker: live indicator while running, static after. */
+function ExecutionMarkerView(props: {
+  segment: ExecutionMarker;
+  width: number;
+  theme: Theme;
+  animate: boolean;
+  ascii: boolean;
+}) {
+  const running = () => props.segment.phase === 'running';
+  const facts = (): ThrobberFacts => ({
+    phase: props.segment.phase,
+    startedAt: props.segment.startedAt,
+    ...(props.segment.activity === undefined ? {} : { activity: props.segment.activity }),
+  });
+  const done = () =>
+    props.segment.completedAt === undefined
+      ? undefined
+      : timeFormat.format(new Date(props.segment.completedAt));
+  const duration = () =>
+    props.segment.durationMs === undefined ? undefined : formatElapsed(props.segment.durationMs);
+  const line = () => {
+    const status =
+      props.segment.phase === 'completed'
+        ? 'Completed'
+        : props.segment.phase === 'failed'
+          ? 'Failed'
+          : 'Interrupted';
+    const time = done();
+    const length = duration();
+    const eventPart =
+      length === undefined
+        ? status
+        : `${status} ${props.segment.phase === 'completed' ? 'in' : 'after'} ${length}`;
+    return time === undefined ? `◌ ${eventPart}` : `◌ ${eventPart} · done ${time}`;
+  };
+  return (
+    <Show
+      when={running()}
+      fallback={
+        <text
+          marginTop={1}
+          fg={
+            props.segment.phase === 'failed'
+              ? props.theme.error
+              : props.segment.phase === 'interrupted'
+                ? props.theme.warn
+                : props.theme.dim
+          }
+        >
+          {`  ◌ ${line()}`}
+        </text>
+      }
+    >
+      <Throbber
+        facts={facts()}
+        width={props.width}
+        theme={props.theme}
+        animate={props.animate}
+        ascii={props.ascii}
+      />
+    </Show>
   );
 }
 

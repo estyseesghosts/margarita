@@ -1,13 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import {
-  describeThrobber,
-  formatElapsed,
-  frameAt,
-  latestTurn,
-  shimmerWeights,
-  tipFor,
-} from './throbber.ts';
+import { describeThrobber, formatElapsed, frameAt, shimmerWeights, tipFor } from './throbber.ts';
 
 const clock = (at: number): string => `t${at}`;
 
@@ -61,108 +54,5 @@ describe('throbber', () => {
     expect(tipFor(3, 1000)).toBeUndefined();
     expect(tipFor(1, 60_000)).toBeUndefined();
     expect(tipFor(3, 60_000)).toBeDefined();
-  });
-});
-
-describe('latestTurn', () => {
-  const model = { providerID: 'p', modelID: 'm' };
-  test('running turn starts at the user message and names the running tool', () => {
-    const facts = latestTurn(
-      [
-        { kind: 'user', id: 'u', createdAt: 10, text: 'hi', attachments: [] },
-        {
-          kind: 'assistant',
-          id: 'a',
-          createdAt: 11,
-          agent: 'build',
-          model,
-          parts: [
-            {
-              kind: 'tool',
-              tool: { id: 't', name: 'grep', status: 'running', input: {}, startedAt: 12 },
-            },
-          ],
-        },
-      ],
-      true,
-    );
-    expect(facts).toEqual({ phase: 'running', startedAt: 10, activity: 'Searching' });
-  });
-  test('idle marker decides interrupted and completion time', () => {
-    const facts = latestTurn(
-      [
-        { kind: 'user', id: 'u', createdAt: 10, text: 'hi', attachments: [] },
-        { kind: 'idle', id: 'i', createdAt: 50, outcome: 'interrupted' },
-      ],
-      false,
-    );
-    expect(facts).toEqual({ phase: 'interrupted', startedAt: 10, completedAt: 50 });
-    expect(latestTurn([], false)).toBeUndefined();
-  });
-  test('a running compaction replaces the activity verb, keeping turn identity', () => {
-    const facts = latestTurn(
-      [
-        { kind: 'user', id: 'u', createdAt: 10, text: 'hi', attachments: [] },
-        {
-          kind: 'assistant',
-          id: 'a',
-          createdAt: 11,
-          agent: 'build',
-          model,
-          parts: [
-            {
-              kind: 'tool',
-              tool: { id: 't', name: 'edit', status: 'running', input: {}, startedAt: 12 },
-            },
-          ],
-        },
-        { kind: 'compaction', id: 'c', createdAt: 20, state: 'running' },
-      ],
-      true,
-    );
-    expect(facts).toEqual({
-      phase: 'running',
-      startedAt: 10,
-      activity: 'Compacting conversation',
-    });
-    if (facts === undefined) throw new Error('expected facts');
-    // describeThrobber appends the ellipsis to the verb.
-    const line = describeThrobber(facts, 10 + 42_000, 80, clock);
-    expect(line.label).toBe('Compacting conversation…');
-    expect(line.animated).toBe(true);
-  });
-  test('compaction applies even before any assistant part exists', () => {
-    const facts = latestTurn(
-      [
-        { kind: 'user', id: 'u', createdAt: 10, text: 'hi', attachments: [] },
-        { kind: 'compaction', id: 'c', createdAt: 12, state: 'running' },
-      ],
-      true,
-    );
-    expect(facts?.activity).toBe('Compacting conversation');
-  });
-  test('a completed compaction falls back to the underlying agent activity', () => {
-    const messages = [
-      { kind: 'user' as const, id: 'u', createdAt: 10, text: 'hi', attachments: [] },
-      {
-        kind: 'assistant' as const,
-        id: 'a',
-        createdAt: 11,
-        agent: 'build',
-        model,
-        parts: [
-          {
-            kind: 'reasoning' as const,
-            text: 'consider',
-            done: false,
-          },
-        ],
-      },
-      { kind: 'compaction' as const, id: 'c', createdAt: 20, state: 'completed' as const },
-    ];
-    const facts = latestTurn(messages, true);
-    expect(facts?.activity).toBe('Thinking');
-    if (facts === undefined) throw new Error('expected facts');
-    expect(describeThrobber(facts, 10 + 1000, 80, clock).label).not.toContain('Compacting');
   });
 });

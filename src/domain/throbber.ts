@@ -1,5 +1,3 @@
-import { classifyTool, type ToolCategory, type TranscriptMessage } from './transcript.ts';
-
 /** Inline activity indicator for the active assistant turn (docs/21-throbber.md). */
 export const orbitFrames = ['◜', '◝', '◞', '◟'] as const;
 export const asciiFrames = ['-', '\\', '|', '/'] as const;
@@ -126,65 +124,4 @@ export const tips = [
 export function tipFor(seed: number, elapsedMs: number): string | undefined {
   if (elapsedMs < 30_000 || seed % 3 !== 0) return undefined;
   return tips[Math.abs(seed) % tips.length];
-}
-
-const activityByCategory: Readonly<Record<ToolCategory, string>> = {
-  read: 'Reading',
-  search: 'Searching',
-  edit: 'Editing',
-  shell: 'Running',
-  web: 'Fetching',
-  delegate: 'Delegating',
-  other: 'Working',
-};
-
-/**
- * Indicator facts for the latest turn, derived only from canonical messages and the
- * server's running flag. Returns undefined when there is no turn to describe.
- */
-export function latestTurn(
-  messages: readonly TranscriptMessage[],
-  running: boolean,
-): ThrobberFacts | undefined {
-  const userIndex = messages.findLastIndex((message) => message.kind === 'user');
-  const user = messages[userIndex];
-  if (user === undefined) return undefined;
-  const after = messages.slice(userIndex + 1);
-  const assistant = after.findLast((message) => message.kind === 'assistant');
-  if (running) {
-    const lastPart = assistant?.kind === 'assistant' ? assistant.parts.at(-1) : undefined;
-    const compacting = after.some(
-      (message) => message.kind === 'compaction' && message.state === 'running',
-    );
-    const activity = compacting
-      ? 'Compacting conversation'
-      : lastPart?.kind === 'tool' && lastPart.tool.status !== 'completed'
-        ? activityByCategory[classifyTool(lastPart.tool.name)]
-        : lastPart?.kind === 'reasoning' && !lastPart.done
-          ? 'Thinking'
-          : undefined;
-    return {
-      phase: 'running',
-      startedAt: user.createdAt,
-      ...(activity === undefined ? {} : { activity }),
-    };
-  }
-  const idle = after.findLast((message) => message.kind === 'idle');
-  if (idle === undefined && assistant === undefined) return undefined;
-  const failed =
-    (idle?.kind === 'idle' && idle.outcome === 'failed') ||
-    (assistant?.kind === 'assistant' && assistant.error !== undefined);
-  const phase: ThrobberPhase =
-    idle?.kind === 'idle' && idle.outcome === 'interrupted'
-      ? 'interrupted'
-      : failed
-        ? 'failed'
-        : 'completed';
-  const completedAt =
-    idle?.createdAt ?? (assistant?.kind === 'assistant' ? assistant.completedAt : undefined);
-  return {
-    phase,
-    startedAt: user.createdAt,
-    ...(completedAt === undefined ? {} : { completedAt }),
-  };
 }

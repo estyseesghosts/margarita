@@ -10,6 +10,7 @@ import { emptyState } from '../config/local-state.ts';
 import { isRecord } from '../domain/backend-event.ts';
 import { composerFrom } from '../domain/composer.ts';
 import { buildKeymap } from '../domain/keymap.ts';
+import type { TranscriptMessage } from '../domain/transcript.ts';
 import { App } from './app.tsx';
 import { pickTheme } from './theme.ts';
 
@@ -643,6 +644,90 @@ function richBackend(): FakeBackend {
   backend.messages = { ses_a: [1, 2, 3, 4].flatMap(richTurn) };
   return backend;
 }
+
+function assembleTurn(id: string, at: number): TranscriptMessage[] {
+  return [
+    { kind: 'user', id: `u${id}`, createdAt: at, text: `ask ${id}`, attachments: [] },
+    {
+      kind: 'assistant' as const,
+      id: `a${id}`,
+      createdAt: at + 10,
+      completedAt: at + 100,
+      agent: 'build',
+      model: { providerID: 'opencode', modelID: 'longcat' },
+      parts: [{ kind: 'text' as const, text: `answer ${id}` }],
+    },
+    { kind: 'idle' as const, id: `i${id}`, createdAt: at + 110, outcome: 'succeeded' as const },
+  ];
+}
+
+function twoTurns(backend: FakeBackend) {
+  backend.messages = {
+    ses_a: [...assembleTurn('one', 1_000), ...assembleTurn('two', 1_000_000)],
+  };
+  return backend;
+}
+
+describe('execution markers (issue #28)', () => {
+  test('each completed execution keeps its own static marker between the right turns', async () => {
+    const backend = twoTurns(backendWithSession());
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    const markerLines = frame.split('\n').filter((line) => line.includes('Completed'));
+    expect(markerLines).toHaveLength(2);
+    // The first marker appears before the second turn's user prompt.
+    const first = markerLines[0] ?? '';
+    const second = markerLines[1] ?? '';
+    expect(first).not.toEqual(second);
+    controller.dispose();
+  });
+
+  test('a running segment animates; a queued follow-up does not reset the timer', async () => {
+    const backend = backendWithSession();
+    backend.active = new Set(['ses_a']);
+    backend.messages = {
+      ses_a: [{ kind: 'user', id: 'u1', createdAt: 1, text: 'work on it', attachments: [] }],
+    };
+    backend.inbox = [
+      { id: 'in_1', kind: 'user', delivery: 'queue', text: 'queued follow-up', createdAt: 2 },
+    ];
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    const liveVerbs = /(Thinking|Tinkering|Pondering|Untangling|Mulling|Noodling)…/g;
+    expect(frame.match(liveVerbs)).toHaveLength(1);
+    controller.dispose();
+  });
+
+  test('an interrupted turn gets a distinct Interrupted marker, not a spinner', async () => {
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'u1', createdAt: 1, text: 'work on it', attachments: [] },
+        {
+          kind: 'assistant' as const,
+          id: 'a1',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [{ kind: 'text' as const, text: 'partial' }],
+        },
+        { kind: 'idle' as const, id: 'i1', createdAt: 4, outcome: 'interrupted' as const },
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('Interrupted');
+    expect(frame).not.toMatch(/(Thinking|Tinkering)…/);
+    controller.dispose();
+  });
+});
 
 describe('live activity indicator (issues 24, 25)', () => {
   test('unfinished empty reasoning produces no placeholder row; exactly one throbber', async () => {
