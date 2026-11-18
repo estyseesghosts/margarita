@@ -127,6 +127,10 @@ export class AppController {
     return this.deps.cwd;
   }
 
+  get serverUrl(): string {
+    return this.deps.backend.baseUrl;
+  }
+
   // ---------------------------------------------------------------- startup
 
   /** Loads catalogs and sessions. Errors propagate so startup can report them. */

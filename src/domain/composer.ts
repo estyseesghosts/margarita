@@ -9,6 +9,18 @@ export const emptyComposer: Composer = { text: '', cursor: 0 };
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
+/** Splits text into user-perceived characters. */
+export function graphemes(text: string): string[] {
+  return Array.from(segmenter.segment(text), (segment) => segment.segment);
+}
+
+/** The cursor's grapheme and the text after it, for drawing an inverse-cell cursor. */
+export function splitAtCursor(composer: Composer): { before: string; at: string; after: string } {
+  const before = composer.text.slice(0, composer.cursor);
+  const end = nextBoundary(composer.text, composer.cursor);
+  return { before, at: composer.text.slice(composer.cursor, end), after: composer.text.slice(end) };
+}
+
 function boundaries(text: string): number[] {
   const points = [0];
   for (const segment of segmenter.segment(text)) {
