@@ -2,19 +2,19 @@
   "name": "margarita",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "bin": {
     "margarita": "./src/main.ts"
   },
+  "type": "module",
   "scripts": {
     "start": "bun run src/main.ts",
     "format": "bun fmt --no-script",
     "format:check": "bun fmt --no-script --check",
-    "lint": "bun lint --no-script --type-aware --max-warnings 0",
     "typecheck": "bun check",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
-    "verify": "bun run format:check && bun run lint && bun run typecheck && bun run test"
+    "verify": "bun run format:check && bun run lint && bun run typecheck && bun run test",
+    "lint": "oxlint --type-aware --deny-warnings"
   },
   "dependencies": {
     "@opencode/client": "2.3.0",
@@ -24,6 +24,8 @@
   },
   "devDependencies": {
     "@types/bun": "^1.4.4",
+    "oxlint": "1.93.0",
+    "oxlint-tsgolint": "7.0.2007",
     "typescript": "^7.0.2"
   }
 }

@@ -1,0 +1,53 @@
+import { describe, expect, test } from 'bun:test';
+
+import { normalizeEvent } from './backend-event.ts';
+
+describe('normalizeEvent', () => {
+  test('usage events carry cost and tokens', () => {
+    expect(
+      normalizeEvent({
+        type: 'session.usage.updated',
+        data: {
+          sessionID: 's',
+          cost: 0.5,
+          tokens: { input: 10, output: 2, reasoning: 1, cache: { read: 4, write: 0 } },
+        },
+      }),
+    ).toEqual({
+      kind: 'usage',
+      sessionID: 's',
+      cost: 0.5,
+      tokens: { input: 10, output: 2, reasoning: 1, cacheRead: 4, cacheWrite: 0 },
+    });
+  });
+  test('malformed usage is dropped rather than zeroing totals', () => {
+    expect(
+      normalizeEvent({ type: 'session.usage.updated', data: { sessionID: 's', cost: 'x' } }),
+    ).toBeUndefined();
+  });
+  test('execution failures keep the server message', () => {
+    expect(
+      normalizeEvent({
+        type: 'session.execution.failed',
+        data: { sessionID: 's', error: { message: 'boom' } },
+      }),
+    ).toEqual({ kind: 'execution', sessionID: 's', state: 'failed', error: 'boom' });
+  });
+  test('streaming events mark the transcript dirty', () => {
+    expect(
+      normalizeEvent({ type: 'session.text.delta', data: { sessionID: 's', delta: 'x' } }),
+    ).toEqual({ kind: 'transcript-changed', sessionID: 's' });
+  });
+  test('permission events', () => {
+    expect(normalizeEvent({ type: 'permission.asked', data: { sessionID: 's' } })).toEqual({
+      kind: 'input-requests-changed',
+      sessionID: 's',
+    });
+  });
+  test('reconnect marker and unknown events', () => {
+    expect(normalizeEvent({ type: 'server.connected', data: {} })).toEqual({ kind: 'connected' });
+    expect(normalizeEvent({ type: 'pty.created', data: { sessionID: 's' } })).toBeUndefined();
+    expect(normalizeEvent(null)).toBeUndefined();
+    expect(normalizeEvent({ type: 'session.text.delta' })).toBeUndefined();
+  });
+});
