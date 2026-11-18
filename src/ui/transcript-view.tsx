@@ -214,6 +214,9 @@ export function Transcript(props: TranscriptProps) {
 
 const cat = [' /\\_/\\ ', '( o.o )', ' > ^ < '];
 
+const catWidth = 7;
+const hintWidth = 34;
+
 export type WelcomeProps = Readonly<{
   controller: AppController;
   theme: Theme;
@@ -227,7 +230,12 @@ export type WelcomeProps = Readonly<{
 export function WelcomePanel(props: WelcomeProps) {
   const model = () =>
     props.model === undefined ? 'server default model' : formatModelRef(props.model);
-  const wide = () => props.width >= 70;
+  const detail = () => `${props.agent ?? 'build'} · ${model()}`;
+  const directory = () => props.directory ?? props.controller.cwd;
+  /** The hints only appear when the cat, the details and the hints all fit unsqueezed. */
+  const wide = () =>
+    props.width >=
+    4 + catWidth + 2 + Math.max(detail().length, directory().length, 16) + 2 + hintWidth;
   return (
     <box
       border
@@ -240,18 +248,18 @@ export function WelcomePanel(props: WelcomeProps) {
       marginBottom={1}
       flexShrink={0}
     >
-      <box flexDirection="column" marginRight={2}>
+      <box flexDirection="column" marginRight={2} width={catWidth} flexShrink={0}>
         <For each={cat}>{(line) => <text fg={props.theme.accent}>{line}</text>}</For>
       </box>
       <box flexDirection="column" flexGrow={1}>
         <text fg={props.theme.text}>
           <b>Welcome back!</b>
         </text>
-        <text fg={props.theme.dim}>{`${props.agent ?? 'build'} · ${model()}`}</text>
-        <text fg={props.theme.dim}>{props.directory ?? props.controller.cwd}</text>
+        <text fg={props.theme.dim}>{detail()}</text>
+        <text fg={props.theme.dim}>{directory()}</text>
       </box>
       <Show when={wide()}>
-        <box flexDirection="column" marginLeft={2}>
+        <box flexDirection="column" marginLeft={2} flexShrink={0}>
           <text fg={props.theme.dim}>← overview (empty prompt)</text>
           <text fg={props.theme.dim}>Shift+Tab agent · Alt+P model</text>
           <text fg={props.theme.dim}>Ctrl+O details · F1 help</text>
