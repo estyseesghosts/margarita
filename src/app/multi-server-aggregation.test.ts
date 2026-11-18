@@ -53,6 +53,45 @@ describe('cross-server aggregation', () => {
     controller.dispose();
   });
 
+  test('each server paginates independently and merges its own rows', async () => {
+    const { controller, local, remote } = harness();
+    let localPages = 0;
+    let remotePages = 0;
+    local.listSessionsHook = async () => {
+      localPages += 1;
+      if (localPages <= 5) {
+        return {
+          sessions: [session(`ses_l${localPages}`, 'local', '/work/lotus')],
+          nextCursor: `l${localPages}`,
+        };
+      }
+      return { sessions: [session('ses_l6', 'local', '/work/lotus')] };
+    };
+    remote.listSessionsHook = async () => {
+      remotePages += 1;
+      if (remotePages <= 5) {
+        return {
+          sessions: [session(`ses_r${remotePages}`, 'srv_1', '/work/lotus')],
+          nextCursor: `r${remotePages}`,
+        };
+      }
+      return { sessions: [session('ses_r6', 'srv_1', '/work/lotus')] };
+    };
+    await controller.loadSessions();
+    expect(controller.state.serverPages['local']?.cursor).toBe('l5');
+    expect(controller.state.serverPages['srv_1']?.cursor).toBe('r5');
+    expect(controller.state.sessionsComplete).toBe(false);
+
+    await controller.loadMoreSessions();
+    expect(localPages).toBe(6);
+    expect(remotePages).toBe(6);
+    expect(controller.state.serverPages['local']?.complete).toBe(true);
+    expect(controller.state.serverPages['srv_1']?.complete).toBe(true);
+    expect(Object.keys(controller.state.sessions)).toContain('server:srv_1/session:ses_r6');
+    expect(Object.keys(controller.state.sessions)).toContain('ses_l6');
+    controller.dispose();
+  });
+
   test('catalogs are scoped by server and directory', async () => {
     const { controller, local, remote } = harness();
     local.agents = [{ id: 'local-agent', name: 'Local', mode: 'primary', hidden: false }];

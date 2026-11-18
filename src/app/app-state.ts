@@ -166,6 +166,11 @@ export type AppState = {
   sessionsLoading: boolean;
   /** Last failure loading an older page; cleared on success. Retry via loadMoreSessions(). */
   sessionsError?: string;
+  /** Independent pagination state per server; one slow host never blocks another. */
+  serverPages: Record<
+    string,
+    Readonly<{ cursor?: string; complete: boolean; loading: boolean; error?: string }>
+  >;
 };
 
 export function initialState(directory: string): AppState {
@@ -206,5 +211,6 @@ export function initialState(directory: string): AppState {
     exitArmed: false,
     sessionsComplete: false,
     sessionsLoading: false,
+    serverPages: {},
   };
 }

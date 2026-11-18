@@ -545,10 +545,19 @@ export class AppController {
     const results = await Promise.all(servers.map((serverID) => this.loadServerSessions(serverID)));
     const fresh: Record<string, SessionSummary> = {};
     const running: Record<string, true> = {};
+    const pages: Record<
+      string,
+      { cursor?: string; complete: boolean; loading: boolean; error?: string }
+    > = {};
     const activeByServer = new Map<string, Set<string>>();
     for (const result of results) {
       Object.assign(fresh, result.fresh);
       for (const id of result.active) running[this.keyFor(result.serverID, id)] = true;
+      pages[result.serverID] = {
+        ...(result.cursor === undefined ? {} : { cursor: result.cursor }),
+        complete: result.cursor === undefined,
+        loading: false,
+      };
       activeByServer.set(result.serverID, result.active);
     }
     // Deletions while the stream was down are never replayed, and absence from the first
@@ -563,6 +572,7 @@ export class AppController {
     batch(() => {
       this.setState('sessions', (current) => ({ ...current, ...reconciled.found, ...fresh }));
       for (const ref of reconciled.deleted) this.forgetSession(ref.sessionID);
+      this.setState('serverPages', pages);
       this.setState(
         'sessionsComplete',
         results.every((result) => result.cursor === undefined),
@@ -662,53 +672,102 @@ export class AppController {
    * pages fail to cover everything). Merges by id, so retrying after a failure never
    * duplicates rows and never discards earlier pages.
    */
-  /**
-   * Fetch the next older page of sessions (the row the overview offers once the first
-   * pages fail to cover everything). Merges by id, so retrying after a failure never
-   * duplicates rows and never discards earlier pages.
-   */
   async loadMoreSessions(): Promise<void> {
-    if (this.state.sessionsComplete || this.state.sessionsLoading) return;
-    const cursor = this.state.sessionsCursor;
+    if (this.state.sessionsLoading) return;
+    const servers = this.serverIDs().filter(
+      (serverID) => this.state.serverPages[serverID]?.complete === false,
+    );
+    if (servers.length === 0) return;
     this.setState('sessionsLoading', true);
-    this.setState('sessionsError', undefined);
-    try {
-      const [page, active] = await Promise.all([
-        this.backend.listSessions(cursor === undefined ? {} : { cursor }),
-        this.backend.activeSessionIDs(),
-      ]);
-      batch(() => {
+    for (const serverID of servers) {
+      this.setState('serverPages', serverID, (current) => ({
+        ...(current ?? { complete: false }),
+        loading: true,
+      }));
+    }
+    const results = await Promise.all(
+      servers.map(async (serverID) => {
+        const backend = this.backendFor(serverID);
+        const cursor = this.state.serverPages[serverID]?.cursor;
+        try {
+          const [page, active] = await Promise.all([
+            backend.listSessions(cursor === undefined ? {} : { cursor }),
+            backend.activeSessionIDs(),
+          ]);
+          return { serverID, page, active };
+        } catch (error) {
+          return {
+            serverID,
+            error: error instanceof Error ? error.message : 'Unknown error loading sessions',
+          };
+        }
+      }),
+    );
+    batch(() => {
+      let anyError: string | undefined;
+      for (const result of results) {
+        if ('error' in result) {
+          anyError = result.error;
+          this.setState('serverPages', result.serverID, (current) => ({
+            ...(current ?? { complete: false }),
+            loading: false,
+            ...(result.error === undefined ? {} : { error: result.error }),
+          }));
+          continue;
+        }
         this.setState('sessions', (current) => {
           const merged = { ...current };
-          for (const session of page.sessions) merged[this.sessionKeyOf(session.id)] = session;
+          for (const session of result.page.sessions) {
+            merged[this.keyFor(result.serverID, session.id)] = {
+              ...session,
+              serverID: result.serverID,
+            };
+          }
           return merged;
         });
-        this.setState('sessionsComplete', page.nextCursor === undefined);
-        this.setState('sessionsCursor', page.nextCursor);
-        this.setState('sessionsLoading', false);
+        this.setState('serverPages', result.serverID, {
+          ...(result.page.nextCursor === undefined ? {} : { cursor: result.page.nextCursor }),
+          complete: result.page.nextCursor === undefined,
+          loading: false,
+        });
         this.setState('running', (current) => {
           const merged = { ...current };
-          for (const id of active) merged[this.sessionKeyOf(id)] = true;
+          for (const id of result.active) merged[this.keyFor(result.serverID, id)] = true;
           return merged;
         });
-      });
-      await Promise.all([...active].map((id) => this.refreshInputRequests(id)));
-      this.debugLog.write('action', { action: 'load-more-sessions', ok: true });
-      // The pagination row disappears once the server says the list is complete; keep a
-      // still-valid selection by landing on the last remaining row.
-      if (page.nextCursor === undefined && this.state.overview.selectedRow === loadMoreRowKey) {
-        const rows = this.overviewRows();
-        const last = rows[rows.length - 1];
-        if (last !== undefined) this.selectRow(last);
-        else this.setState('overview', 'selectedRow', undefined);
       }
-    } catch (error) {
-      this.setState('sessionsLoading', false);
-      this.debugLog.write('action', { action: 'load-more-sessions', ok: false });
+      const all = this.serverIDs().map((serverID) => this.state.serverPages[serverID]);
       this.setState(
-        'sessionsError',
-        error instanceof Error ? error.message : 'Unknown error loading sessions',
+        'sessionsComplete',
+        all.every((page) => page?.complete === true),
       );
+      this.setState(
+        'sessionsCursor',
+        this.serverIDs().find((serverID) => this.state.serverPages[serverID]?.cursor !== undefined)
+          ? this.state.serverPages[
+              this.serverIDs().find(
+                (serverID) => this.state.serverPages[serverID]?.cursor !== undefined,
+              ) ?? this.serverID
+            ]?.cursor
+          : undefined,
+      );
+      this.setState('sessionsLoading', false);
+      this.setState('sessionsError', anyError);
+    });
+    for (const result of results) {
+      if ('error' in result) continue;
+      await Promise.all(
+        [...result.active].map((sessionID) =>
+          this.refreshInputRequests(sessionID, result.serverID),
+        ),
+      );
+    }
+    this.debugLog.write('action', { action: 'load-more-sessions', ok: true });
+    if (this.state.sessionsComplete && this.state.overview.selectedRow === loadMoreRowKey) {
+      const rows = this.overviewRows();
+      const last = rows[rows.length - 1];
+      if (last !== undefined) this.selectRow(last);
+      else this.setState('overview', 'selectedRow', undefined);
     }
   }
 
