@@ -21,6 +21,9 @@ const result = await Bun.build({
   sourcemap: 'linked',
   compile: {
     outfile,
+    // Never pick up a bunfig.toml/.env from wherever marg is launched (e.g. this repo).
+    autoloadBunfig: false,
+    autoloadDotenv: false,
     ...(target === undefined ? {} : { target }),
   },
 });
