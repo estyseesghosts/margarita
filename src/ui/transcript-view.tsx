@@ -26,7 +26,7 @@ import { formatModelRef, type ModelSelection } from '../domain/model-ref.ts';
 import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
 import { assertNever } from '../domain/session.ts';
 import { stickyPrompt, truncatePrompt } from '../domain/sticky-prompt.ts';
-import { formatElapsed, type ThrobberFacts } from '../domain/throbber.ts';
+import { type ThrobberFacts } from '../domain/throbber.ts';
 import {
   describeTool,
   foldTranscript,
@@ -35,6 +35,7 @@ import {
   type TranscriptNode,
   windowNodes,
 } from '../domain/transcript.ts';
+import { markerText } from './marker-text.ts';
 import { QueuedPreview } from './queued-preview.tsx';
 import { createSyntaxStyle } from './syntax.ts';
 import type { Theme } from './theme.ts';
@@ -462,8 +463,6 @@ function NodeView(props: {
   );
 }
 
-const timeFormat = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
-
 /** Renders one execution marker: live indicator while running, static after. */
 function ExecutionMarkerView(props: {
   segment: ExecutionMarker;
@@ -478,26 +477,15 @@ function ExecutionMarkerView(props: {
     startedAt: props.segment.startedAt,
     ...(props.segment.activity === undefined ? {} : { activity: props.segment.activity }),
   });
-  const done = () =>
-    props.segment.completedAt === undefined
-      ? undefined
-      : timeFormat.format(new Date(props.segment.completedAt));
-  const duration = () =>
-    props.segment.durationMs === undefined ? undefined : formatElapsed(props.segment.durationMs);
   const line = () => {
-    const status =
-      props.segment.phase === 'completed'
-        ? 'Completed'
-        : props.segment.phase === 'failed'
-          ? 'Failed'
-          : 'Interrupted';
-    const time = done();
-    const length = duration();
-    const eventPart =
-      length === undefined
-        ? status
-        : `${status} ${props.segment.phase === 'completed' ? 'in' : 'after'} ${length}`;
-    return time === undefined ? `◌ ${eventPart}` : `◌ ${eventPart} · done ${time}`;
+    const { phase, durationMs, completedAt } = props.segment;
+    return phase === 'running'
+      ? ''
+      : markerText({
+          phase,
+          ...(durationMs === undefined ? {} : { durationMs }),
+          ...(completedAt === undefined ? {} : { completedAt }),
+        });
   };
   return (
     <Show
