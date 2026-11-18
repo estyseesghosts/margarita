@@ -97,6 +97,130 @@ describe('@file completion', () => {
   });
 });
 
+function pagedSessions(count: number): SessionSummary[] {
+  return Array.from({ length: count }, (_, index) => fakeSession(`s${index}`));
+}
+
+function onePerPageHook(
+  pages: SessionSummary[],
+): (query: { cursor?: string }) => Promise<{ sessions: SessionSummary[]; nextCursor?: string }> {
+  return async (query) => {
+    const start = query.cursor === undefined ? 0 : Number(query.cursor);
+    const slice = pages.slice(start, start + 1);
+    return {
+      sessions: slice,
+      ...(start + 1 < pages.length ? { nextCursor: String(start + 1) } : {}),
+    };
+  };
+}
+
+describe('session pagination', () => {
+  test('bootstrap caps the first load; Load more pages in older sessions keyboard-only', async () => {
+    const backend = new FakeBackend();
+    backend.listSessionsHook = onePerPageHook(pagedSessions(7));
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+
+    expect(Object.keys(controller.state.sessions)).toEqual(['s0', 's1', 's2', 's3', 's4']);
+    expect(controller.state.sessionsComplete).toBe(false);
+
+    controller.openOverview();
+    expect(controller.state.overview.focus).toBe('list');
+    const rows = controller.overviewRows();
+    expect(rows[rows.length - 1]?.kind).toBe('loadmore');
+
+    const services = { openEditor: () => {}, redraw: () => {}, scroll: () => {} };
+    const { keymap } = buildKeymap({});
+    const down = { name: 'down', ctrl: false, alt: false, shift: false };
+    for (let step = 1; step < rows.length; step += 1) routeKey(controller, keymap, down, services);
+    expect(controller.state.overview.selectedRow).toBe('loadmore');
+
+    // Enter on the load-more row pages in the next page.
+    routeKey(
+      controller,
+      keymap,
+      { name: 'return', ctrl: false, alt: false, shift: false },
+      services,
+    );
+    await flush();
+    expect(Object.keys(controller.state.sessions)).toContain('s5');
+    expect(controller.state.sessionsComplete).toBe(false);
+    expect(controller.state.overview.selectedRow).toBe('loadmore'); // still selectable
+
+    routeKey(
+      controller,
+      keymap,
+      { name: 'return', ctrl: false, alt: false, shift: false },
+      services,
+    );
+    await flush();
+    expect(Object.keys(controller.state.sessions)).toContain('s6');
+    expect(controller.state.sessionsComplete).toBe(true);
+    expect(controller.overviewRows().some((row) => row.kind === 'loadmore')).toBe(false);
+    // The disappearing load-more row must not strand the selection.
+    expect(controller.state.overview.selectedRow).not.toBe('loadmore');
+    controller.dispose();
+  });
+
+  test('a failed page load keeps prior pages and retries without duplicates', async () => {
+    const backend = new FakeBackend();
+    const pages = pagedSessions(7);
+    const real = onePerPageHook(pages);
+    let failNext = true;
+    backend.listSessionsHook = async (query) => {
+      // Bootstrap stops after five pages; the sixth request carries cursor '5'.
+      if (query.cursor === '5' && failNext) {
+        failNext = false;
+        throw new Error('boom');
+      }
+      return real(query);
+    };
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    expect(Object.keys(controller.state.sessions)).toHaveLength(5);
+
+    await controller.loadMoreSessions();
+    expect(controller.state.sessionsError).toContain('boom');
+    expect(controller.state.sessionsLoading).toBe(false);
+    expect(Object.keys(controller.state.sessions)).toHaveLength(5); // pages 1-5 intact
+
+    await controller.loadMoreSessions(); // retry
+    expect(controller.state.sessionsError).toBeUndefined();
+    expect(Object.keys(controller.state.sessions)).toHaveLength(6);
+
+    await controller.loadMoreSessions();
+    await controller.loadMoreSessions(); // completes; further calls are no-ops
+    expect(controller.state.sessionsComplete).toBe(true);
+    const ids = Object.keys(controller.state.sessions);
+    expect(new Set(ids).size).toBe(ids.length); // no duplicates
+    expect(ids).toHaveLength(7);
+    controller.dispose();
+  });
+
+  test('loading more pages preserves the draft and expanded project groups', async () => {
+    const backend = new FakeBackend();
+    backend.listSessionsHook = onePerPageHook(pagedSessions(6));
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.openOverview();
+    controller.setComposer(composerFrom('keep this draft'));
+
+    // Expand the only project group so its hidden sessions render as rows.
+    const group = controller.groups()[0];
+    expect(group).toBeDefined();
+    if (group === undefined) return;
+    controller.toggleOverviewGroup(group.key);
+    expect(controller.state.overview.expanded[group.key]).toBe(true);
+
+    await controller.loadMoreSessions();
+
+    expect(controller.state.composer.text).toBe('keep this draft');
+    expect(controller.state.overview.expanded[group.key]).toBe(true);
+    expect(Object.keys(controller.state.sessions)).toHaveLength(6);
+    controller.dispose();
+  });
+});
+
 function fakeSession(id: string): SessionSummary {
   return {
     id,

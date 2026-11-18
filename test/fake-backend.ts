@@ -33,7 +33,19 @@ export class FakeBackend implements Backend {
   models: CatalogModel[] = [];
   readonly calls: { name: string; args: unknown[] }[] = [];
 
-  async listSessions(): Promise<SessionPage> {
+  /** When set, listSessions delegates here (paged/failable listing tests). */
+  listSessionsHook?: (query: {
+    cursor?: string;
+    directory?: string;
+    limit?: number;
+  }) => Promise<SessionPage>;
+
+  async listSessions(query?: {
+    cursor?: string;
+    directory?: string;
+    limit?: number;
+  }): Promise<SessionPage> {
+    if (this.listSessionsHook !== undefined) return this.listSessionsHook(query ?? {});
     return { sessions: this.sessions };
   }
   async getSession(sessionID: string): Promise<SessionSummary> {

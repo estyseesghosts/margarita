@@ -59,10 +59,14 @@ export function groupSessions(
 /** Sessions shown per project before the rest collapse behind a toggle row. */
 export const collapsedSessionLimit = 6;
 
-/** One selectable overview line: a session, or the inline Show more/less toggle. */
+/** Row key for the pagination row rendered below the last group. */
+export const loadMoreRowKey = 'loadmore';
+
+/** One selectable overview line: a session, the inline toggle, or pagination. */
 export type OverviewRow =
   | Readonly<{ kind: 'session'; key: string; groupKey: string; session: SessionSummary }>
-  | Readonly<{ kind: 'toggle'; key: string; groupKey: string; expanded: boolean; hidden: number }>;
+  | Readonly<{ kind: 'toggle'; key: string; groupKey: string; expanded: boolean; hidden: number }>
+  | Readonly<{ kind: 'loadmore'; key: typeof loadMoreRowKey }>;
 
 export function sessionRowKey(sessionID: string): string {
   return `session:${sessionID}`;

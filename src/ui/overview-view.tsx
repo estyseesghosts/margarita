@@ -2,7 +2,7 @@ import type { Accessor } from 'solid-js';
 import { For, Match, Show, Switch } from 'solid-js';
 
 import type { AppController } from '../app/controller.ts';
-import { groupRows, type OverviewRow } from '../domain/overview-groups.ts';
+import { groupRows, loadMoreRowKey, type OverviewRow } from '../domain/overview-groups.ts';
 import { directoryName } from '../domain/path-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import { executionLabel } from '../domain/session.ts';
@@ -66,8 +66,25 @@ export function Overview(props: { controller: AppController; theme: Theme; now: 
           </box>
         )}
       </For>
-      <Show when={!state.sessionsComplete && groups().length > 0}>
+      <Show when={!state.sessionsComplete}>
         <text fg={props.theme.dim}>Showing recent sessions only.</text>
+        <text fg={selected(loadMoreRowKey) ? props.theme.accent : props.theme.dim}>
+          {`${selected(loadMoreRowKey) ? '  ❯ ' : '    '}${
+            state.sessionsLoading
+              ? '[Loading more sessions…]'
+              : state.sessionsError !== undefined
+                ? '[Retry loading sessions]'
+                : '[Load more sessions]'
+          }`}
+        </text>
+        <Show when={state.sessionsError !== undefined}>
+          <text
+            fg={props.theme.warn}
+          >{`Could not load more sessions: ${state.sessionsError}`}</text>
+        </Show>
+      </Show>
+      <Show when={state.sessionsComplete && groups().length > 0}>
+        <text fg={props.theme.dim}>All sessions loaded.</text>
       </Show>
       <text fg={props.theme.dim} marginTop={1}>
         {`New session in: ${directoryName(state.overview.directory)}`}

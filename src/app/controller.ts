@@ -54,6 +54,7 @@ import { resolveModel } from '../domain/model-resolution.ts';
 import {
   groupRows,
   groupSessions,
+  loadMoreRowKey,
   type OverviewRow,
   type ProjectGroup,
 } from '../domain/overview-groups.ts';
@@ -183,9 +184,12 @@ export class AppController {
 
   /** Flattened selectable overview rows in display order, for keyboard navigation. */
   overviewRows(): OverviewRow[] {
-    return this.groups().flatMap((group) =>
+    const rows = this.groups().flatMap((group) =>
       groupRows(group, this.state.overview.expanded[group.key] === true),
     );
+    // Offer pagination once the server says the first pages are not everything.
+    if (!this.state.sessionsComplete) rows.push({ kind: 'loadmore', key: loadMoreRowKey });
+    return rows;
   }
 
   /** Injected clock, so ages and recency are testable. */
@@ -239,12 +243,68 @@ export class AppController {
     } while (cursor !== undefined && pages < sessionPageLimit);
     const active = await this.deps.backend.activeSessionIDs();
     batch(() => {
-      this.setState('sessions', Object.fromEntries(loaded.map((session) => [session.id, session])));
+      const fresh = Object.fromEntries(loaded.map((session) => [session.id, session]));
+      // Keep sessions revealed by loadMoreSessions beyond the first pages; deletions
+      // arrive as session-deleted events.
+      this.setState('sessions', (current) => ({ ...current, ...fresh }));
       this.setState('sessionsComplete', cursor === undefined);
+      this.setState('sessionsCursor', cursor);
+      this.setState('sessionsLoading', false);
+      this.setState('sessionsError', undefined);
       this.setState('running', Object.fromEntries([...active].map((id) => [id, true])));
     });
     // Running sessions are the ones that can be blocked on input right now.
     await Promise.all([...active].map((id) => this.refreshInputRequests(id)));
+  }
+
+  /**
+   * Fetch the next older page of sessions (the row the overview offers once the first
+   * pages fail to cover everything). Merges by id, so retrying after a failure never
+   * duplicates rows and never discards earlier pages.
+   */
+  async loadMoreSessions(): Promise<void> {
+    if (this.state.sessionsComplete || this.state.sessionsLoading) return;
+    const cursor = this.state.sessionsCursor;
+    this.setState('sessionsLoading', true);
+    this.setState('sessionsError', undefined);
+    try {
+      const [page, active] = await Promise.all([
+        this.deps.backend.listSessions(cursor === undefined ? {} : { cursor }),
+        this.deps.backend.activeSessionIDs(),
+      ]);
+      batch(() => {
+        this.setState('sessions', (current) => {
+          const merged = { ...current };
+          for (const session of page.sessions) merged[session.id] = session;
+          return merged;
+        });
+        this.setState('sessionsComplete', page.nextCursor === undefined);
+        this.setState('sessionsCursor', page.nextCursor);
+        this.setState('sessionsLoading', false);
+        this.setState('running', (current) => {
+          const merged = { ...current };
+          for (const id of active) merged[id] = true;
+          return merged;
+        });
+      });
+      await Promise.all([...active].map((id) => this.refreshInputRequests(id)));
+      this.debugLog.write('action', { action: 'load-more-sessions', ok: true });
+      // The pagination row disappears once the server says the list is complete; keep a
+      // still-valid selection by landing on the last remaining row.
+      if (page.nextCursor === undefined && this.state.overview.selectedRow === loadMoreRowKey) {
+        const rows = this.overviewRows();
+        const last = rows[rows.length - 1];
+        if (last !== undefined) this.selectRow(last);
+        else this.setState('overview', 'selectedRow', undefined);
+      }
+    } catch (error) {
+      this.setState('sessionsLoading', false);
+      this.debugLog.write('action', { action: 'load-more-sessions', ok: false });
+      this.setState(
+        'sessionsError',
+        error instanceof Error ? error.message : 'Unknown error loading sessions',
+      );
+    }
   }
 
   /** Agent and model for a brand-new session in the overview. */
@@ -627,7 +687,9 @@ export class AppController {
     const directory =
       row.kind === 'session'
         ? row.session.directory
-        : this.groups().find((group) => group.key === row.groupKey)?.directory;
+        : row.kind === 'toggle'
+          ? this.groups().find((group) => group.key === row.groupKey)?.directory
+          : undefined; // loadmore keeps the current directory
     if (directory !== undefined) this.setState('overview', 'directory', directory);
   }
 
@@ -661,12 +723,16 @@ export class AppController {
     this.setState('overview', 'focus', 'composer');
   }
 
-  /** Enter on a row: attach a session, or expand/collapse a project inline. */
+  /** Enter on a row: attach a session, expand/collapse a project, or page in more sessions. */
   attachSelected(): void {
     const row = this.selectedOverviewRow();
     if (row === undefined) return;
     if (row.kind === 'toggle') {
       this.toggleOverviewGroup(row.groupKey);
+      return;
+    }
+    if (row.kind === 'loadmore') {
+      void this.loadMoreSessions();
       return;
     }
     this.openSession(row.session.id);

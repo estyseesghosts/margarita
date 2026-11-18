@@ -120,6 +120,12 @@ export type AppState = {
   exitArmed: boolean;
   /** False while more session pages exist than were loaded; the overview says so. */
   sessionsComplete: boolean;
+  /** Cursor for the next older page of sessions; absent once the server has no more. */
+  sessionsCursor?: string;
+  /** True while an older sessions page is in flight. */
+  sessionsLoading: boolean;
+  /** Last failure loading an older page; cleared on success. Retry via loadMoreSessions(). */
+  sessionsError?: string;
 };
 
 export function initialState(directory: string): AppState {
@@ -152,5 +158,6 @@ export function initialState(directory: string): AppState {
     recentModels: [],
     exitArmed: false,
     sessionsComplete: false,
+    sessionsLoading: false,
   };
 }
