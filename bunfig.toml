@@ -1,0 +1,28 @@
+preload = ["@opentui/solid/preload"]
+
+[install]
+exact = true
+
+[fmt]
+printWidth = 100
+tabWidth = 2
+semi = true
+singleQuote = true
+trailingComma = "all"
+sortImports = true
+sortPackageJson = true
+ignorePatterns = ["dist/", "coverage/", "**/*.gen.ts", "docs/", "adr/", "checklists/", "README.md"]
+
+[lint]
+typeAware = true
+ignorePatterns = ["dist/", "coverage/", "**/*.gen.ts"]
+
+[lint.rules]
+"@typescript-eslint/no-explicit-any" = "error"
+"@typescript-eslint/no-floating-promises" = "error"
+"prefer-const" = "error"
+"no-var" = "error"
+"eqeqeq" = ["error", "always"]
+
+[test]
+preload = ["@opentui/solid/preload"]
