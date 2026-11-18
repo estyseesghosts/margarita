@@ -90,6 +90,54 @@ Terminals that cannot deliver clipboard images (for example Windows Terminal pas
 
 `/compact` asks OpenCode to compact the session's context through the same native v2 endpoint its own clients use. The request works while the session is idle or mid-turn; no prompt is sent to the agent, and the session's pending items are untouched. The request is only an acceptance — compaction progress and its result show up in the transcript ("Compacting conversation" → "Conversation compacted" or "Compaction failed").
 
+### Remote servers
+
+Pair an OpenCode v2 server on another machine from inside margarita:
+
+```sh
+# on the remote machine
+opencode serve --service
+opencode pair --remote          # prints a one-time link, valid for five minutes
+
+# in margarita
+/pair https://host.example/auth/connect/<code> --as buildbox
+/servers                        # list local and paired servers
+/servers rename buildbox devbox
+/unpair devbox
+```
+
+Or point at a URL you already know (no one-time code):
+
+```sh
+/pair --url https://host.example --as buildbox
+```
+
+Manual pairing asks for the password through the secure credential flow, not the composer
+history. `MARGARITA_SERVER_PASSWORD` still works for a direct `--server` connection.
+
+From Bash or PowerShell:
+
+```sh
+marg --remote buildbox                                  # unified overview, buildbox selected
+marg --remote buildbox --cwd /home/me/app               # server-side directory
+marg --remote buildbox --cwd /home/me/app "fix the build"
+marg --remote buildbox --resume ses_123
+marg --local --cwd ~/work/lotus
+```
+
+`--cwd` for a remote target is a path **on the remote host**. Relative paths are rejected
+rather than resolved against your local machine. On Windows pointing at a Linux server:
+`--cwd /home/me/app`. From Linux pointing at a Windows server: `--cwd 'C:\work\app'`.
+
+Without `--cwd`, `--remote` opens the overview and does not guess a remote directory.
+Profiles and goal/history data survive restarts; secrets live in Windows DPAPI, macOS
+Keychain, or the Linux Secret Service. If secure storage is unavailable, margarita refuses
+to persist a secret and asks you to re-pair or use the env var instead of writing plaintext.
+
+Paired credentials are not the same as server-side token revocation: `/unpair` removes local
+access only, and remote sessions keep running. Margarita never starts or stops remote
+services, tunnels, or filesystem sync, and exiting never interrupts a session.
+
 ### Config
 
 `%LOCALAPPDATA%\margarita\config.jsonc` on Windows, or your XDG config directory elsewhere:

@@ -44,6 +44,9 @@ export class FakeBackend implements Backend {
     limit?: number;
   }) => Promise<SessionPage>;
 
+  /** When set, listAgents delegates here (catalog scoping/generation tests). */
+  listAgentsHook?: () => Promise<AgentDescriptor[]>;
+
   async listSessions(query?: {
     cursor?: string;
     directory?: string;
@@ -296,6 +299,7 @@ export class FakeBackend implements Backend {
     this.calls.push({ name: 'switchModel', args: [sessionID, model] });
   }
   async listAgents(): Promise<AgentDescriptor[]> {
+    if (this.listAgentsHook !== undefined) return this.listAgentsHook();
     return this.agents;
   }
   async listModels(): Promise<CatalogModel[]> {
