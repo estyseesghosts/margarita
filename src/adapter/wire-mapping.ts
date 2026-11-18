@@ -470,3 +470,8 @@ export function toFileDiff(info: FileDiffInfo): FileDiff {
     truncated: info.more === true,
   };
 }
+
+/** The pending user follow-up that "send now" promotes: first queued (not steering) entry. */
+export function nextQueuedUser(items: readonly QueuedInput[]): QueuedInput | undefined {
+  return items.find((item) => item.kind === 'user' && item.delivery === 'queue');
+}

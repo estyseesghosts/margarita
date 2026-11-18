@@ -13,6 +13,7 @@ import {
   type PromptFile,
 } from '../adapter/backend.ts';
 import type { StreamStatus } from '../adapter/event-pump.ts';
+import { nextQueuedUser } from '../adapter/wire-mapping.ts';
 import type { AppConfig } from '../config/config.ts';
 import { GoalConflictError, type GoalStore, memoryGoalStore } from '../config/goal-store.ts';
 import type { LocalState, SaveResult } from '../config/local-state.ts';
@@ -2007,6 +2008,8 @@ export class AppController {
       await this.deps.backend.changeDelivery(session.id, inboxID, 'steer');
     } catch (error) {
       this.showNotice(errorText(error), 'error');
+      await this.refreshInbox(session.id);
+      return;
     }
     await this.refreshInbox(session.id);
     await this.maybeResumeInterruptedGoal(session.id);
@@ -2024,7 +2027,7 @@ export class AppController {
       return;
     }
     const sessionID = this.state.route.sessionID;
-    const next = (this.state.inbox[sessionID] ?? []).find((item) => item.kind === 'user');
+    const next = nextQueuedUser(this.state.inbox[sessionID] ?? []);
     if (next === undefined) {
       await this.steer();
       return;

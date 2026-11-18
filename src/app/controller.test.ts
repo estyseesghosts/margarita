@@ -1494,6 +1494,37 @@ function queuedBackend() {
   return backend;
 }
 
+describe('send-now targets the hinted queued item (issue #40)', () => {
+  test('a pending steer item ahead of a queued one is skipped', async () => {
+    const backend = queuedBackend();
+    backend.inbox = [
+      { id: 'in_steer', kind: 'user', delivery: 'steer', text: 'steering', createdAt: 1 },
+      { id: 'in_q', kind: 'user', delivery: 'queue', text: 'queued', createdAt: 2 },
+    ];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+    await controller.promoteNextQueued();
+    const change = backend.calls.find((call) => call.name === 'changeDelivery');
+    expect(change?.args[1]).toBe('in_q');
+    controller.dispose();
+  });
+
+  test('a failed promotion does not resume a paused goal', async () => {
+    const { backend, controller } = await goalFixture();
+    backend.active = new Set(['ses_a']);
+    backend.inbox = [{ id: 'in_q', kind: 'user', delivery: 'queue', text: 'queued', createdAt: 1 }];
+    await controller.interrupt();
+    expect(controller.state.awaitingSteer['ses_a']).toBe('goal_1');
+    backend.changeDelivery = async () => {
+      throw new Error('conflict');
+    };
+    await controller.promoteQueued('in_q');
+    expect(backend.calls.filter((call) => call.args[2] === 'resume')).toHaveLength(0);
+    expect(controller.state.awaitingSteer['ses_a']).toBe('goal_1');
+    controller.dispose();
+  });
+});
+
 describe(`Up recalls the newest queued follow-up (issue #30)`, () => {
   test('Up on an empty composer recalls the newest entry; the older stays queued', async () => {
     const backend = queuedBackend();

@@ -1,6 +1,7 @@
 import { For, Show } from 'solid-js';
 
 import type { QueuedInput } from '../adapter/backend.ts';
+import { nextQueuedUser } from '../adapter/wire-mapping.ts';
 import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
 import { truncatePrompt } from '../domain/sticky-prompt.ts';
 import type { Theme } from './theme.ts';
@@ -23,11 +24,15 @@ export function QueuedPreview(props: {
     truncatePrompt(sanitizeText(item.text), Math.max(8, props.width - 6));
   const shown = () => props.items.slice(0, maxItems);
   const overflow = () => Math.max(0, props.items.length - maxItems);
-  const firstQueue = () => props.items.findIndex((item) => item.delivery === 'queue');
+  const hinted = () => nextQueuedUser(props.items);
+  const hintHidden = () => {
+    const target = hinted();
+    return target !== undefined && !shown().includes(target);
+  };
   return (
     <box flexDirection="column" flexShrink={0} marginTop={1}>
       <For each={shown()}>
-        {(item, index) => (
+        {(item) => (
           <box flexDirection="column">
             <box backgroundColor={props.theme.userBg} flexDirection="row">
               <text fg={props.theme.dim}>{item.delivery === 'steer' ? ' ⤷ ' : ' ❯ '}</text>
@@ -35,14 +40,16 @@ export function QueuedPreview(props: {
                 {text(item)}
               </text>
             </box>
-            <Show when={index() === firstQueue() && item.delivery === 'queue'}>
+            <Show when={item === hinted()}>
               <text fg={props.theme.dim}>{'  └ Queued · ctrl+enter to steer now'}</text>
             </Show>
           </box>
         )}
       </For>
       <Show when={overflow() > 0}>
-        <text fg={props.theme.dim}>{`  └ … and ${overflow()} more queued`}</text>
+        <text fg={props.theme.dim}>
+          {`  └ … and ${overflow()} more queued${hintHidden() ? ' · ctrl+enter to steer the next now' : ''}`}
+        </text>
       </Show>
     </box>
   );
