@@ -88,7 +88,7 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
         props.width - 2,
       );
     }
-    const inbox = state.inbox[session.id] ?? [];
+    const inbox = (state.inbox[session.id] ?? []).filter((item) => item.kind === 'user');
     const badge = goalBadge(state.nativeGoals[session.id] ?? null, state.awaitingSteer[session.id]);
     return formatFooter(
       {

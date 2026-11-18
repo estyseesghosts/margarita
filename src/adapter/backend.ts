@@ -92,6 +92,8 @@ export interface Backend {
   runCommand(sessionID: string, name: string, text: string): Promise<void>;
   runShell(sessionID: string, command: string): Promise<void>;
   interrupt(sessionID: string): Promise<boolean>;
+  /** Native OpenCode v2 session compaction; accepted ≠ complete. */
+  compactSession(sessionID: string, requestID?: string): Promise<void>;
   /** Detaches running tool calls so the turn continues while they finish. */
   backgroundTools(sessionID: string): Promise<void>;
   sessionDiff(sessionID: string, range: DiffRange): Promise<FileDiff[]>;
@@ -282,6 +284,20 @@ class OpenCodeBackend implements Backend {
       this.client.session.interrupt({ sessionID }),
     );
     return result.interrupted;
+  }
+
+  /**
+   * Native v2 compaction (`POST /api/session/{sessionID}/compact`, the same operation the
+   * first-party TUI's /compact uses). The reply confirms acceptance, not completion:
+   * progress arrives via session.compaction.* events and the compaction message itself.
+   */
+  async compactSession(sessionID: string, requestID?: string): Promise<void> {
+    await call('session.compact', () =>
+      this.client.session.compact({
+        sessionID,
+        ...(requestID === undefined ? {} : { id: requestID }),
+      }),
+    );
   }
 
   async backgroundTools(sessionID: string): Promise<void> {

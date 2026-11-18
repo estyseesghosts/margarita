@@ -76,9 +76,11 @@ Everything is a single key press. There are no chords. Rebind any of them in the
 ### Slash commands
 
 `/goal <objective>` · `/criteria a; b` · `/plan step one; step two` · `/plan propose` · `/plan adopt` ·
-`/rename` · `/fork` · `/revert` · `/diff [turn]` · `/export [file]`
+`/rename` · `/fork` · `/revert` · `/diff [turn]` · `/export [file]` · `/compact`
 
 `/goal` talks to the native OpenCode `opencode.goal` plugin (the same one OpenCode's own TUI drives): `/goal <objective>`, `/goal` status, `/goal pause|resume|clear`. Plans and acceptance criteria stay local under margarita's state directory and are supplemental; they are never mirrored to the agent.
+
+`/compact` asks OpenCode to compact the session's context through the same native v2 endpoint its own clients use. The request works while the session is idle or mid-turn; no prompt is sent to the agent, and the session's pending items are untouched. The request is only an acceptance — compaction progress and its result show up in the transcript ("Compacting conversation" → "Conversation compacted" or "Compaction failed").
 
 ### Config
 

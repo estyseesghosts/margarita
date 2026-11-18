@@ -1461,16 +1461,16 @@ describe('slash commands are control actions, never queued prompts (issue #31)',
 
   test('a server-side command executes through session.command, not session.prompt', async () => {
     const backend = runningSessionBackend();
-    backend.serverCommands = [{ name: 'compact', description: 'Compact the conversation' }];
+    backend.serverCommands = [{ name: 'deploy', description: 'Deploy the application' }];
     const controller = makePromptController(defaultConfig, backend);
     await attach(controller, 'ses_a');
 
-    controller.setComposer(composerFrom('/compact some extra args'));
+    controller.setComposer(composerFrom('/deploy some extra args'));
     await controller.submit();
 
     expect(backend.calls).toEqual(
       expect.arrayContaining([
-        { name: 'runCommand', args: ['ses_a', 'compact', 'some extra args'] },
+        { name: 'runCommand', args: ['ses_a', 'deploy', 'some extra args'] },
       ]),
     );
     expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
@@ -1479,36 +1479,36 @@ describe('slash commands are control actions, never queued prompts (issue #31)',
 
   test('a failing server command reports an explicit error and preserves the draft', async () => {
     const backend = runningSessionBackend();
-    backend.serverCommands = [{ name: 'compact', description: 'Compact the conversation' }];
+    backend.serverCommands = [{ name: 'deploy', description: 'Deploy the application' }];
     backend.runCommand = async () => {
       throw new BackendError('unknown', 'session.command', 'busy right now');
     };
     const controller = makePromptController(defaultConfig, backend);
     await attach(controller, 'ses_a');
 
-    controller.setComposer(composerFrom('/compact'));
+    controller.setComposer(composerFrom('/deploy'));
     await controller.submit();
 
     expect(controller.state.notice?.text).toContain('busy right now');
-    expect(controller.state.composer.text).toBe('/compact');
+    expect(controller.state.composer.text).toBe('/deploy');
     expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
     controller.dispose();
   });
 
   test('a transport failure of a server command reports an explicit connection notice', async () => {
     const backend = runningSessionBackend();
-    backend.serverCommands = [{ name: 'compact', description: 'Compact the conversation' }];
+    backend.serverCommands = [{ name: 'deploy', description: 'Deploy the application' }];
     backend.runCommand = async () => {
       throw new BackendError('transport', 'session.command', 'connection refused');
     };
     const controller = makePromptController(defaultConfig, backend);
     await attach(controller, 'ses_a');
 
-    controller.setComposer(composerFrom('/compact'));
+    controller.setComposer(composerFrom('/deploy'));
     await controller.submit();
 
     expect(controller.state.notice?.text).toContain('connection problem');
-    expect(controller.state.composer.text).toBe('/compact');
+    expect(controller.state.composer.text).toBe('/deploy');
     expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
     controller.dispose();
   });
@@ -1531,7 +1531,7 @@ describe('slash commands are control actions, never queued prompts (issue #31)',
 
   test('a recalled queued message edited to start with / is routed as a command on resubmission', async () => {
     const backend = runningSessionBackend();
-    backend.serverCommands = [{ name: 'compact', description: 'Compact the conversation' }];
+    backend.serverCommands = [{ name: 'deploy', description: 'Deploy the application' }];
     backend.inbox = [
       { id: 'in_1', kind: 'user', delivery: 'queue', text: 'please review', createdAt: 1 },
     ];
@@ -1541,15 +1541,106 @@ describe('slash commands are control actions, never queued prompts (issue #31)',
     await controller.recallQueuedUp();
     expect(controller.state.composer.text).toBe('please review');
 
-    controller.setComposer(composerFrom('/compact'));
+    controller.setComposer(composerFrom('/deploy'));
     await controller.submit();
 
     expect(backend.calls).toEqual(
-      expect.arrayContaining([{ name: 'runCommand', args: ['ses_a', 'compact', ''] }]),
+      expect.arrayContaining([{ name: 'runCommand', args: ['ses_a', 'deploy', ''] }]),
     );
     expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
     // The inbox only holds non-queued (none) user items afterwards.
     expect(controller.state.inbox['ses_a'] ?? []).toEqual([]);
+    controller.dispose();
+  });
+});
+
+describe('/compact routes to native session compaction (issue #32)', () => {
+  test('idle /compact requests one native compaction and never a prompt or server command', async () => {
+    const backend = runningSessionBackend();
+    const controller = makePromptController(defaultConfig, backend);
+    await attach(controller, 'ses_a');
+
+    await submitCommand(controller, '/compact');
+
+    const compacts = backend.calls.filter((call) => call.name === 'compactSession');
+    expect(compacts).toEqual([{ name: 'compactSession', args: ['ses_a'] }]);
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    expect(backend.calls.some((call) => call.name === 'runCommand')).toBe(false);
+    // Accepted is not completed: the notice never claims the conversation was compacted.
+    expect(controller.state.notice?.text).toBe('Compaction requested');
+    expect(controller.state.notice?.text).not.toContain('compacted');
+    controller.dispose();
+  });
+
+  test('/compact works during a running turn without touching a queued follow-up', async () => {
+    const backend = runningSessionBackend();
+    backend.inbox = [
+      { id: 'in_1', kind: 'user', delivery: 'queue', text: 'keep this queued', createdAt: 1 },
+    ];
+    const controller = makePromptController(defaultConfig, backend);
+    await attach(controller, 'ses_a');
+
+    await submitCommand(controller, '/compact');
+
+    const compacts = backend.calls.filter((call) => call.name === 'compactSession');
+    expect(compacts).toHaveLength(1);
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    // The queued user follow-up is untouched and still user-queued.
+    const userItems = controller.state.inbox['ses_a']?.filter((item) => item.kind === 'user');
+    expect(userItems?.map((item) => item.text)).toEqual(['keep this queued']);
+    controller.dispose();
+  });
+
+  test('a second /compact while one is pending does not double-request', async () => {
+    const backend = runningSessionBackend();
+    const controller = makePromptController(defaultConfig, backend);
+    await attach(controller, 'ses_a');
+
+    await submitCommand(controller, '/compact');
+    await submitCommand(controller, '/compact');
+
+    expect(backend.calls.filter((call) => call.name === 'compactSession')).toHaveLength(1);
+    expect(controller.state.notice?.text).toBe('Compaction already pending');
+    controller.dispose();
+  });
+
+  test('a transport failure of /compact asks nothing of the server and says so', async () => {
+    const backend = runningSessionBackend();
+    backend.compactError = new BackendError('transport', 'session.compact', 'connection refused');
+    const controller = makePromptController(defaultConfig, backend);
+    await attach(controller, 'ses_a');
+
+    await submitCommand(controller, '/compact');
+
+    expect(controller.state.notice?.text).toContain('connection problem');
+    expect(controller.state.notice?.text).not.toContain('compacted');
+    // No pending item was fabricated and the inbox is clean.
+    expect(controller.state.inbox['ses_a'] ?? []).toEqual([]);
+    controller.dispose();
+  });
+
+  test('/compact with arguments is rejected as a usage error', async () => {
+    const backend = runningSessionBackend();
+    const controller = makePromptController(defaultConfig, backend);
+    await attach(controller, 'ses_a');
+
+    await submitCommand(controller, '/compact please summarize everything');
+
+    expect(backend.calls.filter((call) => call.name === 'compactSession')).toHaveLength(0);
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    expect(controller.state.notice?.text).toBe('Usage: /compact');
+    controller.dispose();
+  });
+
+  test('/compact with no session open warns instead of calling the backend', async () => {
+    const backend = new FakeBackend();
+    const controller = makePromptController(defaultConfig, backend);
+    await controller.bootstrap();
+
+    await submitCommand(controller, '/compact');
+
+    expect(backend.calls.filter((call) => call.name === 'compactSession')).toHaveLength(0);
+    expect(controller.state.notice?.text).toBe('Open a session first.');
     controller.dispose();
   });
 });

@@ -1507,6 +1507,9 @@ export class AppController {
       case 'export':
         await this.exportChat(args);
         return;
+      case 'compact':
+        await this.compactCommand(args);
+        return;
       case 'criteria':
         await this.changeGoal(
           (doc) => setAcceptance(doc, parseSteps(args), this.isoNow()),
@@ -1788,6 +1791,34 @@ export class AppController {
     } catch (error) {
       this.showNotice(`Export failed: ${errorText(error)}`, 'error');
     }
+  }
+
+  /**
+   * /compact: asks OpenCode to compact the session via the native v2 endpoint. The reply
+   * confirms acceptance, never completion — state comes from session.compaction.* events
+   * and the compaction transcript message, never from this call returning.
+   */
+  private async compactCommand(args: string): Promise<void> {
+    const session = this.requireSession();
+    if (session === undefined) return;
+    if (args !== '') {
+      this.showNotice('Usage: /compact', 'warn');
+      return;
+    }
+    // A pending compaction is already in the inbox; requesting again would be a no-op.
+    const pending = (this.state.inbox[session.id] ?? []).some((item) => item.kind === 'compaction');
+    if (pending) {
+      this.showNotice('Compaction already pending', 'dim');
+      return;
+    }
+    try {
+      await this.deps.backend.compactSession(session.id);
+    } catch (error) {
+      this.showNotice(`Compaction not requested (connection problem): ${errorText(error)}`, 'warn');
+      return;
+    }
+    this.showNotice('Compaction requested', 'dim');
+    await this.refreshInbox(session.id);
   }
 
   isRunning(): boolean {

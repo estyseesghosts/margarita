@@ -487,5 +487,7 @@ function TasksDialog(props: {
 
 function queuedItems(controller: AppController) {
   const session = controller.currentSession();
-  return session === undefined ? [] : (controller.state.inbox[session.id] ?? []);
+  if (session === undefined) return [];
+  // Pending compactions share the inbox but are not user prompts; they are not cancellable here.
+  return (controller.state.inbox[session.id] ?? []).filter((item) => item.kind === 'user');
 }

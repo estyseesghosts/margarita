@@ -12,6 +12,7 @@ export const localCommands = {
   usage: 'Show token and spend breakdown',
   interrupt: 'Stop the running turn',
   queue: 'Show queued inputs',
+  compact: 'Compact the conversation now: /compact',
   export: 'Save the whole chat log as JSON: /export [file]',
   criteria: 'Acceptance criteria for the session (local): /criteria a; b',
   plan: 'Plan: /plan <steps> · /plan propose · /plan adopt · /plan accept|reject|clear',

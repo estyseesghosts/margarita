@@ -137,6 +137,28 @@ export class FakeBackend implements Backend {
     this.inboxSession[item.id] = sessionID;
     return { ...item };
   }
+  /** When set, compactSession fails with this error (transport failure injection). */
+  compactError: Error | undefined;
+  /**
+   * Native v2 compaction emulator: registers a pending `kind: 'compaction'` inbox item,
+   * like OpenCode's inbox does while the summary is being produced.
+   */
+  async compactSession(sessionID: string, requestID?: string): Promise<void> {
+    this.calls.push({
+      name: 'compactSession',
+      args: [sessionID, ...(requestID === undefined ? [] : [requestID])],
+    });
+    if (this.compactError !== undefined) throw this.compactError;
+    const item: QueuedInput = {
+      id: `in_${this.inbox.length + 1}`,
+      kind: 'compaction',
+      delivery: 'queue',
+      text: '',
+      createdAt: this.inbox.length + 1,
+    };
+    this.inbox.push(item);
+    this.inboxSession[item.id] = sessionID;
+  }
   /** Native opencode.goal plugin emulator: session-scoped goals, updated by goal commands. */
   goals: Record<string, NativeGoal | undefined> = {};
   private goalSequence = 0;
