@@ -235,19 +235,101 @@ export class AppController {
     await Promise.all([this.loadCatalog(this.deps.cwd), this.loadSessions()]);
   }
 
+  private catalogGeneration = 0;
+  private catalogInFlight: Promise<void> | undefined;
+
   async loadCatalog(directory: string): Promise<void> {
-    const [agents, models, fallback, commands] = await Promise.all([
-      this.deps.backend.listAgents(directory),
-      this.deps.backend.listModels(directory),
-      this.deps.backend.defaultModel(directory),
-      this.deps.backend.listCommands(directory).catch(() => []),
-    ]);
-    batch(() => {
-      this.setState('agents', selectableAgents(agents, this.deps.config.agents.cycle));
-      this.setState('models', models);
-      this.setState('defaultModel', fallback);
-      this.setState('serverCommands', commands);
-    });
+    const generation = ++this.catalogGeneration;
+    const key = directoryKey(directory, this.deps.platform);
+    const promise = this.innerLoadCatalog(directory, generation, key);
+    this.catalogInFlight = promise;
+    try {
+      await promise;
+    } finally {
+      if (this.catalogInFlight === promise) this.catalogInFlight = undefined;
+    }
+  }
+
+  private async innerLoadCatalog(
+    directory: string,
+    generation: number,
+    key: string,
+  ): Promise<void> {
+    this.setState('catalogDirectory', key);
+    this.setState('catalogLoading', true);
+    this.setState('catalogError', undefined);
+    try {
+      const [agents, models, fallback, commands] = await Promise.all([
+        this.deps.backend.listAgents(directory),
+        this.deps.backend.listModels(directory),
+        this.deps.backend.defaultModel(directory),
+        this.deps.backend.listCommands(directory).catch(() => []),
+      ]);
+      if (generation !== this.catalogGeneration) return; // a newer project superseded this fetch
+      batch(() => {
+        this.setState('agents', selectableAgents(agents, this.deps.config.agents.cycle));
+        this.setState('models', models);
+        this.setState('defaultModel', fallback);
+        this.setState('serverCommands', commands);
+        this.setState('catalogLoading', false);
+      });
+    } catch (error) {
+      if (generation !== this.catalogGeneration) return;
+      // Never leave another project's catalog usable after a failed reload.
+      batch(() => {
+        this.setState('agents', []);
+        this.setState('models', []);
+        this.setState('defaultModel', undefined);
+        this.setState('serverCommands', []);
+        this.setState('catalogLoading', false);
+        this.setState('catalogError', errorText(error));
+      });
+      throw error;
+    }
+  }
+
+  /** True when the loaded catalog is exactly the one for `directory` and usable. */
+  catalogFresh(directory: string): boolean {
+    return (
+      this.state.catalogDirectory === directoryKey(directory, this.deps.platform) &&
+      !this.state.catalogLoading &&
+      this.state.catalogError === undefined
+    );
+  }
+
+  /** Reloads in the background when the catalog does not match the project right now. */
+  private refreshCatalogIfStale(directory: string): void {
+    if (this.catalogFresh(directory)) return;
+    if (
+      this.state.catalogLoading &&
+      this.state.catalogDirectory === directoryKey(directory, this.deps.platform)
+    ) {
+      return; // already loading exactly this project's catalog
+    }
+    // A load for a different directory may be in flight; starting this one now supersedes it.
+    void this.track('catalog', this.loadCatalog(directory));
+  }
+
+  /** Guarantees the catalog matches `directory`, reloading it if needed. */
+  private async ensureCatalog(directory: string): Promise<boolean> {
+    if (this.catalogFresh(directory)) return true;
+    const key = directoryKey(directory, this.deps.platform);
+    if (this.catalogInFlight !== undefined && this.state.catalogDirectory === key) {
+      // A load for this project is already in flight; wait for it instead of restarting it.
+      try {
+        await this.catalogInFlight;
+      } catch {
+        // Error already recorded on state; freshness check below reports failure.
+      }
+      return this.catalogFresh(directory);
+    }
+    try {
+      await this.loadCatalog(directory);
+      return true;
+    } catch (error) {
+      this.showNotice(`Could not load project catalog: ${errorText(error)}`, 'error');
+      return false;
+    }
   }
 
   async loadSessions(): Promise<void> {
@@ -386,6 +468,7 @@ export class AppController {
 
   private async resync(): Promise<void> {
     await this.loadSessions();
+    void this.track('catalog', this.loadCatalog(this.currentDirectory()));
     const route = this.state.route;
     if (route.kind === 'conversation') await this.loadConversation(route.sessionID);
     for (const id of Object.keys(this.state.transcripts)) {
@@ -640,7 +723,10 @@ export class AppController {
       }
     });
     const directory = this.state.sessions[sessionID]?.directory;
-    if (directory !== undefined) this.loadHistoryFor(directory);
+    if (directory !== undefined) {
+      this.loadHistoryFor(directory);
+      this.refreshCatalogIfStale(directory);
+    }
     void this.track('attach', this.loadConversation(sessionID));
     void this.loadGoal(sessionID);
   }
@@ -661,6 +747,7 @@ export class AppController {
       this.writeComposer(this.state.drafts[`new:${directory}`] ?? emptyComposer);
     });
     this.loadHistoryFor(directory);
+    this.refreshCatalogIfStale(directory);
   }
 
   /**
@@ -796,6 +883,13 @@ export class AppController {
   private updateCompletion(): void {
     const { text, cursor } = this.state.composer;
     if (text.startsWith('/') && !/\s/.test(text)) {
+      const directory = this.currentDirectory();
+      if (!this.catalogFresh(directory)) {
+        // Never suggest another project's commands; reload and show nothing until it lands.
+        this.refreshCatalogIfStale(directory);
+        if (this.state.completion?.kind === 'command') this.setState('completion', undefined);
+        return;
+      }
       const items = completeCommand(text, this.state.serverCommands).map((item) => ({
         label: `/${item.name}`,
         detail: item.description,
@@ -991,6 +1085,10 @@ export class AppController {
     if (this.state.admitting) return;
     const text = this.state.composer.text;
     if (text.trim() === '') return;
+    if (text.trimStart().startsWith('/')) {
+      // Server commands are project-scoped; never route them against another project's catalog.
+      if (!(await this.ensureCatalog(this.currentDirectory()))) return;
+    }
     const parsed = parseInput(
       text,
       new Set(this.state.serverCommands.map((command) => command.name)),
@@ -1260,7 +1358,7 @@ export class AppController {
         else await this.setAgent(args);
         return;
       case 'model':
-        if (args === '') this.openModelPicker();
+        if (args === '') await this.openModelPicker();
         else await this.setModelFromRef(args);
         return;
       case 'effort':
@@ -1336,6 +1434,7 @@ export class AppController {
   // ---------------------------------------------------------------- agents & models
 
   async cycleAgent(direction: 1 | -1): Promise<void> {
+    if (!(await this.ensureCatalog(this.currentDirectory()))) return;
     const session = this.currentSession();
     const current = session === undefined ? this.state.overview.agent : session.agent;
     const next = nextAgent(this.state.agents, current, direction);
@@ -1368,7 +1467,8 @@ export class AppController {
     await this.refreshSummary(session.id);
   }
 
-  openModelPicker(): void {
+  async openModelPicker(): Promise<void> {
+    if (!(await this.ensureCatalog(this.currentDirectory()))) return;
     this.setOverlay({ kind: 'model-picker', query: '', index: 0 });
   }
 
@@ -1412,6 +1512,7 @@ export class AppController {
   }
 
   private async setModelFromRef(ref: string): Promise<void> {
+    if (!(await this.ensureCatalog(this.currentDirectory()))) return;
     const resolved = resolveModel({ model: ref }, this.state.models);
     if (resolved.kind === 'error') {
       this.showNotice(resolved.message, 'warn');
@@ -1421,6 +1522,7 @@ export class AppController {
   }
 
   private async setEffort(variant: string): Promise<void> {
+    if (!(await this.ensureCatalog(this.currentDirectory()))) return;
     const current =
       this.currentSession()?.model ?? this.state.overview.model ?? this.state.defaultModel;
     if (current === undefined) {
@@ -1462,6 +1564,7 @@ export class AppController {
 
   /** F2: next recently used model still present in the catalog. */
   async nextRecentModel(): Promise<void> {
+    if (!(await this.ensureCatalog(this.currentDirectory()))) return;
     const current = this.currentSession()?.model ?? this.state.overview.model;
     const available = this.state.recentModels.filter((recent) =>
       this.state.models.some(

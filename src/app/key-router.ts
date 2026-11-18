@@ -76,7 +76,7 @@ function runAction(controller: AppController, action: ActionID, services: Router
       void controller.cycleAgent(-1);
       return true;
     case 'model.pick':
-      controller.openModelPicker();
+      void controller.openModelPicker();
       return true;
     case 'model.recentNext':
       void controller.nextRecentModel();

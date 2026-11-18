@@ -208,6 +208,129 @@ describe('continue/resume attach (issues #10 #11)', () => {
   });
 });
 
+const agentFor = (id: string) => ({ id, name: id, mode: 'primary' as const, hidden: false });
+const modelFor = (id: string) => [
+  { providerID: 'p', modelID: id, name: id, enabled: true, variants: [] },
+];
+
+const catalogs: Record<
+  string,
+  {
+    agents: ReturnType<typeof agentFor>[];
+    models: ReturnType<typeof modelFor>;
+    commands: { name: string; description?: string }[];
+  }
+> = {
+  '/project-a': {
+    agents: [agentFor('agent-a')],
+    models: modelFor('model-a'),
+    commands: [{ name: 'cmd-a' }],
+  },
+  '/project-b': {
+    agents: [agentFor('agent-b')],
+    models: modelFor('model-b'),
+    commands: [{ name: 'cmd-b' }],
+  },
+};
+
+function scopedBackend(hooks?: { holdB?: Promise<void> }) {
+  const backend = new FakeBackend();
+  backend.listAgents = async (directory?: string) => {
+    if (directory === '/project-b' && hooks?.holdB !== undefined) await hooks.holdB;
+    return catalogs[directory ?? '/project-a']?.agents ?? [];
+  };
+  backend.listModels = async (directory?: string) =>
+    catalogs[directory ?? '/project-a']?.models ?? [];
+  backend.defaultModel = async () => undefined;
+  backend.listCommands = async (directory?: string) =>
+    catalogs[directory ?? '/project-a']?.commands ?? [];
+  return backend;
+}
+
+function scopedController(backend: FakeBackend, cwd: string) {
+  return new AppController({
+    backend,
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd,
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+  });
+}
+
+describe('project-scoped catalogs (issue #2)', () => {
+  test('catalog follows the project directory across A → B → A', async () => {
+    const controller = scopedController(scopedBackend(), '/project-a');
+    await controller.bootstrap();
+    expect(controller.state.agents.map((agent) => agent.id)).toEqual(['agent-a']);
+    expect(controller.catalogFresh('/project-a')).toBe(true);
+
+    controller.startNewSession('/project-b');
+    await flush();
+    expect(controller.state.agents.map((agent) => agent.id)).toEqual(['agent-b']);
+    expect(controller.state.models.map((model) => model.modelID)).toEqual(['model-b']);
+    expect(controller.state.serverCommands.map((command) => command.name)).toEqual(['cmd-b']);
+    expect(controller.catalogFresh('/project-b')).toBe(true);
+
+    controller.startNewSession('/project-a');
+    await flush();
+    expect(controller.state.agents.map((agent) => agent.id)).toEqual(['agent-a']);
+    controller.dispose();
+  });
+
+  test('a stale response never replaces the newer project catalog', async () => {
+    const holdB = deferred<void>();
+    const controller = scopedController(scopedBackend({ holdB: holdB.promise }), '/project-a');
+    await controller.bootstrap();
+
+    controller.startNewSession('/project-b'); // kicks off a slow load for B
+    await flush(); // let the B fetch start
+    controller.startNewSession('/project-a'); // newer route wins
+    await flush();
+    expect(controller.state.agents.map((agent) => agent.id)).toEqual(['agent-a']);
+
+    holdB.resolve(); // B's response arrives late and must be discarded
+    await flush();
+    expect(controller.state.agents.map((agent) => agent.id)).toEqual(['agent-a']);
+    expect(controller.catalogFresh('/project-a')).toBe(true);
+    controller.dispose();
+  });
+
+  test("command completion never suggests another project's commands", async () => {
+    const controller = scopedController(scopedBackend(), '/project-a');
+    await controller.bootstrap();
+    controller.startNewSession('/project-b');
+    await flush();
+    controller.setComposer(composerFrom('/cmd-a'));
+    expect(controller.state.completion).toBeUndefined();
+    controller.setComposer(composerFrom('/cmd-b'));
+    expect(controller.state.completion?.kind).toBe('command');
+    controller.dispose();
+  });
+
+  test('a failed catalog reload clears the catalog instead of serving the previous project', async () => {
+    const backend = scopedBackend();
+    backend.listAgents = async (directory?: string) => {
+      if (directory === '/project-c') throw new Error('project-scoped config is broken');
+      return catalogs[directory ?? '/project-a']?.agents ?? [];
+    };
+    const controller = scopedController(backend, '/project-a');
+    await controller.bootstrap();
+    controller.startNewSession('/project-c');
+    await flush();
+    expect(controller.state.catalogError).toBeDefined();
+    expect(controller.state.agents).toEqual([]);
+    expect(controller.state.serverCommands).toEqual([]);
+    controller.setComposer(composerFrom('/cmd-a'));
+    expect(controller.state.completion).toBeUndefined();
+    controller.dispose();
+  });
+});
+
 describe('session pagination', () => {
   test('bootstrap caps the first load; Load more pages in older sessions keyboard-only', async () => {
     const backend = new FakeBackend();

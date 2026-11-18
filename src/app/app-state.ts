@@ -103,6 +103,13 @@ export type AppState = {
   models: CatalogModel[];
   defaultModel?: ModelSelection;
   serverCommands: ServerCommand[];
+  /**
+   * Canonical directory key the agents/models/commands above belong to, and whether a
+   * fetch is in flight or failed. Consumers must not use another project's catalog.
+   */
+  catalogDirectory?: string;
+  catalogLoading: boolean;
+  catalogError?: string;
   detailed: boolean;
   /** Rendered node count per session (see `windowNodes`); grows as the user pages up. */
   transcriptWindow: Record<string, number>;
@@ -160,6 +167,7 @@ export function initialState(directory: string): AppState {
     agents: [],
     models: [],
     serverCommands: [],
+    catalogLoading: false,
     detailed: false,
     transcriptWindow: {},
     expandedGroups: {},
