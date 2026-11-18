@@ -7,7 +7,7 @@ import { render } from '@opentui/solid';
 import packageJson from '../package.json' with { type: 'json' };
 import { type Backend, BackendError, createBackend } from './adapter/backend.ts';
 import { connect, ConnectionError, redactUrl } from './adapter/connection.ts';
-import { startEventPump } from './adapter/event-pump.ts';
+import { ServerConnectionManager, serverIDForConnection } from './adapter/server-manager.ts';
 import { AppController, errorText } from './app/controller.ts';
 import { createDebugLog, type DebugLog, noDebugLog } from './app/debug-log.ts';
 import { listProjectFiles } from './app/project-files.ts';
@@ -108,6 +108,8 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
 
   let backend: Backend;
   let remoteFilesystem = false;
+  let serverID = 'local';
+  const servers = new ServerConnectionManager();
   try {
     const connection = await connect({
       ...(options.server === undefined ? {} : { server: options.server }),
@@ -118,11 +120,15 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
       ...(env['MARGARITA_ALLOW_INSECURE_HTTP'] === '1' ? { allowInsecureHttp: true } : {}),
       onStarting: () => process.stderr.write('Starting OpenCode service…\n'),
     });
+    serverID = serverIDForConnection(connection);
     backend = createBackend(connection, {
+      serverID,
       toolOutputChars: configLoad.config.transcript.toolOutputChars,
     });
-    remoteFilesystem = connection.origin === 'remote';
-    debugLog.write('connected', { baseUrl: redactUrl(backend.baseUrl) });
+    const managed = servers.add({ serverID, connection, backend });
+    remoteFilesystem = managed.remoteFilesystem;
+    servers.setState(serverID, 'online');
+    debugLog.write('connected', { baseUrl: redactUrl(backend.baseUrl), serverID });
   } catch (error) {
     debugLog.write('connect-failed', {
       errorName: error instanceof Error ? error.name : 'unknown',
@@ -142,6 +148,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   const exit: { request?: () => void } = {};
   const controller = new AppController({
     backend,
+    serverID,
     config: configLoad.config,
     localState: stateLoad.state,
     platform,
@@ -252,11 +259,11 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     }
   }
 
-  const stopPump = startEventPump({
-    source: (signal) => backend.events(signal),
+  servers.startStream(serverID, {
     onBatch: (events, resync) => controller.onEvents(events, resync),
     onStatus: (status) => controller.onStreamStatus(status),
   });
+  const stopPump = () => servers.dispose();
 
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
