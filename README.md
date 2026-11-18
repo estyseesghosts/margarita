@@ -56,3 +56,27 @@ Use [docs/02-upstream-source-map.md](docs/02-upstream-source-map.md) as the firs
 ## First sprint
 
 Create the workspace and a tiny `connect → list sessions → create session → prompt → stream assistant → detach to overview → reattach` vertical slice. Use OpenCode's **network client** `@opencode/client`, not the embedded `@opencode/sdk`. Use `Service.ensure()` to discover or start the background service. Render real server messages and actual usage data before polishing styling.
+
+## Running margarita
+
+Requires Bun (see `.bun-version`) and an OpenCode v2.3 service that is already running. Margarita discovers the registered local service read-only; it never starts, stops or reconfigures it unless you pass `--start-server` (and only when no service is registered).
+
+```sh
+bun install
+bun run start                       # overview of sessions across projects
+bun run start "fix the flaky test"  # new interactive session with that prompt
+bun run start --continue            # latest session in this directory
+bun run start --resume ses_123      # exact session
+bun run start -p -m opencode/longcat-2.5-free "summarize README.md"   # print mode
+bun run start --help
+```
+
+Keys: `Left` on an empty prompt opens the overview · `Shift+Tab` agent · `Alt+P` model · `F2` recent model · `Ctrl+O` details · `Ctrl+R` history search · `Ctrl+S` stash · `Ctrl+G` `$EDITOR` · `Ctrl+J` newline · `Alt+Enter` steer · `Ctrl+C` interrupt/clear/exit · `F1` help. Override in `%LOCALAPPDATA%\margarita\config.jsonc` (XDG config dir elsewhere).
+
+Environment: `NO_COLOR`, `MARGARITA_NO_ANIMATION=1` (static activity indicator), `MARGARITA_ASCII=1` (ASCII spinner frames), `MARGARITA_SERVER_PASSWORD` (for `--server`).
+
+## Development
+
+- `bun run verify` — format check, oxlint (type-aware), typecheck, tests.
+- `MARGARITA_LIVE=1 bun test test/live-smoke.test.tsx` — read-only check against your running service.
+- Layers: `src/domain` (pure, tested), `src/adapter` (SDK mapping, event pump), `src/app` (controller, key router), `src/ui` (OpenTUI/Solid views), `src/cli` (args, print mode).
