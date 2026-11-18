@@ -122,6 +122,30 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
           <text fg={dim()}>{`margarita v${props.controller.version}`}</text>
         </box>
       </Match>
+      <Match when={state.overlay.kind === 'servers'}>
+        <box {...frame('Servers · /servers rename <old> <new> · /unpair <name> · Esc close')}>
+          <For each={props.controller.serverList()}>
+            {(server) => (
+              <text fg={server.active ? props.theme.accent : props.theme.text}>
+                {`${server.active ? '❯' : ' '} ${server.label}  ${server.baseUrl}  [${server.state}]`}
+              </text>
+            )}
+          </For>
+        </box>
+      </Match>
+      <Match when={state.overlay.kind === 'unpair-confirm' ? state.overlay : undefined}>
+        {(overlay: Accessor<Extract<Overlay, { kind: 'unpair-confirm' }>>) => (
+          <box {...frame('Unpair · Enter confirm · Esc cancel')}>
+            <text fg={props.theme.text}>
+              {`Remove local access to "${overlay().label}" and its saved credentials?`}
+            </text>
+            <text fg={dim()}>
+              Remote sessions keep running. Removing local credentials does not revoke an
+              already-issued server token.
+            </text>
+          </box>
+        )}
+      </Match>
       <Match when={state.overlay.kind === 'queue' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'queue' }>>) => {
           return (

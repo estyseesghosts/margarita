@@ -33,6 +33,8 @@ export type Overlay =
   | { kind: 'queue'; index: number }
   | { kind: 'model-picker'; query: string; index: number }
   | { kind: 'history-search'; query: string; before: number }
+  | { kind: 'servers'; index: number }
+  | { kind: 'unpair-confirm'; serverID: string; label: string }
   | { kind: 'form'; sessionID: string; editor: FormEditor }
   | { kind: 'tasks'; index: number }
   | { kind: 'revert'; sessionID: string; messageID: string; files: FileDiff[]; busy: boolean }

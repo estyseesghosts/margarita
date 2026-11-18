@@ -2224,3 +2224,127 @@ describe('image paste and attachments (issue #42)', () => {
     controller.dispose();
   });
 });
+
+function adminHarness() {
+  const calls: string[] = [];
+  const listings = [
+    {
+      serverID: 'local',
+      label: 'local',
+      baseUrl: 'http://localhost:4096',
+      state: 'online',
+      active: true,
+    },
+    {
+      serverID: 'srv_1',
+      label: 'buildbox',
+      baseUrl: 'https://build.example.com',
+      state: 'online',
+      active: false,
+    },
+  ];
+  return {
+    calls,
+    listings,
+    admin: {
+      list: () => listings,
+      rename: async (serverID: string, label: string) => {
+        calls.push(`rename:${serverID}:${label}`);
+        return listings;
+      },
+      unpair: async (serverID: string) => {
+        calls.push(`unpair:${serverID}`);
+      },
+    },
+  };
+}
+
+function controllerWith(admin: ReturnType<typeof adminHarness>['admin']) {
+  return new AppController({
+    backend: new FakeBackend(),
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+    serverAdmin: admin,
+  });
+}
+
+describe('server management commands', () => {
+  test('/servers opens the server list and rename keeps identity', async () => {
+    const harness = adminHarness();
+    const controller = controllerWith(harness.admin);
+    controller.setComposer(composerFrom('/servers'));
+    await controller.submit();
+    expect(controller.state.overlay).toEqual({ kind: 'servers', index: 0 });
+
+    controller.closeOverlay();
+    controller.setComposer(composerFrom('/servers rename buildbox devbox'));
+    await controller.submit();
+    expect(harness.calls).toEqual(['rename:srv_1:devbox']);
+    controller.dispose();
+  });
+
+  test('/unpair of another server removes only its cached state', async () => {
+    const harness = adminHarness();
+    const controller = controllerWith(harness.admin);
+    const remoteSession = {
+      ...fakeSession('ses_a'),
+      serverID: 'srv_1',
+    };
+    const key = 'server:srv_1/session:ses_a';
+    controller.state.sessions[key] = remoteSession;
+    controller.state.running[key] = true;
+
+    controller.setComposer(composerFrom('/unpair buildbox'));
+    await controller.submit();
+    expect(harness.calls).toEqual(['unpair:srv_1']);
+    expect(controller.state.sessions[key]).toBeUndefined();
+    expect(controller.state.running[key]).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('/unpair of the active server asks for confirmation first', async () => {
+    const harness = adminHarness();
+    const controller = controllerWith(harness.admin);
+    controller.setComposer(composerFrom('/unpair local'));
+    await controller.submit();
+    expect(controller.state.overlay).toEqual({
+      kind: 'unpair-confirm',
+      serverID: 'local',
+      label: 'local',
+    });
+    expect(harness.calls).toEqual([]);
+    await controller.confirmUnpair();
+    expect(harness.calls).toEqual(['unpair:local']);
+    expect(controller.state.route).toEqual({ kind: 'overview' });
+    controller.dispose();
+  });
+
+  test('the /servers command never goes to the agent inbox', async () => {
+    const harness = adminHarness();
+    const backend = new FakeBackend();
+    const controller = new AppController({
+      backend,
+      config: defaultConfig,
+      localState: emptyState,
+      platform: 'linux',
+      cwd: '/work/kohjoh',
+      version: '0.0.1',
+      now: () => 10_000,
+      saveLocalState: async () => {},
+      listFiles: () => Promise.resolve([]),
+      requestExit: () => {},
+      serverAdmin: harness.admin,
+    });
+    controller.setComposer(composerFrom('/servers'));
+    await controller.submit();
+    expect(backend.calls).toEqual([]);
+    controller.dispose();
+  });
+});

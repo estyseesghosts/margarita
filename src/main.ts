@@ -19,7 +19,12 @@ import { systemCredentialStore } from './config/credentials.ts';
 import { fileGoalStore } from './config/goal-store.ts';
 import { loadState, saveState } from './config/local-state.ts';
 import { appPaths } from './config/paths.ts';
-import { loadServerProfiles, saveServerProfiles } from './config/server-profiles.ts';
+import {
+  loadServerProfiles,
+  removeProfile,
+  renameProfile,
+  saveServerProfiles,
+} from './config/server-profiles.ts';
 import { buildKeymap } from './domain/keymap.ts';
 import type { ModelSelection } from './domain/model-ref.ts';
 import { App } from './ui/app.tsx';
@@ -184,6 +189,45 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
         toolOutputChars: configLoad.config.transcript.toolOutputChars,
       });
       return { shortname: result.shortname };
+    },
+    serverAdmin: {
+      list: () =>
+        servers.list().map((entry) => ({
+          serverID: entry.serverID,
+          label: entry.label,
+          baseUrl: entry.backend.baseUrl,
+          state: entry.state,
+          active: entry.serverID === serverID,
+        })),
+      rename: async (targetID, label) => {
+        const renamed = renameProfile(profiles.profiles, targetID, label);
+        const saved = await saveServerProfiles(paths.serversFile, {
+          schemaVersion: 1,
+          profiles: renamed,
+        });
+        profiles = saved;
+        servers.setLabel(targetID, label);
+        return saved.profiles.map((profile) => ({
+          serverID: profile.serverID,
+          label: profile.shortname,
+          baseUrl: profile.baseUrl,
+          state: servers.get(profile.serverID)?.state ?? 'offline',
+          active: profile.serverID === serverID,
+        }));
+      },
+      unpair: async (targetID) => {
+        const saved = await saveServerProfiles(paths.serversFile, {
+          schemaVersion: 1,
+          profiles: removeProfile(profiles.profiles, targetID),
+        });
+        profiles = saved;
+        await credentials.delete(targetID).catch((error: unknown) => {
+          process.stderr.write(
+            `marg: could not remove the saved credential for ${targetID}: ${errorText(error)}\n`,
+          );
+        });
+        await servers.remove(targetID);
+      },
     },
     debugLog,
   });

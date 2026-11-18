@@ -204,6 +204,13 @@ function routeOverlay(controller: AppController, key: KeyInput): boolean {
     case 'status':
       if (key.name === 'return' || key.name === 'q') controller.closeOverlay();
       return true;
+    case 'unpair-confirm':
+      if (key.name === 'return' || key.name === 'y') void controller.confirmUnpair();
+      else if (key.name === 'escape' || key.name === 'n') controller.closeOverlay();
+      return true;
+    case 'servers':
+      if (key.name === 'return' || key.name === 'q') controller.closeOverlay();
+      return true;
     case 'form':
       controller.formKey(key);
       return true;

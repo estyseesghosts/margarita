@@ -124,6 +124,22 @@ import {
 } from './app-state.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 
+/** One row of the `/servers` list. Never contains a secret. */
+export type ServerListing = Readonly<{
+  serverID: string;
+  label: string;
+  baseUrl: string;
+  state: string;
+  active: boolean;
+}>;
+
+export type ServerAdmin = Readonly<{
+  list(): readonly ServerListing[];
+  rename(serverID: string, label: string): Promise<readonly ServerListing[]>;
+  /** Forgets the server and its local credentials; never stops remote work. */
+  unpair(serverID: string): Promise<void>;
+}>;
+
 export type ControllerDeps = Readonly<{
   backend: Backend;
   /** Margarita-managed identity of the connected server; defaults to the reserved local one. */
@@ -148,6 +164,8 @@ export type ControllerDeps = Readonly<{
   goalStore?: GoalStore;
   /** Frontend-local pairing; implemented by main so the controller owns no network setup. */
   pair?: (request: PairRequest) => Promise<{ shortname: string }>;
+  /** Server registry management for /servers and /unpair. */
+  serverAdmin?: ServerAdmin;
   /** Opt-in diagnostics sink (--debug-log); defaults to a silent no-op. */
   debugLog?: DebugLog;
 }>;
@@ -1906,6 +1924,12 @@ export class AppController {
       case 'pair':
         await this.pairCommand(args);
         return;
+      case 'servers':
+        await this.serversCommand(args);
+        return;
+      case 'unpair':
+        await this.unpairCommand(args);
+        return;
       case 'server':
         return; // parsed into a server command before reaching here
       default:
@@ -1938,6 +1962,159 @@ export class AppController {
       this.showNotice(`Paired ${result.shortname}.`, 'dim');
     } catch (error) {
       this.showNotice(redactPairingCode(errorText(error), request.code), 'error');
+    }
+  }
+
+  /** Rows for the `/servers` overlay; secrets are never part of a listing. */
+  serverList(): readonly ServerListing[] {
+    return (
+      this.deps.serverAdmin?.list() ?? [
+        {
+          serverID: this.serverID,
+          label: this.serverID === localServerID ? 'local' : this.serverID,
+          baseUrl: this.deps.backend.baseUrl,
+          state: this.state.stream === 'live' ? 'online' : 'connecting',
+          active: true,
+        },
+      ]
+    );
+  }
+
+  private async serversCommand(args: string): Promise<void> {
+    const admin = this.deps.serverAdmin;
+    if (admin === undefined) {
+      this.showNotice('Server management is not available in this build.', 'warn');
+      return;
+    }
+    const tokens = args.split(/\s+/).filter((token) => token !== '');
+    if (tokens[0] !== 'rename') {
+      this.setOverlay({ kind: 'servers', index: 0 });
+      return;
+    }
+    const from = tokens[1];
+    const to = tokens[2];
+    if (from === undefined || to === undefined || tokens.length > 3) {
+      this.showNotice('Usage: /servers rename <old> <new>', 'warn');
+      return;
+    }
+    const target = this.findServer(from);
+    if (target === undefined) {
+      this.showNotice(`Unknown server "${from}".`, 'warn');
+      return;
+    }
+    try {
+      await admin.rename(target.serverID, to);
+      this.showNotice(`Renamed ${target.label} to ${to}.`, 'dim');
+    } catch (error) {
+      this.showNotice(errorText(error), 'error');
+    }
+  }
+
+  private async unpairCommand(args: string): Promise<void> {
+    const admin = this.deps.serverAdmin;
+    if (admin === undefined) {
+      this.showNotice('Server management is not available in this build.', 'warn');
+      return;
+    }
+    const name = args.split(/\s+/).find((token) => token !== '');
+    if (name === undefined) {
+      this.showNotice('Usage: /unpair <name>', 'warn');
+      return;
+    }
+    const target = this.findServer(name);
+    if (target === undefined) {
+      this.showNotice(`Unknown server "${name}".`, 'warn');
+      return;
+    }
+    if (target.serverID === this.serverID) {
+      this.setOverlay({
+        kind: 'unpair-confirm',
+        serverID: target.serverID,
+        label: target.label,
+      });
+      return;
+    }
+    await this.performUnpair(target);
+  }
+
+  /** Confirms the `unpair-confirm` overlay. */
+  async confirmUnpair(): Promise<void> {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'unpair-confirm') return;
+    const target = this.findServer(overlay.serverID);
+    this.setOverlay({ kind: 'none' });
+    await this.performUnpair(
+      target ?? {
+        serverID: overlay.serverID,
+        label: overlay.label,
+        baseUrl: '',
+        state: 'offline',
+        active: overlay.serverID === this.serverID,
+      },
+    );
+  }
+
+  private findServer(name: string): ServerListing | undefined {
+    const needle = name.toLowerCase();
+    return this.serverList().find(
+      (server) =>
+        server.serverID === name ||
+        server.label.toLowerCase() === needle ||
+        server.serverID.toLowerCase() === needle,
+    );
+  }
+
+  private async performUnpair(target: ServerListing): Promise<void> {
+    const admin = this.deps.serverAdmin;
+    if (admin === undefined) return;
+    const wasActive = target.serverID === this.serverID;
+    if (wasActive) {
+      this.saveDraft();
+      this.openOverview();
+    }
+    try {
+      await admin.unpair(target.serverID);
+      this.forgetServer(target.serverID);
+      this.showNotice(
+        `Unpaired ${target.label}. Remote sessions keep running; this only removed local access.`,
+        'dim',
+      );
+    } catch (error) {
+      this.showNotice(errorText(error), 'error');
+    }
+  }
+
+  /** Drops every cached frontend record for one server without touching other servers. */
+  private forgetServer(serverID: string): void {
+    this.setState(
+      produce((state) => {
+        for (const [key, summary] of Object.entries(state.sessions)) {
+          if (summary.serverID === serverID) delete state.sessions[key];
+        }
+        for (const key of Object.keys(state.transcripts)) {
+          if (parseSessionKey(key).serverID === serverID) delete state.transcripts[key];
+        }
+        for (const map of [
+          state.inbox,
+          state.permissions,
+          state.forms,
+          state.goals,
+          state.nativeGoals,
+          state.awaitingSteer,
+          state.running,
+          state.openedAt,
+          state.drafts,
+          state.draftAttachments,
+          state.transcriptWindow,
+        ]) {
+          for (const key of Object.keys(map)) {
+            if (parseSessionKey(key).serverID === serverID) delete map[key];
+          }
+        }
+      }),
+    );
+    if (this.state.overview.selectedRow?.includes(sessionKey({ serverID, sessionID: '' }))) {
+      this.setState('overview', 'selectedRow', undefined);
     }
   }
 
