@@ -498,3 +498,54 @@ describe('tool-group focus', () => {
     controller.dispose();
   });
 });
+
+describe('prompt history across project switches (issue #4)', () => {
+  test('A -> B -> A keeps prompts recorded earlier in the same process', async () => {
+    const backend = new FakeBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+
+    const id = await controller.createSessionWithPrompt('/work/kohjoh', 'prompt recorded in A');
+    expect(id).toBeDefined();
+    expect(controller.historyUp()).toBe(true);
+    expect(controller.state.composer.text).toBe('prompt recorded in A');
+    controller.setComposer(composerFrom(''));
+
+    controller.startNewSession('/elsewhere');
+    expect(controller.historyUp()).toBe(false);
+
+    controller.startNewSession('/work/kohjoh');
+    controller.historyUp();
+    expect(controller.state.composer.text).toBe('prompt recorded in A');
+    controller.dispose();
+  });
+
+  test('a fresh controller restores the saved snapshot after a recorded prompt', async () => {
+    const saved: { value?: import('../config/local-state.ts').LocalState } = {};
+    const make = (localState: import('../config/local-state.ts').LocalState) =>
+      new AppController({
+        backend: new FakeBackend(),
+        config: defaultConfig,
+        localState,
+        platform: 'linux',
+        cwd: '/work/kohjoh',
+        version: '0.0.1',
+        now: () => 10_000,
+        saveLocalState: async (state) => {
+          saved.value = state;
+        },
+        listFiles: () => Promise.resolve([]),
+        requestExit: () => {},
+      });
+
+    const first = make(emptyState);
+    await first.createSessionWithPrompt('/work/kohjoh', 'persisted prompt');
+    expect(saved.value?.history['/work/kohjoh']).toEqual(['persisted prompt']);
+    first.dispose();
+
+    const second = make(saved.value ?? emptyState);
+    second.historyUp();
+    expect(second.state.composer.text).toBe('persisted prompt');
+    second.dispose();
+  });
+});

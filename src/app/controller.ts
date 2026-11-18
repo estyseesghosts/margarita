@@ -61,7 +61,6 @@ import {
 } from '../domain/overview-groups.ts';
 import { directoryKey } from '../domain/path-identity.ts';
 import {
-  createHistory,
   historyBack,
   historyForward,
   recordEntry,
@@ -936,7 +935,16 @@ export class AppController {
 
   private loadHistoryFor(directory: string): void {
     const key = directoryKey(directory, this.deps.platform);
-    this.setState('history', createHistory(this.deps.localState.history[key] ?? []));
+    // Read the live snapshot: prompts recorded this run live in `persisted`, not in the
+    // startup copy from `deps.localState`. Returning to a project must not hide them.
+    // Replace each field rather than merge the object: a stale browse index from the
+    // previous project would otherwise make historyUp() look like the end of this list.
+    // A fresh array reference also keeps store mutations away from the persisted snapshot.
+    this.setState('history', {
+      entries: [...(this.persisted.history[key] ?? [])],
+      index: undefined,
+      savedDraft: '',
+    });
   }
 
   private rememberPrompt(text: string, directory: string): void {

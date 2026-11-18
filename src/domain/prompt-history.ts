@@ -5,7 +5,7 @@
 export type PromptHistory = Readonly<{
   entries: readonly string[];
   /** `undefined` when not browsing; otherwise an index into `entries`. */
-  index?: number;
+  index?: number | undefined;
   savedDraft: string;
 }>;
 
