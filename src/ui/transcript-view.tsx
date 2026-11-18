@@ -7,6 +7,7 @@ import {
   createMemo,
   createSignal,
   For,
+  Index,
   Match,
   onCleanup,
   onMount,
@@ -178,40 +179,30 @@ export function Transcript(props: TranscriptProps) {
         <Show when={transcript()?.loading === true && nodes().length === 0}>
           <text fg={props.theme.dim}> Loading conversation…</text>
         </Show>
-        <For each={windowed().visible}>
+        {/* Row slots persist by index: folding emits fresh node objects every update,
+            and identity-keyed <For> would remount (and re-parse) every visible row on
+            each streamed event. */}
+        <Index each={windowed().visible}>
           {(node) => (
             <>
-              <Show
-                when={
-                  node.kind === 'execution' &&
-                  node.segment.phase === 'running' &&
-                  queued().length > 0
-                }
-              >
+              <Show when={isRunningExecution(node()) && queued().length > 0}>
                 <QueuedPreview items={queued()} theme={props.theme} width={props.width} />
               </Show>
-              <box id={nodeID(node.key)} flexDirection="column" flexShrink={0}>
+              <box id={nodeID(node().key)} flexDirection="column" flexShrink={0}>
                 <NodeView
-                  node={node}
+                  node={node()}
                   theme={props.theme}
                   detailed={state.detailed}
                   syntax={syntax()}
                   width={props.width}
-                  focused={
-                    state.focusedGroup !== undefined &&
-                    (node.kind === 'tool-group'
-                      ? state.focusedGroup === node.key
-                      : node.kind === 'tool'
-                        ? state.focusedGroup === `diff:${node.tool.id}`
-                        : false)
-                  }
+                  focused={isNodeFocused(node(), state.focusedGroup)}
                   animate={props.animate}
                   ascii={props.ascii}
                 />
               </box>
             </>
           )}
-        </For>
+        </Index>
         {/* Fallback: no running marker to sit above (e.g. transcript not loaded). */}
         <Show when={!hasRunningMarker() && queued().length > 0}>
           <QueuedPreview items={queued()} theme={props.theme} width={props.width} />
@@ -301,6 +292,19 @@ export function WelcomePanel(props: WelcomeProps) {
 
 function nodeID(key: string): string {
   return `node:${key}`;
+}
+
+/** An execution marker in its streaming phase, the row the queued preview sits above. */
+function isRunningExecution(node: TranscriptNode): boolean {
+  return node.kind === 'execution' && node.segment.phase === 'running';
+}
+
+/** Whether this row is the focused tool group (or its inline diff, keyed by tool id). */
+function isNodeFocused(node: TranscriptNode, focusedGroup: string | undefined): boolean {
+  if (focusedGroup === undefined) return false;
+  if (node.kind === 'tool-group') return focusedGroup === node.key;
+  if (node.kind === 'tool') return focusedGroup === `diff:${node.tool.id}`;
+  return false;
 }
 
 function NodeView(props: {

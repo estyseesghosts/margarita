@@ -1174,3 +1174,90 @@ describe('queued messages preview (issue #29)', () => {
     controller.dispose();
   });
 });
+
+/** Diff rows of a rendered frame, by content line (line-gutter text included). */
+function diffLines(frame: string): string[] {
+  return frame.split('\n').filter((line) => /row\d+/.test(line));
+}
+/** Trailing cell is the scrollbar's glyph; compare content cells only. */
+function normalizeFrameLine(line: string | undefined): string | undefined {
+  return line?.replace(/[\s▄▀▁▂▃▅▆▇█]+$/u, '');
+}
+
+describe('inline diff stability (issue #26)', () => {
+  test('a fixed 140-line highlighted diff captures stable frames under repeated and unrelated updates', async () => {
+    const content = Array.from({ length: 140 }, (_, index) => `row${index}`).join('\n');
+    const backend = backendWithSession();
+    const messages: NonNullable<(typeof backend.messages)[string]> = [
+      { kind: 'user', id: 'm1', createdAt: 1, text: 'write it', attachments: [] },
+      {
+        kind: 'assistant',
+        id: 'm2',
+        createdAt: 2,
+        completedAt: 3,
+        agent: 'build',
+        model: { providerID: 'opencode', modelID: 'longcat' },
+        parts: [
+          {
+            kind: 'tool',
+            tool: {
+              id: 'w1',
+              name: 'write',
+              status: 'completed',
+              input: { filePath: 'src/app/debug-log.ts', content },
+              startedAt: 2,
+              completedAt: 3,
+            },
+          },
+        ],
+      },
+    ];
+    backend.messages = { ses_a: messages };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    // Expand the clamped 140-line write diff to the full <diff> renderable.
+    setup.mockInput.pressArrow('down', { ctrl: true });
+    await settle(setup);
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    expect(controller.state.expandedDiffs['w1']).toBe(true);
+
+    // Warm up: lay out and paint the expanded diff.
+    await settle(setup);
+    const warm = setup.captureCharFrame();
+    const baseline = diffLines(warm);
+    expect(baseline.length).toBeGreaterThan(0);
+    // No state change: repeated frames are byte-identical, the diff never blanks.
+    for (let index = 0; index < 5; index += 1) {
+      await settle(setup);
+      expect(setup.captureCharFrame()).toBe(warm);
+    }
+
+    // Unrelated update below the diff: a new user message appended to the turn.
+    // Legitimately changed rows aside, the visible diff rows render byte-identically.
+    backend.messages = {
+      ses_a: [
+        ...messages,
+        { kind: 'user', id: 'm3', createdAt: 9, text: 'and then ship it', attachments: [] },
+      ],
+    };
+    controller.openSession('ses_a');
+    await settle(setup);
+    const after = setup.captureCharFrame();
+    expect(after).toContain('and then ship it');
+    // The viewport may scroll by the appended row; every diff row visible in both frames renders byte-identically.
+    const keyed = (frame: string) =>
+      new Map(diffLines(frame).map((line) => [/row\d+/.exec(line)?.[0] ?? '', line]));
+    const before = keyed(warm);
+    const now = keyed(after);
+    const shared = [...before.keys()].filter((row) => now.has(row));
+    expect(shared.length).toBeGreaterThanOrEqual(10);
+    for (const row of shared) {
+      expect(normalizeFrameLine(now.get(row))).toBe(normalizeFrameLine(before.get(row)));
+    }
+
+    controller.dispose();
+  });
+});
