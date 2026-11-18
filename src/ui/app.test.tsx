@@ -10,6 +10,8 @@ import { buildKeymap } from '../domain/keymap.ts';
 import { App } from './app.tsx';
 import { pickTheme } from './theme.ts';
 
+const pageUp = '\u001b[5~';
+
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let current: Setup | undefined;
 
@@ -201,5 +203,38 @@ describe('app', () => {
     setup.mockInput.pressEnter();
     await settle(setup);
     expect(setup.captureCharFrame()).not.toContain('Session number 0');
+  });
+
+  test('long transcripts render a window; PageUp at the top reveals then fetches older pages', async () => {
+    const backend = backendWithSession();
+    backend.messages['ses_a'] = Array.from({ length: 300 }, (_, index) => ({
+      kind: 'user' as const,
+      id: `m${String(index).padStart(4, '0')}`,
+      createdAt: index,
+      text: `message ${index}`,
+      attachments: [],
+    }));
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    // First fetch is one 120-message page; all of it fits in the 200-node window.
+    expect(controller.state.transcripts['ses_a']?.messages).toHaveLength(120);
+    expect(setup.captureCharFrame()).toContain('message 299');
+
+    setup.mockInput.pressKey('HOME', { ctrl: true });
+    await settle(setup);
+    setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    await settle(setup);
+    expect(controller.state.transcripts['ses_a']?.messages).toHaveLength(240);
+    setup.mockInput.pressKey('HOME', { ctrl: true });
+    await settle(setup);
+    setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    await settle(setup);
+    const transcript = controller.state.transcripts['ses_a'];
+    expect(transcript?.messages).toHaveLength(300);
+    expect(transcript?.olderCursor).toBeUndefined();
+    expect(transcript?.messages[0]?.id).toBe('m0000');
   });
 });

@@ -329,3 +329,26 @@ export function describeTool(tool: ToolCall): string {
   }
   return tool.name;
 }
+
+/** Nodes rendered per step; older ones stay folded behind "earlier messages" until paged to. */
+export const transcriptWindowStep = 200;
+
+/**
+ * Keeps the newest `limit` nodes. Rendering cost then tracks the window, not the
+ * session length; `hidden` drives the "earlier messages" marker.
+ */
+export function windowNodes<T>(
+  nodes: readonly T[],
+  limit: number,
+): { visible: readonly T[]; hidden: number } {
+  if (nodes.length <= limit) return { visible: nodes, hidden: 0 };
+  return { visible: nodes.slice(nodes.length - limit), hidden: nodes.length - limit };
+}
+
+/** `14:03:07 · 1.2s` for detailed tool rows; duration omitted while running. */
+export function formatToolTiming(tool: ToolCall, formatClock: (at: number) => string): string {
+  const started = formatClock(tool.startedAt);
+  if (tool.completedAt === undefined) return started;
+  const seconds = Math.max(0, tool.completedAt - tool.startedAt) / 1000;
+  return `${started} · ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds).toString()}s`;
+}

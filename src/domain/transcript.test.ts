@@ -4,10 +4,13 @@ import { sanitizeTerminalText } from './sanitize-text.ts';
 import {
   type AssistantPart,
   foldTranscript,
+  formatToolTiming,
   groupKey,
   type ToolCall,
   type TranscriptMessage,
   type TranscriptNode,
+  transcriptWindowStep,
+  windowNodes,
 } from './transcript.ts';
 
 function tool(id: string, name: string, status: ToolCall['status'] = 'completed'): AssistantPart {
@@ -168,5 +171,33 @@ describe('sanitizeTerminalText', () => {
   });
   test('keeps tabs, newlines and unicode', () => {
     expect(sanitizeTerminalText('a\tb\nçé 🐱')).toBe('a\tb\nçé 🐱');
+  });
+});
+
+function testClock(at: number): string {
+  return `t${at}`;
+}
+
+describe('windowNodes', () => {
+  test('keeps the newest nodes and counts the hidden ones', () => {
+    const nodes = Array.from({ length: 450 }, (_, index) => index);
+    const { visible, hidden } = windowNodes(nodes, transcriptWindowStep);
+    expect(visible).toHaveLength(200);
+    expect(visible[0]).toBe(250);
+    expect(hidden).toBe(250);
+    expect(windowNodes(nodes, 1000)).toEqual({ visible: nodes, hidden: 0 });
+  });
+
+  test('tool timing shows start clock and duration once complete', () => {
+    const call = {
+      id: 't',
+      name: 'read',
+      status: 'completed' as const,
+      input: {},
+      startedAt: 1000,
+    };
+    expect(formatToolTiming(call, testClock)).toBe('t1000');
+    expect(formatToolTiming({ ...call, completedAt: 2234 }, testClock)).toBe('t1000 · 1.2s');
+    expect(formatToolTiming({ ...call, completedAt: 61_000 }, testClock)).toBe('t1000 · 60s');
   });
 });

@@ -1,17 +1,22 @@
+import type { ScrollBoxRenderable } from '@opentui/core';
 import type { Accessor } from 'solid-js';
-import { createMemo, For, Match, Show, Switch } from 'solid-js';
+import { createMemo, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
 
 import type { PermissionPrompt } from '../adapter/backend.ts';
 import type { AppController } from '../app/controller.ts';
+import type { ScrollMove } from '../app/key-router.ts';
 import { formatModelRef, type ModelSelection } from '../domain/model-ref.ts';
 import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
+import { assertNever } from '../domain/session.ts';
 import type { ThrobberFacts } from '../domain/throbber.ts';
 import { latestTurn } from '../domain/throbber.ts';
 import {
   describeTool,
   foldTranscript,
+  formatToolTiming,
   type ToolCall,
   type TranscriptNode,
+  windowNodes,
 } from '../domain/transcript.ts';
 import type { Theme } from './theme.ts';
 import { Throbber } from './throbber-view.tsx';
@@ -23,6 +28,8 @@ export type TranscriptProps = Readonly<{
   width: number;
   animate: boolean;
   ascii: boolean;
+  /** Receives the scroll function for key routing while this transcript is mounted. */
+  onScrollHandle?: (scroll: ((move: ScrollMove) => void) | undefined) => void;
 }>;
 
 const outputPreviewLines = 12;
@@ -38,12 +45,62 @@ export function Transcript(props: TranscriptProps) {
       expandedGroups: new Set(Object.keys(state.expandedGroups)),
     }),
   );
+  const windowed = createMemo(() =>
+    windowNodes(nodes(), props.controller.transcriptWindow(props.sessionID)),
+  );
+  let box: ScrollBoxRenderable | undefined;
+
+  const scroll = (move: ScrollMove) => {
+    if (box === undefined) return;
+    const page = Math.max(1, box.height - 2);
+    switch (move) {
+      case 'pageUp': {
+        if (box.scrollTop > 0) {
+          box.scrollBy(-page);
+          return;
+        }
+        // At the top: reveal earlier nodes while keeping the current first node in place.
+        const first = windowed().visible[0];
+        const keep = first === undefined ? undefined : box.findDescendantById(nodeID(first.key));
+        if (!props.controller.revealEarlier(props.sessionID, windowed().hidden)) return;
+        if (keep !== undefined) {
+          const release = box.anchor(keep);
+          setTimeout(release, 2000);
+        }
+        return;
+      }
+      case 'pageDown':
+        box.scrollBy(page);
+        return;
+      case 'top':
+        box.scrollTo(0);
+        return;
+      case 'bottom':
+        box.scrollTo(box.scrollHeight);
+        return;
+      default:
+        assertNever(move);
+    }
+  };
+  onMount(() => props.onScrollHandle?.(scroll));
+  onCleanup(() => props.onScrollHandle?.(undefined));
+
   const turn = createMemo(() =>
     latestTurn(transcript()?.messages ?? [], state.running[props.sessionID] === true),
   );
 
   return (
-    <scrollbox flexGrow={1} stickyScroll stickyStart="bottom" paddingLeft={1} paddingRight={1}>
+    <scrollbox
+      ref={(element: ScrollBoxRenderable) => {
+        box = element;
+      }}
+      flexGrow={1}
+      stickyScroll
+      stickyStart="bottom"
+      viewportCulling
+      paddingLeft={1}
+      paddingRight={1}
+    >
       <WelcomePanel
         controller={props.controller}
         theme={props.theme}
@@ -52,13 +109,23 @@ export function Transcript(props: TranscriptProps) {
         model={state.sessions[props.sessionID]?.model}
         directory={state.sessions[props.sessionID]?.directory}
       />
-      <Show when={transcript()?.olderCursor !== undefined}>
-        <text fg={props.theme.dim}> … earlier messages not loaded</text>
+      <Show when={windowed().hidden > 0 || transcript()?.olderCursor !== undefined}>
+        <text fg={props.theme.dim}>
+          {transcript()?.loading === true
+            ? ' … loading earlier messages'
+            : ' … earlier messages · PageUp at the top to show them'}
+        </text>
       </Show>
       <Show when={transcript()?.loading === true && nodes().length === 0}>
         <text fg={props.theme.dim}> Loading conversation…</text>
       </Show>
-      <For each={nodes()}>{(node) => <NodeView node={node} theme={props.theme} />}</For>
+      <For each={windowed().visible}>
+        {(node) => (
+          <box id={nodeID(node.key)} flexDirection="column" flexShrink={0}>
+            <NodeView node={node} theme={props.theme} detailed={state.detailed} />
+          </box>
+        )}
+      </For>
       <Show when={turn()}>
         {(facts: Accessor<ThrobberFacts>) => (
           <Throbber
@@ -124,7 +191,11 @@ export function WelcomePanel(props: WelcomeProps) {
   );
 }
 
-function NodeView(props: { node: TranscriptNode; theme: Theme }) {
+function nodeID(key: string): string {
+  return `node:${key}`;
+}
+
+function NodeView(props: { node: TranscriptNode; theme: Theme; detailed: boolean }) {
   const theme = () => props.theme;
   return (
     <Switch>
@@ -166,7 +237,12 @@ function NodeView(props: { node: TranscriptNode; theme: Theme }) {
       </Match>
       <Match when={props.node.kind === 'tool' ? props.node : undefined}>
         {(node: Accessor<NodeOf<'tool'>>) => (
-          <ToolView tool={node().tool} expanded={node().expanded} theme={theme()} />
+          <ToolView
+            tool={node().tool}
+            expanded={node().expanded}
+            detailed={props.detailed}
+            theme={theme()}
+          />
         )}
       </Match>
       <Match when={props.node.kind === 'tool-group' ? props.node : undefined}>
@@ -175,7 +251,9 @@ function NodeView(props: { node: TranscriptNode; theme: Theme }) {
             <text fg={theme().dim}>{`  ${node().summary}${node().running ? '…' : ''}`}</text>
             <Show when={node().expanded}>
               <For each={node().tools}>
-                {(tool) => <ToolView tool={tool} expanded theme={theme()} />}
+                {(tool) => (
+                  <ToolView tool={tool} expanded detailed={props.detailed} theme={theme()} />
+                )}
               </For>
             </Show>
           </box>
@@ -221,7 +299,9 @@ function NodeView(props: { node: TranscriptNode; theme: Theme }) {
   );
 }
 
-function ToolView(props: { tool: ToolCall; expanded: boolean; theme: Theme }) {
+function ToolView(props: { tool: ToolCall; expanded: boolean; detailed: boolean; theme: Theme }) {
+  // Ctrl+O shows exact output (sanitized, untruncated) and timing.
+  const render = (text: string) => (props.detailed ? full(text) : preview(text));
   const failed = () => props.tool.status === 'error';
   const bullet = () =>
     failed()
@@ -234,18 +314,29 @@ function ToolView(props: { tool: ToolCall; expanded: boolean; theme: Theme }) {
       <box flexDirection="row">
         <text fg={bullet()}>● </text>
         <text fg={props.theme.text}>{sanitizeText(describeTool(props.tool))}</text>
+        <Show when={props.detailed}>
+          <text fg={props.theme.dim}>{`  ${formatToolTiming(props.tool, clock)}`}</text>
+        </Show>
       </box>
       {/* Failures are never hidden, even in compact mode. */}
       <Show when={props.tool.error}>
         {(error: Accessor<string>) => (
-          <text fg={props.theme.error}>{`  └ ${preview(error())}`}</text>
+          <text fg={props.theme.error}>{`  └ ${render(error())}`}</text>
         )}
       </Show>
       <Show when={props.expanded && props.tool.output !== undefined && !failed()}>
-        <text fg={props.theme.dim}>{`  └ ${preview(props.tool.output ?? '')}`}</text>
+        <text fg={props.theme.dim}>{`  └ ${render(props.tool.output ?? '')}`}</text>
       </Show>
     </box>
   );
+}
+
+function full(text: string): string {
+  return sanitizeText(text).split('\n').join('\n    ');
+}
+
+function clock(at: number): string {
+  return new Date(at).toLocaleTimeString(undefined, { hour12: false });
 }
 
 function preview(text: string): string {

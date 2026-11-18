@@ -4,7 +4,7 @@ import type { Accessor } from 'solid-js';
 import { createSignal, Match, onCleanup, Show, Switch } from 'solid-js';
 
 import type { AppController } from '../app/controller.ts';
-import { type KeyInput, routeKey } from '../app/key-router.ts';
+import { type KeyInput, routeKey, type ScrollMove } from '../app/key-router.ts';
 import { composerFrom, graphemes, insertText } from '../domain/composer.ts';
 import type { Keymap } from '../domain/keymap.ts';
 import { ComposerView, Footer } from './composer-view.tsx';
@@ -59,11 +59,14 @@ export function App(props: AppProps) {
       });
   };
 
+  let scrollTranscript: ((move: ScrollMove) => void) | undefined;
+
   useKeyboard((event) => {
     if (editing || event.eventType === 'release') return;
     const handled = routeKey(controller, props.keymap, toKeyInput(event), {
       openEditor,
       redraw: () => renderer.requestRender(),
+      scroll: (move) => scrollTranscript?.(move),
     });
     if (handled) event.preventDefault();
   });
@@ -88,6 +91,9 @@ export function App(props: AppProps) {
               width={width()}
               animate={props.animate}
               ascii={props.ascii}
+              onScrollHandle={(handle) => {
+                scrollTranscript = handle;
+              }}
             />
           )}
         </Match>

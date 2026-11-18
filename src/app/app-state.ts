@@ -65,6 +65,8 @@ export type AppState = {
   defaultModel?: ModelSelection;
   serverCommands: ServerCommand[];
   detailed: boolean;
+  /** Rendered node count per session (see `windowNodes`); grows as the user pages up. */
+  transcriptWindow: Record<string, number>;
   expandedGroups: Record<string, true>;
   composer: Composer;
   completion?: Completion;
@@ -107,6 +109,7 @@ export function initialState(directory: string): AppState {
     models: [],
     serverCommands: [],
     detailed: false,
+    transcriptWindow: {},
     expandedGroups: {},
     composer: { ...emptyComposer },
     drafts: {},

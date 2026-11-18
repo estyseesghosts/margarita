@@ -55,8 +55,16 @@ export class FakeBackend implements Backend {
   async activeSessionIDs(): Promise<Set<string>> {
     return new Set(this.active);
   }
-  async listMessages(sessionID: string): Promise<MessagePage> {
-    return { messages: this.messages[sessionID] ?? [] };
+  /** Newest-first pages like the server; the cursor is the index where the page ends. */
+  async listMessages(sessionID: string, limit: number, cursor?: string): Promise<MessagePage> {
+    this.calls.push({ name: 'listMessages', args: [sessionID, limit, cursor] });
+    const all = this.messages[sessionID] ?? [];
+    const end = cursor === undefined ? all.length : Number(cursor);
+    const start = Math.max(0, end - limit);
+    return {
+      messages: all.slice(start, end),
+      ...(start > 0 ? { olderCursor: String(start) } : {}),
+    };
   }
   async listInbox(): Promise<QueuedInput[]> {
     return [];

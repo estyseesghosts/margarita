@@ -22,9 +22,13 @@ import type { AppController } from './controller.ts';
 /** A decoded key: identity, modifiers and the printable text it would insert, if any. */
 export type KeyInput = KeyPress & Readonly<{ text?: string }>;
 
+export type ScrollMove = 'pageUp' | 'pageDown' | 'top' | 'bottom';
+
 export type RouterServices = Readonly<{
   openEditor: () => void;
   redraw: () => void;
+  /** Scrolls the visible transcript; paging past the top loads earlier history. */
+  scroll: (move: ScrollMove) => void;
 }>;
 
 /**
@@ -70,6 +74,18 @@ function runAction(controller: AppController, action: ActionID, services: Router
       return true;
     case 'transcript.details':
       controller.toggleDetails();
+      return true;
+    case 'transcript.pageUp':
+      services.scroll('pageUp');
+      return true;
+    case 'transcript.pageDown':
+      services.scroll('pageDown');
+      return true;
+    case 'transcript.top':
+      services.scroll('top');
+      return true;
+    case 'transcript.bottom':
+      services.scroll('bottom');
       return true;
     case 'history.search':
       controller.openHistorySearch();

@@ -37,7 +37,7 @@ import {
 } from '../domain/prompt-history.ts';
 import type { Execution, SessionSummary } from '../domain/session.ts';
 import { completeCommand, type LocalCommandName, parseInput } from '../domain/slash-command.ts';
-import type { TranscriptMessage } from '../domain/transcript.ts';
+import { type TranscriptMessage, transcriptWindowStep } from '../domain/transcript.ts';
 import { type AppState, initialState, type Overlay, type Route } from './app-state.ts';
 
 export type ControllerDeps = Readonly<{
@@ -378,18 +378,21 @@ export class AppController {
     const page = await this.deps.backend.listMessages(sessionID, transcriptPageSize);
     const existing = this.state.transcripts[sessionID];
     const merged = mergeLatest(existing?.messages ?? [], page.messages);
-    this.setState('transcripts', sessionID, {
-      messages: merged,
-      loading: false,
-      stale: false,
-      ...(existing === undefined
-        ? page.olderCursor === undefined
-          ? {}
-          : { olderCursor: page.olderCursor }
-        : existing.olderCursor === undefined
-          ? {}
-          : { olderCursor: existing.olderCursor }),
-    });
+    // Cached messages older than this page keep their own cursor; otherwise the page's
+    // cursor is the way further back (an empty placeholder transcript has none).
+    const olderCursor =
+      merged.length > page.messages.length ? existing?.olderCursor : page.olderCursor;
+    this.setState(
+      'transcripts',
+      produce((transcripts) => {
+        transcripts[sessionID] = {
+          messages: merged,
+          loading: false,
+          stale: false,
+          ...(olderCursor === undefined ? {} : { olderCursor }),
+        };
+      }),
+    );
     this.touchTranscript(sessionID);
   }
 
@@ -405,16 +408,50 @@ export class AppController {
       );
       const known = new Set(transcript.messages.map((message) => message.id));
       const older = page.messages.filter((message) => !known.has(message.id));
-      this.setState('transcripts', sessionID, (current) => ({
-        messages: [...older, ...current.messages],
-        loading: false,
-        stale: current.stale,
-        ...(page.olderCursor === undefined ? {} : { olderCursor: page.olderCursor }),
-      }));
+      // Replace via produce: a merging setter would keep a stale cursor after the last page.
+      this.setState(
+        'transcripts',
+        sessionID,
+        produce((current) => {
+          current.messages = [...older, ...current.messages];
+          current.loading = false;
+          if (page.olderCursor === undefined) delete current.olderCursor;
+          else current.olderCursor = page.olderCursor;
+        }),
+      );
     } catch (error) {
       this.setState('transcripts', sessionID, 'loading', false);
       throw error;
     }
+  }
+
+  /** Rendered node limit for a session's transcript. */
+  transcriptWindow(sessionID: string): number {
+    return this.state.transcriptWindow[sessionID] ?? transcriptWindowStep;
+  }
+
+  /**
+   * Paging past the top: first un-hide already loaded nodes, then fetch the next older
+   * page from the server. Returns false when there is nothing earlier.
+   */
+  revealEarlier(sessionID: string, hiddenNodes: number): boolean {
+    if (hiddenNodes > 0) {
+      this.setState(
+        'transcriptWindow',
+        sessionID,
+        this.transcriptWindow(sessionID) + transcriptWindowStep,
+      );
+      return true;
+    }
+    const transcript = this.state.transcripts[sessionID];
+    if (transcript?.olderCursor === undefined) return false;
+    this.setState(
+      'transcriptWindow',
+      sessionID,
+      this.transcriptWindow(sessionID) + transcriptWindowStep,
+    );
+    void this.track('history', this.loadOlder(sessionID));
+    return true;
   }
 
   /** Bounded LRU of cached transcripts; detached sessions keep summaries only. */
