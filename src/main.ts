@@ -9,6 +9,7 @@ import { type Backend, BackendError, createBackend } from './adapter/backend.ts'
 import { connect, ConnectionError } from './adapter/connection.ts';
 import { startEventPump } from './adapter/event-pump.ts';
 import { AppController, errorText } from './app/controller.ts';
+import { createDebugLog, type DebugLog, noDebugLog } from './app/debug-log.ts';
 import { listProjectFiles } from './app/project-files.ts';
 import { type CliOptions, helpText, parseArgs } from './cli/args.ts';
 import { exitCodes, runPrint } from './cli/print.ts';
@@ -44,6 +45,59 @@ async function main(argv: readonly string[]): Promise<number> {
 
 async function run(options: CliOptions): Promise<number> {
   const env = process.env;
+  const startedAt = Date.now();
+  let debugLog: DebugLog = noDebugLog;
+  if (options.debugLog !== undefined) {
+    const created = createDebugLog(options.debugLog);
+    if (!created.ok) {
+      process.stderr.write(`marg: ${created.message}\n`);
+      return exitCodes.usage;
+    }
+    debugLog = created.log;
+  }
+  installCrashHandlers(debugLog);
+  debugLog.write('startup', {
+    version,
+    platform: process.platform,
+    term: env['TERM'],
+    colorTerm: env['COLORTERM'],
+    noColor: env['NO_COLOR'] !== undefined,
+    cwd: options.cwd ?? process.cwd(),
+  });
+  try {
+    const code = await execute(options, debugLog);
+    debugLog.write('exit', { code, ms: Date.now() - startedAt });
+    return code;
+  } catch (error) {
+    debugLog.write('crash', { errorName: error instanceof Error ? error.name : 'unknown' });
+    process.stderr.write(`marg: ${errorText(error)}\n`);
+    return exitCodes.failed;
+  } finally {
+    debugLog.close();
+  }
+}
+
+/** Crash paths: record, then die the same way the runtime defaults would. */
+function installCrashHandlers(log: DebugLog): void {
+  if (!log.enabled) return;
+  process.on('uncaughtException', (error) => {
+    log.write('uncaught-exception', {
+      errorName: error instanceof Error ? error.name : 'unknown',
+    });
+    log.close();
+    process.exit(1);
+  });
+  process.on('unhandledRejection', (reason) => {
+    log.write('unhandled-rejection', {
+      errorName: reason instanceof Error ? reason.name : 'unknown',
+    });
+    log.close();
+    process.exit(1);
+  });
+}
+
+async function execute(options: CliOptions, debugLog: DebugLog): Promise<number> {
+  const env = process.env;
   const platform = process.platform;
   const cwd = options.cwd === undefined ? process.cwd() : absolute(options.cwd);
   const paths = appPaths(env, platform);
@@ -63,7 +117,11 @@ async function run(options: CliOptions): Promise<number> {
       onStarting: () => process.stderr.write('Starting OpenCode service…\n'),
     });
     backend = createBackend(connection);
+    debugLog.write('connected', { baseUrl: backend.baseUrl });
   } catch (error) {
+    debugLog.write('connect-failed', {
+      errorName: error instanceof Error ? error.name : 'unknown',
+    });
     process.stderr.write(`marg: ${errorText(error)}\n`);
     if (error instanceof ConnectionError) {
       process.stderr.write(
@@ -89,11 +147,16 @@ async function run(options: CliOptions): Promise<number> {
     listFiles: (root) => listProjectFiles(root),
     requestExit: () => exit.request?.(),
     goalStore: fileGoalStore(join(paths.stateDir, 'goals'), () => new Date().toISOString()),
+    debugLog,
   });
 
   try {
     await controller.bootstrap();
+    debugLog.write('bootstrap', { sessions: Object.keys(controller.state.sessions).length });
   } catch (error) {
+    debugLog.write('bootstrap-failed', {
+      errorKind: error instanceof BackendError ? error.kind : 'unknown',
+    });
     process.stderr.write(`marg: could not load from ${backend.baseUrl}: ${errorText(error)}\n`);
     return error instanceof BackendError && error.kind === 'unauthorized'
       ? exitCodes.unauthorized
@@ -144,6 +207,7 @@ async function run(options: CliOptions): Promise<number> {
     }
     const abort = new AbortController();
     process.once('SIGINT', () => abort.abort());
+    debugLog.write('print', { json: options.json });
     try {
       return await runPrint({
         backend,
@@ -180,7 +244,10 @@ async function run(options: CliOptions): Promise<number> {
     if (!renderer.isDestroyed) renderer.destroy();
   };
   renderer.once('destroy', () => finished.resolve());
-  process.once('SIGTERM', () => exit.request?.());
+  process.once('SIGTERM', () => {
+    debugLog.write('signal', { signal: 'SIGTERM' });
+    exit.request?.();
+  });
 
   const ui = configLoad.config.ui;
   const animate =

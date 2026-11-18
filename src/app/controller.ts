@@ -75,6 +75,7 @@ import {
   type Overlay,
   type Route,
 } from './app-state.ts';
+import { type DebugLog, noDebugLog } from './debug-log.ts';
 
 export type ControllerDeps = Readonly<{
   backend: Backend;
@@ -91,6 +92,8 @@ export type ControllerDeps = Readonly<{
   writeFile?: (path: string, text: string) => Promise<void>;
   /** Goal/plan sidecar storage; defaults to memory (tests). */
   goalStore?: GoalStore;
+  /** Opt-in diagnostics sink (--debug-log); defaults to a silent no-op. */
+  debugLog?: DebugLog;
 }>;
 
 const transcriptPageSize = 120;
@@ -114,6 +117,7 @@ export class AppController {
   private readonly transcriptDirty = new Set<string>();
   private readonly summaryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private transcriptOrder: string[] = [];
+  private readonly debugLog: DebugLog;
   private fileCache: { root: string; files: string[] } | undefined;
   private readonly fileScans = new Map<string, Promise<string[]>>();
   private completionRequest = 0;
@@ -122,6 +126,7 @@ export class AppController {
   private readonly goalStore: GoalStore;
 
   constructor(private readonly deps: ControllerDeps) {
+    this.debugLog = deps.debugLog ?? noDebugLog;
     const [state, setState] = createStore<AppState>(initialState(deps.cwd));
     this.state = state;
     this.setState = setState;
@@ -272,11 +277,17 @@ export class AppController {
   // ---------------------------------------------------------------- events
 
   onStreamStatus(status: StreamStatus): void {
+    this.debugLog.write('stream-status', { status });
     this.setState('stream', status);
     if (status === 'reconnecting') this.showNotice('Connection lost · retrying', 'warn', false);
   }
 
   onEvents(events: readonly BackendEvent[], resync: boolean): void {
+    this.debugLog.write('events', {
+      count: events.length,
+      kinds: [...new Set(events.map((event) => event.kind))],
+      resync,
+    });
     if (this.disposed) return;
     if (resync) {
       void this.track('resync', this.resync());
@@ -527,6 +538,7 @@ export class AppController {
 
   /** View change only: no backend mutation. Drafts are kept per route. */
   openSession(sessionID: string): void {
+    this.debugLog.write('route', { kind: 'conversation', sessionID });
     this.saveDraft();
     const transcript = this.state.transcripts[sessionID];
     batch(() => {
@@ -551,6 +563,7 @@ export class AppController {
    * first prompt is submitted, so opening margarita never leaves empty sessions behind.
    */
   startNewSession(directory: string): void {
+    this.debugLog.write('route', { kind: 'new', directory });
     this.saveDraft();
     batch(() => {
       this.setState('route', { kind: 'new', directory });
@@ -567,6 +580,7 @@ export class AppController {
    * the first row; typing still goes straight to the new-session prompt.
    */
   openOverview(): void {
+    this.debugLog.write('route', { kind: 'overview' });
     this.saveDraft();
     const directory = this.currentDirectory();
     batch(() => {
@@ -923,10 +937,16 @@ export class AppController {
     this.setState('admitting', true);
     try {
       await send();
+      this.debugLog.write('action', { action: 'submit', ok: true });
       this.rememberPrompt(text, directory);
       this.clearComposer(text);
       return true;
     } catch (error) {
+      this.debugLog.write('action', {
+        action: 'submit',
+        ok: false,
+        errorKind: error instanceof BackendError ? error.kind : 'unknown',
+      });
       if (error instanceof BackendError && error.kind === 'transport') {
         // The POST may have landed. Show server state instead of resending blindly.
         this.showNotice(
@@ -986,7 +1006,13 @@ export class AppController {
         ...(agent === undefined ? {} : { agent }),
         ...(model === undefined ? {} : { model }),
       });
+      this.debugLog.write('action', { action: 'create-session', ok: true });
     } catch (error) {
+      this.debugLog.write('action', {
+        action: 'create-session',
+        ok: false,
+        errorKind: error instanceof BackendError ? error.kind : 'unknown',
+      });
       this.setState('admitting', false);
       this.showNotice(errorText(error), 'error');
       return undefined;
@@ -1281,8 +1307,14 @@ export class AppController {
     if (session === undefined) return;
     try {
       const interrupted = await this.deps.backend.interrupt(session.id);
+      this.debugLog.write('action', { action: 'interrupt', ok: interrupted });
       this.showNotice(interrupted ? 'Interrupted' : 'Nothing was running', 'dim');
     } catch (error) {
+      this.debugLog.write('action', {
+        action: 'interrupt',
+        ok: false,
+        errorKind: error instanceof BackendError ? error.kind : 'unknown',
+      });
       this.showNotice(errorText(error), 'error');
     }
   }
@@ -1969,6 +2001,10 @@ export class AppController {
     try {
       await work;
     } catch (error) {
+      this.debugLog.write('backend-error', {
+        operation: label,
+        kind: error instanceof BackendError ? error.kind : 'unknown',
+      });
       if (this.disposed) return;
       this.showNotice(`${label}: ${errorText(error)}`, 'error');
     }
