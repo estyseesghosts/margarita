@@ -9,7 +9,11 @@ export type AppConfig = Readonly<{
   models: Readonly<{ recentLimit: number }>;
   history: Readonly<{ limit: number }>;
   keys: Readonly<Record<string, string>>;
+  ui: Readonly<{ theme: ThemeName; animation: boolean; ascii: boolean }>;
 }>;
+
+export const themeNames = ['dark', 'light', 'high-contrast'] as const;
+export type ThemeName = (typeof themeNames)[number];
 
 export const defaultConfig: AppConfig = {
   agents: { default: 'build', cycle: ['build', 'plan'] },
@@ -18,6 +22,7 @@ export const defaultConfig: AppConfig = {
   models: { recentLimit: 8 },
   history: { limit: 200 },
   keys: {},
+  ui: { theme: 'dark', animation: true, ascii: false },
 };
 
 export type ConfigLoad = Readonly<{ config: AppConfig; warnings: readonly string[] }>;
@@ -71,6 +76,7 @@ export function parseConfig(raw: unknown): ConfigLoad {
   const models = section('models');
   const history = section('history');
   const keysRaw = section('keys');
+  const ui = section('ui');
 
   const string = (value: unknown, path: string, fallback: string): string => {
     if (value === undefined) return fallback;
@@ -108,6 +114,13 @@ export function parseConfig(raw: unknown): ConfigLoad {
   if (enter === 'queue' || enter === 'steer') enterWhileRunning = enter;
   else if (enter !== undefined) warnings.push('input.enterWhileRunning must be "queue" or "steer"');
 
+  let theme = defaultConfig.ui.theme;
+  const themeRaw = ui['theme'];
+  const matched = themeNames.find((name) => name === themeRaw);
+  if (matched !== undefined) theme = matched;
+  else if (themeRaw !== undefined)
+    warnings.push(`ui.theme must be one of ${themeNames.join(', ')}`);
+
   const keys: Record<string, string> = {};
   for (const [action, binding] of Object.entries(keysRaw)) {
     if (typeof binding === 'string') keys[action] = binding;
@@ -134,6 +147,11 @@ export function parseConfig(raw: unknown): ConfigLoad {
       },
       history: { limit: count(history['limit'], 'history.limit', defaultConfig.history.limit) },
       keys,
+      ui: {
+        theme,
+        animation: bool(ui['animation'], 'ui.animation', defaultConfig.ui.animation),
+        ascii: bool(ui['ascii'], 'ui.ascii', defaultConfig.ui.ascii),
+      },
     },
     warnings,
   };

@@ -182,15 +182,17 @@ async function run(options: CliOptions): Promise<number> {
   renderer.once('destroy', () => finished.resolve());
   process.once('SIGTERM', () => exit.request?.());
 
-  const animate = env['MARGARITA_NO_ANIMATION'] === undefined && env['NO_COLOR'] === undefined;
+  const ui = configLoad.config.ui;
+  const animate =
+    ui.animation && env['MARGARITA_NO_ANIMATION'] === undefined && env['NO_COLOR'] === undefined;
   await render(
     () =>
       App({
         controller,
         keymap: keymapBuild.keymap,
-        theme: pickTheme(env),
+        theme: pickTheme(env, ui.theme),
         animate,
-        ascii: env['MARGARITA_ASCII'] !== undefined,
+        ascii: ui.ascii || env['MARGARITA_ASCII'] !== undefined,
         env,
       }),
     renderer,
