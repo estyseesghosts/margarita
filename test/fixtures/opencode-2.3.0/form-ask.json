@@ -1,0 +1,35 @@
+[
+  {
+    "id": "frm_fixture17",
+    "sessionID": "ses_fixture18",
+    "title": "Questions",
+    "metadata": {
+      "kind": "question",
+      "tool": {
+        "messageID": "msg_fixture19",
+        "id": "call_mock_1"
+      }
+    },
+    "fields": [
+      {
+        "key": "q0",
+        "title": "Pick",
+        "description": "Pick one",
+        "type": "string",
+        "options": [
+          {
+            "value": "alpha",
+            "label": "alpha",
+            "description": "first"
+          },
+          {
+            "value": "beta",
+            "label": "beta",
+            "description": "second"
+          }
+        ],
+        "custom": true
+      }
+    ]
+  }
+]

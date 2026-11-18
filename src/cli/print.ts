@@ -59,22 +59,31 @@ export function findTurn(
   }
   if (start < 0) return { state: 'pending' };
   const rest = messages.slice(start);
-  const end = rest.findIndex((m, index) => index > 0 && m.kind === 'idle');
-  if (end < 0) return { state: 'running', messages: rest };
-  const turn = rest.slice(0, end + 1);
-  const marker = turn[end];
+  // The server writes one idle marker per run, so a queued follow-up lands in the same run:
+  // this turn ends at the next user message or at the idle marker, whichever comes first.
+  const end = rest.findIndex((m, index) => index > 0 && (m.kind === 'idle' || m.kind === 'user'));
+  const closer = end < 0 ? undefined : rest[end];
+  if (closer === undefined) return { state: 'running', messages: rest };
+  const turn = rest.slice(0, closer.kind === 'idle' ? end + 1 : end);
+  const lastAssistant = turn.findLast((m) => m.kind === 'assistant');
   const errored = turn.find((m) => m.kind === 'assistant' && m.error !== undefined);
-  if (marker?.kind === 'idle' && marker.outcome !== 'succeeded') {
-    const error = marker.error ?? (errored?.kind === 'assistant' ? errored.error : undefined);
+  const error = errored?.kind === 'assistant' ? errored.error : undefined;
+  if (closer.kind === 'idle' && closer.outcome !== 'succeeded') {
+    const detail = closer.error ?? error;
     return {
       state: 'done',
       messages: turn,
-      outcome: marker.outcome,
-      ...(error === undefined ? {} : { error }),
+      outcome: closer.outcome,
+      ...(detail === undefined ? {} : { error: detail }),
     };
   }
-  if (errored?.kind === 'assistant' && errored.error !== undefined) {
-    return { state: 'done', messages: turn, outcome: 'failed', error: errored.error };
+  if (error !== undefined) return { state: 'done', messages: turn, outcome: 'failed', error };
+  // A following user message only proves this turn ended once its reply has completed.
+  if (
+    closer.kind === 'user' &&
+    !(lastAssistant?.kind === 'assistant' && lastAssistant.completedAt !== undefined)
+  ) {
+    return { state: 'running', messages: turn };
   }
   return { state: 'done', messages: turn, outcome: 'succeeded' };
 }
@@ -139,7 +148,13 @@ export async function runPrint(request: PrintRequest): Promise<number> {
     if (progress.state === 'running') {
       inactiveWhileRunning = active ? 0 : inactiveWhileRunning + 1;
       if (inactiveWhileRunning >= gracePolls) {
-        return fail(request, 'session stopped before the turn finished');
+        // e.g. a declined permission ends the run with an errored reply and no idle marker.
+        const stopped = progress.messages.findLast((m) => m.kind === 'assistant');
+        const cause = stopped?.kind === 'assistant' ? stopped.error : undefined;
+        return fail(
+          request,
+          `session stopped before the turn finished${cause === undefined ? '' : `: ${cause}`}`,
+        );
       }
       continue;
     }

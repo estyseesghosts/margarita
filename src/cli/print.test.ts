@@ -28,6 +28,7 @@ const assistant = (
   createdAt,
   agent: 'build',
   model,
+  completedAt: createdAt + 1,
   parts: [{ kind: 'text', text }],
   ...(error === undefined ? {} : { error }),
 });
@@ -128,6 +129,38 @@ describe('findTurn', () => {
 
   test('is pending without a matching user message', () => {
     expect(findTurn([user('other', 11, 'different')], admitted)).toEqual({ state: 'pending' });
+  });
+
+  test('a queued follow-up in the same run ends this turn before the shared idle marker', () => {
+    const progress = findTurn(
+      [
+        user('in_1', 11, 'hi'),
+        assistant('a1', 12, 'first reply'),
+        user('in_2', 14, 'follow-up'),
+        assistant('a2', 15, 'second reply'),
+        idle('i1', 16, 'succeeded'),
+      ],
+      admitted,
+    );
+    expect(progress).toMatchObject({ state: 'done', outcome: 'succeeded' });
+    if (progress.state === 'done')
+      expect(progress.messages.map((m) => m.id)).toEqual(['in_1', 'a1']);
+  });
+
+  test('a following user message does not finish a reply that is still streaming', () => {
+    const unfinished: TranscriptMessage = {
+      kind: 'assistant',
+      id: 'a1',
+      createdAt: 12,
+      agent: 'build',
+      model,
+      parts: [{ kind: 'text', text: 'partial' }],
+    };
+    const progress = findTurn(
+      [user('in_1', 11, 'hi'), unfinished, user('in_2', 14, 'steer')],
+      admitted,
+    );
+    expect(progress.state).toBe('running');
   });
 
   test('an assistant error fails the turn even when the marker says succeeded', () => {

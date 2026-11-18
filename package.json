@@ -8,12 +8,14 @@
   "type": "module",
   "scripts": {
     "build": "bun run scripts/build.ts",
+    "capture:fixtures": "bun run scripts/capture-fixtures.ts",
     "start": "bun run src/main.ts",
     "format": "bun fmt --no-script",
     "format:check": "bun fmt --no-script --check",
     "typecheck": "bun check",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
+    "test:writable": "bun run scripts/test-writable.ts",
     "verify": "bun run format:check && bun run lint && bun run typecheck && bun run test",
     "lint": "oxlint --type-aware --deny-warnings"
   },

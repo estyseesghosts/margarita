@@ -1,0 +1,115 @@
+{
+  "data": [
+    {
+      "id": "msg_fixture14",
+      "time": {
+        "created": 1700000000310
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_fixture15",
+      "time": {
+        "created": 1700000000270,
+        "firstToken": 1700000000280,
+        "streamed": 1700000000290,
+        "completed": 1700000000300
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "mock-1",
+        "providerID": "mock"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "tool done"
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_fixture13",
+      "time": {
+        "created": 1700000000200,
+        "firstToken": 1700000000210,
+        "streamed": 1700000000240,
+        "completed": 1700000000260
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "mock-1",
+        "providerID": "mock"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "call_mock_1",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "echo captured",
+              "description": "capture"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "captured\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1700000000220,
+            "ran": 1700000000230,
+            "completed": 1700000000250
+          }
+        }
+      ],
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_fixture16",
+      "time": {
+        "created": 1700000000190
+      },
+      "text": "TOOL shell {\"command\":\"echo captured\",\"description\":\"capture\"}",
+      "type": "user"
+    }
+  ],
+  "cursor": {
+    "previous": "eyJpZCI6Im1zZ18xZWU5NzAzOWQwMDE3MW8wanNFSkNHTmJJZCIsIm9yZGVyIjoiZGVzYyIsImRpcmVjdGlvbiI6InByZXZpb3VzIn0",
+    "next": "eyJpZCI6Im1zZ18xZWU5NzAxODUwMDFKZWhPbDZEVXlXRGdQTSIsIm9yZGVyIjoiZGVzYyIsImRpcmVjdGlvbiI6Im5leHQifQ"
+  }
+}

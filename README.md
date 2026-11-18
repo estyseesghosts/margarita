@@ -104,6 +104,7 @@ bun run verify     # format check + oxlint (type-aware) + typecheck + tests
 ```
 
 - `MARGARITA_LIVE=1 bun test test/live-smoke.test.tsx` runs a read-only check against your running service.
+- `bun run test:writable` runs the writable integration suite against a disposable OpenCode service it starts and deletes itself (private config and data, mock model); it never touches your service or sessions. See [docs/15](docs/15-testing-acceptance.md).
 - Code layout: `src/domain` (pure logic) · `src/adapter` (OpenCode client and events) · `src/app` (controller, keys) · `src/ui` (OpenTUI + Solid) · `src/cli` (args, print mode).
 - Code style lives in the TypeScript guide used across this project: Bun, strict TS, small modules.
 

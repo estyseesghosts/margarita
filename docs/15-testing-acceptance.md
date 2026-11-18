@@ -10,6 +10,31 @@
 
 Sources for contract assumptions: [OpenCode v2 API](https://opencode.ai/docs/api), [SDK event semantics](https://opencode.ai/docs/build/client), [Claude keyboard UX](https://code.claude.com/docs/en/interactive-mode), [Claude session overview](https://code.claude.com/docs/en/sessions).
 
+## Writable integration suite (opt-in)
+
+`bun run test:writable` runs `test/writable/` against a **disposable** OpenCode service. It is separate from the read-only `MARGARITA_LIVE=1` smoke test, which is unchanged.
+
+- **Isolation.** The suite starts its own standalone `opencode serve` on a free loopback port. All four XDG roots (config, data, cache, state) and the workspace are under one temp directory, so nothing is read from or written to your OpenCode config, sessions or storage, and your background service is never contacted. Teardown kills the process listening on that port and deletes the directory.
+- **No model credits.** The service is configured with one OpenAI-compatible provider pointing at an in-process mock (`test/writable/mock-model.ts`). The reply is chosen by the prompt text: `HOLD …` stays open until released, `FAIL …` answers HTTP 400, `TOOL <name> <json>` emits that tool call, anything else echoes `ok: <text>`.
+- **Covered:** first prompt, queued second prompt, queue cancel, queue-to-steer, interrupt, provider failure, permission ask/reply/conflict/reject, form reply, model switching, fork and revert, event stream correlation, reconnect with resync, and per-directory sessions and file search. Assertions check message, inbox and event correlation by ID rather than UI strings.
+- **Requires** `opencode` v2.3 on `PATH`. The script sets `MARGARITA_LIVE_WRITE=1`; without it the suite is skipped, so a plain `bun test` never starts a service.
+
+Observed against OpenCode 2.3.0 (pinned by the suite and by the fixtures below):
+
+- A prompt's inbox item ID is the ID of the user message it becomes.
+- One idle marker closes a whole **run**: a queued follow-up delivered in the same run shares the final marker. Turn boundaries are therefore the next user message or the idle marker.
+- A declined permission ends the run with an errored assistant reply and **no** idle marker.
+- `message.list` rejects `order` together with `cursor`; the cursor already encodes the order.
+- The event stream is live-only; work done while disconnected is not replayed, so reconnect must re-read canonical state.
+
+### Recorded fixtures
+
+`test/fixtures/opencode-2.3.0/` holds sanitized raw SDK responses (session, message pages, queued inbox, permission ask, form ask) recorded by `bun run capture:fixtures` from the same disposable service. IDs, timestamps and paths are normalized by `test/writable/sanitize-fixture.ts`. `src/adapter/fixtures.test.ts` maps them through the real wire mappers on every `bun test`. Re-record after upgrading the SDK or server, then review the diff.
+
+### CI
+
+`.github/workflows/verify.yml` runs `bun run verify` on Windows and Linux. The writable suite is not part of it; run it locally or in a dedicated job that has OpenCode installed.
+
 ## Fixtures to check in
 
 `test-fixtures/cases/` must include synthetic but schema-valid versions of:

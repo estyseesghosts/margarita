@@ -1,0 +1,98 @@
+{
+  "data": [
+    {
+      "id": "msg_fixture7",
+      "time": {
+        "created": 1700000000180
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_fixture8",
+      "time": {
+        "created": 1700000000140,
+        "firstToken": 1700000000150,
+        "streamed": 1700000000160,
+        "completed": 1700000000170
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "mock-1",
+        "providerID": "mock"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "ok: queued follow-up"
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_fixture5",
+      "time": {
+        "created": 1700000000130
+      },
+      "text": "queued follow-up",
+      "type": "user"
+    },
+    {
+      "id": "msg_fixture9",
+      "time": {
+        "created": 1700000000080,
+        "firstToken": 1700000000100,
+        "streamed": 1700000000110,
+        "completed": 1700000000120
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "mock-1",
+        "providerID": "mock"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "workingok: HOLD capture"
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_fixture10",
+      "time": {
+        "created": 1700000000070
+      },
+      "text": "HOLD capture",
+      "type": "user"
+    }
+  ],
+  "cursor": {
+    "previous": "eyJpZCI6Im1zZ18xZWU5NmZmOTIwMDFjQlU1eWIzb3JCV25YMiIsIm9yZGVyIjoiZGVzYyIsImRpcmVjdGlvbiI6InByZXZpb3VzIn0",
+    "next": "eyJpZCI6Im1zZ18xZWU5NmZmNGEwMDFFcHdYeDQ0TUV0ZFBDSiIsIm9yZGVyIjoiZGVzYyIsImRpcmVjdGlvbiI6Im5leHQifQ"
+  }
+}

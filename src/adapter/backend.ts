@@ -197,11 +197,12 @@ class OpenCodeBackend implements Backend {
 
   async listMessages(sessionID: string, limit: number, cursor?: string): Promise<MessagePage> {
     const page = await call('message.list', () =>
+      // The server rejects `order` together with a cursor: the cursor already encodes both the
+      // order and the direction of the page it came from.
       this.client.message.list({
         sessionID,
         limit,
-        order: 'desc',
-        ...(cursor === undefined ? {} : { cursor }),
+        ...(cursor === undefined ? { order: 'desc' as const } : { cursor }),
       }),
     );
     const messages = page.data

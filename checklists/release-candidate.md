@@ -6,6 +6,7 @@ Run on the exact build being released (`bun run build`, then the binary from `di
 
 - [ ] `bun run verify` is green (format, type-aware lint, typecheck, unit and frame tests).
 - [ ] `MARGARITA_LIVE=1 bun test test/live-smoke.test.tsx` passes (read-only).
+- [ ] `bun run test:writable` passes (disposable service, mock model).
 - [ ] `test/perf.test.tsx` within budget: fold of 10k messages < 250 ms, 5 MB stdout sanitize < 1.5 s, reconnect merge < 100 ms, steady frame on a 10k-message session < 200 ms.
 
 ## Smoke (manual, Windows Terminal and Ghostty; tmux on Linux)

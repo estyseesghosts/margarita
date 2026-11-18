@@ -1,0 +1,14 @@
+[
+  {
+    "id": "msg_fixture5",
+    "sessionID": "ses_fixture6",
+    "time": {
+      "created": 1700000000090
+    },
+    "type": "user",
+    "payload": {
+      "text": "queued follow-up"
+    },
+    "delivery": "queue"
+  }
+]

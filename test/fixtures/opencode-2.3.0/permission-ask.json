@@ -1,0 +1,14 @@
+[
+  {
+    "id": "per_fixture11",
+    "sessionID": "ses_fixture12",
+    "action": "shell",
+    "resources": ["echo captured"],
+    "save": ["echo *"],
+    "source": {
+      "type": "tool",
+      "messageID": "msg_fixture13",
+      "id": "call_mock_1"
+    }
+  }
+]
