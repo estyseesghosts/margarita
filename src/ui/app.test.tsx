@@ -741,6 +741,79 @@ describe('live activity indicator (issues 24, 25)', () => {
   });
 });
 
+function editDiffBackend(tool: {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  diff?: string;
+  diffFile?: string;
+}) {
+  const backend = backendWithSession();
+  backend.messages = {
+    ses_a: [
+      { kind: 'user', id: 'm1', createdAt: 1, text: 'change it', attachments: [] },
+      {
+        kind: 'assistant' as const,
+        id: 'm2',
+        createdAt: 2,
+        completedAt: 3,
+        agent: 'build',
+        model: { providerID: 'opencode', modelID: 'longcat' },
+        parts: [
+          {
+            kind: 'tool' as const,
+            tool: {
+              id: tool.id,
+              name: tool.name,
+              status: 'completed' as const,
+              input: tool.input,
+              startedAt: 2,
+              completedAt: 3,
+              ...(tool.diff === undefined ? {} : { diff: tool.diff }),
+              ...(tool.diffFile === undefined ? {} : { diffFile: tool.diffFile }),
+            },
+          },
+        ],
+      },
+    ],
+  };
+  return backend;
+}
+
+describe('successful edit diffs (issue #22)', () => {
+  test('an edit with a server-provided patch renders the diff, not a bare row', async () => {
+    const backend = editDiffBackend({
+      id: 'e1',
+      name: 'edit',
+      input: { path: 'src/a.ts', oldString: 'x', newString: 'y' },
+      diff: '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,1 +1,1 @@\n-x\n+y',
+    });
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('Update(src/a.ts)');
+    expect(frame).toContain('1 + y');
+    expect(frame).toContain('Added 1 line');
+    controller.dispose();
+  });
+
+  test('a completed edit-like call with no patch data reports it explicitly', async () => {
+    const backend = editDiffBackend({
+      id: 'e2',
+      name: 'write',
+      input: { path: 'src/a.ts' },
+    });
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('Changed(src/a.ts)');
+    expect(frame).toContain('diff unavailable for this change');
+    controller.dispose();
+  });
+});
+
 describe('oversized inline diff clamping (issue 27)', () => {
   test('a 140-line write diff is clamped; Enter expands only that row; Enter collapses again', async () => {
     const content = Array.from({ length: 140 }, (_, index) => `row${index}`).join('\n');

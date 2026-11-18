@@ -197,7 +197,34 @@ function toToolCall(
       ? sanitizeTerminalText(state['error']['message'])
       : undefined;
   const metadata = isRecord(state) && isRecord(state['metadata']) ? state['metadata'] : {};
-  const diff = typeof metadata['diff'] === 'string' ? metadata['diff'] : undefined;
+  // OpenCode v2.3 edit/write tools report their patch as metadata.files[].patch; the patch
+  // tool additionally reports metadata.diff (all files joined). Prefer the dedicated string
+  // and fall back to the first file entry.
+  const files = Array.isArray(metadata['files']) ? metadata['files'] : [];
+  let diff =
+    typeof metadata['diff'] === 'string' && metadata['diff'].trim() !== ''
+      ? metadata['diff']
+      : undefined;
+  let diffFile =
+    typeof metadata['filePath'] === 'string' && metadata['filePath'] !== ''
+      ? metadata['filePath']
+      : undefined;
+  for (const entry of files) {
+    if (!isRecord(entry)) continue;
+    if (typeof entry['file'] === 'string' && entry['file'] !== '' && diffFile === undefined) {
+      diffFile = entry['file'];
+    }
+  }
+  if (diff === undefined) {
+    for (const entry of files) {
+      if (isRecord(entry) && typeof entry['patch'] === 'string' && entry['patch'].trim() !== '') {
+        diff = entry['patch'];
+        break;
+      }
+    }
+  }
+  diff = diff === undefined ? undefined : sanitizeTerminalText(diff);
+  diffFile = diffFile === undefined ? undefined : sanitizeTerminalText(diffFile);
   // Servers may flag their own truncation in metadata; that takes precedence in the label.
   const serverTruncated = metadata['truncated'] === true;
   const outputTruncated = serverTruncated
@@ -216,6 +243,7 @@ function toToolCall(
     ...(outputTruncated === undefined ? {} : { outputTruncated }),
     ...(error === undefined ? {} : { error }),
     ...(diff === undefined || diff === '' ? {} : { diff }),
+    ...(diffFile === undefined ? {} : { diffFile }),
   };
 }
 

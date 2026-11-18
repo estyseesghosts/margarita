@@ -18,7 +18,7 @@ import type { PermissionPrompt } from '../adapter/backend.ts';
 import type { AppController } from '../app/controller.ts';
 import type { ScrollMove } from '../app/key-router.ts';
 import type { PatchLine } from '../domain/diff.ts';
-import { clampDiffPatch, diffCounts, editDiff } from '../domain/edit-diff.ts';
+import { clampDiffPatch, diffCounts, editDiff, isEditLike, toolPath } from '../domain/edit-diff.ts';
 import type { FormRequest } from '../domain/form.ts';
 import { formatModelRef, type ModelSelection } from '../domain/model-ref.ts';
 import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
@@ -436,6 +436,13 @@ function ToolView(props: {
   focused: boolean;
 }) {
   const edit = createMemo(() => (props.tool.status === 'error' ? undefined : editDiff(props.tool)));
+  // A completed edit-like call with no usable patch must say so instead of degrading to a
+  // bare row: the server gave us nothing to show, which is different from no change at all.
+  const unavailable = createMemo(() =>
+    edit() === undefined && props.tool.status === 'completed' && isEditLike(props.tool)
+      ? (toolPath(props.tool) ?? 'unknown')
+      : undefined,
+  );
   // Compact mode clips the patch to an explicit display-line budget; the full patch is
   // never truncated mid-hunk and re-parsed. Small diffs stay fully visible.
   const clamped = createMemo(() => {
@@ -459,9 +466,11 @@ function ToolView(props: {
         <text fg={bullet()}>● </text>
         <text fg={props.theme.text}>
           {sanitizeText(
-            edit() === undefined
-              ? describeTool(props.tool)
-              : `${props.tool.name === 'write' ? 'Write' : 'Update'}(${describeTool(props.tool).slice(props.tool.name.length + 1)})`,
+            edit() !== undefined
+              ? `${props.tool.name === 'write' ? 'Write' : 'Update'}(${describeTool(props.tool).slice(props.tool.name.length + 1)})`
+              : unavailable() !== undefined
+                ? `Changed(${unavailable()})`
+                : describeTool(props.tool),
           )}
         </text>
         <Show when={props.detailed}>
@@ -469,6 +478,9 @@ function ToolView(props: {
         </Show>
       </box>
       {/* Failures are never hidden, even in compact mode. */}
+      <Show when={unavailable() !== undefined}>
+        <text fg={props.theme.dim}>{'  └ diff unavailable for this change'}</text>
+      </Show>
       <Show when={props.tool.error}>
         {(error: Accessor<string>) => (
           <text fg={props.theme.error}>{`  └ ${render(error())}`}</text>

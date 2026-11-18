@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { SessionMessageAssistant, SessionMessageInfo } from '@opencode/client';
+import type { JsonValue, SessionMessageAssistant, SessionMessageInfo } from '@opencode/client';
 
 import { maxToolOutputChars, toTranscriptMessage } from './wire-mapping.ts';
 
@@ -38,6 +38,90 @@ function toolOutput(message: SessionMessageInfo, options?: { maxToolOutputChars?
   if (tool === undefined) throw new Error('expected tool part');
   return tool;
 }
+
+function editTool(
+  name: string,
+  input: Record<string, JsonValue>,
+  metadata?: Record<string, JsonValue>,
+): SessionMessageAssistant {
+  return {
+    type: 'assistant',
+    id: 'msg_1',
+    agent: 'build',
+    model: { id: 'm', providerID: 'p' },
+    content: [
+      {
+        type: 'tool',
+        id: 'tool_1',
+        name,
+        time: { created: 1, completed: 2 },
+        state: {
+          status: 'completed',
+          input,
+          content: [{ type: 'text', text: 'done' }],
+          ...(metadata === undefined ? {} : { metadata }),
+        },
+      },
+    ],
+    time: { created: 1, completed: 2 },
+  };
+}
+
+describe('server-provided edit diffs (issue #22)', () => {
+  test('edit metadata files[].patch is carried through as the tool diff', () => {
+    const patch = '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,1 +1,1 @@\n-x\n+y';
+    const tool = toolOutput(
+      editTool(
+        'edit',
+        { path: 'src/a.ts', oldString: 'x', newString: 'y' },
+        { files: [{ file: 'src/a.ts', patch, status: 'modified', additions: 1, deletions: 1 }] },
+      ),
+    );
+    expect(tool.diff).toBe(patch);
+    expect(tool.diffFile).toBe('src/a.ts');
+  });
+
+  test('write reports the same shape', () => {
+    const patch = '--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+a\n+b';
+    const tool = toolOutput(
+      editTool(
+        'write',
+        { path: 'n.txt', content: 'a\nb' },
+        { files: [{ file: 'n.txt', patch, status: 'added', additions: 2, deletions: 0 }] },
+      ),
+    );
+    expect(tool.diff).toBe(patch);
+  });
+
+  test('the patch tool metadata.diff string is preferred over per-file entries', () => {
+    const tool = toolOutput(
+      editTool(
+        'patch',
+        { patchText: '@@ -1 +1 @@\n-a\n+b' },
+        {
+          diff: '--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-a\n+b\n',
+          files: [
+            {
+              file: 'x.ts',
+              patch: '@@ -1 +1 @@\n-a\n+b',
+              status: 'modified',
+              additions: 1,
+              deletions: 1,
+            },
+          ],
+        },
+      ),
+    );
+    expect(tool.diff).toBe('--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-a\n+b\n');
+  });
+
+  test('a files entry with no patch yields no diff rather than an empty one', () => {
+    const tool = toolOutput(
+      editTool('edit', { path: 'src/a.ts' }, { files: [{ file: 'src/a.ts' }] }),
+    );
+    expect(tool.diff).toBeUndefined();
+  });
+});
 
 describe('tool output retention (issue #7)', () => {
   test('long output keeps head and tail; a failure at the tail stays visible', () => {

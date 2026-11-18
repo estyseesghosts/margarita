@@ -38,6 +38,28 @@ function text(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+/** The file path an edit-like call claims to have touched, from input or server metadata. */
+export function toolPath(tool: ToolCall): string | undefined {
+  for (const key of ['filePath', 'path', 'file', 'fileName']) {
+    const value = text(tool.input[key]);
+    if (value !== undefined && value !== '') return value;
+  }
+  return tool.diffFile;
+}
+
+/** Edit-like tools (a successful call mutates the worktree) come from the tool names map. */
+export function isEditLike(tool: ToolCall): boolean {
+  const name = tool.name.toLowerCase();
+  return (
+    name === 'edit' ||
+    name === 'write' ||
+    name === 'patch' ||
+    name === 'apply_patch' ||
+    name === 'multiedit' ||
+    name === 'replace'
+  );
+}
+
 function lines(value: string): string[] {
   const split = value.replace(/\r\n?/g, '\n').split('\n');
   if (split.at(-1) === '') split.pop();
@@ -50,10 +72,16 @@ function lines(value: string): string[] {
  * numbering starts at 1 because the file's position is unknown.
  */
 export function editDiff(tool: ToolCall): EditDiff | undefined {
-  const path = text(tool.input['filePath']) ?? text(tool.input['path']);
-  if (path === undefined) return undefined;
-  const filetype = filetypeOf(path);
+  const path = toolPath(tool);
+  const filetype = filetypeOf(path ?? '');
   if (tool.diff !== undefined && tool.diff.trim() !== '') return { diff: tool.diff, filetype };
+  // The OpenCode patch tool carries the patch text as input.patchText (it is the unified
+  // diff the server applies, or already applied).
+  const patchText = text(tool.input['patchText']);
+  if (patchText !== undefined && patchText.trim() !== '') {
+    return { diff: patchText, filetype };
+  }
+  if (path === undefined) return undefined;
   const oldText = text(tool.input['oldString']);
   const newText = text(tool.input['newString']);
   if (oldText !== undefined && newText !== undefined) {

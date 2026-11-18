@@ -18,6 +18,8 @@ export type ToolCall = Readonly<{
   outputTruncated?: 'frontend' | 'server';
   /** The server's unified diff for an edit, with real file line numbers. */
   diff?: string;
+  /** The file the server said an edit touched (from its metadata), when input lacks one. */
+  diffFile?: string;
   error?: string;
   startedAt: number;
   completedAt?: number;

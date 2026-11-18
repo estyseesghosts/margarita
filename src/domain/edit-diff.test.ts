@@ -7,6 +7,8 @@ import {
   editDiff,
   filetypeOf,
   hasOversizedDiff,
+  isEditLike,
+  toolPath,
 } from './edit-diff.ts';
 import type { ToolCall } from './transcript.ts';
 
@@ -39,6 +41,44 @@ describe('editDiff', () => {
 
   test('ignores other tools', () => {
     expect(editDiff(call('read', { filePath: 'a.ts' }))).toBeUndefined();
+  });
+
+  test('a completed edit-like call with no patch anywhere reports undefined', () => {
+    expect(editDiff(call('edit', {}))).toBeUndefined();
+    expect(editDiff(call('write', {}))).toBeUndefined();
+    expect(editDiff(call('patch', {}))).toBeUndefined();
+  });
+
+  test('the patch tool falls back to its patchText input', () => {
+    const patch = '@@ -1,1 +1,1 @@\n-old\n+new';
+    const result = editDiff(call('patch', { patchText: patch }));
+    expect(result?.diff).toBe(patch);
+  });
+
+  test('an empty patchText is not used as a diff', () => {
+    expect(editDiff(call('patch', { patchText: '   \n' }))).toBeUndefined();
+  });
+
+  test('the file type comes from the server diffFile when input carries no path', () => {
+    const result = editDiff({
+      ...call('edit', {}, '--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1 +1 @@\n-x\n+y'),
+      diffFile: 'src/x.ts',
+    });
+    expect(result?.filetype).toBe('typescript');
+  });
+
+  test('toolPath prefers input keys and falls back to the declared server file', () => {
+    expect(toolPath(call('edit', {}))).toBeUndefined();
+    expect(toolPath(call('edit', { path: 'a.ts' }))).toBe('a.ts');
+    expect(toolPath({ ...call('patch', {}), diffFile: 'src/x.ts' })).toBe('src/x.ts');
+  });
+
+  test('isEditLike covers the mutating tools Margarita knows how to render', () => {
+    for (const name of ['edit', 'write', 'patch', 'apply_patch', 'multiedit']) {
+      expect(isEditLike(call(name, {}))).toBe(true);
+    }
+    expect(isEditLike(call('read', {}))).toBe(false);
+    expect(isEditLike(call('bash', {}))).toBe(false);
   });
 });
 
