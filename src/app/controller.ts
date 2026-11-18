@@ -130,6 +130,8 @@ export class AppController {
   private disposed = false;
   private persisted: LocalState;
   private readonly goalStore: GoalStore;
+  /** Serializes instruction writes/removals per session so toggles cannot race. */
+  private readonly instructionQueue = new Map<string, Promise<void>>();
 
   constructor(private readonly deps: ControllerDeps) {
     this.debugLog = deps.debugLog ?? noDebugLog;
@@ -343,8 +345,10 @@ export class AppController {
 
   onStreamStatus(status: StreamStatus): void {
     this.debugLog.write('stream-status', { status });
+    const reconnected = status === 'live' && this.state.stream === 'reconnecting';
     this.setState('stream', status);
     if (status === 'reconnecting') this.showNotice('Connection lost · retrying', 'warn', false);
+    if (reconnected) void this.track('retry-instructions', this.retryPendingRemovals());
   }
 
   onEvents(events: readonly BackendEvent[], resync: boolean): void {
@@ -2052,34 +2056,120 @@ export class AppController {
     }
     const enabled = args === 'on';
     if (!enabled) {
-      // Turning sync off removes the entry; local data is kept either way.
-      await this.deps.backend.removeInstruction(session.id, instructionKey).catch(() => {});
-      this.setState(
-        'goalSync',
-        produce((sync) => {
-          delete sync[session.id];
-        }),
-      );
+      const revision = this.state.goals[session.id]?.revision ?? 0;
+      this.setState('goalSync', session.id, { revision, status: 'pending-removal' });
+      try {
+        await this.queueInstruction(session.id, () =>
+          this.deps.backend.removeInstruction(session.id, instructionKey),
+        );
+      } catch (error) {
+        // Keep local sync enabled and block re-syncing: the server entry may still exist.
+        this.setState('goalSync', session.id, {
+          revision,
+          status: 'removal-failed',
+          error: errorText(error),
+        });
+        this.showNotice(
+          `Could not revoke the shared instruction: ${errorText(error)} · /sync off to retry`,
+          'warn',
+          false,
+        );
+        return;
+      }
+      this.setState('goalSync', session.id, { revision, status: 'synced' });
+      await this.changeGoal((doc) => setSync(doc, false), 'No longer shared with the agent');
+      this.clearGoalSync(session.id);
+      return;
     }
-    await this.changeGoal(
-      (doc) => setSync(doc, enabled),
-      enabled ? 'Goal and plan shared with the agent' : 'No longer shared with the agent',
-    );
+    // Re-enabling supersedes a failed revocation: clear the block before re-syncing.
+    const pending = this.state.goalSync[session.id]?.status === 'removal-failed';
+    if (pending) this.clearGoalSync(session.id);
+    this.setState('goalSync', session.id, {
+      revision: this.state.goals[session.id]?.revision ?? 0,
+      status: 'pending-sync',
+    });
+    await this.changeGoal((doc) => setSync(doc, true), 'Goal and plan shared with the agent');
   }
 
-  /** Writes the compact instruction entry when the user opted in; failures stay local. */
+  /**
+   * Writes the compact instruction entry when the user opted in. A pending or failed
+   * revocation blocks re-adding the instruction until the server confirms it is gone.
+   */
   private async syncInstructions(sessionID: string): Promise<void> {
     const doc = this.state.goals[sessionID];
     const sync = doc?.modelInstructionSync;
     if (doc === undefined || sync?.enabled !== true) return;
+    const blocked = this.state.goalSync[sessionID]?.status;
+    if (blocked === 'pending-removal' || blocked === 'removal-failed') return;
     const text = instructionText(doc);
     try {
-      if (text === '') await this.deps.backend.removeInstruction(sessionID, sync.key);
-      else await this.deps.backend.putInstruction(sessionID, sync.key, text);
-      this.setState('goalSync', sessionID, { revision: doc.revision });
+      await this.queueInstruction(sessionID, () =>
+        text === ''
+          ? this.deps.backend.removeInstruction(sessionID, sync.key)
+          : this.deps.backend.putInstruction(sessionID, sync.key, text),
+      );
+      this.setState('goalSync', sessionID, { revision: doc.revision, status: 'synced' });
     } catch (error) {
-      this.setState('goalSync', sessionID, { revision: doc.revision, error: errorText(error) });
+      this.setState('goalSync', sessionID, {
+        revision: doc.revision,
+        status: 'error',
+        error: errorText(error),
+      });
       this.showNotice('Not synced to agent · local plan kept', 'warn');
+    }
+  }
+
+  /** Chain per-session instruction operations so an older toggle cannot overwrite a newer one. */
+  private queueInstruction(sessionID: string, work: () => Promise<void>): Promise<void> {
+    const prior = this.instructionQueue.get(sessionID) ?? Promise.resolve();
+    const settled = prior
+      .catch(() => {})
+      .then(work)
+      .finally(() => {
+        if (this.instructionQueue.get(sessionID) === settled)
+          this.instructionQueue.delete(sessionID);
+      });
+    this.instructionQueue.set(sessionID, settled);
+    // The chain is also held for the next operation; keep its rejection handled even
+    // when the caller ignores the returned promise.
+    void settled.catch(() => {});
+    return settled;
+  }
+
+  private clearGoalSync(sessionID: string): void {
+    this.setState(
+      produce((state) => {
+        delete state.goalSync[sessionID];
+      }),
+    );
+  }
+
+  /** After reconnect, finish revocations that could not be confirmed earlier. */
+  private async retryPendingRemovals(): Promise<void> {
+    const pending = Object.entries(this.state.goalSync).filter(
+      ([, result]) => result.status === 'removal-failed',
+    );
+    for (const [sessionID, result] of pending) {
+      if (this.state.goalSync[sessionID]?.status !== 'removal-failed') continue;
+      try {
+        await this.queueInstruction(sessionID, () =>
+          this.deps.backend.removeInstruction(sessionID, instructionKey),
+        );
+      } catch (error) {
+        this.setState('goalSync', sessionID, {
+          revision: result.revision,
+          status: 'removal-failed',
+          error: errorText(error),
+        });
+        continue;
+      }
+      this.setState('goalSync', sessionID, { revision: result.revision, status: 'synced' });
+      await this.changeGoal(
+        (doc) => setSync(doc, false),
+        'Shared instruction revoked after reconnect',
+        sessionID,
+      );
+      this.clearGoalSync(sessionID);
     }
   }
 

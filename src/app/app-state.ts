@@ -50,6 +50,15 @@ export type DiffOverlay = {
   error?: string;
 };
 
+export type GoalSyncStatus =
+  'synced' | 'pending-sync' | 'pending-removal' | 'removal-failed' | 'error';
+
+export type GoalSyncResult = Readonly<{
+  revision: number;
+  status: GoalSyncStatus;
+  error?: string;
+}>;
+
 export type Notice = Readonly<{ text: string; tone: 'dim' | 'warn' | 'error'; id: number }>;
 
 export type TranscriptState = {
@@ -79,8 +88,11 @@ export type AppState = {
   forms: Record<string, FormRequest[]>;
   /** Goal/plan sidecar per session; absent until loaded. */
   goals: Record<string, GoalPlanV1>;
-  /** Last instruction-sync outcome per session (not persisted). */
-  goalSync: Record<string, { revision: number; error?: string }>;
+  /**
+   * Last server-confirmed instruction outcome per session (not persisted). A failed
+   * revocation is never reported as "no longer shared": it stays visible until retried.
+   */
+  goalSync: Record<string, GoalSyncResult>;
   /** True while a permission or form reply is in flight; blocks double submits. */
   answering: boolean;
   /** Index of the focused permission choice in the permission card. */

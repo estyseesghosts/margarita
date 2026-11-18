@@ -421,8 +421,13 @@ function TasksDialog(props: {
       return 'Local plan · /sync on to share with the agent';
     }
     const result = props.controller.state.goalSync[session.id];
+    if (result?.status === 'removal-failed')
+      return `Still shared with the agent · revoke failed: ${result.error ?? 'unknown error'}`;
+    if (result?.status === 'pending-removal')
+      return 'Waiting for the agent to drop the instruction…';
+    if (result?.status === 'pending-sync') return 'Sharing with the agent · not yet confirmed';
     if (result === undefined) return 'Shared with the agent · not yet confirmed';
-    if (result.error !== undefined) return `Not synced to agent: ${result.error}`;
+    if (result.status === 'error') return `Not synced to agent: ${result.error ?? 'unknown error'}`;
     return `Shared with the agent · revision ${result.revision}`;
   };
   return (

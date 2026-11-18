@@ -549,3 +549,81 @@ describe('prompt history across project switches (issue #4)', () => {
     second.dispose();
   });
 });
+
+async function syncedFixture() {
+  const backend = new FakeBackend();
+  backend.sessions = [fakeSession('ses_a')];
+  backend.messages = { ses_a: [] };
+  const controller = makeController(() => Promise.resolve([]), backend);
+  await attach(controller, 'ses_a');
+  for (const text of ['/goal Test goal', '/sync on']) {
+    controller.setComposer(composerFrom(text));
+    await controller.submit();
+  }
+  return { backend, controller };
+}
+
+async function submitCommand(controller: AppController, text: string): Promise<void> {
+  controller.setComposer(composerFrom(text));
+  await controller.submit();
+}
+
+describe('instruction sync confirmation (issue #5)', () => {
+  test('a failed revocation never reports success and is not silently re-synced', async () => {
+    const { backend, controller } = await syncedFixture();
+    backend.removeInstructionError = new Error('network drop');
+
+    await submitCommand(controller, '/sync off');
+    expect(controller.state.notice?.text).toContain('Could not revoke');
+    expect(controller.state.notice?.text).toContain('/sync off to retry');
+    expect(controller.goalOf('ses_a')?.modelInstructionSync?.enabled).toBe(true);
+    expect(controller.state.goalSync['ses_a']?.status).toBe('removal-failed');
+
+    const puts = backend.calls.filter((call) => call.name === 'putInstruction').length;
+    await submitCommand(controller, '/plan step one');
+    expect(backend.calls.filter((call) => call.name === 'putInstruction')).toHaveLength(puts);
+    controller.dispose();
+  });
+
+  test('a confirmed revocation disables sync and clears the pending state', async () => {
+    const { backend, controller } = await syncedFixture();
+    await submitCommand(controller, '/sync off');
+    expect(backend.calls.some((call) => call.name === 'removeInstruction')).toBe(true);
+    expect(controller.goalOf('ses_a')?.modelInstructionSync?.enabled).toBe(false);
+    expect(controller.state.goalSync['ses_a']).toBeUndefined();
+    expect(controller.state.notice?.text).toBe('No longer shared with the agent');
+    controller.dispose();
+  });
+
+  test('reconnect retries a failed revocation and finishes it', async () => {
+    const { backend, controller } = await syncedFixture();
+    backend.removeInstructionError = new Error('network drop');
+    await submitCommand(controller, '/sync off');
+    const removals = backend.calls.filter((call) => call.name === 'removeInstruction').length;
+
+    backend.removeInstructionError = undefined;
+    controller.onStreamStatus('reconnecting');
+    controller.onStreamStatus('live');
+    await flush();
+
+    expect(backend.calls.filter((call) => call.name === 'removeInstruction').length).toBe(
+      removals + 1,
+    );
+    expect(controller.goalOf('ses_a')?.modelInstructionSync?.enabled).toBe(false);
+    expect(controller.state.goalSync['ses_a']).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('toggling back on after a failed revocation re-syncs the instruction', async () => {
+    const { backend, controller } = await syncedFixture();
+    backend.removeInstructionError = new Error('network drop');
+    await submitCommand(controller, '/sync off');
+    const puts = backend.calls.filter((call) => call.name === 'putInstruction').length;
+
+    backend.removeInstructionError = undefined;
+    await submitCommand(controller, '/sync on');
+    expect(backend.calls.filter((call) => call.name === 'putInstruction').length).toBe(puts + 1);
+    expect(controller.state.goalSync['ses_a']?.status).not.toBe('removal-failed');
+    controller.dispose();
+  });
+});

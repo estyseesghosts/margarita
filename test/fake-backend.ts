@@ -120,6 +120,8 @@ export class FakeBackend implements Backend {
   revertFiles: FileDiff[] = [];
   /** When set, instruction writes fail (server without the experimental route). */
   instructionsUnavailable = false;
+  /** When set, instruction removal fails (transport drop or permission error). */
+  removeInstructionError: Error | undefined;
 
   async sessionDiff(sessionID: string, range: DiffRange): Promise<FileDiff[]> {
     this.calls.push({ name: 'sessionDiff', args: [sessionID, range] });
@@ -154,6 +156,7 @@ export class FakeBackend implements Backend {
   }
   async removeInstruction(sessionID: string, key: string): Promise<void> {
     this.calls.push({ name: 'removeInstruction', args: [sessionID, key] });
+    if (this.removeInstructionError !== undefined) throw this.removeInstructionError;
   }
 
   async switchAgent(sessionID: string, agent: string): Promise<void> {
