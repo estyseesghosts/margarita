@@ -402,3 +402,50 @@ describe('grouped activity (issue #23)', () => {
     expect(failed?.kind === 'tool' && failed.tool.error).toBe('exit 1');
   });
 });
+
+const user = (id: string, text: string): TranscriptMessage => ({
+  kind: 'user',
+  id,
+  createdAt: 0,
+  text,
+  attachments: [],
+});
+const reply = (id: string, ...texts: string[]): TranscriptMessage => ({
+  ...assistant(texts.map((text): AssistantPart => ({ kind: 'text', text }))),
+  id,
+});
+const texts = (nodes: TranscriptNode[]) =>
+  nodes.flatMap((node) => (node.kind === 'text' ? [node.text] : []));
+
+describe('foldTranscript answers across turns', () => {
+  test('every completed turn keeps its short answer in compact mode', () => {
+    const nodes = foldTranscript(
+      [
+        user('u1', 'Did the tests pass?'),
+        reply('a1', 'Yes, 42 tests passed.'),
+        user('u2', 'Check the README.'),
+        reply('a2', 'One link is broken.'),
+        user('u3', 'Fixed?'),
+        reply('a3', 'Yes'),
+      ],
+      compact,
+    );
+    expect(texts(nodes)).toEqual(['Yes, 42 tests passed.', 'One link is broken.', 'Yes']);
+  });
+
+  test('progress notes before a turn’s final message still fold', () => {
+    const nodes = foldTranscript(
+      [user('u1', 'go'), reply('a1', 'Looking now.'), reply('a2', 'Done.'), user('u2', 'more')],
+      compact,
+    );
+    expect(texts(nodes)).toEqual(['Done.']);
+  });
+
+  test('queued follow-ups sharing one run each keep their answer', () => {
+    const nodes = foldTranscript(
+      [user('u1', 'one'), reply('a1', 'First.'), user('u2', 'two'), reply('a2', 'Second.')],
+      compact,
+    );
+    expect(texts(nodes)).toEqual(['First.', 'Second.']);
+  });
+});

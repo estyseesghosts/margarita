@@ -167,15 +167,21 @@ export function foldTranscript(
   options: FoldOptions,
 ): TranscriptNode[] {
   const out: TranscriptNode[] = [];
-  // Brief progress notes fold into the activity group across a working run; the newest
-  // assistant message carries the user-visible answer, so its text never folds away.
-  let lastAssistantIndex = -1;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.kind === 'assistant') {
-      lastAssistantIndex = index;
-      break;
+  // Brief progress notes fold into the activity group across a working run; the last
+  // assistant message of each user turn carries that turn's answer, so its text never folds
+  // away. A turn ends at the next user message (the server writes one idle marker per run,
+  // so idle markers cannot delimit turns).
+  const answerMessages = new Set<TranscriptMessage>();
+  let turnAnswer: TranscriptMessage | undefined;
+  for (const message of messages) {
+    if (message.kind === 'user') {
+      if (turnAnswer !== undefined) answerMessages.add(turnAnswer);
+      turnAnswer = undefined;
+    } else if (message.kind === 'assistant') {
+      turnAnswer = message;
     }
   }
+  if (turnAnswer !== undefined) answerMessages.add(turnAnswer);
   /** Emits the marker for the message just appended, if the segment boundary falls there. */
   function appendBoundaryMarker(messageId: string) {
     const marker = options.markers?.get(messageId);
@@ -200,12 +206,7 @@ export function foldTranscript(
         break;
       }
       case 'assistant':
-        foldAssistant(
-          message,
-          options,
-          out,
-          lastAssistantIndex >= 0 && messages[lastAssistantIndex] === message,
-        );
+        foldAssistant(message, options, out, answerMessages.has(message));
         break;
       case 'shell':
         out.push({
