@@ -10,6 +10,7 @@ import type {
   ServerCommand,
   SessionPage,
 } from '../src/adapter/backend.ts';
+import { BackendError } from '../src/adapter/backend.ts';
 import type { AgentDescriptor } from '../src/domain/agent-cycle.ts';
 import type { BackendEvent } from '../src/domain/backend-event.ts';
 import type { FileDiff } from '../src/domain/diff.ts';
@@ -86,24 +87,48 @@ export class FakeBackend implements Backend {
       ...(start > 0 ? { olderCursor: String(start) } : {}),
     };
   }
-  async listInbox(): Promise<QueuedInput[]> {
-    return [];
+  /** In-memory inbox; Margarita treats FIFO order as server order. */
+  inbox: QueuedInput[] = [];
+  /** When set, the next prompt/admission returns an item with this failure (test may override). */
+  async listInbox(sessionID: string): Promise<QueuedInput[]> {
+    this.calls.push({ name: 'listInbox', args: [sessionID] });
+    return this.inbox.map((item) => ({ ...item }));
   }
   async cancelQueued(sessionID: string, inboxID: string): Promise<void> {
     this.calls.push({ name: 'cancelQueued', args: [sessionID, inboxID] });
+    if (!this.inbox.some((item) => item.id === inboxID)) {
+      throw new BackendError(
+        'not-found',
+        'session.inbox.cancel',
+        `item ${inboxID} is not queued anymore`,
+      );
+    }
+    this.inbox = this.inbox.filter((item) => item.id !== inboxID);
   }
   async changeDelivery(sessionID: string, inboxID: string, delivery: Delivery): Promise<void> {
     this.calls.push({ name: 'changeDelivery', args: [sessionID, inboxID, delivery] });
+    const index = this.inbox.findIndex((entry) => entry.id === inboxID);
+    if (index < 0) {
+      throw new BackendError(
+        'not-found',
+        'session.inbox.delivery-change',
+        `item ${inboxID} is not queued anymore`,
+      );
+    }
+    this.inbox[index] = { ...this.inbox[index]!, delivery };
   }
   async prompt(sessionID: string, draft: PromptDraft): Promise<QueuedInput> {
     this.calls.push({ name: 'prompt', args: [sessionID, draft] });
-    return {
-      id: 'in_1',
+    const delivery = draft.delivery ?? 'queue';
+    const item: QueuedInput = {
+      id: `in_${this.inbox.length + 1}`,
       kind: 'user',
-      delivery: draft.delivery ?? 'queue',
+      delivery,
       text: draft.text,
-      createdAt: 1,
+      createdAt: this.inbox.length + 1,
     };
+    this.inbox.push(item);
+    return { ...item };
   }
   async runCommand(sessionID: string, name: string, text: string): Promise<void> {
     this.calls.push({ name: 'runCommand', args: [sessionID, name, text] });

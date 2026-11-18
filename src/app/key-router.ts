@@ -336,6 +336,12 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
         controller.moveOverviewSelection(-1);
         return true;
       }
+      // An empty composer recalls the newest pending queued follow-up (Up-to-edit); fall
+      // back to prompt history when nothing is queued.
+      if (composer.text === '' && state.route.kind === 'conversation') {
+        void controller.recallQueuedUp();
+        return true;
+      }
       controller.historyUp();
       return true;
     }

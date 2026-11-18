@@ -124,6 +124,39 @@ describe('acceptance', () => {
     expect(backend.calls.some((call) => call.name === 'interrupt')).toBe(true);
   });
 
+  test('Up on an empty composer recalls the newest queued follow-up for editing', async () => {
+    const backend = twoSessions();
+    backend.inbox = [
+      { id: 'in_1', kind: 'user', delivery: 'queue', text: 'first follow-up', createdAt: 1 },
+      { id: 'in_2', kind: 'user', delivery: 'queue', text: 'second follow-up', createdAt: 2 },
+    ];
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    setup.mockInput.pressArrow('up');
+    await settle(setup);
+
+    expect(controller.state.composer.text).toBe('second follow-up');
+    // Older queued message survives.
+    expect(controller.state.inbox['ses_a']?.map((item) => item.id)).toEqual(['in_1']);
+
+    await setup.mockInput.typeText(' plus edited');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    const prompts = backend.calls.filter((call) => call.name === 'prompt');
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]?.args[1]).toMatchObject({
+      text: 'second follow-up plus edited',
+      delivery: 'queue',
+    });
+    expect(
+      controller.state.inbox['ses_a']
+        ?.filter((item) => item.kind === 'user')
+        .map((item) => item.text),
+    ).toEqual(['first follow-up', 'second follow-up plus edited']);
+  });
+
   test('D: Shift+Tab asks the server to switch from build to plan', async () => {
     const backend = twoSessions();
     const { controller, setup } = await mount(backend);

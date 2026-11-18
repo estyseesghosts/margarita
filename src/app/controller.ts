@@ -1788,14 +1788,12 @@ export class AppController {
   async cancelQueued(inboxID: string): Promise<void> {
     const session = this.currentSession();
     if (session === undefined) return;
-    const item = (this.state.inbox[session.id] ?? []).find((entry) => entry.id === inboxID);
+    const sessionID = session.id;
+    const item = (this.state.inbox[sessionID] ?? []).find((entry) => entry.id === inboxID);
     try {
-      await this.deps.backend.cancelQueued(session.id, inboxID);
-      // The server cannot edit queued text; restore it to the composer instead.
-      if (item !== undefined && this.state.composer.text === '') {
-        this.writeComposer(composerFrom(item.text));
-      }
+      await this.deps.backend.cancelQueued(sessionID, inboxID);
     } catch (error) {
+      // The most likely race: the server delivered the item between our listing and the cancel.
       if (
         error instanceof BackendError &&
         (error.kind === 'not-found' || error.kind === 'conflict')
@@ -1804,8 +1802,52 @@ export class AppController {
       } else {
         this.showNotice(errorText(error), 'error');
       }
+      await this.refreshInbox(sessionID);
+      return;
     }
-    await this.refreshInbox(session.id);
+    await this.refreshInbox(sessionID);
+    if (item === undefined) return;
+    // Restore the full text into the composer, never into a different session's composer.
+    const sameSession =
+      this.state.route.kind === 'conversation' && this.state.route.sessionID === sessionID;
+    if (sameSession && this.state.composer.text === '' && this.state.completion === undefined) {
+      this.writeComposer(composerFrom(item.text));
+      return;
+    }
+    // Never clobber a draft the user typed during the cancel; park the recalled text instead.
+    if (this.state.stash === undefined) {
+      this.setState('stash', item.text);
+      this.showNotice('Queued message parked · Ctrl+S to restore', 'dim');
+      return;
+    }
+    this.showNotice(
+      'Queued message cancelled, but the composer and the parked-draft slot were both busy.',
+      'warn',
+    );
+  }
+
+  /**
+   * Up on an empty composer recalls the newest pending queued user message into the editor so
+   * it can be edited and resent. The fast path is cancellation + restore; until the server
+   * acknowledges, nothing has been changed. When the session is no longer you (switched or
+   * parked elsewhere), the text parks into the paste/stash draft rather than another session's
+   * composer.
+   */
+  async recallQueuedUp(): Promise<void> {
+    if (this.state.route.kind !== 'conversation') {
+      this.historyUp();
+      return;
+    }
+    const sessionID = this.state.route.sessionID;
+    const items = this.state.inbox[sessionID] ?? [];
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (item?.kind === 'user') {
+        await this.cancelQueued(item.id);
+        return;
+      }
+    }
+    this.historyUp();
   }
 
   async promoteQueued(inboxID: string): Promise<void> {

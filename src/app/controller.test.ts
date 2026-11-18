@@ -1127,3 +1127,173 @@ describe('instruction sync confirmation (issue #5)', () => {
     controller.dispose();
   });
 });
+
+function pressKey(
+  controller: AppController,
+  key: { name: string; ctrl?: boolean; alt?: boolean; shift?: boolean },
+): boolean {
+  const services = { openEditor: () => {}, redraw: () => {}, scroll: () => {} };
+  const { keymap } = buildKeymap({});
+  return routeKey(
+    controller,
+    keymap,
+    {
+      name: key.name,
+      ctrl: key.ctrl ?? false,
+      alt: key.alt ?? false,
+      shift: key.shift ?? false,
+    },
+    services,
+  );
+}
+
+function queuedBackend() {
+  const backend = new FakeBackend();
+  backend.sessions = [fakeSession('ses_a'), fakeSession('ses_b')];
+  backend.messages = { ses_a: [], ses_b: [] };
+  backend.active = new Set(['ses_a']);
+  backend.inbox = [
+    { id: 'in_1', kind: 'user', delivery: 'queue', text: 'first follow-up', createdAt: 1 },
+    { id: 'in_2', kind: 'user', delivery: 'queue', text: 'second follow-up', createdAt: 2 },
+  ];
+  return backend;
+}
+
+describe(`Up recalls the newest queued follow-up (issue #30)`, () => {
+  test('Up on an empty composer recalls the newest entry; the older stays queued', async () => {
+    const backend = queuedBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+
+    pressKey(controller, { name: 'up' });
+    await flush();
+
+    expect(controller.state.composer.text).toBe('second follow-up');
+    expect(controller.state.composer.cursor).toBe('second follow-up'.length);
+    expect(backend.inbox.map((item) => item.id)).toEqual(['in_1']);
+    controller.dispose();
+  });
+
+  test('a recalled multiline message with an @mention round-trips unclipped', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    backend.active = new Set(['ses_a']);
+    backend.inbox = [
+      {
+        id: 'in_9',
+        kind: 'user',
+        delivery: 'queue',
+        text: 'look at @src/app/controller.ts\nand then run the tests\n\nthanks',
+        createdAt: 1,
+      },
+    ];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+
+    pressKey(controller, { name: 'up' });
+    await flush();
+
+    expect(controller.state.composer.text).toBe(
+      'look at @src/app/controller.ts\nand then run the tests\n\nthanks',
+    );
+    expect(controller.state.composer.cursor).toBe(controller.state.composer.text.length);
+    expect(backend.inbox).toEqual([]);
+    controller.dispose();
+  });
+
+  test('editing the recalled message and pressing Enter creates no duplicate; the replacement is queued', async () => {
+    const backend = queuedBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+
+    pressKey(controller, { name: 'up' });
+    await flush();
+    controller.setComposer(composerFrom('edited follow-up'));
+    await controller.submit();
+
+    const prompts = backend.calls.filter((call) => call.name === 'prompt');
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]?.args[1]).toMatchObject({ text: 'edited follow-up', delivery: 'queue' });
+    expect(backend.inbox.filter((item) => item.kind === 'user').map((item) => item.text)).toEqual([
+      'first follow-up',
+      'edited follow-up',
+    ]);
+    controller.dispose();
+  });
+
+  test('with a non-empty composer Up does not touch the queue', async () => {
+    const backend = queuedBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom('draft in progress'));
+
+    pressKey(controller, { name: 'up' });
+
+    expect(backend.calls.filter((call) => call.name === 'cancelQueued')).toHaveLength(0);
+    expect(controller.state.inbox['ses_a']?.map((item) => item.id)).toEqual(['in_1', 'in_2']);
+    controller.dispose();
+  });
+
+  test('a cancel conflict reports an already-delivered item and leaves the queue alone', async () => {
+    const backend = queuedBackend();
+    backend.cancelQueued = async () => {
+      throw new BackendError('not-found', 'session.inbox.cancel', 'delivered');
+    };
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+
+    await controller.recallQueuedUp();
+
+    expect(controller.state.notice?.text).toContain('Already delivered');
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.stash).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('switching sessions during the cancel does not deposit text in the new session', async () => {
+    const backend = queuedBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+
+    const hold = deferred<void>();
+    const realCancel = backend.cancelQueued.bind(backend);
+    backend.cancelQueued = async (sessionID: string, inboxID: string) => {
+      await hold.promise;
+      return realCancel(sessionID, inboxID);
+    };
+
+    const recall = controller.recallQueuedUp();
+    controller.openSession('ses_b');
+    hold.resolve();
+    await recall;
+    await flush();
+
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.stash).toBe('second follow-up');
+    controller.dispose();
+  });
+
+  test('a parked recalled message is restored with Ctrl+S', async () => {
+    const backend = queuedBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+
+    const hold = deferred<void>();
+    const realCancel = backend.cancelQueued.bind(backend);
+    backend.cancelQueued = async (sessionID: string, inboxID: string) => {
+      await hold.promise;
+      return realCancel(sessionID, inboxID);
+    };
+
+    const recall = controller.recallQueuedUp();
+    controller.openSession('ses_b');
+    hold.resolve();
+    await recall;
+
+    controller.toggleStash();
+
+    expect(controller.state.composer.text).toBe('second follow-up');
+    controller.dispose();
+  });
+});
