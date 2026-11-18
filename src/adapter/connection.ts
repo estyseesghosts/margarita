@@ -15,6 +15,8 @@ export type ConnectOptions = Readonly<{
   startServer: boolean;
   /** Basic-auth password for a remote server, from env only (never argv). */
   remotePassword?: string;
+  /** Explicit opt-in to send the password over plain HTTP to a non-loopback host. */
+  allowInsecureHttp?: boolean;
   onStarting?: () => void;
 }>;
 
@@ -33,12 +35,10 @@ export class ConnectionError extends Error {
  */
 export async function connect(options: ConnectOptions): Promise<Connection> {
   if (options.server !== undefined) {
-    let url: URL;
-    try {
-      url = new URL(options.server);
-    } catch (cause) {
-      throw new ConnectionError(`Invalid --server URL "${options.server}".`, { cause });
-    }
+    const url = checkServerUrl(options.server, {
+      hasPassword: options.remotePassword !== undefined,
+      allowInsecureHttp: options.allowInsecureHttp === true,
+    });
     return {
       baseUrl: url.toString().replace(/\/$/, ''),
       headers: basicAuthHeaders(options.remotePassword, 'opencode'),
@@ -84,4 +84,62 @@ function basicAuthHeaders(
   if (password === undefined) return {};
   const credentials = Buffer.from(`${username ?? 'opencode'}:${password}`).toString('base64');
   return { authorization: `Basic ${credentials}` };
+}
+
+function isLoopback(hostname: string): boolean {
+  return (
+    hostname === 'localhost' ||
+    hostname.endsWith('.localhost') ||
+    hostname === '[::1]' ||
+    /^127(?:\.\d{1,3}){3}$/.test(hostname)
+  );
+}
+
+/**
+ * Validates an explicit `--server` URL. Only http(s) is accepted, credentials embedded in the
+ * URL are rejected (use MARGARITA_SERVER_PASSWORD), and a password never crosses the network
+ * over plain HTTP unless the loopback exemption or the explicit insecure override applies.
+ * Error messages never echo the raw input, which may contain secrets.
+ */
+export function checkServerUrl(
+  raw: string,
+  policy: { hasPassword: boolean; allowInsecureHttp: boolean },
+): URL {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch (cause) {
+    throw new ConnectionError('Invalid --server URL.', { cause });
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ConnectionError(
+      `Unsupported --server protocol "${url.protocol}"; use http or https.`,
+    );
+  }
+  if (url.username !== '' || url.password !== '') {
+    throw new ConnectionError(
+      'Do not put credentials in the --server URL; set MARGARITA_SERVER_PASSWORD instead.',
+    );
+  }
+  if (
+    policy.hasPassword &&
+    url.protocol === 'http:' &&
+    !isLoopback(url.hostname) &&
+    !policy.allowInsecureHttp
+  ) {
+    throw new ConnectionError(
+      `Refusing to send the server password over plain HTTP to ${url.host}. Use https://, an SSH/TLS tunnel to localhost, or set MARGARITA_ALLOW_INSECURE_HTTP=1 to override.`,
+    );
+  }
+  return url;
+}
+
+/** URL safe to log: no user info, and no query or fragment (they can carry tokens). */
+export function redactUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    return `${url.protocol}//${url.host}${url.pathname === '/' ? '' : url.pathname}`;
+  } catch {
+    return '<invalid url>';
+  }
 }

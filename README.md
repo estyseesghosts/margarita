@@ -95,7 +95,7 @@ Everything is a single key press. There are no chords. Rebind any of them in the
 }
 ```
 
-Environment knobs: `NO_COLOR`, `MARGARITA_NO_ANIMATION=1`, `MARGARITA_ASCII=1`, and `MARGARITA_SERVER_PASSWORD` (for `--server`).
+Environment knobs: `NO_COLOR`, `MARGARITA_NO_ANIMATION=1`, `MARGARITA_ASCII=1`, and `MARGARITA_SERVER_PASSWORD` (for `--server`). The password is only sent over HTTPS or to a loopback host; reach a remote server through TLS or an SSH tunnel (`ssh -L 4096:localhost:4096 host`, then `--server http://localhost:4096`). `MARGARITA_ALLOW_INSECURE_HTTP=1` overrides this for trusted networks. Credentials in the `--server` URL are rejected.
 
 ## Development
 

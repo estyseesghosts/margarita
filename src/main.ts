@@ -6,7 +6,7 @@ import { render } from '@opentui/solid';
 
 import packageJson from '../package.json' with { type: 'json' };
 import { type Backend, BackendError, createBackend } from './adapter/backend.ts';
-import { connect, ConnectionError } from './adapter/connection.ts';
+import { connect, ConnectionError, redactUrl } from './adapter/connection.ts';
 import { startEventPump } from './adapter/event-pump.ts';
 import { AppController, errorText } from './app/controller.ts';
 import { createDebugLog, type DebugLog, noDebugLog } from './app/debug-log.ts';
@@ -115,13 +115,14 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
       ...(env['MARGARITA_SERVER_PASSWORD'] === undefined
         ? {}
         : { remotePassword: env['MARGARITA_SERVER_PASSWORD'] }),
+      ...(env['MARGARITA_ALLOW_INSECURE_HTTP'] === '1' ? { allowInsecureHttp: true } : {}),
       onStarting: () => process.stderr.write('Starting OpenCode service…\n'),
     });
     backend = createBackend(connection, {
       toolOutputChars: configLoad.config.transcript.toolOutputChars,
     });
     remoteFilesystem = connection.origin === 'remote';
-    debugLog.write('connected', { baseUrl: backend.baseUrl });
+    debugLog.write('connected', { baseUrl: redactUrl(backend.baseUrl) });
   } catch (error) {
     debugLog.write('connect-failed', {
       errorName: error instanceof Error ? error.name : 'unknown',
@@ -162,7 +163,9 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     debugLog.write('bootstrap-failed', {
       errorKind: error instanceof BackendError ? error.kind : 'unknown',
     });
-    process.stderr.write(`marg: could not load from ${backend.baseUrl}: ${errorText(error)}\n`);
+    process.stderr.write(
+      `marg: could not load from ${redactUrl(backend.baseUrl)}: ${errorText(error)}\n`,
+    );
     return error instanceof BackendError && error.kind === 'unauthorized'
       ? exitCodes.unauthorized
       : exitCodes.unavailable;
