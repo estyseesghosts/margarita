@@ -4,7 +4,8 @@ import { createEffect, For, Match, Show, Switch } from 'solid-js';
 
 import type { AppController } from '../app/controller.ts';
 import { groupRows, loadMoreRowKey, type OverviewRow } from '../domain/overview-groups.ts';
-import { directoryName } from '../domain/path-identity.ts';
+import { directoryKey, directoryName } from '../domain/path-identity.ts';
+import { projectLabel } from '../domain/project-label.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import { executionLabel } from '../domain/session.ts';
 import { formatAge } from '../domain/usage-format.ts';
@@ -68,6 +69,18 @@ export function Overview(props: {
         {(group) => (
           <box flexDirection="column" marginBottom={1}>
             <text>
+              <Show when={props.ascii !== true}>
+                <span
+                  style={{
+                    bg: projectLabel(group.serverID, directoryKey(group.directory, 'linux'))
+                      .background,
+                    fg: projectLabel(group.serverID, directoryKey(group.directory, 'linux'))
+                      .foreground,
+                  }}
+                >
+                  {' ██ '}
+                </span>
+              </Show>
               <span style={{ fg: props.theme.text }}>
                 <b>{group.name}</b>
               </span>
