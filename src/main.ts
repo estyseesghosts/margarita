@@ -220,6 +220,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
         ...(model.model === undefined ? {} : { model: model.model }),
         json: options.json,
         write: (text) => process.stdout.write(text),
+        diagnostic: (text) => process.stderr.write(text),
         signal: abort.signal,
       });
     } catch (error) {
