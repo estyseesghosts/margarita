@@ -26,10 +26,7 @@ function waitFor(condition: () => boolean, timeoutMs = 1000): Promise<void> {
 describe('event pump', () => {
   test('connect triggers a resync, then events arrive in batches in order', async () => {
     const batches: { events: readonly BackendEvent[]; resync: boolean }[] = [];
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: gate, resolve: release } = Promise.withResolvers<void>();
     const stop = startEventPump({
       flushIntervalMs: 1,
       source: async function* (signal) {
