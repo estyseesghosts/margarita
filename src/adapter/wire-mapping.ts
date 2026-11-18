@@ -288,6 +288,21 @@ export function toTranscriptMessage(message: SessionMessageInfo): TranscriptMess
   }
 }
 
+function options(list: readonly { value: string; label: string; description?: string }[]) {
+  return list.map((option) => ({
+    value: option.value,
+    label: sanitizeTerminalText(option.label),
+    ...(option.description === undefined
+      ? {}
+      : { description: sanitizeTerminalText(option.description) }),
+  }));
+}
+
+/** Wire numbers may be the strings "Infinity"/"NaN"; only finite numbers are kept. */
+function finite(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 /** Maps a server form; every displayed string is sanitized. Unknown field types fail closed. */
 export function toFormRequest(info: FormInfo): FormRequest {
   return {
@@ -305,7 +320,7 @@ function toFormField(field: WireFormField): FormField {
     ...(field.description === undefined
       ? {}
       : { description: sanitizeTerminalText(field.description) }),
-    required: 'required' in field && field.required === true,
+    required: 'required' in field && (field.required ?? false),
     when: ('when' in field ? (field.when ?? []) : []).flatMap((condition) =>
       typeof condition.value === 'string' ||
       typeof condition.value === 'number' ||
@@ -314,16 +329,6 @@ function toFormField(field: WireFormField): FormField {
         : [],
     ),
   };
-  const options = (list: readonly { value: string; label: string; description?: string }[]) =>
-    list.map((option) => ({
-      value: option.value,
-      label: sanitizeTerminalText(option.label),
-      ...(option.description === undefined
-        ? {}
-        : { description: sanitizeTerminalText(option.description) }),
-    }));
-  const finite = (value: unknown) =>
-    typeof value === 'number' && Number.isFinite(value) ? value : undefined;
   switch (field.type) {
     case 'string':
       if (field.options !== undefined && field.options.length > 0) {
