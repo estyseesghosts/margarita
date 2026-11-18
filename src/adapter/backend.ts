@@ -42,6 +42,22 @@ export type MessagePage = Readonly<{ messages: TranscriptMessage[]; olderCursor?
 export type Delivery = 'queue' | 'steer';
 export type PermissionDecision = 'once' | 'always' | 'reject';
 
+/** A file reference: `file://` URI plus the `@mention` range it came from. */
+export type PromptFile = Readonly<{
+  uri: string;
+  name: string;
+  start: number;
+  end: number;
+  text: string;
+}>;
+
+export type PromptDraft = Readonly<{
+  text: string;
+  files: readonly PromptFile[];
+  /** Omitted when idle; while running the server needs an explicit queue/steer choice. */
+  delivery?: Delivery;
+}>;
+
 /** The narrow set of server operations the frontend needs; see docs/08-server-adapter.md. */
 export interface Backend {
   readonly baseUrl: string;
@@ -61,7 +77,7 @@ export interface Backend {
   listInbox(sessionID: string): Promise<QueuedInput[]>;
   cancelQueued(sessionID: string, inboxID: string): Promise<void>;
   changeDelivery(sessionID: string, inboxID: string, delivery: Delivery): Promise<void>;
-  prompt(sessionID: string, text: string, delivery: Delivery): Promise<QueuedInput>;
+  prompt(sessionID: string, draft: PromptDraft): Promise<QueuedInput>;
   runCommand(sessionID: string, name: string, text: string): Promise<void>;
   runShell(sessionID: string, command: string): Promise<void>;
   interrupt(sessionID: string): Promise<boolean>;
@@ -183,9 +199,22 @@ class OpenCodeBackend implements Backend {
     );
   }
 
-  async prompt(sessionID: string, text: string, delivery: Delivery): Promise<QueuedInput> {
+  async prompt(sessionID: string, draft: PromptDraft): Promise<QueuedInput> {
     const admitted = await call('session.prompt', () =>
-      this.client.session.prompt({ sessionID, text, delivery }),
+      this.client.session.prompt({
+        sessionID,
+        text: draft.text,
+        ...(draft.delivery === undefined ? {} : { delivery: draft.delivery }),
+        ...(draft.files.length === 0
+          ? {}
+          : {
+              files: draft.files.map((file) => ({
+                uri: file.uri,
+                name: file.name,
+                mention: { start: file.start, end: file.end, text: file.text },
+              })),
+            }),
+      }),
     );
     return toQueuedInput(admitted);
   }
