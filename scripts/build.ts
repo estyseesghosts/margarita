@@ -8,7 +8,8 @@ import solidPlugin from '@opentui/solid/bun-plugin';
  *   bun run build               # current platform → dist/marg[.exe]
  *   bun run build <bun-target>  # e.g. bun-linux-x64, bun-darwin-arm64
  */
-const target = process.argv[2];
+const requested = process.argv[2];
+const target = requested === undefined ? undefined : asTarget(requested);
 const windows = target === undefined ? process.platform === 'win32' : target.includes('windows');
 const outfile = `dist/marg${windows ? '.exe' : ''}`;
 
@@ -20,7 +21,7 @@ const result = await Bun.build({
   sourcemap: 'linked',
   compile: {
     outfile,
-    ...(target === undefined ? {} : { target: target as Bun.Build.CompileTarget }),
+    ...(target === undefined ? {} : { target }),
   },
 });
 if (!result.success) {
@@ -28,3 +29,15 @@ if (!result.success) {
   process.exit(1);
 }
 console.log(`built ${outfile}`);
+
+function asTarget(value: string): Bun.Build.CompileTarget {
+  if (!isTarget(value)) {
+    console.error(`unknown target ${value}; expected bun-<os>-<arch>[-modifier]`);
+    process.exit(2);
+  }
+  return value;
+}
+
+function isTarget(value: string): value is Bun.Build.CompileTarget {
+  return /^bun-(linux|darwin|windows)-(x64|arm64)(-(baseline|modern|musl))*$/.test(value);
+}
