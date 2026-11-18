@@ -115,7 +115,13 @@ function runAction(controller: AppController, action: ActionID, services: Router
       controller.setComposer(insertText(controller.state.composer, '\n'));
       return true;
     case 'composer.steer':
-      void controller.steer();
+      // Contextual: empty composer sends now the next queued follow-up (FIFO);
+      // draft text steers the draft.
+      if (controller.state.composer.text === '') {
+        void controller.promoteNextQueued();
+      } else {
+        void controller.steer();
+      }
       return true;
     case 'screen.redraw':
       services.redraw();
@@ -298,6 +304,12 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
     if (key.name === 'f' || key.name === 'right') return edit(moveWordRight(composer));
     if (key.name === 'backspace') return edit(deleteWordBackward(composer));
     if (key.name === 'return') {
+      // Empty composer: contextual send-now for the next queued follow-up (FIFO);
+      // with draft text, steer the draft as before.
+      if (composer.text === '') {
+        void controller.promoteNextQueued();
+        return true;
+      }
       void controller.steer();
       return true;
     }

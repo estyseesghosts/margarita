@@ -1875,6 +1875,26 @@ export class AppController {
     await this.refreshInbox(session.id);
   }
 
+  /**
+   * Alt+Enter on an empty composer sends now the next pending queued user message (FIFO):
+   * the same promote mechanism, offered positionally as the send-now hint above the active
+   * task. With no queued follow-up it falls back to steering whatever the empty composer
+   * would have meant before.
+   */
+  async promoteNextQueued(): Promise<void> {
+    if (this.state.route.kind !== 'conversation') {
+      await this.steer();
+      return;
+    }
+    const sessionID = this.state.route.sessionID;
+    const next = (this.state.inbox[sessionID] ?? []).find((item) => item.kind === 'user');
+    if (next === undefined) {
+      await this.steer();
+      return;
+    }
+    await this.promoteQueued(next.id);
+  }
+
   // ---------------------------------------------------------------- permissions
 
   pendingPermission() {

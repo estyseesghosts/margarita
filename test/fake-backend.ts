@@ -89,10 +89,14 @@ export class FakeBackend implements Backend {
   }
   /** In-memory inbox; Margarita treats FIFO order as server order. */
   inbox: QueuedInput[] = [];
+  /** Session each inbox item was enqueued for; items assigned directly default to ses_a. */
+  inboxSession: Record<string, string> = {};
   /** When set, the next prompt/admission returns an item with this failure (test may override). */
   async listInbox(sessionID: string): Promise<QueuedInput[]> {
     this.calls.push({ name: 'listInbox', args: [sessionID] });
-    return this.inbox.map((item) => ({ ...item }));
+    return this.inbox
+      .filter((item) => (this.inboxSession[item.id] ?? 'ses_a') === sessionID)
+      .map((item) => ({ ...item }));
   }
   async cancelQueued(sessionID: string, inboxID: string): Promise<void> {
     this.calls.push({ name: 'cancelQueued', args: [sessionID, inboxID] });
@@ -104,6 +108,7 @@ export class FakeBackend implements Backend {
       );
     }
     this.inbox = this.inbox.filter((item) => item.id !== inboxID);
+    delete this.inboxSession[inboxID];
   }
   async changeDelivery(sessionID: string, inboxID: string, delivery: Delivery): Promise<void> {
     this.calls.push({ name: 'changeDelivery', args: [sessionID, inboxID, delivery] });
@@ -128,6 +133,7 @@ export class FakeBackend implements Backend {
       createdAt: this.inbox.length + 1,
     };
     this.inbox.push(item);
+    this.inboxSession[item.id] = sessionID;
     return { ...item };
   }
   async runCommand(sessionID: string, name: string, text: string): Promise<void> {

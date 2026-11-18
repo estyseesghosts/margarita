@@ -1021,3 +1021,156 @@ describe('transcript rendering (docs/22, docs/23)', () => {
     expect(top.split('question number 1').length).toBe(2);
   });
 });
+
+function runningWithQueue(): FakeBackend {
+  const backend = backendWithSession();
+  backend.active = new Set(['ses_a']);
+  backend.messages = {
+    ses_a: [{ kind: 'user', id: 'm1', createdAt: 1, text: 'work on it', attachments: [] }],
+  };
+  backend.inbox = [
+    { id: 'in_1', kind: 'user', delivery: 'queue', text: 'first follow-up', createdAt: 2 },
+    {
+      id: 'in_2',
+      kind: 'user',
+      delivery: 'queue',
+      text: 'second follow-up,\nmultiline note',
+      createdAt: 3,
+    },
+  ];
+  return backend;
+}
+
+describe('queued messages preview (issue #29)', () => {
+  const verb = /(Thinking|Tinkering|Pondering|Untangling|Mulling|Noodling)…/;
+
+  test('queued follow-ups render above the active throbber and below the transcript, FIFO, with the send-now hint', async () => {
+    const backend = runningWithQueue();
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+
+    const queued1 = frame.indexOf('[queue] first follow-up');
+    const queued2 = frame.indexOf('[queue] second follow-up');
+    const hint = frame.indexOf('Alt+Enter: send now');
+    const marker = frame.search(verb);
+    const composerPlaceholder = frame.lastIndexOf('← overview');
+
+    expect(queued1).toBeGreaterThanOrEqual(0);
+    expect(queued2).toBeGreaterThan(queued1);
+    // The send-now hint hangs under the FIFO-first item, above the second item's row.
+    expect(hint).toBeGreaterThan(queued1);
+    expect(hint).toBeLessThan(queued2);
+    expect(marker).toBeGreaterThanOrEqual(0);
+    expect(marker).toBeGreaterThan(queued2);
+    expect(marker).toBeLessThan(composerPlaceholder);
+    // The hint appears exactly once (only for the FIFO-next item).
+    expect(frame.match(/Alt\+Enter: send now/g)).toHaveLength(1);
+    // The multiline item is clipped to one line.
+    expect(frame).not.toContain('multiline note\n');
+    controller.dispose();
+  });
+
+  test('Alt+Enter on an empty composer promotes the oldest queued item to steer; failure leaves it queued', async () => {
+    const backend = runningWithQueue();
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    setup.mockInput.pressKey('RETURN', { meta: true });
+    await settle(setup);
+
+    expect(backend.calls).toEqual(
+      expect.arrayContaining([{ name: 'changeDelivery', args: ['ses_a', 'in_1', 'steer'] }]),
+    );
+    // The item is now a steering item; the hint moved down the FIFO line.
+    const promoted = controller.state.inbox['ses_a']?.find((item) => item.id === 'in_1');
+    expect(promoted?.delivery).toBe('steer');
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('[steer] first follow-up');
+    expect(frame).toContain('[queue] second follow-up');
+    // Existing in-flight delivery failure leaves the item queued.
+    controller.dispose();
+  });
+
+  test('a failing promote reports the error and leaves the item visibly queued', async () => {
+    const backend = runningWithQueue();
+    backend.changeDelivery = async () => {
+      throw new BackendError('transport', 'session.inbox.delivery-change', 'busy');
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    setup.mockInput.pressKey('RETURN', { meta: true });
+    await settle(setup);
+
+    expect(controller.state.notice?.text).toContain('busy');
+    expect(controller.state.inbox['ses_a']?.map((item) => item.delivery)).toEqual([
+      'queue',
+      'queue',
+    ]);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('[queue] first follow-up');
+    expect(frame).toContain('Alt+Enter: send now');
+    controller.dispose();
+  });
+
+  test('no queued preview when the inbox is empty or the other session has nothing queued', async () => {
+    const backend = runningWithQueue();
+    backend.sessions.push({
+      id: 'ses_b',
+      projectID: 'p',
+      directory: '/work/kohjoh',
+      title: 'other',
+      agent: 'build',
+      tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      cost: 0,
+      createdAt: 2,
+      updatedAt: 2,
+      archived: false,
+    });
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    controller.openSession('ses_b');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain('Alt+Enter: send now');
+    expect(frame).not.toContain('first follow-up');
+    controller.dispose();
+  });
+
+  test('once the server delivers, the preview disappears and the canonical user message renders', async () => {
+    const backend = runningWithQueue();
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    // The server admits both items into the transcript and clears the inbox.
+    backend.inbox = [];
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'work on it', attachments: [] },
+        { kind: 'user', id: 'm2', createdAt: 5, text: 'first follow-up', attachments: [] },
+        {
+          kind: 'user',
+          id: 'm3',
+          createdAt: 6,
+          text: 'second follow-up,\nmultiline note',
+          attachments: [],
+        },
+      ],
+    };
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain('Alt+Enter: send now');
+    expect(frame).not.toContain('[queue]');
+    expect(frame).not.toContain('[steer]');
+    expect(frame).toContain('first follow-up');
+    controller.dispose();
+  });
+});

@@ -28,7 +28,6 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
 
   return (
     <box flexDirection="column" flexShrink={0}>
-      <QueueChips controller={props.controller} theme={props.theme} />
       <text fg={props.theme.border}>{rule()}</text>
       <box flexDirection="row">
         <text fg={active() ? props.theme.text : props.theme.dim}>❯ </text>
@@ -68,22 +67,6 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
         )}
       </Show>
     </box>
-  );
-}
-
-function QueueChips(props: { controller: AppController; theme: Theme }) {
-  const items = () => {
-    const session = props.controller.currentSession();
-    return session === undefined ? [] : (props.controller.state.inbox[session.id] ?? []);
-  };
-  return (
-    <For each={items().filter((item) => item.kind === 'user')}>
-      {(item) => (
-        <text fg={props.theme.dim}>
-          {`  [${item.delivery === 'steer' ? 'steering' : 'queued'}] ${item.text.split('\n')[0] ?? ''}`}
-        </text>
-      )}
-    </For>
   );
 }
 

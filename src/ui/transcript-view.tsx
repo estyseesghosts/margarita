@@ -34,6 +34,7 @@ import {
   type TranscriptNode,
   windowNodes,
 } from '../domain/transcript.ts';
+import { QueuedPreview } from './queued-preview.tsx';
 import { createSyntaxStyle } from './syntax.ts';
 import type { Theme } from './theme.ts';
 import { Throbber } from './throbber-view.tsx';
@@ -73,6 +74,14 @@ export function Transcript(props: TranscriptProps) {
   });
   const windowed = createMemo(() =>
     windowNodes(nodes(), props.controller.transcriptWindow(props.sessionID)),
+  );
+  // Server-confirmed pending user follow-ups, FIFO (server order) — rendered in the
+  // activity region right above the running task marker, never inside the composer.
+  const queued = createMemo(() =>
+    (state.inbox[props.sessionID] ?? []).filter((item) => item.kind === 'user'),
+  );
+  const hasRunningMarker = createMemo(() =>
+    nodes().some((node) => node.kind === 'execution' && node.segment.phase === 'running'),
   );
   let box: ScrollBoxRenderable | undefined;
   const renderer = useRenderer();
@@ -171,27 +180,42 @@ export function Transcript(props: TranscriptProps) {
         </Show>
         <For each={windowed().visible}>
           {(node) => (
-            <box id={nodeID(node.key)} flexDirection="column" flexShrink={0}>
-              <NodeView
-                node={node}
-                theme={props.theme}
-                detailed={state.detailed}
-                syntax={syntax()}
-                width={props.width}
-                focused={
-                  state.focusedGroup !== undefined &&
-                  (node.kind === 'tool-group'
-                    ? state.focusedGroup === node.key
-                    : node.kind === 'tool'
-                      ? state.focusedGroup === `diff:${node.tool.id}`
-                      : false)
+            <>
+              <Show
+                when={
+                  node.kind === 'execution' &&
+                  node.segment.phase === 'running' &&
+                  queued().length > 0
                 }
-                animate={props.animate}
-                ascii={props.ascii}
-              />
-            </box>
+              >
+                <QueuedPreview items={queued()} theme={props.theme} width={props.width} />
+              </Show>
+              <box id={nodeID(node.key)} flexDirection="column" flexShrink={0}>
+                <NodeView
+                  node={node}
+                  theme={props.theme}
+                  detailed={state.detailed}
+                  syntax={syntax()}
+                  width={props.width}
+                  focused={
+                    state.focusedGroup !== undefined &&
+                    (node.kind === 'tool-group'
+                      ? state.focusedGroup === node.key
+                      : node.kind === 'tool'
+                        ? state.focusedGroup === `diff:${node.tool.id}`
+                        : false)
+                  }
+                  animate={props.animate}
+                  ascii={props.ascii}
+                />
+              </box>
+            </>
           )}
         </For>
+        {/* Fallback: no running marker to sit above (e.g. transcript not loaded). */}
+        <Show when={!hasRunningMarker() && queued().length > 0}>
+          <QueuedPreview items={queued()} theme={props.theme} width={props.width} />
+        </Show>
         <PermissionCard controller={props.controller} theme={props.theme} />
         <FormCard controller={props.controller} theme={props.theme} />
       </scrollbox>
