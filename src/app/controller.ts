@@ -115,6 +115,8 @@ export class AppController {
   private readonly summaryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private transcriptOrder: string[] = [];
   private fileCache: { root: string; files: string[] } | undefined;
+  private readonly fileScans = new Map<string, Promise<string[]>>();
+  private completionRequest = 0;
   private disposed = false;
   private persisted: LocalState;
   private readonly goalStore: GoalStore;
@@ -693,13 +695,20 @@ export class AppController {
   }
 
   private async completeFiles(partial: string, start: number): Promise<void> {
+    const request = ++this.completionRequest;
     const root = this.currentDirectory();
-    if (this.fileCache?.root !== root) {
-      this.fileCache = { root, files: await this.deps.listFiles(root) };
-    }
+    const files = await this.filesFor(root);
     const mention = activeMention(this.state.composer.text, this.state.composer.cursor);
-    if (mention === undefined || mention.start !== start) return; // composer moved on
-    const items = rankPaths(this.fileCache.files, partial, 8).map((path) => ({
+    if (
+      request !== this.completionRequest || // a newer mention superseded this one
+      mention === undefined ||
+      mention.start !== start ||
+      mention.path !== partial || // same offset, different query (`@a` → `@src`)
+      this.currentDirectory() !== root // project switched mid-scan
+    ) {
+      return;
+    }
+    const items = rankPaths(files, partial, 8).map((path) => ({
       label: `@${path}`,
       detail: '',
       insert: `@${path} `,
@@ -708,6 +717,28 @@ export class AppController {
       'completion',
       items.length === 0 ? undefined : { kind: 'file', items, index: 0, start },
     );
+  }
+
+  /**
+   * Shared, single-flight scan per directory. Concurrent mentions during one scan all await the
+   * same traversal; the result is cached per root until the project changes.
+   */
+  private filesFor(root: string): Promise<string[]> {
+    const cache = this.fileCache;
+    if (cache?.root === root) return Promise.resolve(cache.files);
+    const existing = this.fileScans.get(root);
+    if (existing !== undefined) return existing;
+    const work = this.deps
+      .listFiles(root)
+      .then((files) => {
+        this.fileCache = { root, files };
+        return files;
+      })
+      .finally(() => {
+        this.fileScans.delete(root);
+      });
+    this.fileScans.set(root, work);
+    return work;
   }
 
   moveCompletion(direction: -1 | 1): void {
