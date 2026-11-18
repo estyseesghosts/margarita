@@ -61,15 +61,29 @@ Create the workspace and a tiny `connect → list sessions → create session �
 
 Requires Bun (see `.bun-version`) and an OpenCode v2.3 service that is already running. Margarita discovers the registered local service read-only; it never starts, stops or reconfigures it unless you pass `--start-server` (and only when no service is registered).
 
+The command is `marg`. Build a self-contained executable (Bun runtime and OpenTUI's native library embedded) and put it on your PATH:
+
 ```sh
 bun install
-bun run start                       # overview of sessions across projects
-bun run start "fix the flaky test"  # new interactive session with that prompt
-bun run start --continue            # latest session in this directory
-bun run start --resume ses_123      # exact session
-bun run start -p -m opencode/longcat-2.5-free "summarize README.md"   # print mode
-bun run start --help
+bun run build                       # → dist/marg.exe (dist/marg elsewhere)
+bun run build bun-linux-x64         # cross-compile for another target
 ```
+
+Copy `dist/marg.exe` into any directory on PATH (for example `%USERPROFILE%.localin`). Alternatively `bun link` registers `marg` from source.
+
+```sh
+marg                                # new session in the current directory (Left → overview)
+marg "fix the flaky test"           # new session with that prompt
+marg --continue                     # latest session in this directory
+marg --resume                       # session overview
+marg --resume ses_123               # exact session
+marg -p -m opencode/longcat-2.5-free "summarize README.md"   # print mode
+marg --help
+```
+
+From a checkout, `bun run start …` is equivalent.
+
+The overview lists sessions by project, most recently used first, six per project; `[Show more]` expands the rest inline.
 
 Keys: `Left` on an empty prompt opens the overview · `Shift+Tab` agent · `Alt+P` model · `F2` recent model · `Ctrl+O` details · `Ctrl+R` history search · `Ctrl+S` stash · `Ctrl+G` `$EDITOR` · `Ctrl+J` newline · `Alt+Enter` steer · `Ctrl+C` interrupt/clear/exit · `F1` help. Override in `%LOCALAPPDATA%\margarita\config.jsonc` (XDG config dir elsewhere).
 
