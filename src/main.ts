@@ -402,10 +402,17 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     }
   }
 
-  servers.startStream(serverID, {
-    onBatch: (events, resync) => controller.onEvents(events, resync),
-    onStatus: (status) => controller.onStreamStatus(status),
-  });
+  // One stream per registered server. Manager-level guards drop callbacks from stale
+  // streams, so reconnects and unpair cannot duplicate subscriptions. Cached sessions stay
+  // visible while a host is offline; only the launch server drives the single stream badge.
+  for (const managed of servers.list()) {
+    servers.startStream(managed.serverID, {
+      onBatch: (events, resync) => controller.onEvents(events, resync),
+      onStatus: (status) => {
+        if (managed.serverID === serverID) controller.onStreamStatus(status);
+      },
+    });
+  }
   const stopPump = () => servers.dispose();
 
   const renderer = await createCliRenderer({
