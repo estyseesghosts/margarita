@@ -116,7 +116,7 @@ export interface Backend {
   listForms(sessionID: string): Promise<FormRequest[]>;
   replyForm(sessionID: string, formID: string, answer: Record<string, FormValue>): Promise<void>;
   /** Native OpenCode goal for the session (plugin RPC `opencode.goal/get`); null when unset. */
-  getGoal(sessionID: string): Promise<NativeGoal | null>;
+  getGoal(sessionID: string, directory?: string): Promise<NativeGoal | null>;
   cancelForm(sessionID: string, formID: string): Promise<void>;
   replyPermission(
     sessionID: string,
@@ -447,9 +447,16 @@ class OpenCodeBackend implements Backend {
    * server without the plugin (or one that cannot reach it) raises and this surfaces as the
    * upstream error — callers treat it as "no goal to show", matching first-party behavior.
    */
-  async getGoal(sessionID: string): Promise<NativeGoal | null> {
+  async getGoal(sessionID: string, directory?: string): Promise<NativeGoal | null> {
+    // The first-party TUI scopes this RPC to the session's own project; the startup cwd is
+    // wrong whenever another project's session is open.
     const result = await call('opencode.goal.get', () =>
-      this.client.rpc.call({ rpcID: 'opencode.goal', method: 'get', input: { sessionID } }),
+      this.client.rpc.call({
+        rpcID: 'opencode.goal',
+        method: 'get',
+        input: { sessionID },
+        ...(directory === undefined ? {} : { location: { directory } }),
+      }),
     );
     return toNativeGoal(result.output);
   }

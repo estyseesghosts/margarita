@@ -7,6 +7,7 @@ import type { AppConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
 import { composerFrom } from '../domain/composer.ts';
 import { buildKeymap } from '../domain/keymap.ts';
+import type { NativeGoal } from '../domain/native-goal.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { ToolCall, TranscriptMessage } from '../domain/transcript.ts';
 import { AppController } from './controller.ts';
@@ -1056,6 +1057,10 @@ async function submitCommand(controller: AppController, text: string): Promise<v
   await controller.submit();
 }
 
+function activeGoal(id: string): NativeGoal {
+  return { id, objective: id, status: 'active', rounds: 1, maxRounds: 5 };
+}
+
 async function goalFixture(objective = 'Ship the native goal') {
   const backend = new FakeBackend();
   backend.sessions = [fakeSession('ses_a')];
@@ -1124,6 +1129,72 @@ describe('native opencode goal (issue #21)', () => {
       false,
     );
     expect(controller.nativeGoalOf('ses_a')).toMatchObject({ status: 'complete', rounds: 7 });
+    controller.dispose();
+  });
+
+  test('goal reads carry the session directory and interleave per session (issue #35)', async () => {
+    const pending = new Map<string, (goal: NativeGoal | null) => void>();
+    class HeldGoals extends FakeBackend {
+      override getGoal(sessionID: string, directory?: string): Promise<NativeGoal | null> {
+        this.calls.push({ name: 'getGoal', args: [sessionID, directory] });
+        return new Promise((resolve) => pending.set(sessionID, resolve));
+      }
+    }
+    const backend = new HeldGoals();
+    backend.sessions = [
+      { ...fakeSession('ses_a'), directory: '/work/a' },
+      { ...fakeSession('ses_b'), directory: '/work/b' },
+    ];
+    backend.messages = { ses_a: [], ses_b: [] };
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    controller.openSession('ses_b');
+    await flush();
+    const reads = backend.calls.filter((call) => call.name === 'getGoal');
+    expect(reads.map((call) => call.args)).toEqual([
+      ['ses_a', '/work/a'],
+      ['ses_b', '/work/b'],
+    ]);
+    // Out of order: B answers first, then A; both land.
+    pending.get('ses_b')?.(activeGoal('goal_b'));
+    pending.get('ses_a')?.(activeGoal('goal_a'));
+    await flush();
+    expect(controller.nativeGoalOf('ses_a')?.id).toBe('goal_a');
+    expect(controller.nativeGoalOf('ses_b')?.id).toBe('goal_b');
+    controller.dispose();
+  });
+
+  test('a goal-changed push supersedes an older in-flight read of the same session', async () => {
+    const held: { release?: (goal: NativeGoal | null) => void } = {};
+    class SlowGoal extends FakeBackend {
+      override getGoal(): Promise<NativeGoal | null> {
+        return new Promise((resolve) => {
+          held.release = resolve;
+        });
+      }
+    }
+    const backend = new SlowGoal();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    controller.onEvents(
+      [
+        {
+          kind: 'goal-changed',
+          sessionID: 'ses_a',
+          goal: { id: 'new', objective: 'new', status: 'active', rounds: 2, maxRounds: 5 },
+        },
+      ],
+      false,
+    );
+    held.release?.(activeGoal('old'));
+    await flush();
+    expect(controller.nativeGoalOf('ses_a')?.id).toBe('new');
     controller.dispose();
   });
 

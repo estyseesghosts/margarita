@@ -549,6 +549,7 @@ export class AppController {
         void this.track('requests', this.refreshInputRequests(event.sessionID));
         return;
       case 'goal-changed':
+        this.bumpGoalVersion(event.sessionID);
         this.setState('nativeGoals', event.sessionID, event.goal);
         return;
       default:
@@ -1935,26 +1936,39 @@ export class AppController {
 
   // ---------------------------------------------------------------- native goal
 
-  /** Ticket guard: only the newest opencode.goal/get result from this frontend lands. */
-  private goalFetchTicket = 0;
+  /**
+   * Per-session version guard for opencode.goal/get: a newer read or a goal-changed push
+   * for the same session supersedes an in-flight read; other sessions never interfere.
+   */
+  private goalVersions = new Map<string, number>();
+
+  private bumpGoalVersion(sessionID: string): number {
+    const next = (this.goalVersions.get(sessionID) ?? 0) + 1;
+    this.goalVersions.set(sessionID, next);
+    return next;
+  }
 
   /** Native OpenCode goal for a session, re-read from the plugin. Also cached in state. */
   async refreshNativeGoal(sessionID: string): Promise<NativeGoal | null> {
-    const ticket = ++this.goalFetchTicket;
+    const version = this.bumpGoalVersion(sessionID);
+    const directory = this.state.sessions[sessionID]?.directory;
     try {
-      const goal = await this.deps.backend.getGoal(sessionID);
-      if (ticket !== this.goalFetchTicket) return this.nativeGoalOf(sessionID);
+      const goal = await this.deps.backend.getGoal(sessionID, directory);
+      if (version !== this.goalVersions.get(sessionID)) return this.nativeGoalOf(sessionID);
       this.setState('nativeGoals', sessionID, goal);
       return goal;
     } catch (error) {
-      // A server without the goal plugin (or an unreachable one) shows no goal.
       this.debugLog.write('backend-error', {
         operation: 'opencode.goal.get',
         kind: error instanceof BackendError ? error.kind : 'unknown',
       });
-      if (ticket !== this.goalFetchTicket) return this.nativeGoalOf(sessionID);
-      this.setState('nativeGoals', sessionID, null);
-      return null;
+      if (version !== this.goalVersions.get(sessionID)) return this.nativeGoalOf(sessionID);
+      // A failed read says nothing about the goal: keep what is known, and show no goal
+      // only when nothing was ever read (e.g. a server without the goal plugin).
+      if (this.state.nativeGoals[sessionID] === undefined) {
+        this.setState('nativeGoals', sessionID, null);
+      }
+      return this.nativeGoalOf(sessionID);
     }
   }
 

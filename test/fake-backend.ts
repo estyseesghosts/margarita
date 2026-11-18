@@ -162,8 +162,11 @@ export class FakeBackend implements Backend {
   /** Native opencode.goal plugin emulator: session-scoped goals, updated by goal commands. */
   goals: Record<string, NativeGoal | undefined> = {};
   private goalSequence = 0;
-  async getGoal(sessionID: string): Promise<NativeGoal | null> {
-    this.calls.push({ name: 'getGoal', args: [sessionID] });
+  async getGoal(sessionID: string, directory?: string): Promise<NativeGoal | null> {
+    this.calls.push({
+      name: 'getGoal',
+      args: directory === undefined ? [sessionID] : [sessionID, directory],
+    });
     return this.goals[sessionID] ?? null;
   }
   async runCommand(sessionID: string, name: string, text: string): Promise<void> {
