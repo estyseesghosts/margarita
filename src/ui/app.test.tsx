@@ -527,6 +527,195 @@ function richBackend(): FakeBackend {
   return backend;
 }
 
+describe('live activity indicator (issues 24, 25)', () => {
+  test('unfinished empty reasoning produces no placeholder row; exactly one throbber', async () => {
+    const backend = backendWithSession();
+    backend.active = new Set(['ses_a']);
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'why is it slow?', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            { kind: 'reasoning', text: '', done: false },
+            { kind: 'text', text: 'The frame budget is exceeded.' },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain('∴');
+    const liveVerbs = /(Thinking|Tinkering|Pondering|Untangling|Mulling|Noodling)…/g;
+    expect(frame.match(liveVerbs)).toHaveLength(1);
+  });
+
+  test('detailed mode shows authentic in-progress reasoning with labeling', async () => {
+    const backend = backendWithSession();
+    backend.active = new Set(['ses_a']);
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'hi', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            { kind: 'reasoning', text: 'consider the frame budget', done: false },
+            { kind: 'text', text: 'Working.' },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressKey('o', { ctrl: true });
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('∴ Reasoning (in progress…)');
+    expect(frame).toContain('consider the frame budget');
+  });
+
+  test('a running compaction reuses the throbber verb; terminal state lands as one row', async () => {
+    const backend = backendWithSession();
+    backend.active = new Set(['ses_a']);
+    const running = [
+      { kind: 'user' as const, id: 'm1', createdAt: 1, text: 'hi', attachments: [] },
+      {
+        kind: 'assistant' as const,
+        id: 'm2',
+        createdAt: 2,
+        agent: 'build',
+        model: { providerID: 'opencode', modelID: 'longcat' },
+        parts: [{ kind: 'reasoning' as const, text: '', done: false }],
+      },
+      { kind: 'compaction' as const, id: 'c1', createdAt: 3, state: 'running' as const },
+    ];
+    backend.messages = { ses_a: running };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame.split('Compacting conversation…').length - 1).toBe(1);
+    expect(frame).not.toContain('∴');
+
+    // Server says the compaction landed: throbber resumes from agent state, one dim row.
+    backend.messages = {
+      ses_a: [
+        ...running.slice(0, 2),
+        { kind: 'compaction' as const, id: 'c1', createdAt: 3, state: 'completed' as const },
+      ],
+    };
+    controller.onEvents([], true);
+    await settle(setup);
+    await settle(setup);
+    const done = setup.captureCharFrame();
+    expect(done).toContain('Conversation compacted');
+    expect(done).not.toContain('Compacting conversation…');
+  });
+});
+
+describe('oversized inline diff clamping (issue 27)', () => {
+  test('a 140-line write diff is clamped; Enter expands only that row; Enter collapses again', async () => {
+    const content = Array.from({ length: 140 }, (_, index) => `row${index}`).join('\n');
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'write it', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'w1',
+                name: 'write',
+                status: 'completed',
+                input: { filePath: 'src/app/debug-log.ts', content },
+                startedAt: 2,
+                completedAt: 3,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    // The header may scrolled out of the 24-row viewport; the clamp row is pinned at the bottom.
+    expect(frame).toContain('… 127 more lines · Enter to expand');
+    expect(frame).not.toContain('row139');
+
+    setup.mockInput.pressArrow('down', { ctrl: true });
+    await settle(setup);
+    expect(controller.state.focusedGroup).toBe('diff:w1');
+    expect(setup.captureCharFrame()).toContain('▸ … 127 more lines');
+
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    expect(controller.state.expandedDiffs['w1']).toBe(true);
+    expect(setup.captureCharFrame()).not.toContain('more lines · Enter to expand');
+    expect(controller.state.composer.text).toBe(''); // not a submit, not a draft
+
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    expect(controller.state.expandedDiffs['w1']).toBeUndefined();
+    expect(setup.captureCharFrame()).toContain('… 127 more lines · Enter to expand');
+  });
+
+  test('a three-line diff renders completely with no clamp indicator', async () => {
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'fix it', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'e1',
+                name: 'edit',
+                status: 'completed',
+                input: { filePath: 'src/app/debug-log.ts', oldString: 'old', newString: 'new' },
+                startedAt: 2,
+                completedAt: 3,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('Added 1 line');
+    expect(frame).not.toContain('more lines');
+  });
+});
+
 describe('transcript rendering (docs/22, docs/23)', () => {
   test('renders markdown, diff gutter and a sticky header for an earlier prompt', async () => {
     const { controller, setup } = await mount(richBackend());

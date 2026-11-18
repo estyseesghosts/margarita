@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 
-import { diffCounts, editDiff, filetypeOf } from './edit-diff.ts';
+import {
+  clampDiffPatch,
+  diffCounts,
+  diffPreviewBudget,
+  editDiff,
+  filetypeOf,
+  hasOversizedDiff,
+} from './edit-diff.ts';
 import type { ToolCall } from './transcript.ts';
 
 const call = (name: string, input: Record<string, unknown>, diff?: string): ToolCall => ({
@@ -32,6 +39,45 @@ describe('editDiff', () => {
 
   test('ignores other tools', () => {
     expect(editDiff(call('read', { filePath: 'a.ts' }))).toBeUndefined();
+  });
+});
+
+function diffPatch(displayLines: number): string {
+  return [
+    '--- a/f.ts',
+    '+++ b/f.ts',
+    '@@ -1,1 +1,' + String(displayLines) + ' @@',
+    ...Array.from({ length: displayLines }, (_, index) => `+row${index}`),
+  ].join('\n');
+}
+
+describe('clampDiffPatch', () => {
+  test('a three-line diff is shown completely', () => {
+    const result = clampDiffPatch('@@ -1 +1 @@\n-old\n+new');
+    expect(result.hidden).toBe(0);
+    expect(result.shown).toHaveLength(3);
+  });
+
+  test('twenty-, one-hundred-forty- and one-thousand-line diffs clamp with counts', () => {
+    for (const count of [20, 140, 1000]) {
+      const result = clampDiffPatch(diffPatch(count));
+      expect(result.shown).toHaveLength(diffPreviewBudget);
+      expect(result.hidden).toBe(count + 3 - diffPreviewBudget);
+    }
+  });
+
+  test('clipping never produces a malformed hunk; every shown line is intact', () => {
+    const result = clampDiffPatch(diffPatch(100));
+    for (const line of result.shown) expect(line.text).not.toContain('\n');
+    expect(result.shown[0]?.text).toBe('--- a/f.ts');
+  });
+
+  test('hasOversizedDiff only for edit-like patches past the budget', () => {
+    const big = call('write', { filePath: 'f.ts', content: 'x\n'.repeat(100) });
+    const small = call('write', { filePath: 'f.ts', content: 'x' });
+    expect(hasOversizedDiff(big)).toBe(true);
+    expect(hasOversizedDiff(small)).toBe(false);
+    expect(hasOversizedDiff(call('read', { filePath: 'f.ts' }))).toBe(false);
   });
 });
 

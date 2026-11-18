@@ -153,8 +153,12 @@ export function latestTurn(
   const assistant = after.findLast((message) => message.kind === 'assistant');
   if (running) {
     const lastPart = assistant?.kind === 'assistant' ? assistant.parts.at(-1) : undefined;
-    const activity =
-      lastPart?.kind === 'tool' && lastPart.tool.status !== 'completed'
+    const compacting = after.some(
+      (message) => message.kind === 'compaction' && message.state === 'running',
+    );
+    const activity = compacting
+      ? 'Compacting conversation'
+      : lastPart?.kind === 'tool' && lastPart.tool.status !== 'completed'
         ? activityByCategory[classifyTool(lastPart.tool.name)]
         : lastPart?.kind === 'reasoning' && !lastPart.done
           ? 'Thinking'

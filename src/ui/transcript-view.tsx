@@ -17,7 +17,8 @@ import {
 import type { PermissionPrompt } from '../adapter/backend.ts';
 import type { AppController } from '../app/controller.ts';
 import type { ScrollMove } from '../app/key-router.ts';
-import { diffCounts, editDiff } from '../domain/edit-diff.ts';
+import type { PatchLine } from '../domain/diff.ts';
+import { clampDiffPatch, diffCounts, editDiff } from '../domain/edit-diff.ts';
 import type { FormRequest } from '../domain/form.ts';
 import { formatModelRef, type ModelSelection } from '../domain/model-ref.ts';
 import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
@@ -59,6 +60,7 @@ export function Transcript(props: TranscriptProps) {
     foldTranscript(transcript()?.messages ?? [], {
       detailed: state.detailed,
       expandedGroups: new Set(Object.keys(state.expandedGroups)),
+      expandedDiffs: new Set(Object.keys(state.expandedDiffs)),
     }),
   );
   const windowed = createMemo(() =>
@@ -171,7 +173,15 @@ export function Transcript(props: TranscriptProps) {
                 theme={props.theme}
                 detailed={state.detailed}
                 syntax={syntax()}
-                focused={node.kind === 'tool-group' && state.focusedGroup === node.key}
+                width={props.width}
+                focused={
+                  state.focusedGroup !== undefined &&
+                  (node.kind === 'tool-group'
+                    ? state.focusedGroup === node.key
+                    : node.kind === 'tool'
+                      ? state.focusedGroup === `diff:${node.tool.id}`
+                      : false)
+                }
               />
             </box>
           )}
@@ -279,6 +289,7 @@ function NodeView(props: {
   theme: Theme;
   detailed: boolean;
   syntax: SyntaxStyle;
+  width: number;
   focused: boolean;
 }) {
   const theme = () => props.theme;
@@ -314,7 +325,7 @@ function NodeView(props: {
         {(node: Accessor<NodeOf<'reasoning'>>) => (
           <box marginTop={1} flexDirection="column" paddingLeft={2}>
             <text fg={theme().dim}>
-              <i>{node().done ? '∴ Reasoning (model-provided)' : '∴ Thinking…'}</i>
+              <i>{node().done ? '∴ Reasoning (model-provided)' : '∴ Reasoning (in progress…)'}</i>
             </text>
             <text fg={theme().dim}>{sanitizeText(node().text)}</text>
           </box>
@@ -335,6 +346,8 @@ function NodeView(props: {
             detailed={props.detailed}
             theme={theme()}
             syntax={props.syntax}
+            width={props.width}
+            focused={props.focused}
           />
         )}
       </Match>
@@ -355,6 +368,8 @@ function NodeView(props: {
                     detailed={props.detailed}
                     theme={theme()}
                     syntax={props.syntax}
+                    width={props.width}
+                    focused={false}
                   />
                 )}
               </For>
@@ -408,8 +423,18 @@ function ToolView(props: {
   detailed: boolean;
   theme: Theme;
   syntax: SyntaxStyle;
+  width: number;
+  focused: boolean;
 }) {
   const edit = createMemo(() => (props.tool.status === 'error' ? undefined : editDiff(props.tool)));
+  // Compact mode clips the patch to an explicit display-line budget; the full patch is
+  // never truncated mid-hunk and re-parsed. Small diffs stay fully visible.
+  const clamped = createMemo(() => {
+    const shown = edit();
+    return shown === undefined ? undefined : clampDiffPatch(shown.diff);
+  });
+  const showFullDiff = () => props.expanded || (clamped()?.hidden ?? 0) === 0;
+  const lineWidth = () => Math.max(8, props.width - 4);
   // Ctrl+O shows exact output (sanitized, untruncated) and timing.
   const render = (text: string) => (props.detailed ? full(text) : preview(text));
   const failed = () => props.tool.status === 'error';
@@ -444,21 +469,39 @@ function ToolView(props: {
         {(shown: Accessor<NonNullable<ReturnType<typeof editDiff>>>) => (
           <box flexDirection="column" paddingLeft={2}>
             <text fg={props.theme.dim}>{`└ ${changeSummary(diffCounts(shown().diff))}`}</text>
-            <diff
-              diff={shown().diff}
-              view="unified"
-              showLineNumbers
-              syntaxStyle={props.syntax}
-              treeSitterClient={getTreeSitterClient()}
-              filetype={shown().filetype}
-              fg={props.theme.text}
-              lineNumberFg={props.theme.dim}
-              addedBg={props.theme.addedBg}
-              removedBg={props.theme.removedBg}
-              addedSignColor={props.theme.success}
-              removedSignColor={props.theme.error}
-              wrapMode="none"
-            />
+            <Show
+              when={showFullDiff()}
+              fallback={
+                <box flexDirection="column">
+                  <For each={clamped()?.shown ?? []}>
+                    {(line) => (
+                      <text fg={diffLineFg(line.kind, props.theme)}>
+                        {truncateToWidth(line.text, lineWidth())}
+                      </text>
+                    )}
+                  </For>
+                  <text fg={props.focused ? props.theme.accent : props.theme.dim}>
+                    {`${props.focused ? '▸ ' : '  '}… ${clamped()?.hidden ?? 0} more lines · Enter to expand`}
+                  </text>
+                </box>
+              }
+            >
+              <diff
+                diff={shown().diff}
+                view="unified"
+                showLineNumbers
+                syntaxStyle={props.syntax}
+                treeSitterClient={getTreeSitterClient()}
+                filetype={shown().filetype}
+                fg={props.theme.text}
+                lineNumberFg={props.theme.dim}
+                addedBg={props.theme.addedBg}
+                removedBg={props.theme.removedBg}
+                addedSignColor={props.theme.success}
+                removedSignColor={props.theme.error}
+                wrapMode="none"
+              />
+            </Show>
           </box>
         )}
       </Show>
@@ -475,6 +518,29 @@ function ToolView(props: {
 
 function plural(count: number): string {
   return `${count} ${count === 1 ? 'line' : 'lines'}`;
+}
+
+/** Compact-mode colours for a clipped patch line; semantics match the full <diff> view. */
+function diffLineFg(kind: PatchLine['kind'], theme: Theme): string {
+  switch (kind) {
+    case 'add':
+      return theme.success;
+    case 'del':
+      return theme.error;
+    case 'hunk':
+      return theme.accent;
+    case 'meta':
+    case 'context':
+      return theme.dim;
+    default:
+      return theme.text;
+  }
+}
+
+/** Clip a pre-sanitized patch line to one terminal row; never wraps, so rows stay bounded. */
+function truncateToWidth(text: string, width: number): string {
+  if (text.length <= width) return text;
+  return `${text.slice(0, Math.max(0, width - 1))}…`;
 }
 
 function changeSummary(counts: { additions: number; deletions: number }): string {

@@ -281,6 +281,109 @@ async function attach(controller: AppController, sessionID: string): Promise<voi
   await flush();
 }
 
+function fakeEditTool(id: string): ToolCall {
+  const lines = ['--- a/f.ts', '+++ b/f.ts', '@@ -1,1 +1,100 @@'];
+  lines.push(...Array.from({ length: 100 }, (_, index) => `+row${index}`));
+  return {
+    id,
+    name: 'edit',
+    status: 'completed',
+    input: { filePath: 'f.ts' },
+    startedAt: 1,
+    completedAt: 2,
+    diff: lines.join('\n'),
+  };
+}
+
+function conversationWithEdit() {
+  const backend = new FakeBackend();
+  backend.sessions = [fakeSession('ses_a')];
+  backend.messages = {
+    ses_a: [
+      assistantWithTools('m2', [
+        fakeTool('t1', 'read'),
+        fakeEditTool('d1'),
+        fakeTool('t4', 'glob'),
+        fakeTool('t5', 'glob'),
+      ]),
+    ],
+  };
+  const controller = makeController(() => Promise.resolve([]), backend);
+  return { backend, controller };
+}
+
+describe('oversized inline diff focus', () => {
+  test('selection walks groups and diff rows in render order; Enter toggles only the diff', async () => {
+    const { controller } = conversationWithEdit();
+    await attach(controller, 'ses_a');
+
+    expect(controller.collapsibleItems()).toEqual([
+      { key: 'group:t1', kind: 'group' },
+      { key: 'diff:d1', kind: 'diff' },
+      { key: 'group:t4', kind: 'group' },
+    ]);
+
+    controller.moveGroupFocus(1);
+    expect(controller.state.focusedGroup).toBe('group:t1');
+    controller.moveGroupFocus(1);
+    expect(controller.state.focusedGroup).toBe('diff:d1');
+    controller.moveGroupFocus(1);
+    expect(controller.state.focusedGroup).toBe('group:t4');
+    controller.moveGroupFocus(-1);
+    expect(controller.state.focusedGroup).toBe('diff:d1');
+
+    expect(controller.toggleFocusedGroup()).toBe(true);
+    expect(controller.state.expandedDiffs['d1']).toBe(true);
+    expect(controller.state.expandedGroups['group:t1']).toBeUndefined();
+    expect(controller.state.expandedGroups['group:t4']).toBeUndefined();
+
+    expect(controller.toggleFocusedGroup()).toBe(true);
+    expect(controller.state.expandedDiffs['d1']).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('Enter routes to the diff toggle when a diff row is selected (composer stays empty)', async () => {
+    const { controller } = conversationWithEdit();
+    await attach(controller, 'ses_a');
+
+    const services = { openEditor: () => {}, redraw: () => {}, scroll: () => {} };
+    const { keymap } = buildKeymap({});
+    const ctrlDown = { name: 'down', ctrl: true, alt: false, shift: false };
+    routeKey(controller, keymap, ctrlDown, services);
+    routeKey(controller, keymap, ctrlDown, services);
+    expect(controller.state.focusedGroup).toBe('diff:d1');
+
+    routeKey(
+      controller,
+      keymap,
+      { name: 'return', ctrl: false, alt: false, shift: false },
+      services,
+    );
+    await flush();
+    expect(controller.state.expandedDiffs['d1']).toBe(true);
+    expect(controller.state.composer.text).toBe('');
+
+    routeKey(
+      controller,
+      keymap,
+      { name: 'return', ctrl: false, alt: false, shift: false },
+      services,
+    );
+    await flush();
+    expect(controller.state.expandedDiffs['d1']).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('detailed mode shows everything expanded and offers no collapsible rows', async () => {
+    const { controller } = conversationWithEdit();
+    await attach(controller, 'ses_a');
+    controller.toggleDetails();
+    expect(controller.state.detailed).toBe(true);
+    expect(controller.collapsibleItems()).toEqual([]);
+    controller.dispose();
+  });
+});
+
 describe('tool-group focus', () => {
   test('expands only the selected group; other groups stay folded', async () => {
     const { controller } = conversationFixture();

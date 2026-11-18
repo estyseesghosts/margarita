@@ -95,6 +95,8 @@ export type AppState = {
   /** Rendered node count per session (see `windowNodes`); grows as the user pages up. */
   transcriptWindow: Record<string, number>;
   expandedGroups: Record<string, true>;
+  /** Tool IDs whose oversized inline diffs the user expanded; mirrors expandedGroups. */
+  expandedDiffs: Record<string, true>;
   /** Group key of the tool group selected for per-group toggle; absent when composer has focus. */
   focusedGroup?: string;
   composer: Composer;
@@ -149,6 +151,7 @@ export function initialState(directory: string): AppState {
     detailed: false,
     transcriptWindow: {},
     expandedGroups: {},
+    expandedDiffs: {},
     composer: { ...emptyComposer },
     drafts: {},
     admitting: false,

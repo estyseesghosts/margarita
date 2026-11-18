@@ -87,6 +87,8 @@ export type FoldOptions = Readonly<{
   detailed: boolean;
   /** Group keys the user expanded individually; see `groupKey`. */
   expandedGroups: ReadonlySet<string>;
+  /** Tool IDs whose oversized inline diff the user expanded; see `clampDiffPatch`. */
+  expandedDiffs?: ReadonlySet<string>;
 }>;
 
 const categoryByName: Readonly<Record<string, ToolCategory>> = {
@@ -183,15 +185,13 @@ export function foldTranscript(
         }
         break;
       case 'compaction':
+        // A running compaction is the throbber's job ("Compacting conversation…");
+        // only the terminal states earn a one-off transcript notice.
+        if (message.state === 'running') break;
         out.push({
           kind: 'notice',
           key: message.id,
-          text:
-            message.state === 'running'
-              ? 'Compacting conversation…'
-              : message.state === 'failed'
-                ? 'Compaction failed'
-                : 'Conversation compacted',
+          text: message.state === 'failed' ? 'Compaction failed' : 'Conversation compacted',
           tone: message.state === 'failed' ? 'error' : 'dim',
         });
         break;
@@ -289,7 +289,10 @@ function foldAssistant(
           key: part.tool.id,
           tool: part.tool,
           category: classifyTool(part.tool.name),
-          expanded: options.detailed || part.tool.status === 'error',
+          expanded:
+            options.detailed ||
+            part.tool.status === 'error' ||
+            options.expandedDiffs?.has(part.tool.id) === true,
         });
         return;
       case 'text':
@@ -299,7 +302,8 @@ function foldAssistant(
         return;
       case 'reasoning':
         if (part.text.trim() !== '') sawReasoningText = true;
-        // Reasoning breaks no groups; it is invisible by default except while streaming.
+        // Live reasoning status is the throbber's job; the transcript only shows
+        // authentic reasoning text, and only in detailed mode.
         if (options.detailed && part.text.trim() !== '') {
           flush();
           out.push({
@@ -308,9 +312,6 @@ function foldAssistant(
             text: part.text,
             done: part.done,
           });
-        } else if (!part.done && !options.detailed) {
-          flush();
-          out.push({ kind: 'reasoning', key: `${message.id}:${index}`, text: '', done: false });
         }
         return;
       default:

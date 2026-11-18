@@ -110,6 +110,30 @@ describe('foldTranscript', () => {
     expect(kinds(nodes)).toEqual(['group(2)', 'text', 'group(1)']);
   });
 
+  test('a large inline diff is collapsed by default and expandable via expandedDiffs', () => {
+    const diffLines = ['--- a/f.ts', '+++ b/f.ts', '@@ -1,1 +1,40 @@'];
+    diffLines.push(...Array.from({ length: 40 }, (_, index) => `+row${index}`));
+    const editTool: ToolCall = {
+      id: 'd1',
+      name: 'edit',
+      status: 'completed',
+      input: { filePath: 'f.ts' },
+      startedAt: 0,
+      diff: diffLines.join('\n'),
+    };
+    const parts: AssistantPart[] = [{ kind: 'tool', tool: editTool }];
+
+    const collapsed = foldTranscript([assistant(parts)], compact);
+    expect(collapsed[0]).toMatchObject({ kind: 'tool', expanded: false });
+
+    const expanded = foldTranscript([assistant(parts)], {
+      detailed: false,
+      expandedGroups: new Set(),
+      expandedDiffs: new Set(['d1']),
+    });
+    expect(expanded[0]).toMatchObject({ kind: 'tool', expanded: true });
+  });
+
   test('expanded group state is keyed by the first child ID', () => {
     const parts = [tool('a', 'read'), tool('b', 'read')];
     const key = groupKey([{ id: 'a', name: 'read', status: 'completed', input: {}, startedAt: 0 }]);
@@ -118,6 +142,50 @@ describe('foldTranscript', () => {
       expandedGroups: new Set([key]),
     });
     expect(nodes[0]?.kind === 'tool-group' && nodes[0].expanded).toBe(true);
+  });
+
+  test('unfinished empty reasoning produces no node in compact mode', () => {
+    const parts: AssistantPart[] = [
+      { kind: 'reasoning', text: '', done: false },
+      { kind: 'text', text: 'Answer' },
+    ];
+    expect(kinds(foldTranscript([assistant(parts)], compact))).toEqual(['text']);
+    // Even with visible tool activity around it, nothing placeholder-like appears.
+    const mixed: AssistantPart[] = [
+      tool('a', 'read'),
+      { kind: 'reasoning', text: '', done: false },
+      tool('b', 'read'),
+    ];
+    expect(kinds(foldTranscript([assistant(mixed)], compact))).toEqual(['group(2)']);
+  });
+
+  test('completed empty reasoning produces no node in detailed mode either', () => {
+    const parts: AssistantPart[] = [
+      { kind: 'reasoning', text: '', done: false },
+      { kind: 'reasoning', text: 'real thought', done: true },
+    ];
+    const nodes = foldTranscript([assistant(parts)], detailed);
+    expect(nodes.map((node) => node.kind)).toEqual(['reasoning']);
+    expect(nodes[0]).toEqual({
+      kind: 'reasoning',
+      key: 'm1:1',
+      text: 'real thought',
+      done: true,
+    });
+  });
+
+  test('a running compaction renders no transcript row; terminal states render one notice', () => {
+    const running = foldTranscript(
+      [{ kind: 'compaction', id: 'c', createdAt: 5, state: 'running' }],
+      compact,
+    );
+    expect(running).toEqual([]);
+    expect(
+      foldTranscript([{ kind: 'compaction', id: 'c', createdAt: 5, state: 'completed' }], compact),
+    ).toEqual([{ kind: 'notice', key: 'c', text: 'Conversation compacted', tone: 'dim' }]);
+    expect(
+      foldTranscript([{ kind: 'compaction', id: 'c', createdAt: 5, state: 'failed' }], compact),
+    ).toEqual([{ kind: 'notice', key: 'c', text: 'Compaction failed', tone: 'error' }]);
   });
 
   test('reasoning text is hidden by default and shown exactly in detailed mode', () => {

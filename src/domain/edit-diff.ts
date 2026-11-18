@@ -1,3 +1,4 @@
+import { type PatchLine, patchLines } from './diff.ts';
 import type { ToolCall } from './transcript.ts';
 
 export type EditDiff = Readonly<{ diff: string; filetype: string | undefined }>;
@@ -82,4 +83,31 @@ export function diffCounts(diff: string): { additions: number; deletions: number
     else if (line.startsWith('-')) deletions += 1;
   }
   return { additions, deletions };
+}
+
+/** Display-line budget for an inline patch in compact mode (fits small terminals). */
+export const diffPreviewBudget = 16;
+
+export type DiffPreview = Readonly<{
+  /** The first `budget` display lines, unparsed for safe clipping. */
+  shown: readonly PatchLine[];
+  /** How many display lines are hidden behind the expand control. */
+  hidden: number;
+}>;
+
+/**
+ * Explicit display-line clipping of a patch for compact rendering. Never feeds a
+ * truncated patch back into a unified-diff parser; callers render `shown` verbatim.
+ */
+export function clampDiffPatch(patch: string, budget: number = diffPreviewBudget): DiffPreview {
+  const clipped = patchLines(patch);
+  if (clipped.length <= budget) return { shown: clipped, hidden: 0 };
+  return { shown: clipped.slice(0, budget), hidden: clipped.length - budget };
+}
+
+/** True when an edit-like tool's patch exceeds the compact-mode preview budget. */
+export function hasOversizedDiff(tool: ToolCall, budget: number = diffPreviewBudget): boolean {
+  const edit = editDiff(tool);
+  if (edit === undefined) return false;
+  return patchLines(edit.diff).length > budget;
 }

@@ -20,6 +20,7 @@ import { defaultAgent, nextAgent, selectableAgents } from '../domain/agent-cycle
 import type { BackendEvent } from '../domain/backend-event.ts';
 import { type Composer, composerFrom, emptyComposer } from '../domain/composer.ts';
 import { type DiffScope, patchLines, turnStart } from '../domain/diff.ts';
+import { hasOversizedDiff } from '../domain/edit-diff.ts';
 import { projectExecution } from '../domain/execution.ts';
 import { activeMention, findFileMentions, rankPaths } from '../domain/file-reference.ts';
 import {
@@ -1709,44 +1710,76 @@ export class AppController {
     );
   }
 
-  /** Tool groups in render order; empty outside conversations and in detailed mode. */
-  toolGroups(): Extract<TranscriptNode, { kind: 'tool-group' }>[] {
+  /** Folded nodes for the attached conversation; empty elsewhere. */
+  private conversationNodes(): TranscriptNode[] {
     if (this.state.route.kind !== 'conversation') return [];
     const target = this.state.route.sessionID;
     const messages = this.state.transcripts[target]?.messages ?? [];
-    const nodes = foldTranscript(messages, {
+    return foldTranscript(messages, {
       detailed: this.state.detailed,
       expandedGroups: new Set(Object.keys(this.state.expandedGroups)),
+      expandedDiffs: new Set(Object.keys(this.state.expandedDiffs)),
     });
-    return nodes.filter((node) => node.kind === 'tool-group');
   }
 
-  /** Ctrl+↑/↓ while reading: move the lightweight selection between tool groups. */
+  /** Tool groups in render order; empty outside conversations and in detailed mode. */
+  toolGroups(): Extract<TranscriptNode, { kind: 'tool-group' }>[] {
+    return this.conversationNodes().filter((node) => node.kind === 'tool-group');
+  }
+
+  /**
+   * Collapsible transcript items in render order: tool groups and standalone edit
+   * tools whose inline diff exceeds the compact preview budget (keys `diff:<toolID>`).
+   * Empty in detailed mode, where everything is already shown expanded.
+   */
+  collapsibleItems(): { key: string; kind: 'group' | 'diff' }[] {
+    if (this.state.detailed) return [];
+    return this.conversationNodes().flatMap((node): { key: string; kind: 'group' | 'diff' }[] => {
+      if (node.kind === 'tool-group') return [{ key: node.key, kind: 'group' as const }];
+      if (node.kind === 'tool' && node.tool.status !== 'error' && hasOversizedDiff(node.tool)) {
+        return [{ key: `diff:${node.tool.id}`, kind: 'diff' as const }];
+      }
+      return [];
+    });
+  }
+
+  /** Ctrl+↑/↓ while reading: move the lightweight selection between collapsible items. */
   moveGroupFocus(direction: -1 | 1): void {
-    const groups = this.toolGroups();
-    if (groups.length === 0) return;
+    const items = this.collapsibleItems();
+    if (items.length === 0) return;
     const current = this.state.focusedGroup;
-    const index = current === undefined ? -1 : groups.findIndex((group) => group.key === current);
+    const index = current === undefined ? -1 : items.findIndex((item) => item.key === current);
     const next =
       index === -1
         ? direction === -1
-          ? groups.length - 1
+          ? items.length - 1
           : 0
-        : Math.min(groups.length - 1, Math.max(0, index + direction));
-    const group = groups[next];
-    if (group !== undefined) this.setState('focusedGroup', group.key);
+        : Math.min(items.length - 1, Math.max(0, index + direction));
+    const item = items[next];
+    if (item !== undefined) this.setState('focusedGroup', item.key);
   }
 
-  /** Enter on an empty prompt expands/collapses only the selected group. */
+  /** Enter on an empty prompt expands/collapses only the selected item. */
   toggleFocusedGroup(): boolean {
     const key = this.state.focusedGroup;
     if (key === undefined) return false;
-    if (!this.toolGroups().some((group) => group.key === key)) {
+    const item = this.collapsibleItems().find((entry) => entry.key === key);
+    if (item === undefined) {
       this.setState('focusedGroup', undefined);
       return false;
     }
-    this.toggleGroup(key);
+    if (item.kind === 'diff') this.toggleDiffExpanded(item.key.slice('diff:'.length));
+    else this.toggleGroup(item.key);
     return true;
+  }
+
+  toggleDiffExpanded(id: string): void {
+    this.setState(
+      produce((state) => {
+        if (state.expandedDiffs[id] === true) delete state.expandedDiffs[id];
+        else state.expandedDiffs[id] = true;
+      }),
+    );
   }
 
   clearGroupFocus(): void {
