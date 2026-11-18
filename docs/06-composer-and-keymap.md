@@ -55,7 +55,7 @@ The mapping is deliberately not an exact Claude clone. `Shift+Tab` must never fl
 | Composer | `!` at start | User shell mode |
 | Overview list | `Up`/`Down` | Move among rows |
 | Overview list | `Enter`/`Right` | Attach selected session |
-| Overview list | `N` | Focus new-session composer (when not typing) |
+| Overview list | any printable key | Focus and fill the new-session composer (including `n`) |
 | Overview list | `/` | Search list (not session prompt) |
 | Overview list | `Esc` | Clear filter or focus overview composer |
 | Overview composer | `Enter` | Create new session + send initial prompt |

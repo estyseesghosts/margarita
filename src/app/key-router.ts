@@ -238,14 +238,13 @@ function routeOverviewList(controller: AppController, key: KeyInput): boolean {
   if (key.name === 'up') controller.moveOverviewSelection(-1);
   else if (key.name === 'down') controller.moveOverviewSelection(1);
   else if (key.name === 'return' || key.name === 'right') controller.attachSelected();
-  else if (key.name === 'escape' || key.name === 'n') controller.focusOverviewComposer();
+  else if (key.name === 'escape') controller.focusOverviewComposer();
   else if (key.name === '?') controller.setOverlay({ kind: 'help' });
   else if (key.ctrl && (key.name === 'c' || key.name === 'd'))
     controller.armOrExit(`Ctrl+${key.name.toUpperCase()}`);
   else if (isPrintable(key)) {
-    // Typing while the list is focused goes to the new-session composer.
-    controller.focusOverviewComposer();
-    controller.setComposer(insertText(controller.state.composer, key.text));
+    // Typing any printable key (including 'n') focuses and fills the new-session composer.
+    controller.activateOverviewComposer(key.text);
   } else return false;
   return true;
 }

@@ -177,6 +177,80 @@ describe('app', () => {
     expect(controller.state.overview.focus).toBe('composer');
   });
 
+  test("typing 'new feature' from list selection keeps the leading n (issue 15)", async () => {
+    const { controller, setup } = await mount(backendWithSession());
+    controller.startNewSession('/work/kohjoh');
+    await settle(setup);
+    setup.mockInput.pressArrow('left');
+    await settle(setup);
+    expect(controller.state.route.kind).toBe('overview');
+    expect(controller.state.overview.focus).toBe('list');
+    expect(controller.state.overview.selectedRow).toBe('session:ses_a');
+    await setup.mockInput.typeText('new feature');
+    await settle(setup);
+    expect(controller.state.composer.text).toBe('new feature');
+    expect(controller.state.overview.focus).toBe('composer');
+  });
+
+  test('paste from list selection activates composer and Enter sends the pasted prompt (issue 15)', async () => {
+    const backend = backendWithSession();
+    const { controller, setup } = await mount(backend);
+    controller.startNewSession('/work/kohjoh');
+    await settle(setup);
+    setup.mockInput.pressArrow('left');
+    await settle(setup);
+    expect(controller.state.route.kind).toBe('overview');
+    expect(controller.state.overview.focus).toBe('list');
+    expect(controller.state.overview.selectedRow).toBe('session:ses_a');
+    await setup.mockInput.pasteBracketedText('fix failing tests');
+    await settle(setup);
+    expect(controller.state.composer.text).toBe('fix failing tests');
+    expect(controller.state.overview.focus).toBe('composer');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    expect(controller.currentSession()?.id).not.toBe('ses_a');
+    expect(backend.calls.find((call) => call.name === 'prompt')?.args[1]).toMatchObject({
+      text: 'fix failing tests',
+    });
+  });
+
+  test('session-list Up/Down/Right/Enter navigation still works with an empty composer (issue 15)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = Array.from({ length: 3 }, (_, index) => ({
+      id: `ses_${index}`,
+      projectID: 'p',
+      directory: '/work/kohjoh',
+      title: `Session ${index}`,
+      createdAt: 0,
+      updatedAt: index,
+      archived: false,
+    }));
+    const { controller, setup } = await mount(backend);
+    controller.startNewSession('/work/kohjoh');
+    await settle(setup);
+    setup.mockInput.pressArrow('left');
+    await settle(setup);
+    expect(controller.state.route.kind).toBe('overview');
+    expect(controller.state.overview.focus).toBe('list');
+    expect(controller.state.overview.selectedRow).toBe('session:ses_2');
+    expect(controller.state.composer.text).toBe('');
+    setup.mockInput.pressArrow('down');
+    await settle(setup);
+    expect(controller.state.overview.selectedRow).toBe('session:ses_1');
+    setup.mockInput.pressArrow('up');
+    await settle(setup);
+    expect(controller.state.overview.selectedRow).toBe('session:ses_2');
+    setup.mockInput.pressArrow('right');
+    await settle(setup);
+    expect(controller.state.route).toMatchObject({ kind: 'conversation', sessionID: 'ses_2' });
+    setup.mockInput.pressArrow('left');
+    await settle(setup);
+    expect(controller.state.route.kind).toBe('overview');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    expect(controller.state.route).toMatchObject({ kind: 'conversation', sessionID: 'ses_2' });
+  });
+
   test('projects collapse to six most recent sessions with inline Show more/less', async () => {
     const backend = new FakeBackend();
     backend.sessions = Array.from({ length: 8 }, (_, index) => ({

@@ -5,7 +5,7 @@ import { createSignal, Match, onCleanup, Show, Switch } from 'solid-js';
 
 import type { AppController } from '../app/controller.ts';
 import { type KeyInput, routeKey, type ScrollMove } from '../app/key-router.ts';
-import { composerFrom, graphemes, insertText } from '../domain/composer.ts';
+import { composerFrom, graphemes } from '../domain/composer.ts';
 import type { Keymap } from '../domain/keymap.ts';
 import { ComposerView, Footer } from './composer-view.tsx';
 import { editExternally } from './external-editor.ts';
@@ -74,7 +74,7 @@ export function App(props: AppProps) {
   usePaste((event) => {
     if (state.overlay.kind !== 'none') return;
     const text = new TextDecoder().decode(event.bytes).replace(/\r\n?/g, '\n');
-    controller.setComposer(insertText(state.composer, text));
+    controller.activateOverviewComposer(text);
   });
 
   const width = () => dimensions().width;

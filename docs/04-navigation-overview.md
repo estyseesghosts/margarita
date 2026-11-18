@@ -67,7 +67,7 @@ No session tab strip; no badges that shout on every row; no animated per-row spi
 
 Always present below the groups, one line initially; supports multiline and history as in session composer. Its target project is the selected group, initially the CLI cwd or most-recent active project. `Alt+Up/Down` or a project picker can select project without accidentally changing session. The placeholder should communicate `New session in <folder>`. Press Enter creates a **new** session in that folder, selects `build` if discoverable, uses selected/default model, sends prompt, and navigates to it. Prompt without selection must not accidentally resume the highlighted session.
 
-**Distinct actions:** Enter with session row focused **resumes**. Enter with overview composer focused **creates**. Use visible focus indication; avoid mode ambiguity. Shortcut `N` only when list focus and no editing. Allow an empty new session via `/new` or a dedicated key rather than plain Enter on blank text.
+**Distinct actions:** Enter with session row focused **resumes**. Enter with overview composer focused **creates**. Use visible focus indication; avoid mode ambiguity. Typing any printable key (including `n`) while the list has focus moves focus to the composer and inserts that character; paste does the same. Allow an empty new session via `/new` or a dedicated key rather than plain Enter on blank text.
 
 ## Backgrounding and notifications
 

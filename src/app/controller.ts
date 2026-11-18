@@ -18,7 +18,7 @@ import { GoalConflictError, type GoalStore, memoryGoalStore } from '../config/go
 import type { LocalState } from '../config/local-state.ts';
 import { defaultAgent, nextAgent, selectableAgents } from '../domain/agent-cycle.ts';
 import type { BackendEvent } from '../domain/backend-event.ts';
-import { type Composer, composerFrom, emptyComposer } from '../domain/composer.ts';
+import { type Composer, composerFrom, emptyComposer, insertText } from '../domain/composer.ts';
 import { type DiffScope, patchLines, turnStart } from '../domain/diff.ts';
 import { hasOversizedDiff } from '../domain/edit-diff.ts';
 import { projectExecution } from '../domain/execution.ts';
@@ -725,6 +725,15 @@ export class AppController {
 
   focusOverviewComposer(): void {
     this.setState('overview', 'focus', 'composer');
+  }
+
+  /**
+   * Focus the overview composer and insert text as one action. Both typed keys and pasted
+   * text use this so input can never land in a composer that is not focused (issue 15).
+   */
+  activateOverviewComposer(text: string): void {
+    this.focusOverviewComposer();
+    this.setComposer(insertText(this.state.composer, text));
   }
 
   /** Enter on a row: attach a session, expand/collapse a project, or page in more sessions. */
