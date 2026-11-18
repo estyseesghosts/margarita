@@ -278,6 +278,11 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
 
   await finished.promise;
   await stopPump();
+  try {
+    await controller.flushLocalState();
+  } catch (error) {
+    process.stderr.write(`marg: local state was not fully saved: ${errorText(error)}\n`);
+  }
   controller.dispose();
   return exitCodes.ok;
 }

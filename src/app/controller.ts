@@ -15,7 +15,8 @@ import {
 import type { StreamStatus } from '../adapter/event-pump.ts';
 import type { AppConfig } from '../config/config.ts';
 import { GoalConflictError, type GoalStore, memoryGoalStore } from '../config/goal-store.ts';
-import type { LocalState } from '../config/local-state.ts';
+import type { LocalState, SaveResult } from '../config/local-state.ts';
+import { mergeState } from '../config/local-state.ts';
 import { defaultAgent, nextAgent, selectableAgents } from '../domain/agent-cycle.ts';
 import type { BackendEvent } from '../domain/backend-event.ts';
 import { type Composer, composerFrom, emptyComposer, insertText } from '../domain/composer.ts';
@@ -91,7 +92,7 @@ export type ControllerDeps = Readonly<{
   cwd: string;
   version: string;
   now: () => number;
-  saveLocalState: (state: LocalState) => Promise<void>;
+  saveLocalState: (state: LocalState) => Promise<SaveResult | void>;
   listFiles: (root: string) => Promise<string[]>;
   requestExit: () => void;
   /** Writes an exported file; defaults to Bun.write. */
@@ -129,6 +130,9 @@ export class AppController {
   private completionRequest = 0;
   private disposed = false;
   private persisted: LocalState;
+  /** In-flight saves, serialized per controller. */
+  private saveChain: Promise<void> = Promise.resolve();
+  private saveError: string | undefined;
   private readonly goalStore: GoalStore;
   /** Serializes instruction writes/removals per session so toggles cannot race. */
   private readonly instructionQueue = new Map<string, Promise<void>>();
@@ -149,6 +153,19 @@ export class AppController {
     if (this.noticeTimer !== undefined) clearTimeout(this.noticeTimer);
     for (const timer of this.summaryTimers.values()) clearTimeout(timer);
     this.summaryTimers.clear();
+  }
+
+  /**
+   * Waits for every queued state save to land. Call before exiting so the last
+   * history/model updates are not lost. Rejects if any save failed, so the caller can warn.
+   */
+  async flushLocalState(): Promise<void> {
+    await this.saveChain;
+    if (this.saveError !== undefined) {
+      const message = this.saveError;
+      this.saveError = undefined;
+      throw new Error(message);
+    }
   }
 
   // ---------------------------------------------------------------- selectors
@@ -1848,7 +1865,28 @@ export class AppController {
 
   private persist(patch: Partial<Omit<LocalState, 'schemaVersion'>>): void {
     this.persisted = { ...this.persisted, ...patch };
-    void this.track('save', this.deps.saveLocalState(this.persisted));
+    const snapshot = this.persisted;
+    this.saveChain = this.saveChain.then(async () => {
+      try {
+        const result = await this.deps.saveLocalState(snapshot);
+        const merged = result?.state;
+        if (merged !== undefined) {
+          // Adopt the post-merge snapshot so later patches build on what is actually on
+          // disk. If this process applied a newer patch while the save was in flight,
+          // re-merge that patch over the disk state instead of dropping either.
+          const latest = this.persisted;
+          this.persisted = latest === snapshot ? merged : mergeState(latest, merged);
+        }
+        if (result?.warning !== undefined) {
+          this.showNotice(`Local state warning: ${result.warning}`, 'warn');
+        }
+      } catch (error) {
+        const message = errorText(error);
+        this.debugLog.write('backend-error', { operation: 'save', kind: 'unknown' });
+        this.saveError = message;
+        this.showNotice(`Could not persist local state: ${message}`, 'error');
+      }
+    });
   }
 
   /** Every background promise ends here: failures become visible notices, never silence. */
