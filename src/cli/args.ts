@@ -194,7 +194,7 @@ Options:
   -c, --continue         Continue the most recent session in this directory
   -r, --resume [ses_id]  Resume a session by ID, or open the overview
   -p, --print            Noninteractive: send the prompt, print the answer, exit
-  --json                 With --print, emit NDJSON events
+  --json                 With --print, print the turn's transcript messages as NDJSON once it ends (buffered, not live)
   --server <url>         Connect to a specific OpenCode server (password: MARGARITA_SERVER_PASSWORD)
   --start-server         Start \`opencode serve --service\` if none is running
   --config <path>        Alternate config file

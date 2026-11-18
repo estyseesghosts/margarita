@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { parseArgs } from './args.ts';
+import { helpText, parseArgs } from './args.ts';
 
 function run(argv: string[]) {
   const parsed = parseArgs(argv);
@@ -68,6 +68,10 @@ describe('parseArgs', () => {
     const parsed = parseArgs(argv);
     expect(parsed.kind).toBe('error');
     expect(parsed.kind === 'error' && parsed.message).toContain(message);
+  });
+  test('help describes --json as buffered transcript messages, not live events (#46)', () => {
+    expect(helpText).toContain('buffered, not live');
+    expect(helpText).not.toContain('NDJSON events');
   });
   test('help and version short-circuit', () => {
     expect(parseArgs(['--help', '--bogus-later']).kind).toBe('error');

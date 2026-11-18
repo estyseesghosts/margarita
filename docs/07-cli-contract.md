@@ -13,7 +13,7 @@ unnamed --resume ses_...
 unnamed --resume                  # Open overview/picker, not start new
 unnamed --server http://127.0.0.1:4096 --no-start-server
 unnamed --print --provider openai --model gpt-6.1-sol "Explain this file"
-unnamed --print --json "Count failures"   # NDJSON output for scripts
+unnamed --print --json "Count failures"   # buffered NDJSON transcript messages, printed when the turn ends
 ```
 
 `unnamed` is a **placeholder executable name**, not a settled product name. It should be changeable in `package.json` `bin` without touching application architecture. Positional prompt **must stay interactive**; explicit `--print`/`-p` is noninteractive. Claude Code documents positional prompt and flags in [its CLI reference](https://code.claude.com/docs/en/cli-reference). OpenCode uses `opencode run` for noninteractive operation and supports `--model`, `--agent`, `--continue`, and `--session`: [OpenCode commands](https://opencode.ai/docs/cli/commands).
@@ -33,7 +33,7 @@ unnamed --print --json "Count failures"   # NDJSON output for scripts
 | `--continue`, `-c` | bool | false | Most recent eligible top-level session in cwd |
 | `--resume`, `-r` | optional ID | absent | Exact ID or overview selector |
 | `--print`, `-p` | bool | false | Noninteractive; print final text, deterministic exit codes |
-| `--json` | bool | false | Requires `--print`; NDJSON structured events/results |
+| `--json` | bool | false | Requires `--print`; prints the admitted turn's transcript messages as NDJSON (`{sessionID, message}` per line) after the turn finishes. Output is buffered, not a live event stream; a live `stream-json` mode is not implemented |
 | `--config` | path | XDG/AppData default | Alternate frontend config |
 | `--help`/`--version` | bool | false | No server connection |
 
@@ -65,7 +65,7 @@ If validation fails, do not create an empty session. If session creation succeed
 
 ## Exact stdout/stderr rules
 
-Interactive mode takes terminal screen; warnings/errors appear in appropriate overlay or stderr only before renderer starts. Noninteractive text uses stdout for final answer, stderr for diagnostics, nonzero exit on failure, NDJSON for `--json`. Never print auth credentials, private reasoning, full environment variables or hidden chain-of-thought. Print mode attaches to existing backend runtime instead of launching its own model execution. The CLI is **not** a thin `opencode run` wrapper: it uses the same client adapter as the TUI.
+Interactive mode takes terminal screen; warnings/errors appear in appropriate overlay or stderr only before renderer starts. Noninteractive text uses stdout for final answer, stderr for diagnostics, nonzero exit on failure, buffered NDJSON transcript messages (after the turn ends) for `--json`. Never print auth credentials, private reasoning, full environment variables or hidden chain-of-thought. Print mode attaches to existing backend runtime instead of launching its own model execution. The CLI is **not** a thin `opencode run` wrapper: it uses the same client adapter as the TUI.
 
 ## Path rules
 
