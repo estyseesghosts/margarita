@@ -178,6 +178,8 @@ export type ControllerDeps = Readonly<{
   serverAdmin?: ServerAdmin;
   /** Display metadata for grouping: shortname and whether a server is currently online. */
   serverInfo?: (serverID: string) => { label?: string; online: boolean } | undefined;
+  /** Every server to aggregate in the overview; defaults to the launch server only. */
+  serverIDs?: () => readonly string[];
   /** Opt-in diagnostics sink (--debug-log); defaults to a silent no-op. */
   debugLog?: DebugLog;
 }>;
@@ -288,8 +290,8 @@ export class AppController {
   }
 
   /** Canonical project key for a directory on this server. */
-  projectKeyOf(directory: string): string {
-    return projectKey({ serverID: this.serverID, directory }, this.deps.platform);
+  projectKeyOf(directory: string, serverID: string = this.serverID): string {
+    return projectKey({ serverID, directory }, this.deps.platform);
   }
 
   // ---------------------------------------------------------------- selectors
@@ -497,43 +499,85 @@ export class AppController {
     }
   }
 
+  private serverIDs(): string[] {
+    return [...new Set([this.serverID, ...(this.deps.serverIDs?.() ?? [])])];
+  }
+
+  private keyFor(serverID: string, sessionID: string): string {
+    return sessionKey({ serverID, sessionID });
+  }
+
   async loadSessions(): Promise<void> {
-    const loaded: SessionSummary[] = [];
-    let cursor: string | undefined;
-    let pages = 0;
-    do {
-      const page = await this.backend.listSessions(cursor === undefined ? {} : { cursor });
-      loaded.push(...page.sessions);
-      cursor = page.nextCursor;
-      pages += 1;
-    } while (cursor !== undefined && pages < sessionPageLimit);
-    const active = await this.backend.activeSessionIDs();
-    const fresh = Object.fromEntries(
-      loaded.map((session) => [sessionKey(this.refOf(session.id)), session]),
-    );
+    const servers = this.serverIDs();
+    const results = await Promise.all(servers.map((serverID) => this.loadServerSessions(serverID)));
+    const fresh: Record<string, SessionSummary> = {};
+    const running: Record<string, true> = {};
+    const activeByServer = new Map<string, Set<string>>();
+    for (const result of results) {
+      Object.assign(fresh, result.fresh);
+      for (const id of result.active) running[this.keyFor(result.serverID, id)] = true;
+      activeByServer.set(result.serverID, result.active);
+    }
     // Deletions while the stream was down are never replayed, and absence from the first
-    // pages only means "not loaded". Ask the server about each cached ID the pages missed.
+    // pages only means "not loaded". Ask the owning server about each cached ID the pages
+    // missed; never send one host's ID to another host.
     const reconciled = await this.reconcileKnownSessions(
       Object.keys(this.state.sessions)
         .filter((key) => fresh[key] === undefined)
         .map(parseSessionKey)
-        .filter((ref) => ref.serverID === this.serverID),
+        .filter((ref) => servers.includes(ref.serverID)),
     );
     batch(() => {
-      // Keep sessions revealed by loadMoreSessions beyond the first pages.
       this.setState('sessions', (current) => ({ ...current, ...reconciled.found, ...fresh }));
       for (const ref of reconciled.deleted) this.forgetSession(ref.sessionID);
-      this.setState('sessionsComplete', cursor === undefined);
-      this.setState('sessionsCursor', cursor);
+      this.setState(
+        'sessionsComplete',
+        results.every((result) => result.cursor === undefined),
+      );
+      this.setState(
+        'sessionsCursor',
+        results.find((result) => result.cursor !== undefined)?.cursor,
+      );
       this.setState('sessionsLoading', false);
       this.setState('sessionsError', undefined);
-      this.setState(
-        'running',
-        Object.fromEntries([...active].map((id) => [this.sessionKeyOf(id), true])),
-      );
+      this.setState('running', (current) => ({ ...current, ...running }));
     });
     // Running sessions are the ones that can be blocked on input right now.
-    await Promise.all([...active].map((id) => this.refreshInputRequests(id)));
+    await Promise.all(
+      servers.flatMap((serverID) =>
+        [...(activeByServer.get(serverID) ?? [])].map((sessionID) =>
+          this.refreshInputRequests(sessionID, serverID),
+        ),
+      ),
+    );
+  }
+
+  private async loadServerSessions(serverID: string): Promise<{
+    serverID: string;
+    fresh: Record<string, SessionSummary>;
+    active: Set<string>;
+    cursor?: string;
+  }> {
+    const backend = this.backendFor(serverID);
+    const loaded: SessionSummary[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const page = await backend.listSessions(cursor === undefined ? {} : { cursor });
+      // Trust the backend's server stamp when present; otherwise this server owns the row.
+      loaded.push(...page.sessions.map((session) => ({ ...session, serverID })));
+      cursor = page.nextCursor;
+      pages += 1;
+    } while (cursor !== undefined && pages < sessionPageLimit);
+    const active = await backend.activeSessionIDs();
+    return {
+      serverID,
+      fresh: Object.fromEntries(
+        loaded.map((session) => [this.keyFor(serverID, session.id), session]),
+      ),
+      active,
+      ...(cursor === undefined ? {} : { cursor }),
+    };
   }
 
   /** Looks up cached sessions the listing did not return; only a definite not-found deletes. */
@@ -546,7 +590,7 @@ export class AppController {
       await Promise.all(
         refs.slice(start, start + reconcileConcurrency).map(async (ref) => {
           try {
-            found[sessionKey(ref)] = await this.backend.getSession(ref.sessionID);
+            found[sessionKey(ref)] = await this.backendFor(ref.serverID).getSession(ref.sessionID);
           } catch (error) {
             if (error instanceof BackendError && error.kind === 'not-found') deleted.push(ref);
             // Any other failure proves nothing: keep the row.
@@ -580,6 +624,11 @@ export class AppController {
     }
   }
 
+  /**
+   * Fetch the next older page of sessions (the row the overview offers once the first
+   * pages fail to cover everything). Merges by id, so retrying after a failure never
+   * duplicates rows and never discards earlier pages.
+   */
   /**
    * Fetch the next older page of sessions (the row the overview offers once the first
    * pages fail to cover everything). Merges by id, so retrying after a failure never
@@ -852,14 +901,19 @@ export class AppController {
     this.setState('inbox', this.sessionKeyOf(sessionID), items);
   }
 
-  private async refreshInputRequests(sessionID: string): Promise<void> {
+  private async refreshInputRequests(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): Promise<void> {
+    const backend = this.backendFor(serverID);
     const [permissions, forms] = await Promise.all([
-      this.backend.listPermissions(sessionID),
-      this.backend.listForms(sessionID),
+      backend.listPermissions(sessionID),
+      backend.listForms(sessionID),
     ]);
+    const key = this.keyFor(serverID, sessionID);
     batch(() => {
-      this.setState('permissions', this.sessionKeyOf(sessionID), permissions);
-      this.setState('forms', this.sessionKeyOf(sessionID), forms);
+      this.setState('permissions', key, permissions);
+      this.setState('forms', key, forms);
       if (permissions.length === 0) this.setState('permissionChoice', 0);
     });
   }
@@ -1002,19 +1056,19 @@ export class AppController {
       this.setState('completion', undefined);
       this.setState('focusedGroup', undefined);
       this.setState('permissionChoice', 0);
-      this.setState('openedAt', this.sessionKeyOf(sessionID), this.deps.now());
-      this.restoreDraft(this.sessionKeyOf(sessionID));
+      this.setState('openedAt', this.keyFor(serverID, sessionID), this.deps.now());
+      this.restoreDraft(this.keyFor(serverID, sessionID));
       if (transcript === undefined) {
-        this.setState('transcripts', this.sessionKeyOf(sessionID), {
+        this.setState('transcripts', this.keyFor(serverID, sessionID), {
           messages: [],
           loading: true,
           stale: false,
         });
       }
     });
-    const directory = this.state.sessions[this.sessionKeyOf(sessionID)]?.directory;
+    const directory = this.state.sessions[this.keyFor(serverID, sessionID)]?.directory;
     if (directory !== undefined) {
-      this.loadHistoryFor(directory);
+      this.loadHistoryFor(directory, serverID);
       this.refreshCatalogIfStale(directory);
     }
     void this.track('attach', this.loadConversation(sessionID));
@@ -1025,18 +1079,18 @@ export class AppController {
    * An unsent conversation in `directory`. Nothing is created on the server until the
    * first prompt is submitted, so opening margarita never leaves empty sessions behind.
    */
-  startNewSession(directory: string): void {
-    this.debugLog.write('route', { kind: 'new', serverID: this.serverID, directory });
+  startNewSession(directory: string, serverID: string = this.serverID): void {
+    this.debugLog.write('route', { kind: 'new', serverID, directory });
     this.saveDraft();
     batch(() => {
-      this.setState('route', { kind: 'new', serverID: this.serverID, directory });
+      this.setState('route', { kind: 'new', serverID, directory });
       this.setState('overlay', { kind: 'none' });
       this.setState('completion', undefined);
       this.setState('focusedGroup', undefined);
       this.setState('overview', 'directory', directory);
-      this.restoreDraft(`new:${this.projectKeyOf(directory)}`);
+      this.restoreDraft(`new:${this.projectKeyOf(directory, serverID)}`);
     });
-    this.loadHistoryFor(directory);
+    this.loadHistoryFor(directory, serverID);
     this.refreshCatalogIfStale(directory);
   }
 
@@ -1092,9 +1146,9 @@ export class AppController {
       case 'overview':
         return 'overview';
       case 'new':
-        return `new:${this.projectKeyOf(route.directory)}`;
+        return `new:${this.projectKeyOf(route.directory, route.serverID)}`;
       default:
-        return this.sessionKeyOf(route.sessionID);
+        return this.keyFor(route.serverID, route.sessionID);
     }
   }
 
@@ -1501,8 +1555,8 @@ export class AppController {
     });
   }
 
-  private loadHistoryFor(directory: string): void {
-    const key = this.projectKeyOf(directory);
+  private loadHistoryFor(directory: string, serverID: string = this.serverID): void {
+    const key = this.projectKeyOf(directory, serverID);
     // Read the live snapshot: prompts recorded this run live in `persisted`, not in the
     // startup copy from `deps.localState`. Returning to a project must not hide them.
     // Replace each field rather than merge the object: a stale browse index from the
@@ -1515,10 +1569,10 @@ export class AppController {
     });
   }
 
-  private rememberPrompt(text: string, directory: string): void {
+  private rememberPrompt(text: string, directory: string, serverID: string = this.serverID): void {
     const history = recordEntry(this.state.history, text, this.deps.config.history.limit);
     this.setState('history', history);
-    const key = this.projectKeyOf(directory);
+    const key = this.projectKeyOf(directory, serverID);
     this.persist({ history: { ...this.persisted.history, [key]: history.entries } });
   }
 
@@ -1624,7 +1678,7 @@ export class AppController {
     try {
       await send();
       this.debugLog.write('action', { action: 'submit', ok: true });
-      if (text.trim() !== '') this.rememberPrompt(text, directory);
+      if (text.trim() !== '') this.rememberPrompt(text, directory, this.activeServerID());
       this.clearComposer(text, sentAttachments);
       return true;
     } catch (error) {

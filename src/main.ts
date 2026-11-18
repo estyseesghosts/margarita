@@ -284,6 +284,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
         await servers.remove(targetID);
       },
     },
+    serverIDs: () => servers.list().map((managed) => managed.serverID),
     serverInfo: (targetID) => {
       const managed = servers.get(targetID);
       if (managed === undefined) return undefined;
