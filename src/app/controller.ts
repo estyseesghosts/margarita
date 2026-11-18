@@ -142,6 +142,8 @@ export type ServerAdmin = Readonly<{
 
 export type ControllerDeps = Readonly<{
   backend: Backend;
+  /** Resolves a backend by server identity; absent means single-server mode. */
+  backendFor?: (serverID: string) => Backend | undefined;
   /** Margarita-managed identity of the connected server; defaults to the reserved local one. */
   serverID?: string;
   config: AppConfig;
@@ -244,9 +246,33 @@ export class AppController {
 
   // ---------------------------------------------------------------- identity
 
-  /** Canonical key for this server's copy of a session; the only key state maps use. */
+  private backendFor(serverID: string): Backend {
+    return this.deps.backendFor?.(serverID) ?? this.deps.backend;
+  }
+
+  /** Server of the current route; overview/new default to the launch server. */
+  private activeServerID(): string {
+    const route = this.state.route;
+    return route.kind === 'overview' ? this.serverID : route.serverID;
+  }
+
+  /** Backend for user actions and loads on the current route. Fails closed by server. */
+  private get backend(): Backend {
+    return this.backendFor(this.activeServerID());
+  }
+
+  /**
+   * Canonical key for a session. Prefers the launch server (the common case); when that key
+   * is absent, resolves a cached session with this ID so sessions on other servers still map
+   * to their own state instead of colliding with a local one.
+   */
   sessionKeyOf(sessionID: string): string {
-    return sessionKey({ serverID: this.serverID, sessionID });
+    const own = sessionKey({ serverID: this.serverID, sessionID });
+    if (this.state.sessions[own] !== undefined) return own;
+    for (const summary of Object.values(this.state.sessions)) {
+      if (summary.id === sessionID) return sessionKey({ serverID: summary.serverID, sessionID });
+    }
+    return own;
   }
 
   private refOf(sessionID: string): SessionRef {
@@ -319,7 +345,7 @@ export class AppController {
   }
 
   get serverUrl(): string {
-    return this.deps.backend.baseUrl;
+    return this.backend.baseUrl;
   }
 
   // ---------------------------------------------------------------- startup
@@ -354,10 +380,10 @@ export class AppController {
     this.setState('catalogError', undefined);
     try {
       const [agents, models, fallback, commands] = await Promise.all([
-        this.deps.backend.listAgents(directory),
-        this.deps.backend.listModels(directory),
-        this.deps.backend.defaultModel(directory),
-        this.deps.backend.listCommands(directory).catch(() => []),
+        this.backend.listAgents(directory),
+        this.backend.listModels(directory),
+        this.backend.defaultModel(directory),
+        this.backend.listCommands(directory).catch(() => []),
       ]);
       if (generation !== this.catalogGeneration) return; // a newer project superseded this fetch
       batch(() => {
@@ -431,12 +457,12 @@ export class AppController {
     let cursor: string | undefined;
     let pages = 0;
     do {
-      const page = await this.deps.backend.listSessions(cursor === undefined ? {} : { cursor });
+      const page = await this.backend.listSessions(cursor === undefined ? {} : { cursor });
       loaded.push(...page.sessions);
       cursor = page.nextCursor;
       pages += 1;
     } while (cursor !== undefined && pages < sessionPageLimit);
-    const active = await this.deps.backend.activeSessionIDs();
+    const active = await this.backend.activeSessionIDs();
     const fresh = Object.fromEntries(
       loaded.map((session) => [sessionKey(this.refOf(session.id)), session]),
     );
@@ -475,7 +501,7 @@ export class AppController {
       await Promise.all(
         refs.slice(start, start + reconcileConcurrency).map(async (ref) => {
           try {
-            found[sessionKey(ref)] = await this.deps.backend.getSession(ref.sessionID);
+            found[sessionKey(ref)] = await this.backend.getSession(ref.sessionID);
           } catch (error) {
             if (error instanceof BackendError && error.kind === 'not-found') deleted.push(ref);
             // Any other failure proves nothing: keep the row.
@@ -521,8 +547,8 @@ export class AppController {
     this.setState('sessionsError', undefined);
     try {
       const [page, active] = await Promise.all([
-        this.deps.backend.listSessions(cursor === undefined ? {} : { cursor }),
-        this.deps.backend.activeSessionIDs(),
+        this.backend.listSessions(cursor === undefined ? {} : { cursor }),
+        this.backend.activeSessionIDs(),
       ]);
       batch(() => {
         this.setState('sessions', (current) => {
@@ -626,8 +652,8 @@ export class AppController {
       model = resolved.model;
     }
     try {
-      if (agent !== undefined) await this.deps.backend.switchAgent(sessionID, agent);
-      if (model !== undefined) await this.deps.backend.switchModel(sessionID, model);
+      if (agent !== undefined) await this.backend.switchAgent(sessionID, agent);
+      if (model !== undefined) await this.backend.switchModel(sessionID, model);
     } catch (error) {
       return { ok: false, message: `could not apply the requested selection: ${errorText(error)}` };
     }
@@ -766,7 +792,7 @@ export class AppController {
 
   private async refreshSummary(sessionID: string): Promise<void> {
     try {
-      const session = await this.deps.backend.getSession(sessionID);
+      const session = await this.backend.getSession(sessionID);
       // reconcile replaces the stored summary wholesale: absent `revert` is removed again.
       this.setState('sessions', this.sessionKeyOf(sessionID), reconcile(session));
       this.reconcileStagedRevert(sessionID);
@@ -777,14 +803,14 @@ export class AppController {
   }
 
   private async refreshInbox(sessionID: string): Promise<void> {
-    const items = await this.deps.backend.listInbox(sessionID);
+    const items = await this.backend.listInbox(sessionID);
     this.setState('inbox', this.sessionKeyOf(sessionID), items);
   }
 
   private async refreshInputRequests(sessionID: string): Promise<void> {
     const [permissions, forms] = await Promise.all([
-      this.deps.backend.listPermissions(sessionID),
-      this.deps.backend.listForms(sessionID),
+      this.backend.listPermissions(sessionID),
+      this.backend.listForms(sessionID),
     ]);
     batch(() => {
       this.setState('permissions', this.sessionKeyOf(sessionID), permissions);
@@ -816,7 +842,7 @@ export class AppController {
   }
 
   private async fetchLatest(sessionID: string): Promise<void> {
-    const page = await this.deps.backend.listMessages(sessionID, transcriptPageSize);
+    const page = await this.backend.listMessages(sessionID, transcriptPageSize);
     const existing = this.state.transcripts[this.sessionKeyOf(sessionID)];
     const merged = mergeLatest(existing?.messages ?? [], page.messages);
     // Cached messages older than this page keep their own cursor; otherwise the page's
@@ -842,7 +868,7 @@ export class AppController {
     if (transcript?.olderCursor === undefined || transcript.loading) return;
     this.setState('transcripts', this.sessionKeyOf(sessionID), 'loading', true);
     try {
-      const page = await this.deps.backend.listMessages(
+      const page = await this.backend.listMessages(
         sessionID,
         transcriptPageSize,
         transcript.olderCursor,
@@ -921,12 +947,12 @@ export class AppController {
   // ---------------------------------------------------------------- navigation
 
   /** View change only: no backend mutation. Drafts are kept per route. */
-  openSession(sessionID: string): void {
-    this.debugLog.write('route', { kind: 'conversation', serverID: this.serverID, sessionID });
+  openSession(sessionID: string, serverID: string = this.serverID): void {
+    this.debugLog.write('route', { kind: 'conversation', serverID, sessionID });
     this.saveDraft();
     const transcript = this.state.transcripts[this.sessionKeyOf(sessionID)];
     batch(() => {
-      this.setState('route', { kind: 'conversation', serverID: this.serverID, sessionID });
+      this.setState('route', { kind: 'conversation', serverID, sessionID });
       this.setState('overlay', { kind: 'none' });
       this.setState('completion', undefined);
       this.setState('focusedGroup', undefined);
@@ -1270,7 +1296,7 @@ export class AppController {
     const root = this.currentDirectory();
     const remote = this.deps.remoteFilesystem === true;
     const files = remote
-      ? await this.deps.backend.findProjectFiles(root, partial, 50).catch(() => [] as string[]) // best-effort completion; unreadable server is silent here
+      ? await this.backend.findProjectFiles(root, partial, 50).catch(() => [] as string[]) // best-effort completion; unreadable server is silent here
       : await this.filesFor(root);
     const mention = activeMention(this.state.composer.text, this.state.composer.cursor);
     if (
@@ -1498,16 +1524,16 @@ export class AppController {
       async () => {
         switch (parsed.kind) {
           case 'shell':
-            await this.deps.backend.runShell(sessionID, parsed.command);
+            await this.backend.runShell(sessionID, parsed.command);
             return;
           case 'server':
-            await this.deps.backend.runCommand(sessionID, parsed.name, parsed.args);
+            await this.backend.runCommand(sessionID, parsed.name, parsed.args);
             return;
           case 'prompt': {
             const running = this.state.running[this.sessionKeyOf(sessionID)] === true;
             const delivery =
               deliveryOverride ?? (running ? this.deps.config.input.enterWhileRunning : undefined);
-            await this.deps.backend.prompt(sessionID, {
+            await this.backend.prompt(sessionID, {
               text,
               files: await this.promptFiles(text, directory, sentAttachments),
               ...(delivery === undefined ? {} : { delivery }),
@@ -1661,11 +1687,7 @@ export class AppController {
       try {
         // Exact path verified against the server's fuzzy search over the project; the base
         // name as query guarantees the file appears in the hits when it exists.
-        const hits = await this.deps.backend.findProjectFiles(
-          directory,
-          baseServerPath(relative),
-          100,
-        );
+        const hits = await this.backend.findProjectFiles(directory, baseServerPath(relative), 100);
         matched = hits.find((hit) => normalizeServerPath(hit, shape) === relative);
       } catch {
         matched = undefined;
@@ -1707,7 +1729,7 @@ export class AppController {
     this.setState('admitting', true);
     let session: SessionSummary;
     try {
-      session = await this.deps.backend.createSession({
+      session = await this.backend.createSession({
         directory,
         ...(agent === undefined ? {} : { agent }),
         ...(model === undefined ? {} : { model }),
@@ -1734,7 +1756,7 @@ export class AppController {
         text,
         directory,
         async () => {
-          await this.deps.backend.prompt(session.id, {
+          await this.backend.prompt(session.id, {
             text,
             files: await this.promptFiles(text, directory, sentAttachments),
           });
@@ -1765,7 +1787,7 @@ export class AppController {
     let best: SessionSummary | undefined;
     try {
       do {
-        const page = await this.deps.backend.listSessions(
+        const page = await this.backend.listSessions(
           cursor === undefined ? directoryQuery : { directory, cursor },
         );
         for (const session of page.sessions) {
@@ -1814,7 +1836,7 @@ export class AppController {
     const known = this.state.sessions[this.sessionKeyOf(sessionID)];
     if (known !== undefined) return known;
     try {
-      const session = await this.deps.backend.getSession(sessionID);
+      const session = await this.backend.getSession(sessionID);
       this.storeSessionSummary(session);
       return session;
     } catch (error) {
@@ -1834,7 +1856,7 @@ export class AppController {
       text,
       directory,
       async () => {
-        await this.deps.backend.prompt(sessionID, {
+        await this.backend.prompt(sessionID, {
           text,
           files: await this.promptFiles(text, directory, sentAttachments),
           ...(running ? { delivery: this.deps.config.input.enterWhileRunning } : {}),
@@ -1976,7 +1998,7 @@ export class AppController {
         {
           serverID: this.serverID,
           label: this.serverID === localServerID ? 'local' : this.serverID,
-          baseUrl: this.deps.backend.baseUrl,
+          baseUrl: this.backend.baseUrl,
           state: this.state.stream === 'live' ? 'online' : 'connecting',
           active: true,
         },
@@ -2149,7 +2171,7 @@ export class AppController {
     // Optimistic footer update, confirmed by the summary refetch.
     this.setState('sessions', this.sessionKeyOf(session.id), { ...session, agent: agentID });
     try {
-      await this.deps.backend.switchAgent(session.id, agentID);
+      await this.backend.switchAgent(session.id, agentID);
       if (this.state.running[this.sessionKeyOf(session.id)] === true)
         this.showNotice(`Agent: ${agentID} (next turn)`, 'dim');
     } catch (error) {
@@ -2246,7 +2268,7 @@ export class AppController {
     }
     this.setState('sessions', this.sessionKeyOf(session.id), { ...session, model });
     try {
-      await this.deps.backend.switchModel(session.id, model);
+      await this.backend.switchModel(session.id, model);
     } catch (error) {
       this.showNotice(errorText(error), 'error');
     }
@@ -2292,7 +2314,7 @@ export class AppController {
     const session = this.currentSession();
     if (session === undefined) return;
     try {
-      const interrupted = await this.deps.backend.interrupt(session.id);
+      const interrupted = await this.backend.interrupt(session.id);
       this.debugLog.write('action', { action: 'interrupt', ok: interrupted });
       this.showNotice(interrupted ? 'Interrupted' : 'Nothing was running', 'dim');
       if (interrupted) await this.captureInterruptSteerIntent(session.id);
@@ -2314,7 +2336,7 @@ export class AppController {
       return;
     }
     try {
-      await this.deps.backend.backgroundTools(session.id);
+      await this.backend.backgroundTools(session.id);
       this.showNotice('Running tools moved to the background', 'dim');
     } catch (error) {
       this.showNotice(`Background failed: ${errorText(error)}`, 'error');
@@ -2336,7 +2358,7 @@ export class AppController {
       const pages: TranscriptMessage[][] = [];
       let cursor: string | undefined;
       do {
-        const page = await this.deps.backend.listMessages(session.id, exportPageSize, cursor);
+        const page = await this.backend.listMessages(session.id, exportPageSize, cursor);
         pages.unshift(page.messages);
         cursor = page.olderCursor;
       } while (cursor !== undefined);
@@ -2344,7 +2366,7 @@ export class AppController {
       const log = {
         format: 'margarita.chatlog.v1',
         exportedAt: new Date(this.deps.now()).toISOString(),
-        server: this.deps.backend.baseUrl,
+        server: this.backend.baseUrl,
         session,
         messages: pages.flat(),
         ...(goal === undefined ? {} : { goal }),
@@ -2383,7 +2405,7 @@ export class AppController {
       return;
     }
     try {
-      await this.deps.backend.compactSession(session.id);
+      await this.backend.compactSession(session.id);
     } catch (error) {
       this.showNotice(`Compaction not requested (connection problem): ${errorText(error)}`, 'warn');
       return;
@@ -2415,7 +2437,7 @@ export class AppController {
       (entry) => entry.id === inboxID,
     );
     try {
-      await this.deps.backend.cancelQueued(sessionID, inboxID);
+      await this.backend.cancelQueued(sessionID, inboxID);
     } catch (error) {
       // The most likely race: the server delivered the item between our listing and the cancel.
       if (
@@ -2495,7 +2517,7 @@ export class AppController {
     const session = this.currentSession();
     if (session === undefined) return;
     try {
-      await this.deps.backend.changeDelivery(session.id, inboxID, 'steer');
+      await this.backend.changeDelivery(session.id, inboxID, 'steer');
     } catch (error) {
       this.showNotice(errorText(error), 'error');
       await this.refreshInbox(session.id);
@@ -2555,7 +2577,7 @@ export class AppController {
       this.setNativeGoalState(sessionID, { status: 'loading' });
     }
     try {
-      const goal = await this.deps.backend.getGoal(sessionID, directory);
+      const goal = await this.backend.getGoal(sessionID, directory);
       if (version !== this.goalVersions.get(this.sessionKeyOf(sessionID)))
         return this.nativeGoalOf(sessionID);
       this.setNativeGoalState(
@@ -2652,7 +2674,7 @@ export class AppController {
       return;
     }
     try {
-      await this.deps.backend.runCommand(sessionID, 'goal', 'resume');
+      await this.backend.runCommand(sessionID, 'goal', 'resume');
     } catch (error) {
       this.showNotice(`Could not resume the goal: ${errorText(error)}`, 'error');
     }
@@ -2685,7 +2707,7 @@ export class AppController {
     const choice = decision ?? this.permissionChoices()[this.state.permissionChoice] ?? 'reject';
     this.setState('answering', true);
     try {
-      await this.deps.backend.replyPermission(pending.sessionID, pending.id, choice);
+      await this.backend.replyPermission(pending.sessionID, pending.id, choice);
     } catch (error) {
       if (
         error instanceof BackendError &&
@@ -2733,7 +2755,7 @@ export class AppController {
     };
     this.setState('overlay', base);
     try {
-      const files = await this.deps.backend.sessionDiff(session.id, range);
+      const files = await this.backend.sessionDiff(session.id, range);
       if (this.isDiffOverlay(session.id, scope)) {
         this.setState('overlay', { ...base, loading: false, files });
       }
@@ -2818,10 +2840,10 @@ export class AppController {
     this.setState('overlay', { kind: 'form', sessionID: overlay.sessionID, editor });
     if (outcome === 'submit') {
       void this.finishForm(form, () =>
-        this.deps.backend.replyForm(form.sessionID, form.id, buildAnswer(form, editor.answers)),
+        this.backend.replyForm(form.sessionID, form.id, buildAnswer(form, editor.answers)),
       );
     } else if (outcome === 'decline') {
-      void this.finishForm(form, () => this.deps.backend.cancelForm(form.sessionID, form.id));
+      void this.finishForm(form, () => this.backend.cancelForm(form.sessionID, form.id));
     }
   }
 
@@ -3208,7 +3230,7 @@ export class AppController {
       return;
     }
     try {
-      await this.deps.backend.renameSession(session.id, title);
+      await this.backend.renameSession(session.id, title);
       // The server's session event carries the authoritative title; reflect it now too.
       this.setState('sessions', this.sessionKeyOf(session.id), { ...session, title });
       this.showNotice(`Renamed to ${title}`, 'dim');
@@ -3221,7 +3243,7 @@ export class AppController {
     const session = this.requireSession();
     if (session === undefined) return;
     try {
-      const forked = await this.deps.backend.forkSession(session.id);
+      const forked = await this.backend.forkSession(session.id);
       this.setState('sessions', this.sessionKeyOf(forked.id), forked);
       const doc = this.state.goals[this.sessionKeyOf(session.id)];
       if (doc !== undefined) {
@@ -3281,7 +3303,7 @@ export class AppController {
       return;
     }
     try {
-      const files = await this.deps.backend.stageRevert(session.id, messageID);
+      const files = await this.backend.stageRevert(session.id, messageID);
       this.setOverlay({ kind: 'revert', sessionID: session.id, messageID, files, busy: false });
     } catch (error) {
       this.showNotice(`Revert unavailable: ${errorText(error)}`, 'error');
@@ -3315,7 +3337,7 @@ export class AppController {
   ): Promise<void> {
     let summary;
     try {
-      summary = await this.deps.backend.getSession(overlay.sessionID);
+      summary = await this.backend.getSession(overlay.sessionID);
     } catch (error) {
       // Can't verify: do not act blindly on the worktree.
       this.setOverlay({ ...overlay, busy: false });
@@ -3337,8 +3359,8 @@ export class AppController {
       return;
     }
     try {
-      if (confirm) await this.deps.backend.commitRevert(overlay.sessionID);
-      else await this.deps.backend.clearRevert(overlay.sessionID);
+      if (confirm) await this.backend.commitRevert(overlay.sessionID);
+      else await this.backend.clearRevert(overlay.sessionID);
     } catch (error) {
       this.setState('overlay', (current) =>
         current.kind === 'revert' && current.sessionID === overlay.sessionID
@@ -3366,7 +3388,7 @@ export class AppController {
       return undefined;
     }
     try {
-      await this.deps.backend.clearRevert(overlay.sessionID);
+      await this.backend.clearRevert(overlay.sessionID);
       this.setOverlay({ kind: 'none' });
       return undefined;
     } catch (error) {

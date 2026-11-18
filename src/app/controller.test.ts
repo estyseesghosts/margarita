@@ -2348,3 +2348,37 @@ describe('server management commands', () => {
     controller.dispose();
   });
 });
+
+describe('server routing', () => {
+  test('session actions use the owning backend, never another server', async () => {
+    const local = new FakeBackend();
+    const remote = new FakeBackend();
+    const controller = new AppController({
+      backend: local,
+      backendFor: (serverID: string) => (serverID === 'srv_1' ? remote : local),
+      config: defaultConfig,
+      localState: emptyState,
+      platform: 'linux',
+      cwd: '/work/kohjoh',
+      version: '0.0.1',
+      now: () => 10_000,
+      saveLocalState: async () => {},
+      listFiles: () => Promise.resolve([]),
+      requestExit: () => {},
+    });
+    const key = 'server:srv_1/session:ses_a';
+    controller.state.sessions[key] = { ...fakeSession('ses_a'), serverID: 'srv_1' };
+    controller.openSession('ses_a', 'srv_1');
+    controller.setComposer(composerFrom('hello'));
+    await controller.submit();
+
+    expect(remote.calls.some((call) => call.name === 'prompt')).toBe(true);
+    expect(local.calls.some((call) => call.name === 'prompt')).toBe(false);
+    expect(controller.state.route).toEqual({
+      kind: 'conversation',
+      serverID: 'srv_1',
+      sessionID: 'ses_a',
+    });
+    controller.dispose();
+  });
+});
