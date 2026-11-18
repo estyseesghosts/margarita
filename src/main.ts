@@ -6,7 +6,7 @@ import { render } from '@opentui/solid';
 
 import packageJson from '../package.json' with { type: 'json' };
 import { type Backend, BackendError, createBackend } from './adapter/backend.ts';
-import { connect, ConnectionError, redactUrl } from './adapter/connection.ts';
+import { connect, type Connection, ConnectionError, redactUrl } from './adapter/connection.ts';
 import { ServerConnectionManager, serverIDForConnection } from './adapter/server-manager.ts';
 import { AppController, errorText } from './app/controller.ts';
 import { createDebugLog, type DebugLog, noDebugLog } from './app/debug-log.ts';
@@ -14,6 +14,7 @@ import { pairServer } from './app/pairing-service.ts';
 import { listProjectFiles } from './app/project-files.ts';
 import { type CliOptions, helpText, parseArgs } from './cli/args.ts';
 import { exitCodes, runPrint } from './cli/print.ts';
+import { resolveWorkingDirectory } from './cli/target.ts';
 import { loadConfig } from './config/config.ts';
 import { systemCredentialStore } from './config/credentials.ts';
 import { fileGoalStore } from './config/goal-store.ts';
@@ -107,28 +108,86 @@ function installCrashHandlers(log: DebugLog): void {
 async function execute(options: CliOptions, debugLog: DebugLog): Promise<number> {
   const env = process.env;
   const platform = process.platform;
-  const cwd = options.cwd === undefined ? process.cwd() : absolute(options.cwd);
+  const localCwd = options.cwd === undefined ? process.cwd() : absolute(options.cwd);
   const paths = appPaths(env, platform);
   const configLoad = await loadConfig(options.config ?? paths.configFile);
   for (const warning of configLoad.warnings) process.stderr.write(`config: ${warning}\n`);
   const keymapBuild = buildKeymap(configLoad.config.keys);
   for (const error of keymapBuild.errors) process.stderr.write(`keys: ${error}\n`);
 
+  const profileLoad = await loadServerProfiles(paths.serversFile);
+  if (profileLoad.warning !== undefined) process.stderr.write(`${profileLoad.warning}\n`);
+  let profiles = profileLoad.profiles;
+  const credentials = systemCredentialStore(platform, paths.stateDir);
+
   let backend: Backend;
   let remoteFilesystem = false;
   let serverID = 'local';
+  let cwd = localCwd;
   const servers = new ServerConnectionManager();
   try {
-    const connection = await connect({
-      ...(options.server === undefined ? {} : { server: options.server }),
-      startServer: options.startServer,
-      ...(env['MARGARITA_SERVER_PASSWORD'] === undefined
-        ? {}
-        : { remotePassword: env['MARGARITA_SERVER_PASSWORD'] }),
-      ...(env['MARGARITA_ALLOW_INSECURE_HTTP'] === '1' ? { allowInsecureHttp: true } : {}),
-      onStarting: () => process.stderr.write('Starting OpenCode service…\n'),
-    });
-    serverID = serverIDForConnection(connection);
+    let connection: Connection;
+    if (options.remote !== undefined) {
+      const alias = options.remote;
+      const profile = profiles.profiles.find(
+        (entry) => entry.shortname.toLowerCase() === alias.toLowerCase(),
+      );
+      if (profile === undefined) {
+        process.stderr.write(`marg: unknown server "${alias}". Use /servers or pair it first.\n`);
+        return exitCodes.notFound;
+      }
+      const secret = await credentials.get(profile.serverID).catch(() => undefined);
+      if (secret === undefined) {
+        process.stderr.write(
+          `marg: no saved credential for "${profile.shortname}". Re-pair it or set MARGARITA_SERVER_PASSWORD.\\n`,
+        );
+        return exitCodes.unauthorized;
+      }
+      connection = {
+        baseUrl: profile.baseUrl,
+        headers: {
+          authorization:
+            profile.auth === 'basic'
+              ? `Basic ${Buffer.from(`opencode:${secret}`).toString('base64')}`
+              : `Bearer ${secret}`,
+        },
+        origin: 'remote',
+      };
+      serverID = profile.serverID;
+      const resolved = resolveWorkingDirectory({
+        cwd: options.cwd,
+        remote: true,
+        localCwd,
+        platform,
+      });
+      if (!resolved.ok) {
+        process.stderr.write(`marg: ${resolved.message}\n`);
+        return exitCodes.usage;
+      }
+      cwd = resolved.directory;
+    } else {
+      connection = await connect({
+        ...(options.server === undefined ? {} : { server: options.server }),
+        startServer: options.startServer,
+        ...(env['MARGARITA_SERVER_PASSWORD'] === undefined
+          ? {}
+          : { remotePassword: env['MARGARITA_SERVER_PASSWORD'] }),
+        ...(env['MARGARITA_ALLOW_INSECURE_HTTP'] === '1' ? { allowInsecureHttp: true } : {}),
+        onStarting: () => process.stderr.write('Starting OpenCode service…\n'),
+      });
+      serverID = serverIDForConnection(connection);
+      const resolved = resolveWorkingDirectory({
+        cwd: options.cwd,
+        remote: connection.origin === 'remote',
+        localCwd,
+        platform,
+      });
+      if (!resolved.ok) {
+        process.stderr.write(`marg: ${resolved.message}\n`);
+        return exitCodes.usage;
+      }
+      cwd = resolved.directory;
+    }
     backend = createBackend(connection, {
       serverID,
       toolOutputChars: configLoad.config.transcript.toolOutputChars,
@@ -152,10 +211,6 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
 
   const stateLoad = await loadState(paths.stateFile);
   if (stateLoad.warning !== undefined) process.stderr.write(`${stateLoad.warning}\n`);
-  const profileLoad = await loadServerProfiles(paths.serversFile);
-  if (profileLoad.warning !== undefined) process.stderr.write(`${profileLoad.warning}\n`);
-  let profiles = profileLoad.profiles;
-  const credentials = systemCredentialStore(platform, paths.stateDir);
 
   const exit: { request?: () => void } = {};
   const controller = new AppController({
@@ -248,6 +303,20 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   }
 
   const target = options.target;
+  // A remote target has no meaningful implicit directory: this machine's cwd is not on the
+  // remote host. Starting or continuing without an explicit remote --cwd is an error.
+  if (remoteFilesystem && cwd === '') {
+    if (
+      target.kind === 'continue' ||
+      (target.kind === 'new' && target.prompt !== undefined) ||
+      (options.print && target.kind === 'new')
+    ) {
+      process.stderr.write(
+        'marg: --remote needs --cwd <absolute path on the remote host> to start or continue a session.\n',
+      );
+      return exitCodes.usage;
+    }
+  }
   let existingSessionID: string | undefined;
   if (target.kind === 'resume') {
     const summary = await controller.ensureSession(target.sessionID);
@@ -371,7 +440,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   if (existingSessionID !== undefined) {
     controller.openSession(existingSessionID);
     if (prompt !== undefined) await controller.sendToSession(existingSessionID, prompt);
-  } else if (target.kind === 'new' || target.kind === 'continue') {
+  } else if ((target.kind === 'new' || target.kind === 'continue') && cwd !== '') {
     if (prompt === undefined) controller.startNewSession(cwd);
     else await controller.createSessionWithPrompt(cwd, prompt);
   } else {

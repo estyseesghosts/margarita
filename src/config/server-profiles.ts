@@ -12,6 +12,8 @@ export type ServerProfile = Readonly<{
   baseUrl: string;
   /** Additional addresses/aliases that refer to the same server. */
   aliases?: readonly string[];
+  /** How the stored credential is sent; a scheme, never the secret itself. */
+  auth?: 'bearer' | 'basic';
   /** Free-form non-secret metadata advertised by the server. */
   metadata?: Readonly<Record<string, string>>;
 }>;
@@ -32,6 +34,7 @@ export type ProfileInput = Readonly<{
   shortname: string;
   baseUrl: string;
   aliases?: readonly string[];
+  auth?: 'bearer' | 'basic';
   metadata?: Readonly<Record<string, string>>;
 }>;
 
@@ -87,6 +90,7 @@ function normalizeProfile(input: ProfileInput): ServerProfile {
     shortname: validateShortname(input.shortname),
     baseUrl: normalizeServerUrl(input.baseUrl),
     ...(aliases.length === 0 ? {} : { aliases }),
+    ...(input.auth === undefined ? {} : { auth: input.auth }),
     ...(metadata === undefined || Object.keys(metadata).length === 0 ? {} : { metadata }),
   };
 }
@@ -182,6 +186,7 @@ export function parseServerProfiles(raw: unknown): ServerProfiles {
         serverID,
         shortname,
         baseUrl,
+        ...(entry['auth'] === 'basic' || entry['auth'] === 'bearer' ? { auth: entry['auth'] } : {}),
         ...(Array.isArray(entry['aliases'])
           ? {
               aliases: entry['aliases'].filter(

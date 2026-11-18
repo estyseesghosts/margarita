@@ -79,3 +79,30 @@ describe('parseArgs', () => {
     expect(parseArgs(['--version']).kind).toBe('version');
   });
 });
+
+describe('remote target selection', () => {
+  test('--remote selects a saved profile', () => {
+    expect(run(['--remote', 'buildbox']).remote).toBe('buildbox');
+    expect(run(['--remote=buildbox', '--cwd', '/home/me/app'])).toMatchObject({
+      remote: 'buildbox',
+      cwd: '/home/me/app',
+    });
+  });
+  test('--local forces the local service', () => {
+    expect(run(['--local']).local).toBe(true);
+  });
+  test('conflicting target options are rejected', () => {
+    for (const argv of [
+      ['--remote', 'a', '--local'],
+      ['--remote', 'a', '--server', 'https://x'],
+      ['--remote', 'a', '--start-server'],
+      ['--local', '--server', 'https://x'],
+    ]) {
+      expect(parseArgs(argv).kind).toBe('error');
+    }
+  });
+  test('help documents remote selection', () => {
+    expect(helpText).toContain('--remote <shortname>');
+    expect(helpText).toContain('--local');
+  });
+});

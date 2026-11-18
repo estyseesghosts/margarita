@@ -43,8 +43,14 @@ function profileFor(input: {
   serverID: string;
   shortname: string;
   baseUrl: string;
+  auth: 'bearer' | 'basic';
 }): ServerProfile {
-  return { serverID: input.serverID, shortname: input.shortname, baseUrl: input.baseUrl };
+  return {
+    serverID: input.serverID,
+    shortname: input.shortname,
+    baseUrl: input.baseUrl,
+    auth: input.auth,
+  };
 }
 
 /**
@@ -79,7 +85,9 @@ export async function pairServer(
   const serverID = `srv_${(deps.generateID ?? randomUUID)()}`;
   let connection: Connection;
   let credential: string;
+  let auth: 'bearer' | 'basic';
   if (request.code !== '') {
+    auth = 'bearer';
     const redeemed = await redeemPairing(baseUrl, request.code, {
       ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
       ...(deps.allowInsecureHttp === undefined
@@ -93,6 +101,7 @@ export async function pairServer(
     };
     credential = redeemed.token;
   } else {
+    auth = 'basic';
     const policy = checkServerUrl(baseUrl, {
       hasPassword: deps.password !== undefined,
       allowInsecureHttp: deps.allowInsecureHttp === true,
@@ -120,6 +129,7 @@ export async function pairServer(
     serverID,
     shortname,
     baseUrl: connection.baseUrl,
+    auth,
   });
   try {
     const saved = await deps.saveProfiles({ schemaVersion: 1, profiles });
@@ -129,6 +139,7 @@ export async function pairServer(
         serverID,
         shortname,
         baseUrl: connection.baseUrl,
+        auth,
       });
     deps.servers.add({
       serverID,

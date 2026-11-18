@@ -14,6 +14,10 @@ export type CliOptions = Readonly<{
   agent?: string;
   cwd?: string;
   server?: string;
+  /** Shortname of a persistent server profile to use instead of the local service. */
+  remote?: string;
+  /** Force the local service even when a default remote exists. */
+  local: boolean;
   startServer: boolean;
   config?: string;
   debugLog?: string;
@@ -33,6 +37,7 @@ const valueFlags = new Map<string, keyof MutableValues>([
   ['--agent', 'agent'],
   ['--cwd', 'cwd'],
   ['--server', 'server'],
+  ['--remote', 'remote'],
   ['--config', 'config'],
   ['--debug-log', 'debugLog'],
 ]);
@@ -44,6 +49,7 @@ type MutableValues = {
   agent?: string;
   cwd?: string;
   server?: string;
+  remote?: string;
   config?: string;
   debugLog?: string;
 };
@@ -58,6 +64,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   let print = false;
   let json = false;
   let startServer = false;
+  let local = false;
   let continueLast = false;
   let resume: { id?: string } | undefined;
   let help = false;
@@ -96,6 +103,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         continue;
       case '--start-server':
         startServer = true;
+        continue;
+      case '--local':
+        local = true;
         continue;
       case '--continue':
       case '-c':
@@ -140,6 +150,18 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (values.server !== undefined && startServer) {
     return { kind: 'error', message: '--server and --start-server cannot be combined.' };
   }
+  if (values.remote !== undefined && local) {
+    return { kind: 'error', message: '--remote and --local cannot be combined.' };
+  }
+  if (values.remote !== undefined && values.server !== undefined) {
+    return { kind: 'error', message: '--remote and --server cannot be combined.' };
+  }
+  if (values.remote !== undefined && startServer) {
+    return { kind: 'error', message: '--remote and --start-server cannot be combined.' };
+  }
+  if (local && values.server !== undefined) {
+    return { kind: 'error', message: '--local and --server cannot be combined.' };
+  }
 
   let target: StartTarget;
   if (resume !== undefined) {
@@ -173,7 +195,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 
   return {
     kind: 'run',
-    options: { ...values, target, print, json, startServer },
+    options: { ...values, target, print, json, local, startServer },
   };
 }
 
@@ -196,6 +218,8 @@ Options:
   -p, --print            Noninteractive: send the prompt, print the answer, exit
   --json                 With --print, print the turn's transcript messages as NDJSON once it ends (buffered, not live)
   --server <url>         Connect to a specific OpenCode server (password: MARGARITA_SERVER_PASSWORD)
+  --remote <shortname>   Use a saved remote server profile
+  --local                Force the local OpenCode service
   --start-server         Start \`opencode serve --service\` if none is running
   --config <path>        Alternate config file
   --debug-log <path>     Write redacted diagnostics to a file
