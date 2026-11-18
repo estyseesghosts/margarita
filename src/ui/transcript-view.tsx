@@ -5,6 +5,7 @@ import { createMemo, For, Match, onCleanup, onMount, Show, Switch } from 'solid-
 import type { PermissionPrompt } from '../adapter/backend.ts';
 import type { AppController } from '../app/controller.ts';
 import type { ScrollMove } from '../app/key-router.ts';
+import type { FormRequest } from '../domain/form.ts';
 import { formatModelRef, type ModelSelection } from '../domain/model-ref.ts';
 import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
 import { assertNever } from '../domain/session.ts';
@@ -138,6 +139,7 @@ export function Transcript(props: TranscriptProps) {
         )}
       </Show>
       <PermissionCard controller={props.controller} theme={props.theme} />
+      <FormCard controller={props.controller} theme={props.theme} />
     </scrollbox>
   );
 }
@@ -393,6 +395,36 @@ function PermissionCard(props: { controller: AppController; theme: Theme }) {
             </For>
           </text>
           <text fg={props.theme.dim}>←/→ choose · Enter confirm · Esc reject</text>
+        </box>
+      )}
+    </Show>
+  );
+}
+
+/** A pending agent question. It never takes focus by itself; Enter on an empty prompt opens it. */
+function FormCard(props: { controller: AppController; theme: Theme }) {
+  const pending = () =>
+    props.controller.pendingPermission() === undefined ? props.controller.pendingForm() : undefined;
+  return (
+    <Show when={pending()}>
+      {(form: Accessor<FormRequest>) => (
+        <box
+          border
+          borderStyle="rounded"
+          borderColor={props.theme.warn}
+          title=" Question from the agent "
+          flexDirection="column"
+          paddingLeft={1}
+          paddingRight={1}
+          marginTop={1}
+          flexShrink={0}
+        >
+          <text fg={props.theme.text}>
+            <b>{form().title}</b>
+          </text>
+          <text fg={props.theme.dim}>
+            {`${form().fields.length} field${form().fields.length === 1 ? '' : 's'} · Enter on an empty prompt to answer`}
+          </text>
         </box>
       )}
     </Show>

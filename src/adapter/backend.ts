@@ -2,6 +2,7 @@ import { ClientError, OpenCode, type OpenCodeClient } from '@opencode/client';
 
 import type { AgentDescriptor } from '../domain/agent-cycle.ts';
 import { type BackendEvent, normalizeEvent } from '../domain/backend-event.ts';
+import type { FormRequest, FormValue } from '../domain/form.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
 import type { SessionSummary } from '../domain/session.ts';
@@ -12,6 +13,7 @@ import {
   type QueuedInput,
   toAgentDescriptor,
   toCatalogModel,
+  toFormRequest,
   toModelSelection,
   toPermissionPrompt,
   toQueuedInput,
@@ -88,7 +90,9 @@ export interface Backend {
   defaultModel(directory: string): Promise<ModelSelection | undefined>;
   listCommands(directory: string): Promise<ServerCommand[]>;
   listPermissions(sessionID: string): Promise<PermissionPrompt[]>;
-  countForms(sessionID: string): Promise<number>;
+  listForms(sessionID: string): Promise<FormRequest[]>;
+  replyForm(sessionID: string, formID: string, answer: Record<string, FormValue>): Promise<void>;
+  cancelForm(sessionID: string, formID: string): Promise<void>;
   replyPermission(
     sessionID: string,
     requestID: string,
@@ -288,11 +292,25 @@ class OpenCodeBackend implements Backend {
     return requests.map(toPermissionPrompt);
   }
 
-  async countForms(sessionID: string): Promise<number> {
+  async listForms(sessionID: string): Promise<FormRequest[]> {
     const forms = await call('session.form.list', () =>
       this.client.session.form.list({ sessionID }),
     );
-    return forms.length;
+    return forms.map(toFormRequest);
+  }
+
+  async replyForm(
+    sessionID: string,
+    formID: string,
+    answer: Record<string, FormValue>,
+  ): Promise<void> {
+    await call('session.form.reply', () =>
+      this.client.session.form.reply({ sessionID, formID, answer }),
+    );
+  }
+
+  async cancelForm(sessionID: string, formID: string): Promise<void> {
+    await call('session.form.cancel', () => this.client.session.form.cancel({ sessionID, formID }));
   }
 
   async replyPermission(

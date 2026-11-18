@@ -46,6 +46,15 @@ export function routeKey(
   if (state.overlay.kind !== 'none') return routeOverlay(controller, key);
   if (state.route.kind === 'conversation' && controller.pendingPermission() !== undefined) {
     if (routePermission(controller, key)) return true;
+  } else if (
+    state.route.kind === 'conversation' &&
+    controller.pendingForm() !== undefined &&
+    state.composer.text === '' &&
+    key.name === 'return'
+  ) {
+    // Enter on an empty prompt opens the pending agent question.
+    controller.openForm();
+    return true;
   }
   if (state.completion !== undefined && routeCompletion(controller, key)) return true;
 
@@ -118,6 +127,10 @@ function runAction(controller: AppController, action: ActionID, services: Router
 
 function routeOverlay(controller: AppController, key: KeyInput): boolean {
   const overlay = controller.state.overlay;
+  if (overlay.kind === 'form' && !(key.ctrl && key.name === 'c')) {
+    controller.formKey(key);
+    return true;
+  }
   if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
     controller.closeOverlay();
     return true;
@@ -158,6 +171,9 @@ function routeOverlay(controller: AppController, key: KeyInput): boolean {
     case 'usage':
     case 'status':
       if (key.name === 'return' || key.name === 'q') controller.closeOverlay();
+      return true;
+    case 'form':
+      controller.formKey(key);
       return true;
     case 'none':
       return false;

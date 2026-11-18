@@ -11,6 +11,7 @@ import type {
 } from '../src/adapter/backend.ts';
 import type { AgentDescriptor } from '../src/domain/agent-cycle.ts';
 import type { BackendEvent } from '../src/domain/backend-event.ts';
+import type { FormRequest, FormValue } from '../src/domain/form.ts';
 import type { ModelSelection } from '../src/domain/model-ref.ts';
 import type { CatalogModel } from '../src/domain/model-resolution.ts';
 import type { SessionSummary } from '../src/domain/session.ts';
@@ -23,6 +24,9 @@ export class FakeBackend implements Backend {
   messages: Record<string, TranscriptMessage[]> = {};
   active = new Set<string>();
   permissions: PermissionPrompt[] = [];
+  forms: FormRequest[] = [];
+  /** When set, the next permission reply fails with this error (second-client races). */
+  replyError: Error | undefined;
   agents: AgentDescriptor[] = [];
   models: CatalogModel[] = [];
   readonly calls: { name: string; args: unknown[] }[] = [];
@@ -116,8 +120,20 @@ export class FakeBackend implements Backend {
   async listPermissions(sessionID: string): Promise<PermissionPrompt[]> {
     return this.permissions.filter((permission) => permission.sessionID === sessionID);
   }
-  async countForms(): Promise<number> {
-    return 0;
+  async listForms(sessionID: string): Promise<FormRequest[]> {
+    return this.forms.filter((form) => form.sessionID === sessionID);
+  }
+  async replyForm(
+    sessionID: string,
+    formID: string,
+    answer: Record<string, FormValue>,
+  ): Promise<void> {
+    this.calls.push({ name: 'replyForm', args: [sessionID, formID, answer] });
+    this.forms = this.forms.filter((form) => form.id !== formID);
+  }
+  async cancelForm(sessionID: string, formID: string): Promise<void> {
+    this.calls.push({ name: 'cancelForm', args: [sessionID, formID] });
+    this.forms = this.forms.filter((form) => form.id !== formID);
   }
   async replyPermission(
     sessionID: string,
@@ -125,6 +141,9 @@ export class FakeBackend implements Backend {
     decision: PermissionDecision,
   ): Promise<void> {
     this.calls.push({ name: 'replyPermission', args: [sessionID, requestID, decision] });
+    const failure = this.replyError;
+    this.replyError = undefined;
+    if (failure !== undefined) throw failure;
     this.permissions = this.permissions.filter((permission) => permission.id !== requestID);
   }
   events(signal: AbortSignal): AsyncIterable<BackendEvent> {

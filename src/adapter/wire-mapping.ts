@@ -1,5 +1,7 @@
 import type {
   AgentInfo,
+  FormField as WireFormField,
+  FormInfo,
   ModelInfo,
   PermissionRequest,
   SessionInboxInfo,
@@ -10,6 +12,7 @@ import type {
 
 import type { AgentDescriptor } from '../domain/agent-cycle.ts';
 import { isRecord, readTokens } from '../domain/backend-event.ts';
+import type { FormField, FormRequest } from '../domain/form.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
 import { sanitizeTerminalText } from '../domain/sanitize-text.ts';
@@ -282,5 +285,96 @@ export function toTranscriptMessage(message: SessionMessageInfo): TranscriptMess
       };
     default:
       return undefined;
+  }
+}
+
+/** Maps a server form; every displayed string is sanitized. Unknown field types fail closed. */
+export function toFormRequest(info: FormInfo): FormRequest {
+  return {
+    id: info.id,
+    sessionID: info.sessionID,
+    title: sanitizeTerminalText(info.title),
+    fields: info.fields.map(toFormField),
+  };
+}
+
+function toFormField(field: WireFormField): FormField {
+  const base = {
+    key: field.key,
+    title: sanitizeTerminalText(field.title ?? field.key),
+    ...(field.description === undefined
+      ? {}
+      : { description: sanitizeTerminalText(field.description) }),
+    required: 'required' in field && field.required === true,
+    when: ('when' in field ? (field.when ?? []) : []).flatMap((condition) =>
+      typeof condition.value === 'string' ||
+      typeof condition.value === 'number' ||
+      typeof condition.value === 'boolean'
+        ? [{ key: condition.key, op: condition.op, value: condition.value }]
+        : [],
+    ),
+  };
+  const options = (list: readonly { value: string; label: string; description?: string }[]) =>
+    list.map((option) => ({
+      value: option.value,
+      label: sanitizeTerminalText(option.label),
+      ...(option.description === undefined
+        ? {}
+        : { description: sanitizeTerminalText(option.description) }),
+    }));
+  const finite = (value: unknown) =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  switch (field.type) {
+    case 'string':
+      if (field.options !== undefined && field.options.length > 0) {
+        return {
+          ...base,
+          kind: 'choice',
+          options: options(field.options),
+          custom: field.custom === true,
+          ...(field.default === undefined ? {} : { default: field.default }),
+        };
+      }
+      return {
+        ...base,
+        kind: 'text',
+        ...(field.placeholder === undefined
+          ? {}
+          : { placeholder: sanitizeTerminalText(field.placeholder) }),
+        ...(field.default === undefined ? {} : { default: field.default }),
+      };
+    case 'multiselect':
+      return {
+        ...base,
+        kind: 'multi',
+        options: options(field.options),
+        ...(field.minItems === undefined ? {} : { minItems: field.minItems }),
+        ...(field.maxItems === undefined ? {} : { maxItems: field.maxItems }),
+        ...(field.default === undefined ? {} : { default: field.default }),
+      };
+    case 'number':
+    case 'integer': {
+      const minimum = finite(field.minimum);
+      const maximum = finite(field.maximum);
+      const fallback = finite(field.default);
+      return {
+        ...base,
+        kind: 'number',
+        integer: field.type === 'integer',
+        ...(minimum === undefined ? {} : { minimum }),
+        ...(maximum === undefined ? {} : { maximum }),
+        ...(fallback === undefined ? {} : { default: fallback }),
+      };
+    }
+    case 'boolean':
+      return {
+        ...base,
+        kind: 'boolean',
+        ...(field.default === undefined ? {} : { default: field.default }),
+      };
+    case 'external':
+      return { ...base, kind: 'external', url: sanitizeTerminalText(field.url) };
+    default:
+      throw new WireFormatError('Unknown form field type.');
   }
 }

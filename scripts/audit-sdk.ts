@@ -40,5 +40,5 @@ if (first !== undefined) {
   console.log('message.list', messages.messages.map((message) => message.kind).join(','));
   console.log('inbox', (await backend.listInbox(first.id)).length);
   console.log('permission', (await backend.listPermissions(first.id)).length);
-  console.log('form', await backend.countForms(first.id));
+  console.log('form', (await backend.listForms(first.id)).length);
 }

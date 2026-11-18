@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { testRender } from '@opentui/solid';
 
 import { FakeBackend } from '../../test/fake-backend.ts';
+import { BackendError } from '../adapter/backend.ts';
 import { AppController } from '../app/controller.ts';
 import { defaultConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
@@ -203,6 +204,68 @@ describe('app', () => {
     setup.mockInput.pressEnter();
     await settle(setup);
     expect(setup.captureCharFrame()).not.toContain('Session number 0');
+  });
+
+  test('agent question: card, Enter opens the form, answers are sent once', async () => {
+    const backend = backendWithSession();
+    backend.forms = [
+      {
+        id: 'frm_1',
+        sessionID: 'ses_a',
+        title: 'Which branch?',
+        fields: [
+          {
+            key: 'branch',
+            title: 'Branch',
+            required: true,
+            when: [],
+            kind: 'choice',
+            custom: false,
+            options: [
+              { value: 'main', label: 'main' },
+              { value: 'dev', label: 'dev' },
+            ],
+          },
+        ],
+      },
+    ];
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('Question from the agent');
+    expect(controller.executionOf('ses_a').state).toBe('waiting');
+
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    expect(controller.state.overlay.kind).toBe('form');
+    setup.mockInput.pressArrow('down');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    await settle(setup);
+    const replies = backend.calls.filter((call) => call.name === 'replyForm');
+    expect(replies).toHaveLength(1);
+    expect(replies[0]?.args).toEqual(['ses_a', 'frm_1', { branch: 'dev' }]);
+    expect(controller.state.overlay.kind).toBe('none');
+    expect(setup.captureCharFrame()).not.toContain('Question from the agent');
+  });
+
+  test('permission answered by another client resolves without a fake success', async () => {
+    const backend = backendWithSession();
+    backend.permissions = [
+      { id: 'per_1', sessionID: 'ses_a', action: 'bash', resources: ['git status'], save: [] },
+    ];
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('Permission needed');
+    backend.replyError = new BackendError('conflict', 'permission.reply', 'already replied');
+    backend.permissions = [];
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    await settle(setup);
+    expect(backend.calls.filter((call) => call.name === 'replyPermission')).toHaveLength(1);
+    expect(controller.state.notice?.text).toBe('Already answered elsewhere.');
+    expect(setup.captureCharFrame()).not.toContain('Permission needed');
   });
 
   test('long transcripts render a window; PageUp at the top reveals then fetches older pages', async () => {

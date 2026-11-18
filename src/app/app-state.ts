@@ -3,6 +3,7 @@ import type { StreamStatus } from '../adapter/event-pump.ts';
 import type { AgentDescriptor } from '../domain/agent-cycle.ts';
 import type { Composer } from '../domain/composer.ts';
 import { emptyComposer } from '../domain/composer.ts';
+import type { FormEditor, FormRequest } from '../domain/form.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
 import type { PromptHistory } from '../domain/prompt-history.ts';
@@ -27,7 +28,8 @@ export type Overlay =
   | { kind: 'status' }
   | { kind: 'queue'; index: number }
   | { kind: 'model-picker'; query: string; index: number }
-  | { kind: 'history-search'; query: string; before: number };
+  | { kind: 'history-search'; query: string; before: number }
+  | { kind: 'form'; sessionID: string; editor: FormEditor };
 
 export type Notice = Readonly<{ text: string; tone: 'dim' | 'warn' | 'error'; id: number }>;
 
@@ -55,7 +57,9 @@ export type AppState = {
   sessions: Record<string, SessionSummary>;
   running: Record<string, boolean>;
   permissions: Record<string, PermissionPrompt[]>;
-  forms: Record<string, number>;
+  forms: Record<string, FormRequest[]>;
+  /** True while a permission or form reply is in flight; blocks double submits. */
+  answering: boolean;
   /** Index of the focused permission choice in the permission card. */
   permissionChoice: number;
   transcripts: Record<string, TranscriptState>;
@@ -102,6 +106,7 @@ export function initialState(directory: string): AppState {
     running: {},
     permissions: {},
     forms: {},
+    answering: false,
     permissionChoice: 0,
     transcripts: {},
     inbox: {},

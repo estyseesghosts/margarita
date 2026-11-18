@@ -3,6 +3,13 @@ import { For, Match, Show, Switch } from 'solid-js';
 
 import type { Overlay } from '../app/app-state.ts';
 import type { AppController } from '../app/controller.ts';
+import {
+  currentField,
+  type FormEditor,
+  type FormField,
+  type FormRequest,
+  visibleFields,
+} from '../domain/form.ts';
 import { actionIDs, formatBinding, type Keymap } from '../domain/keymap.ts';
 import { formatModelRef } from '../domain/model-ref.ts';
 import type { SessionSummary, TokenUsage } from '../domain/session.ts';
@@ -157,6 +164,23 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
           );
         }}
       </Match>
+      <Match when={state.overlay.kind === 'form' ? state.overlay : undefined}>
+        {(overlay: Accessor<Extract<Overlay, { kind: 'form' }>>) => (
+          <Show
+            when={props.controller.openFormRequest()}
+            fallback={<text fg={dim()}>This question was answered or withdrawn.</text>}
+          >
+            {(form: Accessor<FormRequest>) => (
+              <FormDialog
+                form={form()}
+                editor={overlay().editor}
+                theme={props.theme}
+                frame={frame}
+              />
+            )}
+          </Show>
+        )}
+      </Match>
       <Match when={state.overlay.kind === 'history-search' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'history-search' }>>) => (
           <box {...frame('History search · Ctrl+R older · Enter use')}>
@@ -166,6 +190,91 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
         )}
       </Match>
     </Switch>
+  );
+}
+
+type Frame = (title: string) => Record<string, unknown>;
+
+/** One field at a time, with progress and the field's own controls. */
+function FormDialog(props: { form: FormRequest; editor: FormEditor; theme: Theme; frame: Frame }) {
+  const fields = () => visibleFields(props.form, props.editor.answers);
+  const field = () => currentField(props.form, props.editor);
+  const value = () => {
+    const current = field();
+    return current === undefined ? undefined : props.editor.answers[current.key];
+  };
+  const choices = () => {
+    const current = field();
+    if (current === undefined) return [];
+    if (current.kind === 'choice' || current.kind === 'multi') {
+      const chosen = value();
+      return current.options.map((option) => ({
+        label: option.label,
+        description: option.description,
+        checked: current.kind === 'multi' && Array.isArray(chosen) && chosen.includes(option.value),
+      }));
+    }
+    if (current.kind === 'boolean') {
+      return [
+        { label: 'Yes', description: undefined, checked: false },
+        { label: 'No', description: undefined, checked: false },
+      ];
+    }
+    return [];
+  };
+  const typed = () => {
+    const current = field();
+    return (
+      current?.kind === 'text' ||
+      current?.kind === 'number' ||
+      (current?.kind === 'choice' && current.custom)
+    );
+  };
+  return (
+    <box {...props.frame(`${props.form.title} · ${props.editor.index + 1}/${fields().length}`)}>
+      <Show when={field()}>
+        {(current: Accessor<FormField>) => (
+          <>
+            <text fg={props.theme.text}>
+              <b>{current().title}</b>
+              {current().required ? <span style={{ fg: props.theme.warn }}> *</span> : ''}
+            </text>
+            <Show when={current().description}>
+              {(description: Accessor<string>) => <text fg={props.theme.dim}>{description()}</text>}
+            </Show>
+            <For each={choices()}>
+              {(choice, index) => {
+                const highlighted = () => index() === props.editor.cursor;
+                const mark = () =>
+                  current().kind === 'multi' ? (choice.checked ? '[x] ' : '[ ] ') : '';
+                return (
+                  <text fg={highlighted() ? props.theme.accent : props.theme.text}>
+                    {`${highlighted() ? '❯' : ' '} ${mark()}${choice.label}`}
+                    <span style={{ fg: props.theme.dim }}>
+                      {choice.description === undefined ? '' : `  ${choice.description}`}
+                    </span>
+                  </text>
+                );
+              }}
+            </For>
+            <Show when={typed()}>
+              <text fg={props.theme.text}>{`> ${props.editor.text}`}</text>
+            </Show>
+            <Show when={current().kind === 'external' ? current() : undefined}>
+              {(external: Accessor<FormField & { kind: 'external' }>) => (
+                <text fg={props.theme.accent}>{`Open in a browser: ${external().url}`}</text>
+              )}
+            </Show>
+          </>
+        )}
+      </Show>
+      <Show when={props.editor.problem}>
+        {(problem: Accessor<string>) => <text fg={props.theme.error}>{problem()}</text>}
+      </Show>
+      <text fg={props.theme.dim}>
+        Enter next · Shift+Tab back · ↑↓ choose · Space toggle · Esc later · Ctrl+X decline
+      </text>
+    </box>
   );
 }
 

@@ -19,6 +19,13 @@ import type { BackendEvent } from '../domain/backend-event.ts';
 import { type Composer, composerFrom, emptyComposer } from '../domain/composer.ts';
 import { projectExecution } from '../domain/execution.ts';
 import { activeMention, findFileMentions, rankPaths } from '../domain/file-reference.ts';
+import {
+  buildAnswer,
+  editorKey,
+  type FormKey,
+  type FormRequest,
+  startEditor,
+} from '../domain/form.ts';
 import { formatModelRef, type ModelSelection, sameModel } from '../domain/model-ref.ts';
 import { resolveModel } from '../domain/model-resolution.ts';
 import {
@@ -101,7 +108,7 @@ export class AppController {
       running: this.state.running[sessionID] === true,
       outcome: this.state.sessions[sessionID]?.outcome,
       permissionIDs: permissions.map((permission) => permission.id),
-      formCount: this.state.forms[sessionID] ?? 0,
+      formCount: (this.state.forms[sessionID] ?? []).length,
     });
   }
 
@@ -343,7 +350,7 @@ export class AppController {
   private async refreshInputRequests(sessionID: string): Promise<void> {
     const [permissions, forms] = await Promise.all([
       this.deps.backend.listPermissions(sessionID),
-      this.deps.backend.countForms(sessionID),
+      this.deps.backend.listForms(sessionID),
     ]);
     batch(() => {
       this.setState('permissions', sessionID, permissions);
@@ -1251,8 +1258,9 @@ export class AppController {
 
   async answerPermission(decision?: PermissionDecision): Promise<void> {
     const pending = this.pendingPermission();
-    if (pending === undefined) return;
+    if (pending === undefined || this.state.answering) return;
     const choice = decision ?? this.permissionChoices()[this.state.permissionChoice] ?? 'reject';
+    this.setState('answering', true);
     try {
       await this.deps.backend.replyPermission(pending.sessionID, pending.id, choice);
     } catch (error) {
@@ -1266,7 +1274,83 @@ export class AppController {
       }
     }
     // Close only after the server confirms the request is gone.
-    await this.refreshInputRequests(pending.sessionID);
+    try {
+      await this.refreshInputRequests(pending.sessionID);
+    } finally {
+      this.setState('answering', false);
+    }
+  }
+
+  /** Oldest pending agent question for the attached session; permissions go first. */
+  pendingForm(): FormRequest | undefined {
+    const session = this.currentSession();
+    if (session === undefined) return undefined;
+    return (this.state.forms[session.id] ?? [])[0];
+  }
+
+  openForm(): void {
+    const form = this.pendingForm();
+    if (form === undefined) return;
+    this.setState('overlay', {
+      kind: 'form',
+      sessionID: form.sessionID,
+      editor: startEditor(form),
+    });
+  }
+
+  /** The form an open form overlay is editing, if it is still pending. */
+  openFormRequest(): FormRequest | undefined {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'form') return undefined;
+    return (this.state.forms[overlay.sessionID] ?? []).find(
+      (form) => form.id === overlay.editor.formID,
+    );
+  }
+
+  formKey(key: FormKey): void {
+    const overlay = this.state.overlay;
+    const form = this.openFormRequest();
+    if (overlay.kind !== 'form' || form === undefined) {
+      this.closeOverlay();
+      return;
+    }
+    const { editor, outcome } = editorKey(form, overlay.editor, key);
+    if (outcome === 'close') {
+      this.closeOverlay();
+      return;
+    }
+    this.setState('overlay', { kind: 'form', sessionID: overlay.sessionID, editor });
+    if (outcome === 'submit') {
+      void this.finishForm(form, () =>
+        this.deps.backend.replyForm(form.sessionID, form.id, buildAnswer(form, editor.answers)),
+      );
+    } else if (outcome === 'decline') {
+      void this.finishForm(form, () => this.deps.backend.cancelForm(form.sessionID, form.id));
+    }
+  }
+
+  private async finishForm(form: FormRequest, send: () => Promise<void>): Promise<void> {
+    if (this.state.answering) return;
+    this.setState('answering', true);
+    try {
+      await send();
+      this.closeOverlay();
+    } catch (error) {
+      if (
+        error instanceof BackendError &&
+        (error.kind === 'not-found' || error.kind === 'conflict')
+      ) {
+        this.closeOverlay();
+        this.showNotice('Already answered elsewhere.', 'dim');
+      } else {
+        this.showNotice(errorText(error), 'error');
+      }
+    }
+    try {
+      await this.refreshInputRequests(form.sessionID);
+    } finally {
+      this.setState('answering', false);
+    }
   }
 
   // ---------------------------------------------------------------- presentation
