@@ -214,8 +214,10 @@ export class FakeBackend implements Backend {
   async defaultModel(): Promise<ModelSelection | undefined> {
     return undefined;
   }
+  /** Configurable server-side command catalog returned by listCommands. */
+  serverCommands: ServerCommand[] = [];
   async listCommands(): Promise<ServerCommand[]> {
-    return [];
+    return this.serverCommands.map((command) => ({ ...command }));
   }
   /** Configurable server-side file index: match is a lowercase substring test. */
   async findProjectFiles(directory: string, query: string): Promise<string[]> {

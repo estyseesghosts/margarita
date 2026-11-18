@@ -77,7 +77,12 @@ import {
   serverPathShape,
 } from '../domain/server-path.ts';
 import type { Execution, SessionSummary } from '../domain/session.ts';
-import { completeCommand, type LocalCommandName, parseInput } from '../domain/slash-command.ts';
+import {
+  completeCommand,
+  isLocalCommand,
+  type LocalCommandName,
+  parseInput,
+} from '../domain/slash-command.ts';
 import {
   foldTranscript,
   type TranscriptMessage,
@@ -1110,9 +1115,12 @@ export class AppController {
     if (this.state.admitting) return;
     const text = this.state.composer.text;
     if (text.trim() === '') return;
+    const localName = /^\/(\S+)/.exec(text.trimStart())?.[1];
+    const isLocal = localName !== undefined && isLocalCommand(localName);
     if (text.trimStart().startsWith('/')) {
-      // Server commands are project-scoped; never route them against another project's catalog.
-      if (!(await this.ensureCatalog(this.currentDirectory()))) return;
+      // Local control commands are frontend-local and must keep working when the server or
+      // its catalog is broken; only server and plugin commands need the server catalog.
+      if (!isLocal && !(await this.ensureCatalog(this.currentDirectory()))) return;
     }
     const parsed = parseInput(
       text,
@@ -1137,30 +1145,38 @@ export class AppController {
     }
     const sessionID = this.state.route.sessionID;
     const directory = this.state.sessions[sessionID]?.directory ?? this.deps.cwd;
-    await this.admit(text, directory, async () => {
-      switch (parsed.kind) {
-        case 'shell':
-          await this.deps.backend.runShell(sessionID, parsed.command);
-          return;
-        case 'server':
-          await this.deps.backend.runCommand(sessionID, parsed.name, parsed.args);
-          return;
-        case 'prompt': {
-          const running = this.state.running[sessionID] === true;
-          const delivery =
-            deliveryOverride ?? (running ? this.deps.config.input.enterWhileRunning : undefined);
-          await this.deps.backend.prompt(sessionID, {
-            text,
-            files: await this.resolveFiles(text, directory),
-            ...(delivery === undefined ? {} : { delivery }),
-          });
-          await this.refreshInbox(sessionID);
-          return;
+    const commandNotice =
+      'The request may or may not have been delivered (connection problem); check for its effects before resending.';
+    const isPromptDelivery = parsed.kind === 'prompt';
+    await this.admit(
+      text,
+      directory,
+      async () => {
+        switch (parsed.kind) {
+          case 'shell':
+            await this.deps.backend.runShell(sessionID, parsed.command);
+            return;
+          case 'server':
+            await this.deps.backend.runCommand(sessionID, parsed.name, parsed.args);
+            return;
+          case 'prompt': {
+            const running = this.state.running[sessionID] === true;
+            const delivery =
+              deliveryOverride ?? (running ? this.deps.config.input.enterWhileRunning : undefined);
+            await this.deps.backend.prompt(sessionID, {
+              text,
+              files: await this.resolveFiles(text, directory),
+              ...(delivery === undefined ? {} : { delivery }),
+            });
+            await this.refreshInbox(sessionID);
+            return;
+          }
+          default:
+            return;
         }
-        default:
-          return;
-      }
-    });
+      },
+      isPromptDelivery ? undefined : commandNotice,
+    );
   }
 
   /** Sends the current draft with steer delivery (Alt+Enter or /steer). */
@@ -1173,6 +1189,7 @@ export class AppController {
     text: string,
     directory: string,
     send: () => Promise<void>,
+    transportNotice = 'Delivery unknown (connection problem). Check the transcript before resending.',
   ): Promise<boolean> {
     this.setState('admitting', true);
     try {
@@ -1188,11 +1205,8 @@ export class AppController {
         errorKind: error instanceof BackendError ? error.kind : 'unknown',
       });
       if (error instanceof BackendError && error.kind === 'transport') {
-        // The POST may have landed. Show server state instead of resending blindly.
-        this.showNotice(
-          'Delivery unknown (connection problem). Check the transcript before resending.',
-          'error',
-        );
+        // The request may have landed. Show server state instead of resending blindly.
+        this.showNotice(transportNotice, 'error');
         if (this.state.route.kind === 'conversation') {
           this.scheduleTranscript(this.state.route.sessionID);
           void this.track('inbox', this.refreshInbox(this.state.route.sessionID));

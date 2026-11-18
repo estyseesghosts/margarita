@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { FakeBackend } from '../../test/fake-backend.ts';
 import { BackendError, type PromptDraft } from '../adapter/backend.ts';
 import { defaultConfig } from '../config/config.ts';
+import type { AppConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
 import { composerFrom } from '../domain/composer.ts';
 import { buildKeymap } from '../domain/keymap.ts';
@@ -1294,6 +1295,193 @@ describe(`Up recalls the newest queued follow-up (issue #30)`, () => {
     controller.toggleStash();
 
     expect(controller.state.composer.text).toBe('second follow-up');
+    controller.dispose();
+  });
+});
+
+function configFor(delivery: 'queue' | 'steer') {
+  return delivery === 'queue'
+    ? defaultConfig
+    : { ...defaultConfig, input: { enterWhileRunning: 'steer' as const } };
+}
+
+function runningSessionBackend() {
+  const backend = new FakeBackend();
+  backend.sessions = [fakeSession('ses_a')];
+  backend.messages = { ses_a: [] };
+  backend.active = new Set(['ses_a']);
+  backend.agents = [{ id: 'build', name: 'build', mode: 'primary', hidden: false }];
+  return backend;
+}
+
+function makePromptController(config: AppConfig, backend: FakeBackend) {
+  return new AppController({
+    backend,
+    config,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+  });
+}
+
+describe('slash commands are control actions, never queued prompts (issue #31)', () => {
+  const configs = [
+    { name: 'queue', delivery: 'queue' as const },
+    { name: 'steer', delivery: 'steer' as const },
+  ];
+
+  for (const { delivery } of configs) {
+    test(`local controls never become a ${delivery} inbox message while the agent works`, async () => {
+      const config = configFor(delivery);
+      const backend = runningSessionBackend();
+      const controller = makePromptController(config, backend);
+      await attach(controller, 'ses_a');
+
+      for (const command of [
+        '/sessions',
+        '/queue',
+        '/interrupt',
+        '/goal pause',
+        '/model',
+        '/goal clear',
+      ]) {
+        backend.calls.length = 0;
+        controller.setComposer(composerFrom(command));
+        await controller.submit();
+        expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+        expect((controller.state.inbox['ses_a'] ?? []).some((item) => item.kind === 'user')).toBe(
+          false,
+        );
+      }
+      controller.dispose();
+    });
+
+    test(`an ordinary prompt while the agent works admits with delivery ${delivery}`, async () => {
+      const config = configFor(delivery);
+      const backend = runningSessionBackend();
+      const controller = makePromptController(config, backend);
+      await attach(controller, 'ses_a');
+
+      controller.setComposer(composerFrom('plain follow-up'));
+      await controller.submit();
+
+      const prompts = backend.calls.filter((call) => call.name === 'prompt');
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]?.args[1]).toMatchObject({ text: 'plain follow-up', delivery });
+      controller.dispose();
+    });
+  }
+
+  test('an unknown slash command is rejected; the composer is preserved', async () => {
+    const backend = runningSessionBackend();
+    const controller = makePromptController(defaultConfig, backend);
+    await attach(controller, 'ses_a');
+
+    controller.setComposer(composerFrom('/not-a-real-command'));
+    await controller.submit();
+
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    expect(controller.state.composer.text).toBe('/not-a-real-command');
+    expect(controller.state.notice?.text).toContain('Unknown command');
+    controller.dispose();
+  });
+
+  test('a server-side command executes through session.command, not session.prompt', async () => {
+    const backend = runningSessionBackend();
+    backend.serverCommands = [{ name: 'compact', description: 'Compact the conversation' }];
+    const controller = makePromptController(defaultConfig, backend);
+    await attach(controller, 'ses_a');
+
+    controller.setComposer(composerFrom('/compact some extra args'));
+    await controller.submit();
+
+    expect(backend.calls).toEqual(
+      expect.arrayContaining([
+        { name: 'runCommand', args: ['ses_a', 'compact', 'some extra args'] },
+      ]),
+    );
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    controller.dispose();
+  });
+
+  test('a failing server command reports an explicit error and preserves the draft', async () => {
+    const backend = runningSessionBackend();
+    backend.serverCommands = [{ name: 'compact', description: 'Compact the conversation' }];
+    backend.runCommand = async () => {
+      throw new BackendError('unknown', 'session.command', 'busy right now');
+    };
+    const controller = makePromptController(defaultConfig, backend);
+    await attach(controller, 'ses_a');
+
+    controller.setComposer(composerFrom('/compact'));
+    await controller.submit();
+
+    expect(controller.state.notice?.text).toContain('busy right now');
+    expect(controller.state.composer.text).toBe('/compact');
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    controller.dispose();
+  });
+
+  test('a transport failure of a server command reports an explicit connection notice', async () => {
+    const backend = runningSessionBackend();
+    backend.serverCommands = [{ name: 'compact', description: 'Compact the conversation' }];
+    backend.runCommand = async () => {
+      throw new BackendError('transport', 'session.command', 'connection refused');
+    };
+    const controller = makePromptController(defaultConfig, backend);
+    await attach(controller, 'ses_a');
+
+    controller.setComposer(composerFrom('/compact'));
+    await controller.submit();
+
+    expect(controller.state.notice?.text).toContain('connection problem');
+    expect(controller.state.composer.text).toBe('/compact');
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    controller.dispose();
+  });
+
+  test('the local /revert control works even when the server catalog fetch fails', async () => {
+    const backend = runningSessionBackend();
+    backend.listCommands = async () => {
+      throw new Error('catalog broken');
+    };
+    const controller = makePromptController(defaultConfig, backend);
+    await attach(controller, 'ses_a');
+
+    controller.setComposer(composerFrom('/interrupt'));
+    await controller.submit();
+
+    expect(backend.calls.some((call) => call.name === 'interrupt')).toBe(true);
+    expect(controller.state.composer.text).toBe('');
+    controller.dispose();
+  });
+
+  test('a recalled queued message edited to start with / is routed as a command on resubmission', async () => {
+    const backend = runningSessionBackend();
+    backend.serverCommands = [{ name: 'compact', description: 'Compact the conversation' }];
+    backend.inbox = [
+      { id: 'in_1', kind: 'user', delivery: 'queue', text: 'please review', createdAt: 1 },
+    ];
+    const controller = makePromptController(defaultConfig, backend);
+    await attach(controller, 'ses_a');
+
+    await controller.recallQueuedUp();
+    expect(controller.state.composer.text).toBe('please review');
+
+    controller.setComposer(composerFrom('/compact'));
+    await controller.submit();
+
+    expect(backend.calls).toEqual(
+      expect.arrayContaining([{ name: 'runCommand', args: ['ses_a', 'compact', ''] }]),
+    );
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    // The inbox only holds non-queued (none) user items afterwards.
+    expect(controller.state.inbox['ses_a'] ?? []).toEqual([]);
     controller.dispose();
   });
 });
