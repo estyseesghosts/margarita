@@ -117,6 +117,8 @@ export type AppState = {
    * fetch is in flight or failed. Consumers must not use another project's catalog.
    */
   catalogDirectory?: string;
+  /** Server owning the loaded catalog; catalogs are scoped by server AND directory. */
+  catalogServerID?: string;
   catalogLoading: boolean;
   catalogError?: string;
   detailed: boolean;

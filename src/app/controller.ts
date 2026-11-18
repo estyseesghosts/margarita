@@ -260,6 +260,16 @@ export class AppController {
     return this.deps.backendFor?.(serverID) ?? this.deps.backend;
   }
 
+  /**
+   * Whether a server lacks this machine's filesystem. Every non-local server is remote;
+   * the legacy `remoteFilesystem` flag still marks a directly configured launch server
+   * (older single-server tests and `--server` callers) as remote.
+   */
+  private isRemoteServer(serverID: string): boolean {
+    if (serverID !== localServerID) return true;
+    return serverID === this.serverID && this.deps.remoteFilesystem === true;
+  }
+
   /** Server of the current route; overview/new default to the launch server. */
   private activeServerID(): string {
     const route = this.state.route;
@@ -399,41 +409,58 @@ export class AppController {
 
   /** Loads catalogs and sessions. Errors propagate so startup can report them. */
   async bootstrap(): Promise<void> {
-    await Promise.all([this.loadCatalog(this.deps.cwd), this.loadSessions()]);
+    await Promise.all([this.loadCatalog(this.deps.cwd, this.serverID), this.loadSessions()]);
   }
 
   private catalogGeneration = 0;
   private catalogInFlight: Promise<void> | undefined;
+  private catalogInFlightScope: string | undefined;
 
-  async loadCatalog(directory: string): Promise<void> {
+  /** Catalog scope: server identity plus canonical directory, never directory alone. */
+  private catalogScope(directory: string, serverID: string): string {
+    return `${serverID}\u0000${directoryKey(directory, this.deps.platform)}`;
+  }
+
+  async loadCatalog(directory: string, serverID: string = this.activeServerID()): Promise<void> {
     const generation = ++this.catalogGeneration;
-    const key = directoryKey(directory, this.deps.platform);
-    const promise = this.innerLoadCatalog(directory, generation, key);
+    const scope = this.catalogScope(directory, serverID);
+    const promise = this.innerLoadCatalog(directory, serverID, generation, scope);
     this.catalogInFlight = promise;
+    this.catalogInFlightScope = scope;
     try {
       await promise;
     } finally {
-      if (this.catalogInFlight === promise) this.catalogInFlight = undefined;
+      if (this.catalogInFlight === promise) {
+        this.catalogInFlight = undefined;
+        this.catalogInFlightScope = undefined;
+      }
     }
   }
 
   private async innerLoadCatalog(
     directory: string,
+    serverID: string,
     generation: number,
-    key: string,
+    scope: string,
   ): Promise<void> {
-    this.setState('catalogDirectory', key);
+    this.setState('catalogDirectory', directoryKey(directory, this.deps.platform));
+    this.setState('catalogServerID', serverID);
     this.setState('catalogLoading', true);
     this.setState('catalogError', undefined);
+    const backend = this.backendFor(serverID);
     try {
       const [agents, models, fallback, commands] = await Promise.all([
-        this.backend.listAgents(directory),
-        this.backend.listModels(directory),
-        this.backend.defaultModel(directory),
-        this.backend.listCommands(directory).catch(() => []),
+        backend.listAgents(directory),
+        backend.listModels(directory),
+        backend.defaultModel(directory),
+        backend.listCommands(directory).catch(() => []),
       ]);
-      if (generation !== this.catalogGeneration) return; // a newer project superseded this fetch
+      // Reject a late response from a server/project the user has already left.
+      if (generation !== this.catalogGeneration || this.catalogScope(directory, serverID) !== scope)
+        return;
       batch(() => {
+        this.setState('catalogDirectory', directoryKey(directory, this.deps.platform));
+        this.setState('catalogServerID', serverID);
         this.setState('agents', selectableAgents(agents, this.deps.config.agents.cycle));
         this.setState('models', models);
         this.setState('defaultModel', fallback);
@@ -442,7 +469,7 @@ export class AppController {
       });
     } catch (error) {
       if (generation !== this.catalogGeneration) return;
-      // Never leave another project's catalog usable after a failed reload.
+      // Never leave another project's or server's catalog usable after a failed reload.
       batch(() => {
         this.setState('agents', []);
         this.setState('models', []);
@@ -455,9 +482,10 @@ export class AppController {
     }
   }
 
-  /** True when the loaded catalog is exactly the one for `directory` and usable. */
-  catalogFresh(directory: string): boolean {
+  /** True when the loaded catalog is exactly the one for `(server, directory)` and usable. */
+  catalogFresh(directory: string, serverID: string = this.activeServerID()): boolean {
     return (
+      this.state.catalogServerID === serverID &&
       this.state.catalogDirectory === directoryKey(directory, this.deps.platform) &&
       !this.state.catalogLoading &&
       this.state.catalogError === undefined
@@ -465,33 +493,37 @@ export class AppController {
   }
 
   /** Reloads in the background when the catalog does not match the project right now. */
-  private refreshCatalogIfStale(directory: string): void {
-    if (this.catalogFresh(directory)) return;
+  private refreshCatalogIfStale(directory: string, serverID: string = this.activeServerID()): void {
+    if (this.catalogFresh(directory, serverID)) return;
     if (
       this.state.catalogLoading &&
+      this.state.catalogServerID === serverID &&
       this.state.catalogDirectory === directoryKey(directory, this.deps.platform)
     ) {
       return; // already loading exactly this project's catalog
     }
-    // A load for a different directory may be in flight; starting this one now supersedes it.
-    void this.track('catalog', this.loadCatalog(directory));
+    // A load for another scope may be in flight; starting this one now supersedes it.
+    void this.track('catalog', this.loadCatalog(directory, serverID));
   }
 
-  /** Guarantees the catalog matches `directory`, reloading it if needed. */
-  private async ensureCatalog(directory: string): Promise<boolean> {
-    if (this.catalogFresh(directory)) return true;
-    const key = directoryKey(directory, this.deps.platform);
-    if (this.catalogInFlight !== undefined && this.state.catalogDirectory === key) {
-      // A load for this project is already in flight; wait for it instead of restarting it.
+  /** Guarantees the catalog matches `(server, directory)`, reloading it if needed. */
+  private async ensureCatalog(
+    directory: string,
+    serverID: string = this.activeServerID(),
+  ): Promise<boolean> {
+    if (this.catalogFresh(directory, serverID)) return true;
+    const scope = this.catalogScope(directory, serverID);
+    if (this.catalogInFlight !== undefined && this.catalogInFlightScope === scope) {
+      // A load for this exact scope is already in flight; wait for it instead of restarting.
       try {
         await this.catalogInFlight;
       } catch {
         // Error already recorded on state; freshness check below reports failure.
       }
-      return this.catalogFresh(directory);
+      return this.catalogFresh(directory, serverID);
     }
     try {
-      await this.loadCatalog(directory);
+      await this.loadCatalog(directory, serverID);
       return true;
     } catch (error) {
       this.showNotice(`Could not load project catalog: ${errorText(error)}`, 'error');
@@ -499,6 +531,7 @@ export class AppController {
     }
   }
 
+  /** Every server the overview aggregates, launch server first and deduplicated. */
   private serverIDs(): string[] {
     return [...new Set([this.serverID, ...(this.deps.serverIDs?.() ?? [])])];
   }
@@ -1069,7 +1102,7 @@ export class AppController {
     const directory = this.state.sessions[this.keyFor(serverID, sessionID)]?.directory;
     if (directory !== undefined) {
       this.loadHistoryFor(directory, serverID);
-      this.refreshCatalogIfStale(directory);
+      this.refreshCatalogIfStale(directory, serverID);
     }
     void this.track('attach', this.loadConversation(sessionID));
     void this.loadGoal(sessionID);
@@ -1091,7 +1124,7 @@ export class AppController {
       this.restoreDraft(`new:${this.projectKeyOf(directory, serverID)}`);
     });
     this.loadHistoryFor(directory, serverID);
-    this.refreshCatalogIfStale(directory);
+    this.refreshCatalogIfStale(directory, serverID);
   }
 
   /**
@@ -1393,9 +1426,13 @@ export class AppController {
   private async completeFiles(partial: string, start: number): Promise<void> {
     const request = ++this.completionRequest;
     const root = this.currentDirectory();
-    const remote = this.deps.remoteFilesystem === true;
+    // The selected route's server decides the filesystem, not the launch connection.
+    const serverID = this.activeServerID();
+    const remote = this.isRemoteServer(serverID);
     const files = remote
-      ? await this.backend.findProjectFiles(root, partial, 50).catch(() => [] as string[]) // best-effort completion; unreadable server is silent here
+      ? await this.backendFor(serverID)
+          .findProjectFiles(root, partial, 50)
+          .catch(() => [] as string[]) // best-effort completion; unreadable server is silent here
       : await this.filesFor(root);
     const mention = activeMention(this.state.composer.text, this.state.composer.cursor);
     if (
@@ -1721,8 +1758,12 @@ export class AppController {
     });
   }
 
-  private resolveFiles(text: string, directory: string): Promise<PromptFile[]> {
-    if (this.deps.remoteFilesystem === true) return this.resolveRemoteFiles(text, directory);
+  private resolveFiles(
+    text: string,
+    directory: string,
+    serverID: string = this.activeServerID(),
+  ): Promise<PromptFile[]> {
+    if (this.isRemoteServer(serverID)) return this.resolveRemoteFiles(text, directory, serverID);
     return this.resolveLocalFiles(text, directory);
   }
 
@@ -1765,7 +1806,12 @@ export class AppController {
    * windows semantics) and verified through the server's file search; unverifiable references
    * are reported and omitted instead of being sent as unreadable local paths.
    */
-  private async resolveRemoteFiles(text: string, directory: string): Promise<PromptFile[]> {
+  private async resolveRemoteFiles(
+    text: string,
+    directory: string,
+    serverID: string = this.activeServerID(),
+  ): Promise<PromptFile[]> {
+    const backend = this.backendFor(serverID);
     const shape = serverPathShape(directory);
     const files: PromptFile[] = [];
     const missing: string[] = [];
@@ -1786,7 +1832,7 @@ export class AppController {
       try {
         // Exact path verified against the server's fuzzy search over the project; the base
         // name as query guarantees the file appears in the hits when it exists.
-        const hits = await this.backend.findProjectFiles(directory, baseServerPath(relative), 100);
+        const hits = await backend.findProjectFiles(directory, baseServerPath(relative), 100);
         matched = hits.find((hit) => normalizeServerPath(hit, shape) === relative);
       } catch {
         matched = undefined;
