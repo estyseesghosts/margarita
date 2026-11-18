@@ -180,6 +180,35 @@ export function stripJsonComments(text: string): string {
       inString = true;
       out += char;
       index += 1;
+    } else if (char === ',') {
+      // Drop a trailing comma only when the next significant character outside
+      // a string closes an object or array.
+      let ahead = index + 1;
+      while (ahead < text.length) {
+        const peek = text[ahead] ?? '';
+        if (/\s/.test(peek)) {
+          ahead += 1;
+          continue;
+        }
+        // Skip comments that may sit between the comma and the closing bracket.
+        if (peek === '/' && text[ahead + 1] === '/') {
+          while (ahead < text.length && text[ahead] !== '\n') ahead += 1;
+          continue;
+        }
+        if (peek === '/' && text[ahead + 1] === '*') {
+          const end = text.indexOf('*/', ahead + 2);
+          ahead = end === -1 ? text.length : end + 2;
+          continue;
+        }
+        break;
+      }
+      const closer = text[ahead];
+      if (closer === '}' || closer === ']') {
+        index += 1; // skip the comma, keep the whitespace that follows
+      } else {
+        out += char;
+        index += 1;
+      }
     } else if (char === '/' && next === '/') {
       while (index < text.length && text[index] !== '\n') index += 1;
     } else if (char === '/' && next === '*') {
@@ -190,5 +219,5 @@ export function stripJsonComments(text: string): string {
       index += 1;
     }
   }
-  return out.replace(/,(\s*[}\]])/g, '$1');
+  return out;
 }

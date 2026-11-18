@@ -24,6 +24,26 @@ describe('config', () => {
     const text = '{ // c\n "a": "http://x/*y*/", /* b */ "b": [1,2,], }';
     expect(JSON.parse(stripJsonComments(text))).toEqual({ a: 'http://x/*y*/', b: [1, 2] });
   });
+  test('trailing-comma cleanup is string-aware', () => {
+    const cases: Array<[string, unknown]> = [
+      ['{"keys":{"x":"foo,}"},}', { keys: { x: 'foo,}' } }],
+      ['{"keys":{"x":"foo, ]"},}', { keys: { x: 'foo, ]' } }],
+      ['{"a":",]"}', { a: ',]' }],
+      ['["a,}", "b, ]",]', ['a,}', 'b, ]']],
+      ['{"a":"escaped \\"quote,}",}', { a: 'escaped "quote,}' }],
+      ['{"a":"back \\\\ slash,}",}', { a: 'back \\ slash,}' }],
+      ['{/* c */ "a": 1, // tail\n}', { a: 1 }],
+      ['{"a":1,/* between , and } */}', { a: 1 }],
+      ['{"a":"http://x",}', { a: 'http://x' }],
+      ['{"a":"// not a comment",}', { a: '// not a comment' }],
+      ['{"a":"/* not a comment */",}', { a: '/* not a comment */' }],
+      ['[1,2,3,]', [1, 2, 3]],
+      ['{"a":{"b":[1,{"c":2,},],},}', { a: { b: [1, { c: 2 }] } }],
+    ];
+    for (const [input, expected] of cases) {
+      expect(JSON.parse(stripJsonComments(input))).toEqual(expected);
+    }
+  });
   test('missing file yields defaults without warnings', async () => {
     expect(await loadConfig(join(await tempDir(), 'none.jsonc'))).toEqual({
       config: defaultConfig,
