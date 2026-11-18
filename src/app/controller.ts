@@ -132,6 +132,9 @@ export const diffPageLines = 18;
  * methods; they never talk to the backend. Leaving a session is a pure view change:
  * nothing here calls interrupt/background/delete on navigation.
  */
+/** Pause reason the goal plugin records when the user interrupts a running goal. */
+const stoppedByUserReason = 'Stopped by the user';
+
 export class AppController {
   readonly state: AppState;
   private readonly setState: SetStoreFunction<AppState>;
@@ -2077,7 +2080,10 @@ export class AppController {
    */
   private async captureInterruptSteerIntent(sessionID: string): Promise<void> {
     const goal = await this.refreshNativeGoal(sessionID);
-    if (goal?.status === 'paused' && goal.reason === 'Stopped by the user') {
+    // The plugin's pause event may not have landed yet, so a still-active goal also
+    // qualifies; the resume re-reads and re-checks it before acting.
+    const stoppedByUser = goal?.status === 'paused' && goal.reason === stoppedByUserReason;
+    if (goal !== null && (stoppedByUser || goal.status === 'active')) {
       this.setState('awaitingSteer', sessionID, goal.id);
       return;
     }
@@ -2087,16 +2093,21 @@ export class AppController {
   /**
    * The user's follow-up is already admitted by the time this runs, so its backend call
    * executes after the follow-up prompt; the plugin's resume drives the next continuation
-   * from idle instead of racing it. Only an intent recorded at interrupt time qualifies.
+   * from idle instead of racing it. The goal is re-read first: only the same goal, still
+   * paused by the interrupt, is resumed, so another client's pause, clear or replacement wins.
    */
   private async maybeResumeInterruptedGoal(sessionID: string): Promise<void> {
     const intent = this.state.awaitingSteer[sessionID];
     if (intent === undefined) return;
+    const goal = await this.refreshNativeGoal(sessionID);
     this.clearSteerIntent(sessionID);
+    if (goal?.id !== intent || goal.status !== 'paused' || goal.reason !== stoppedByUserReason) {
+      return;
+    }
     try {
       await this.deps.backend.runCommand(sessionID, 'goal', 'resume');
-    } catch {
-      // Already active/cleared (e.g. resumed from another window): the refetch is truth.
+    } catch (error) {
+      this.showNotice(`Could not resume the goal: ${errorText(error)}`, 'error');
     }
     await this.refreshNativeGoal(sessionID);
   }

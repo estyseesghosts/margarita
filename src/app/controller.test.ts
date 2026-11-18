@@ -1382,6 +1382,68 @@ describe('native opencode goal (issue #21)', () => {
     controller.dispose();
   });
 
+  test('a delayed pause event still resumes the same goal on the follow-up', async () => {
+    const { backend, controller } = await goalFixture();
+    backend.interrupt = async () => true; // the plugin's pause has not landed yet
+    await controller.interrupt();
+    expect(controller.state.awaitingSteer['ses_a']).toBe('goal_1');
+    backend.goals['ses_a'] = {
+      ...backend.goals['ses_a']!,
+      status: 'paused',
+      reason: 'Stopped by the user',
+    };
+    await submitCommand(controller, 'follow-up');
+    expect(backend.calls.filter((call) => call.args[2] === 'resume')).toHaveLength(1);
+    expect(controller.nativeGoalOf('ses_a')).toMatchObject({ status: 'active' });
+    controller.dispose();
+  });
+
+  test("another client's pause, replacement or clear wins over the interrupt intent", async () => {
+    const changes: Record<string, (backend: FakeBackend) => void> = {
+      pause: (backend) => {
+        backend.goals['ses_a'] = {
+          ...backend.goals['ses_a']!,
+          status: 'paused',
+          reason: 'Paused by the user',
+        };
+      },
+      replace: (backend) => {
+        backend.goals['ses_a'] = {
+          ...backend.goals['ses_a']!,
+          id: 'goal_2',
+          status: 'paused',
+          reason: 'Stopped by the user',
+        };
+      },
+      clear: (backend) => {
+        delete backend.goals['ses_a'];
+      },
+    };
+    for (const change of Object.values(changes)) {
+      const { backend, controller } = await goalFixture();
+      await controller.interrupt();
+      expect(controller.state.awaitingSteer['ses_a']).toBe('goal_1');
+      change(backend);
+      await submitCommand(controller, 'follow-up');
+      expect(backend.calls.filter((call) => call.args[2] === 'resume')).toHaveLength(0);
+      expect(controller.state.awaitingSteer['ses_a']).toBeUndefined();
+      controller.dispose();
+    }
+  });
+
+  test('a failed resume is reported instead of swallowed', async () => {
+    const { backend, controller } = await goalFixture();
+    await controller.interrupt();
+    const run = backend.runCommand.bind(backend);
+    backend.runCommand = async (sessionID, name, text) => {
+      if (text === 'resume') throw new Error('plugin offline');
+      await run(sessionID, name, text);
+    };
+    await submitCommand(controller, 'follow-up');
+    expect(controller.state.notice?.text).toContain('plugin offline');
+    controller.dispose();
+  });
+
   test('the interruption intent is cleared by /goal clear and completion stops resuming', async () => {
     const { backend, controller } = await goalFixture();
     backend.serverCommands = [{ name: 'goal', description: 'goal control' }];
