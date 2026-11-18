@@ -18,6 +18,7 @@ import { fileGoalStore } from './config/goal-store.ts';
 import { loadState, saveState } from './config/local-state.ts';
 import { appPaths } from './config/paths.ts';
 import { buildKeymap } from './domain/keymap.ts';
+import type { ModelSelection } from './domain/model-ref.ts';
 import { App } from './ui/app.tsx';
 import { pickTheme } from './ui/theme.ts';
 
@@ -167,22 +168,6 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
       : exitCodes.unavailable;
   }
 
-  const agent = controller.resolveCliAgent(options.agent);
-  if (!agent.ok) {
-    process.stderr.write(`marg: ${agent.message}\n`);
-    return exitCodes.modelUnavailable;
-  }
-  const model = controller.resolveCliModel({
-    ...(options.provider === undefined ? {} : { provider: options.provider }),
-    ...(options.model === undefined ? {} : { model: options.model }),
-    ...(options.effort === undefined ? {} : { effort: options.effort }),
-  });
-  if (!model.ok) {
-    process.stderr.write(`marg: ${model.message}\n`);
-    return exitCodes.modelUnavailable;
-  }
-  controller.setNewSessionDefaults(agent.agent, model.model);
-
   const target = options.target;
   let existingSessionID: string | undefined;
   if (target.kind === 'resume') {
@@ -198,6 +183,41 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     if (existingSessionID === undefined && options.print) {
       process.stderr.write('marg: no session to continue in this project.\n');
       return exitCodes.notFound;
+    }
+  }
+
+  // An existing session keeps its own selections unless a flag says otherwise, and flags are
+  // checked against that session's project. A new session uses the startup project's catalog.
+  let agent: { agent?: string } = {};
+  let model: { model?: ModelSelection } = {};
+  if (existingSessionID === undefined) {
+    const resolvedAgent = controller.resolveCliAgent(options.agent);
+    if (!resolvedAgent.ok) {
+      process.stderr.write(`marg: ${resolvedAgent.message}\n`);
+      return exitCodes.modelUnavailable;
+    }
+    const resolvedModel = controller.resolveCliModel({
+      ...(options.provider === undefined ? {} : { provider: options.provider }),
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.effort === undefined ? {} : { effort: options.effort }),
+    });
+    if (!resolvedModel.ok) {
+      process.stderr.write(`marg: ${resolvedModel.message}\n`);
+      return exitCodes.modelUnavailable;
+    }
+    agent = resolvedAgent;
+    model = resolvedModel;
+    controller.setNewSessionDefaults(agent.agent, model.model);
+  } else {
+    const applied = await controller.applyCliOverrides(existingSessionID, {
+      ...(options.agent === undefined ? {} : { agent: options.agent }),
+      ...(options.provider === undefined ? {} : { provider: options.provider }),
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.effort === undefined ? {} : { effort: options.effort }),
+    });
+    if (!applied.ok) {
+      process.stderr.write(`marg: ${applied.message}\n`);
+      return exitCodes.modelUnavailable;
     }
   }
 

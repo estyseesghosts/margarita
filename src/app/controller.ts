@@ -504,6 +504,51 @@ export class AppController {
     };
   }
 
+  /**
+   * Applies explicit `--agent/--provider/--model/--effort` flags to an existing session
+   * (`--resume`, `--continue`) before its prompt is admitted. Choices are validated against
+   * that session's own project catalog, flags left out change nothing, and any failure is
+   * reported so the turn never silently runs with the old selection.
+   */
+  async applyCliOverrides(
+    sessionID: string,
+    flags: { agent?: string; provider?: string; model?: string; effort?: string },
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    const wantsModel =
+      flags.provider !== undefined || flags.model !== undefined || flags.effort !== undefined;
+    if (flags.agent === undefined && !wantsModel) return { ok: true };
+    const session = await this.ensureSession(sessionID);
+    if (session === undefined) return { ok: false, message: `session ${sessionID} not found.` };
+    if (!(await this.ensureCatalog(session.directory))) {
+      return { ok: false, message: `could not load the catalog for ${session.directory}.` };
+    }
+    let agent: string | undefined;
+    if (flags.agent !== undefined) {
+      const resolved = this.resolveCliAgent(flags.agent);
+      if (!resolved.ok) return resolved;
+      agent = resolved.agent;
+    }
+    let model: ModelSelection | undefined;
+    if (wantsModel) {
+      const resolved = this.resolveCliModel({
+        ...(flags.provider === undefined ? {} : { provider: flags.provider }),
+        ...(flags.model === undefined ? {} : { model: flags.model }),
+        ...(flags.effort === undefined ? {} : { effort: flags.effort }),
+      });
+      if (!resolved.ok) return resolved;
+      model = resolved.model;
+    }
+    try {
+      if (agent !== undefined) await this.deps.backend.switchAgent(sessionID, agent);
+      if (model !== undefined) await this.deps.backend.switchModel(sessionID, model);
+    } catch (error) {
+      return { ok: false, message: `could not apply the requested selection: ${errorText(error)}` };
+    }
+    if (model !== undefined) this.rememberModel(model);
+    await this.refreshSummary(sessionID);
+    return { ok: true };
+  }
+
   // ---------------------------------------------------------------- events
 
   onStreamStatus(status: StreamStatus): void {

@@ -515,6 +515,74 @@ function revertBackend() {
   return backend;
 }
 
+function resumeFixture() {
+  const backend = scopedBackend();
+  backend.sessions = [{ ...fakeSession('ses_b'), directory: '/project-b' }];
+  const controller = scopedController(backend, '/project-a');
+  const switches = () =>
+    backend.calls.filter((call) => call.name === 'switchAgent' || call.name === 'switchModel');
+  return { backend, controller, switches };
+}
+
+describe('explicit flags on resumed sessions (issue #37)', () => {
+  test('flags are validated against the session project and applied', async () => {
+    const { backend, controller } = resumeFixture();
+    await controller.bootstrap();
+    const result = await controller.applyCliOverrides('ses_b', {
+      agent: 'agent-b',
+      model: 'model-b',
+    });
+    expect(result).toEqual({ ok: true });
+    expect(backend.calls.find((call) => call.name === 'switchAgent')?.args).toEqual([
+      'ses_b',
+      'agent-b',
+    ]);
+    expect(backend.calls.find((call) => call.name === 'switchModel')?.args[0]).toBe('ses_b');
+    controller.dispose();
+  });
+
+  test('omitted flags change nothing', async () => {
+    const { controller, switches } = resumeFixture();
+    await controller.bootstrap();
+    expect(await controller.applyCliOverrides('ses_b', {})).toEqual({ ok: true });
+    expect(switches()).toEqual([]);
+    controller.dispose();
+  });
+
+  test('an agent from another project is rejected and nothing is switched', async () => {
+    const { controller, switches } = resumeFixture();
+    await controller.bootstrap();
+    const result = await controller.applyCliOverrides('ses_b', { agent: 'agent-a' });
+    expect(result.ok).toBe(false);
+    expect(switches()).toEqual([]);
+    controller.dispose();
+  });
+
+  test('an unknown model is rejected before the agent is switched', async () => {
+    const { controller, switches } = resumeFixture();
+    await controller.bootstrap();
+    const result = await controller.applyCliOverrides('ses_b', {
+      agent: 'agent-b',
+      model: 'nope',
+    });
+    expect(result.ok).toBe(false);
+    expect(switches()).toEqual([]);
+    controller.dispose();
+  });
+
+  test('a failing switch is reported', async () => {
+    const { backend, controller } = resumeFixture();
+    backend.switchAgent = async () => {
+      throw new Error('boom');
+    };
+    await controller.bootstrap();
+    const result = await controller.applyCliOverrides('ses_b', { agent: 'agent-b' });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain('boom');
+    controller.dispose();
+  });
+});
+
 describe('staged revert recovery (issue #8)', () => {
   test('attaching reveals a server-staged revert as a recovery dialog', async () => {
     const backend = revertBackend();
