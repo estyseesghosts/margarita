@@ -248,7 +248,9 @@ function routeCompletion(controller: AppController, key: KeyInput): boolean {
 }
 
 function routeOverviewList(controller: AppController, key: KeyInput): boolean {
-  if (key.name === 'up') controller.moveOverviewSelection(-1);
+  if (key.name === '[') controller.cycleOverviewTab(-1);
+  else if (key.name === ']') controller.cycleOverviewTab(1);
+  else if (key.name === 'up') controller.moveOverviewSelection(-1);
   else if (key.name === 'down') controller.moveOverviewSelection(1);
   else if (key.name === 'return' || key.name === 'right') controller.attachSelected();
   else if (key.name === 'escape') controller.focusOverviewComposer();

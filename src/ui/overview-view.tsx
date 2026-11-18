@@ -48,6 +48,19 @@ export function Overview(props: {
       <text fg={props.theme.text} marginBottom={1}>
         <b>Sessions</b>
       </text>
+      <text marginBottom={1}>
+        <For each={['all', 'local', 'remotes', 'active', 'needs-input'] as const}>
+          {(tab) => (
+            <span
+              style={{
+                fg: state.overview.tab === tab ? props.theme.accent : props.theme.dim,
+              }}
+            >
+              {`${state.overview.tab === tab ? '[' : ' '}${props.controller.tabLabel(tab)} ${props.controller.tabCounts()[tab]}${state.overview.tab === tab ? ']' : ' '} `}
+            </span>
+          )}
+        </For>
+      </text>
       <Show when={groups().length === 0}>
         <text fg={props.theme.dim}>No sessions yet. Type below to start one.</text>
       </Show>

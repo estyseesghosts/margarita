@@ -74,6 +74,13 @@ import {
   type ProjectGroup,
 } from '../domain/overview-groups.ts';
 import {
+  filterSessions,
+  nextTab,
+  type OverviewTab,
+  overviewTabLabels,
+  tabCounts,
+} from '../domain/overview-tabs.ts';
+import {
   PairingError,
   type PairRequest,
   parsePairArgs,
@@ -315,8 +322,36 @@ export class AppController {
       : undefined;
   }
 
+  /** Counts for the tab bar, based on the same classifier as the dot. */
+  tabCounts(): Record<OverviewTab, number> {
+    return tabCounts(Object.values(this.state.sessions), {
+      statusOf: (session) => this.statusOf(session),
+      online: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
+    });
+  }
+
+  overviewTab(): OverviewTab {
+    return this.state.overview.tab;
+  }
+
+  cycleOverviewTab(direction: -1 | 1): void {
+    this.setState('overview', 'tab', nextTab(this.state.overview.tab, direction));
+  }
+
+  setOverviewTab(tab: OverviewTab): void {
+    this.setState('overview', 'tab', tab);
+  }
+
+  tabLabel(tab: OverviewTab): string {
+    return overviewTabLabels[tab];
+  }
+
   groups(): ProjectGroup[] {
-    return groupSessions(Object.values(this.state.sessions), {
+    const filtered = filterSessions(Object.values(this.state.sessions), this.state.overview.tab, {
+      statusOf: (session) => this.statusOf(session),
+      online: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
+    });
+    return groupSessions(filtered, {
       platform: this.deps.platform,
       showArchived: this.deps.config.sessions.showArchived,
       showChildren: this.deps.config.sessions.showChildren,

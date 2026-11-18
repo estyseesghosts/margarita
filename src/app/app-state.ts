@@ -140,6 +140,8 @@ export type AppState = {
   admitting: boolean;
   overview: {
     focus: 'list' | 'composer';
+    /** Active filter tab over the shared session index. */
+    tab: 'all' | 'local' | 'remotes' | 'active' | 'needs-input';
     /** Row key from `overviewRows()`: a session or a Show more/less toggle. */
     selectedRow?: string;
     /** Project groups showing every session instead of the collapsed few. */
@@ -195,7 +197,7 @@ export function initialState(directory: string): AppState {
     draftAttachments: {},
     stashAttachments: [],
     admitting: false,
-    overview: { focus: 'composer', directory, expanded: {} },
+    overview: { focus: 'composer', tab: 'all', directory, expanded: {} },
     openedAt: {},
     history: createHistory([]),
     recentModels: [],
