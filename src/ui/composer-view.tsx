@@ -3,6 +3,7 @@ import { For, Show } from 'solid-js';
 
 import type { Completion, Notice } from '../app/app-state.ts';
 import type { AppController } from '../app/controller.ts';
+import { attachmentLabel } from '../domain/attachment.ts';
 import { splitAtCursor } from '../domain/composer.ts';
 import { formatFooter } from '../domain/footer.ts';
 import { goalBadge } from '../domain/native-goal.ts';
@@ -29,6 +30,13 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
 
   return (
     <box flexDirection="column" flexShrink={0}>
+      <Show when={state.attachments.length > 0}>
+        <box flexDirection="row" paddingLeft={1}>
+          <text fg={props.theme.accentLight}>
+            {`⌫ ${state.attachments.map((attachment) => attachmentLabel(attachment)).join('   ·   ')}`}
+          </text>
+        </box>
+      </Show>
       <text fg={props.theme.border}>{rule()}</text>
       <box flexDirection="row">
         <text fg={active() ? props.theme.text : props.theme.dim}>❯ </text>

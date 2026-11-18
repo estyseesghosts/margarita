@@ -12,6 +12,7 @@ import type {
 } from '@opencode/client';
 
 import type { AgentDescriptor } from '../domain/agent-cycle.ts';
+import { type Attachment, attachmentFromBase64 } from '../domain/attachment.ts';
 import { isRecord, readTokens } from '../domain/backend-event.ts';
 import type { FileDiff } from '../domain/diff.ts';
 import type { FormField, FormRequest } from '../domain/form.ts';
@@ -130,17 +131,30 @@ export type QueuedInput = Readonly<{
   delivery: 'queue' | 'steer';
   text: string;
   createdAt: number;
+  /** Inline files the queued message carries, so recalling it does not drop them. */
+  attachments?: readonly Attachment[];
 }>;
 
 export function toQueuedInput(item: SessionInboxInfo): QueuedInput {
   const payload: unknown = item.payload;
   const text = isRecord(payload) && typeof payload['text'] === 'string' ? payload['text'] : '';
+  const files = isRecord(payload) && Array.isArray(payload['files']) ? payload['files'] : [];
+  const attachments = files.flatMap((file: unknown, index: number) => {
+    if (!isRecord(file)) return [];
+    const data = file['data'];
+    const mime = file['mime'];
+    if (typeof data !== 'string' || typeof mime !== 'string') return [];
+    const name = typeof file['name'] === 'string' ? file['name'] : '';
+    const attachment = attachmentFromBase64(name, mime, data, `inbox:${item.id}:${index}`);
+    return attachment === undefined ? [] : [attachment];
+  });
   return {
     id: item.id,
     kind: item.type,
     delivery: item.delivery,
     text,
     createdAt: item.time.created,
+    attachments,
   };
 }
 

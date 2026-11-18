@@ -65,6 +65,8 @@ Print mode is always explicit: giving a prompt never silently turns it on.
 | `Ctrl+R` | Search prompt history |
 | `Ctrl+S` | Stash the current draft |
 | `Ctrl+G` | Edit the prompt in `$EDITOR` |
+| Paste an image or image path | Attach it (PNG, JPEG, GIF, WebP, AVIF, PDF) |
+| `Backspace` (empty prompt) | Remove the newest attachment |
 | `Ctrl+J` / `Ctrl+Enter` (or `Alt+Enter`) | Newline / steer the running agent |
 | `Ctrl+T` | Goal and task checklist |
 | `Ctrl+B` | Move running tools to the background |
@@ -72,6 +74,12 @@ Print mode is always explicit: giving a prompt never silently turns it on.
 | `F1` | Help |
 
 Everything is a single key press. There are no chords. Rebind any of them in the config below.
+
+### Attachments
+
+Paste a screenshot from the clipboard, or paste the path of an image/PDF file (quoted paths with spaces work). It appears as a chip above the input, is sent as an inline OpenCode prompt file, and works the same against a local or remote (`--server`) service. `Backspace` on an empty input removes the newest chip. Text pastes, bracketed pastes and multiline code behave as before.
+
+Terminals that cannot deliver clipboard images (for example Windows Terminal pasting a raw bitmap, or a WSL/SSH session) should paste the file path instead; a path that is not a supported file is still inserted as text. Binary data that is not a recognised image is refused rather than decoded into the prompt. Attachments are capped at 20 MB each.
 
 ### Slash commands
 

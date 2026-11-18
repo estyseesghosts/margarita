@@ -51,13 +51,11 @@ export type DiffRange = Readonly<{ from?: string; to?: string }>;
 export type Delivery = 'queue' | 'steer';
 export type PermissionDecision = 'once' | 'always' | 'reject';
 
-/** A file reference: `file://` URI plus the `@mention` range it came from. */
+/** A prompt file: a `file:`/`data:` URI plus the optional `@mention` range it came from. */
 export type PromptFile = Readonly<{
   uri: string;
   name: string;
-  start: number;
-  end: number;
-  text: string;
+  mention?: { start: number; end: number; text: string };
 }>;
 
 export type PromptDraft = Readonly<{
@@ -264,7 +262,7 @@ class OpenCodeBackend implements Backend {
               files: draft.files.map((file) => ({
                 uri: file.uri,
                 name: file.name,
-                mention: { start: file.start, end: file.end, text: file.text },
+                ...(file.mention === undefined ? {} : { mention: file.mention }),
               })),
             }),
       }),

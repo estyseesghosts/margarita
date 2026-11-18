@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { FakeBackend } from '../../test/fake-backend.ts';
 import { BackendError, type BackendErrorKind, type PromptDraft } from '../adapter/backend.ts';
@@ -145,9 +148,7 @@ describe('remote @file resolution (issue #9)', () => {
       {
         uri: 'file:///srv/proj/src/main.ts',
         name: 'src/main.ts',
-        start: 8,
-        end: 20,
-        text: '@src/main.ts',
+        mention: { start: 8, end: 20, text: '@src/main.ts' },
       },
     ]);
     controller.dispose();
@@ -166,9 +167,7 @@ describe('remote @file resolution (issue #9)', () => {
       {
         uri: 'file:///srv/proj/src/main.ts',
         name: '/srv/proj/src/main.ts',
-        start: 8,
-        end: 30,
-        text: '@/srv/proj/src/main.ts',
+        mention: { start: 8, end: 30, text: '@/srv/proj/src/main.ts' },
       },
     ]);
     controller.dispose();
@@ -187,9 +186,7 @@ describe('remote @file resolution (issue #9)', () => {
       {
         uri: 'file:///C:/Users/u/proj/src/main.ts',
         name: 'SRC\\MAIN.TS',
-        start: 8,
-        end: 20,
-        text: '@SRC\\MAIN.TS',
+        mention: { start: 8, end: 20, text: '@SRC\\MAIN.TS' },
       },
     ]);
     controller.dispose();
@@ -2075,6 +2072,150 @@ describe('/compact routes to native session compaction (issue #32)', () => {
 
     expect(backend.calls.filter((call) => call.name === 'compactSession')).toHaveLength(0);
     expect(controller.state.notice?.text).toBe('Open a session first.');
+    controller.dispose();
+  });
+});
+
+const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+const pngData = Buffer.from(pngBytes).toString('base64');
+const asBytes = (value: string): Uint8Array => new TextEncoder().encode(value);
+
+function attachedBackend(): FakeBackend {
+  const backend = new FakeBackend();
+  backend.sessions = [fakeSession('ses_a')];
+  backend.messages = { ses_a: [] };
+  return backend;
+}
+
+describe('image paste and attachments (issue #42)', () => {
+  test('plain and multiline text still paste as text', async () => {
+    const controller = makeController(() => Promise.resolve([]), attachedBackend());
+    await attach(controller, 'ses_a');
+
+    await controller.pasteBytes(asBytes('line one\nline two'));
+
+    expect(controller.state.composer.text).toBe('line one\nline two');
+    expect(controller.state.attachments).toEqual([]);
+  });
+
+  test('binary image data becomes a chip; arbitrary binary is rejected', async () => {
+    const controller = makeController(() => Promise.resolve([]), attachedBackend());
+    await attach(controller, 'ses_a');
+
+    await controller.pasteBytes(pngBytes);
+    expect(controller.state.attachments).toHaveLength(1);
+    expect(controller.state.attachments[0]).toMatchObject({
+      name: 'clipboard.png',
+      mime: 'image/png',
+    });
+    expect(controller.state.composer.text).toBe('');
+
+    await controller.pasteBytes(new Uint8Array([0, 1, 2, 250]));
+    expect(controller.state.attachments).toHaveLength(1);
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.notice?.text).toContain('not text or a supported image');
+    controller.dispose();
+  });
+
+  test('pasting a local image path attaches the file instead of its text', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'marg-attach-'));
+    const controller = makeController(() => Promise.resolve([]), attachedBackend());
+    try {
+      const path = join(directory, 'shot.png');
+      await writeFile(path, pngBytes);
+      await attach(controller, 'ses_a');
+
+      // The controller test platform is posix; Windows temp paths work with forward slashes.
+      await controller.pasteBytes(asBytes(path.replaceAll('\\', '/')));
+
+      expect(controller.state.composer.text).toBe('');
+      expect(controller.state.attachments).toHaveLength(1);
+      expect(controller.state.attachments[0]).toMatchObject({
+        name: 'shot.png',
+        mime: 'image/png',
+      });
+      expect(controller.state.notice?.text).toContain('shot.png attached');
+    } finally {
+      controller.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('an attachment alone can be submitted; it travels inline and clears on success', async () => {
+    const backend = attachedBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+
+    controller.attachImage(pngBytes, 'image/png', 'shot.png');
+    await controller.submit();
+
+    const draft = promptDraft(backend);
+    expect(draft.text).toBe('');
+    expect(draft.files).toEqual([{ uri: `data:image/png;base64,${pngData}`, name: 'shot.png' }]);
+    expect(controller.state.attachments).toEqual([]);
+    controller.dispose();
+  });
+
+  test('Backspace on an empty composer removes the newest attachment', async () => {
+    const controller = makeController(() => Promise.resolve([]), attachedBackend());
+    await attach(controller, 'ses_a');
+    controller.attachImage(pngBytes, 'image/png', 'one.png');
+    controller.attachImage(pngBytes, 'image/png', 'two.png');
+
+    expect(pressKey(controller, { name: 'backspace' })).toBe(true);
+    expect(controller.state.attachments.map((attachment) => attachment.name)).toEqual(['one.png']);
+    expect(pressKey(controller, { name: 'backspace' })).toBe(true);
+    expect(controller.state.attachments).toEqual([]);
+    controller.dispose();
+  });
+
+  test('recalling a queued message restores its attachments', async () => {
+    const backend = attachedBackend();
+    const attachment = {
+      id: 'a1',
+      name: 'shot.png',
+      mime: 'image/png',
+      data: pngData,
+      size: pngBytes.byteLength,
+    };
+    backend.inbox = [
+      {
+        id: 'in_1',
+        kind: 'user',
+        delivery: 'queue',
+        text: 'look at this',
+        createdAt: 1,
+        attachments: [attachment],
+      },
+    ];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+
+    await controller.recallQueuedUp();
+
+    expect(controller.state.composer.text).toBe('look at this');
+    expect(controller.state.attachments.map((entry) => entry.name)).toEqual(['shot.png']);
+    controller.dispose();
+  });
+
+  test('drafts and the stash keep attachments with their text', async () => {
+    const controller = makeController(() => Promise.resolve([]), attachedBackend());
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom('fix this'));
+    controller.attachImage(pngBytes, 'image/png', 'shot.png');
+
+    controller.openOverview();
+    expect(controller.state.attachments).toEqual([]);
+    controller.openSession('ses_a');
+    expect(controller.state.composer.text).toBe('fix this');
+    expect(controller.state.attachments.map((attachment) => attachment.name)).toEqual(['shot.png']);
+
+    controller.toggleStash();
+    expect(controller.state.attachments).toEqual([]);
+    expect(controller.state.composer.text).toBe('');
+    controller.toggleStash();
+    expect(controller.state.composer.text).toBe('fix this');
+    expect(controller.state.attachments.map((attachment) => attachment.name)).toEqual(['shot.png']);
     controller.dispose();
   });
 });

@@ -1,6 +1,7 @@
 import type { PermissionPrompt, QueuedInput, ServerCommand } from '../adapter/backend.ts';
 import type { StreamStatus } from '../adapter/event-pump.ts';
 import type { AgentDescriptor } from '../domain/agent-cycle.ts';
+import type { Attachment } from '../domain/attachment.ts';
 import type { Composer } from '../domain/composer.ts';
 import { emptyComposer } from '../domain/composer.ts';
 import type { DiffScope, FileDiff } from '../domain/diff.ts';
@@ -93,7 +94,12 @@ export type AppState = {
    */
   awaitingSteer: Record<string, string>;
   /** Cancelled queued messages whose text could not be placed yet; restored with Ctrl+S. */
-  recovered: { sessionID: string; inboxID: string; text: string }[];
+  recovered: {
+    sessionID: string;
+    inboxID: string;
+    text: string;
+    attachments?: Attachment[];
+  }[];
   /** True while a permission or form reply is in flight; blocks double submits. */
   answering: boolean;
   /** Index of the focused permission choice in the permission card. */
@@ -120,9 +126,15 @@ export type AppState = {
   /** Group key of the tool group selected for per-group toggle; absent when composer has focus. */
   focusedGroup?: string;
   composer: Composer;
+  /** Image/PDF attachments waiting with the current draft; sent as inline prompt files. */
+  attachments: Attachment[];
   completion?: Completion;
   drafts: Record<string, Composer>;
+  /** Attachments saved with each route's draft. */
+  draftAttachments: Record<string, Attachment[]>;
   stash?: string;
+  /** Attachments saved with the stashed draft. */
+  stashAttachments: Attachment[];
   admitting: boolean;
   overview: {
     focus: 'list' | 'composer';
@@ -176,7 +188,10 @@ export function initialState(directory: string): AppState {
     expandedGroups: {},
     expandedDiffs: {},
     composer: { ...emptyComposer },
+    attachments: [],
     drafts: {},
+    draftAttachments: {},
+    stashAttachments: [],
     admitting: false,
     overview: { focus: 'composer', directory, expanded: {} },
     openedAt: {},

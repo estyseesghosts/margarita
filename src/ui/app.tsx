@@ -73,8 +73,7 @@ export function App(props: AppProps) {
 
   usePaste((event) => {
     if (state.overlay.kind !== 'none') return;
-    const text = new TextDecoder().decode(event.bytes).replace(/\r\n?/g, '\n');
-    controller.activateOverviewComposer(text);
+    void controller.pasteBytes(event.bytes);
   });
 
   const width = () => dimensions().width;

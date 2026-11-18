@@ -19,6 +19,16 @@ import { GoalConflictError, type GoalStore, memoryGoalStore } from '../config/go
 import type { LocalState, SaveResult } from '../config/local-state.ts';
 import { mergeState } from '../config/local-state.ts';
 import { defaultAgent, nextAgent, selectableAgents } from '../domain/agent-cycle.ts';
+import {
+  type Attachment,
+  attachmentLimitBytes,
+  attachmentMimeForName,
+  attachmentPromptFile,
+  detectAttachmentMime,
+  makeAttachment,
+  pastedAttachmentName,
+  splitPastedPaths,
+} from '../domain/attachment.ts';
 import type { BackendEvent } from '../domain/backend-event.ts';
 import { type Composer, composerFrom, emptyComposer, insertText } from '../domain/composer.ts';
 import { type DiffScope, type FileDiff, patchLines, turnStart } from '../domain/diff.ts';
@@ -851,7 +861,7 @@ export class AppController {
       this.setState('focusedGroup', undefined);
       this.setState('permissionChoice', 0);
       this.setState('openedAt', sessionID, this.deps.now());
-      this.writeComposer(this.state.drafts[sessionID] ?? emptyComposer);
+      this.restoreDraft(sessionID);
       if (transcript === undefined) {
         this.setState('transcripts', sessionID, { messages: [], loading: true, stale: false });
       }
@@ -878,7 +888,7 @@ export class AppController {
       this.setState('completion', undefined);
       this.setState('focusedGroup', undefined);
       this.setState('overview', 'directory', directory);
-      this.writeComposer(this.state.drafts[`new:${directory}`] ?? emptyComposer);
+      this.restoreDraft(`new:${directory}`);
     });
     this.loadHistoryFor(directory);
     this.refreshCatalogIfStale(directory);
@@ -898,6 +908,7 @@ export class AppController {
       this.setState('completion', undefined);
       this.setState('focusedGroup', undefined);
       this.writeComposer(this.state.drafts['overview'] ?? emptyComposer);
+      this.setState('attachments', [...(this.state.draftAttachments['overview'] ?? [])]);
       this.setState('overview', 'directory', directory);
       const first = this.overviewRows()[0];
       if (first === undefined) {
@@ -920,7 +931,18 @@ export class AppController {
 
   private saveDraft(): void {
     const key = routeKey(this.state.route);
-    this.setState('drafts', key, { ...this.state.composer });
+    batch(() => {
+      this.setState('drafts', key, { ...this.state.composer });
+      this.setState('draftAttachments', key, [...this.state.attachments]);
+    });
+  }
+
+  /** Restores a route's saved text and its attachments together. */
+  private restoreDraft(key: string): void {
+    batch(() => {
+      this.writeComposer(this.state.drafts[key] ?? emptyComposer);
+      this.setState('attachments', [...(this.state.draftAttachments[key] ?? [])]);
+    });
   }
 
   private selectRow(row: OverviewRow): void {
@@ -972,6 +994,116 @@ export class AppController {
   activateOverviewComposer(text: string): void {
     this.focusOverviewComposer();
     this.setComposer(insertText(this.state.composer, text));
+  }
+
+  /**
+   * One terminal paste. Text is inserted as before, except when the whole paste names local
+   * image/PDF files: those become attachments. Non-text bytes are accepted only when they
+   * carry a known image/PDF signature; arbitrary binary is rejected instead of being decoded
+   * into placeholder characters.
+   */
+  async pasteBytes(bytes: Uint8Array): Promise<void> {
+    const text = decodePastedText(bytes);
+    if (text !== undefined) {
+      if (await this.attachPastedPaths(text)) return;
+      this.activateOverviewComposer(text);
+      return;
+    }
+    const mime = detectAttachmentMime(bytes);
+    if (mime === undefined) {
+      this.showNotice('Pasted data is not text or a supported image.', 'warn');
+      return;
+    }
+    const name = `clipboard.${mime.split('/').at(-1) ?? 'bin'}`;
+    this.attachImage(bytes, mime, name);
+  }
+
+  /** Attaches an image from any source that already decoded it (tests, future clipboards). */
+  attachImage(bytes: Uint8Array, mime: string, name: string): boolean {
+    const result = makeAttachment(name, mime, bytes);
+    if (!result.ok) {
+      this.showNotice(result.error, 'warn');
+      return false;
+    }
+    this.addAttachments([result.attachment], `${name} attached`);
+    return true;
+  }
+
+  /** Removes the most recently attached image; Backspace on an empty composer calls this. */
+  detachLastAttachment(): boolean {
+    const current = this.state.attachments;
+    const last = current.at(-1);
+    if (last === undefined) return false;
+    this.setState(
+      'attachments',
+      current.filter((attachment) => attachment.id !== last.id),
+    );
+    this.showNotice(`${last.name} removed`, 'dim');
+    return true;
+  }
+
+  removeAttachment(id: string): void {
+    this.setState(
+      'attachments',
+      this.state.attachments.filter((attachment) => attachment.id !== id),
+    );
+  }
+
+  private addAttachments(added: readonly Attachment[], notice?: string): void {
+    this.focusOverviewComposer();
+    this.setState('attachments', (current) => [...current, ...added]);
+    if (notice !== undefined) this.showNotice(notice, 'dim');
+  }
+
+  /**
+   * A pasted path (or several) becomes an attachment only when every token names an existing
+   * supported file. Anything else falls through to normal text insertion, so pasting a
+   * sentence or a code path never silently swallows it.
+   */
+  private async attachPastedPaths(text: string): Promise<boolean> {
+    const trimmed = text.trim();
+    if (trimmed === '') return false;
+    const paths = splitPastedPaths(trimmed, this.deps.platform);
+    if (paths.length === 0) return false;
+    const added: Attachment[] = [];
+    for (const path of paths) {
+      const result = await this.readLocalAttachment(path);
+      if (result === undefined) return false;
+      if ('error' in result) {
+        this.showNotice(result.error, 'warn');
+        return true;
+      }
+      added.push(result.attachment);
+    }
+    if (added.length === 0) return false;
+    this.addAttachments(
+      added,
+      added.length === 1
+        ? `${added[0]?.name ?? 'File'} attached`
+        : `${added.length} files attached`,
+    );
+    return true;
+  }
+
+  private async readLocalAttachment(
+    path: string,
+  ): Promise<{ attachment: Attachment } | { error: string } | undefined> {
+    if (path === '' || /^[a-z][a-z0-9+.-]*:\/\//i.test(path)) return undefined;
+    const mime = attachmentMimeForName(path);
+    if (mime === undefined) return undefined;
+    const file = Bun.file(path);
+    if (!(await file.exists())) return undefined;
+    if (file.size > attachmentLimitBytes) {
+      return { error: `${pastedAttachmentName(path)} is larger than 20 MB` };
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = new Uint8Array(await file.arrayBuffer());
+    } catch {
+      return { error: `Could not read ${pastedAttachmentName(path)}` };
+    }
+    const result = makeAttachment(pastedAttachmentName(path), mime, bytes);
+    return result.ok ? { attachment: result.attachment } : { error: result.error };
   }
 
   /** Enter on a row: attach a session, expand/collapse a project, or page in more sessions. */
@@ -1144,23 +1276,29 @@ export class AppController {
 
   toggleStash(): void {
     const text = this.state.composer.text;
-    if (text !== '') {
+    if (text !== '' || this.state.attachments.length > 0) {
       batch(() => {
         this.setState('stash', text);
+        this.setState('stashAttachments', [...this.state.attachments]);
         this.writeComposer(emptyComposer);
+        this.setState('attachments', []);
       });
       this.showNotice('Draft stashed · Ctrl+S to restore', 'dim');
-    } else if (this.state.stash !== undefined) {
-      const stash = this.state.stash;
+    } else if (this.state.stash !== undefined || this.state.stashAttachments.length > 0) {
+      const stash = this.state.stash ?? '';
+      const attachments = this.state.stashAttachments;
       batch(() => {
-        this.writeComposer(composerFrom(stash));
+        this.writeComposer(stash === '' ? emptyComposer : composerFrom(stash));
+        this.setState('attachments', [...attachments]);
         this.setState('stash', undefined);
+        this.setState('stashAttachments', []);
       });
     } else if (this.state.recovered.length > 0) {
       const [next, ...rest] = this.state.recovered;
       if (next === undefined) return;
       batch(() => {
         this.writeComposer(composerFrom(next.text));
+        this.setState('attachments', [...(next.attachments ?? [])]);
         this.setState('recovered', rest);
       });
     }
@@ -1229,7 +1367,7 @@ export class AppController {
   async submit(deliveryOverride?: Delivery): Promise<void> {
     if (this.state.admitting) return;
     const text = this.state.composer.text;
-    if (text.trim() === '') return;
+    if (text.trim() === '' && this.state.attachments.length === 0) return;
     const localName = /^\/(\S+)/.exec(text.trimStart())?.[1];
     const isLocal = localName !== undefined && isLocalCommand(localName);
     if (text.trimStart().startsWith('/')) {
@@ -1263,6 +1401,7 @@ export class AppController {
     const commandNotice =
       'The request may or may not have been delivered (connection problem); check for its effects before resending.';
     const isPromptDelivery = parsed.kind === 'prompt';
+    const sentAttachments = isPromptDelivery ? [...this.state.attachments] : [];
     const admitted = await this.admit(
       text,
       directory,
@@ -1280,7 +1419,7 @@ export class AppController {
               deliveryOverride ?? (running ? this.deps.config.input.enterWhileRunning : undefined);
             await this.deps.backend.prompt(sessionID, {
               text,
-              files: await this.resolveFiles(text, directory),
+              files: await this.promptFiles(text, directory, sentAttachments),
               ...(delivery === undefined ? {} : { delivery }),
             });
             await this.refreshInbox(sessionID);
@@ -1291,6 +1430,7 @@ export class AppController {
         }
       },
       isPromptDelivery ? undefined : commandNotice,
+      sentAttachments,
     );
     if (admitted) {
       if (parsed.kind === 'prompt') {
@@ -1317,13 +1457,14 @@ export class AppController {
     directory: string,
     send: () => Promise<void>,
     transportNotice = 'Delivery unknown (connection problem). Check the transcript before resending.',
+    sentAttachments: readonly Attachment[] = [],
   ): Promise<boolean> {
     this.setState('admitting', true);
     try {
       await send();
       this.debugLog.write('action', { action: 'submit', ok: true });
-      this.rememberPrompt(text, directory);
-      this.clearComposer(text);
+      if (text.trim() !== '') this.rememberPrompt(text, directory);
+      this.clearComposer(text, sentAttachments);
       return true;
     } catch (error) {
       this.debugLog.write('action', {
@@ -1347,19 +1488,41 @@ export class AppController {
     }
   }
 
-  private clearComposer(submitted: string): void {
-    if (this.state.composer.text === submitted) {
-      batch(() => {
+  private clearComposer(submitted: string, sentAttachments: readonly Attachment[] = []): void {
+    const sent = new Set(sentAttachments.map((attachment) => attachment.id));
+    batch(() => {
+      if (this.state.composer.text === submitted) {
         this.writeComposer(emptyComposer);
         this.setState('completion', undefined);
         this.setState('focusedGroup', undefined);
-      });
-    }
+      }
+      // Sent attachments are gone even if the user typed more while the request was in flight.
+      if (sent.size > 0) {
+        this.setState(
+          'attachments',
+          this.state.attachments.filter((attachment) => !sent.has(attachment.id)),
+        );
+      }
+    });
   }
 
   private resolveFiles(text: string, directory: string): Promise<PromptFile[]> {
     if (this.deps.remoteFilesystem === true) return this.resolveRemoteFiles(text, directory);
     return this.resolveLocalFiles(text, directory);
+  }
+
+  /**
+   * Prompt files for a send: `@` mentions resolved for this server, then image/PDF
+   * attachments. Attachments are inline `data:` URIs so a remote server never needs the
+   * local path.
+   */
+  private async promptFiles(
+    text: string,
+    directory: string,
+    attachments: readonly Attachment[] = this.state.attachments,
+  ): Promise<PromptFile[]> {
+    const mentioned = await this.resolveFiles(text, directory);
+    return [...mentioned, ...attachments.map((attachment) => attachmentPromptFile(attachment))];
   }
 
   private async resolveLocalFiles(text: string, directory: string): Promise<PromptFile[]> {
@@ -1374,9 +1537,7 @@ export class AppController {
       files.push({
         uri: pathToFileURL(path).href,
         name: mention.path,
-        start: mention.start,
-        end: mention.end,
-        text: mention.text,
+        mention: { start: mention.start, end: mention.end, text: mention.text },
       });
     }
     this.reportUnresolved(missing);
@@ -1430,9 +1591,7 @@ export class AppController {
       files.push({
         uri: serverFileUri(canonical),
         name: mention.path,
-        start: mention.start,
-        end: mention.end,
-        text: mention.text,
+        mention: { start: mention.start, end: mention.end, text: mention.text },
       });
     }
     this.reportUnresolved(missing, true);
@@ -1480,12 +1639,19 @@ export class AppController {
       this.clearComposer(text);
       this.openSession(session.id);
       this.writeComposer(composerFrom(text));
-      const sent = await this.admit(text, directory, async () => {
-        await this.deps.backend.prompt(session.id, {
-          text,
-          files: await this.resolveFiles(text, directory),
-        });
-      });
+      const sentAttachments = [...this.state.attachments];
+      const sent = await this.admit(
+        text,
+        directory,
+        async () => {
+          await this.deps.backend.prompt(session.id, {
+            text,
+            files: await this.promptFiles(text, directory, sentAttachments),
+          });
+        },
+        undefined,
+        sentAttachments,
+      );
       if (!sent)
         this.showNotice(`Session ${session.id} was created but the prompt was not sent.`, 'error');
     } else {
@@ -1573,13 +1739,20 @@ export class AppController {
     const directory = this.state.sessions[sessionID]?.directory ?? this.deps.cwd;
     this.writeComposer(composerFrom(text));
     const running = this.state.running[sessionID] === true;
-    return this.admit(text, directory, async () => {
-      await this.deps.backend.prompt(sessionID, {
-        text,
-        files: await this.resolveFiles(text, directory),
-        ...(running ? { delivery: this.deps.config.input.enterWhileRunning } : {}),
-      });
-    });
+    const sentAttachments = [...this.state.attachments];
+    return this.admit(
+      text,
+      directory,
+      async () => {
+        await this.deps.backend.prompt(sessionID, {
+          text,
+          files: await this.promptFiles(text, directory, sentAttachments),
+          ...(running ? { delivery: this.deps.config.input.enterWhileRunning } : {}),
+        });
+      },
+      undefined,
+      sentAttachments,
+    );
   }
 
   // ---------------------------------------------------------------- local commands
@@ -1977,18 +2150,33 @@ export class AppController {
     // Restore the full text into the composer, never into a different session's composer.
     const sameSession =
       this.state.route.kind === 'conversation' && this.state.route.sessionID === sessionID;
-    if (sameSession && this.state.composer.text === '' && this.state.completion === undefined) {
+    if (
+      sameSession &&
+      this.state.composer.text === '' &&
+      this.state.attachments.length === 0 &&
+      this.state.completion === undefined
+    ) {
       this.writeComposer(composerFrom(item.text));
+      this.setState('attachments', [...(item.attachments ?? [])]);
       return;
     }
     // Never clobber a draft the user typed during the cancel; park the recalled text instead.
-    if (this.state.stash === undefined) {
+    if (this.state.stash === undefined && this.state.stashAttachments.length === 0) {
       this.setState('stash', item.text);
+      this.setState('stashAttachments', [...(item.attachments ?? [])]);
       this.showNotice('Queued message parked · Ctrl+S to restore', 'dim');
       return;
     }
     // Both slots are busy: keep the text in its own recovery entry, never lost.
-    this.setState('recovered', (list) => [...list, { sessionID, inboxID, text: item.text }]);
+    this.setState('recovered', (list) => [
+      ...list,
+      {
+        sessionID,
+        inboxID,
+        text: item.text,
+        ...(item.attachments === undefined ? {} : { attachments: [...item.attachments] }),
+      },
+    ]);
     this.showNotice(
       'Queued message cancelled and kept aside · clear the composer, then Ctrl+S to restore',
       'warn',
@@ -2939,6 +3127,15 @@ export function mergeLatest(
 export function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/** Strict UTF-8 decode for a paste; undefined means the bytes are not text. */
+function decodePastedText(bytes: Uint8Array): string | undefined {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/\r\n?/g, '\n');
+  } catch {
+    return undefined;
+  }
 }
 
 /** Maps a normalized backend failure onto why a goal read is inconclusive. */

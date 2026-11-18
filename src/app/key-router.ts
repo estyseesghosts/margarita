@@ -335,6 +335,11 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
     case 'linefeed':
       return edit(insertText(composer, '\n'));
     case 'backspace':
+      // An empty composer with attachments drops the newest chip instead of doing nothing.
+      if (composer.text === '' && controller.state.attachments.length > 0) {
+        controller.detachLastAttachment();
+        return true;
+      }
       return edit(deleteBackward(composer));
     case 'delete':
       return edit(deleteForward(composer));
