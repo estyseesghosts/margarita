@@ -1,5 +1,6 @@
+import type { ScrollBoxRenderable } from '@opentui/core';
 import type { Accessor } from 'solid-js';
-import { For, Match, Show, Switch } from 'solid-js';
+import { createEffect, For, Match, Show, Switch } from 'solid-js';
 
 import type { AppController } from '../app/controller.ts';
 import { groupRows, loadMoreRowKey, type OverviewRow } from '../domain/overview-groups.ts';
@@ -20,8 +21,25 @@ export function Overview(props: { controller: AppController; theme: Theme; now: 
   const groups = () => props.controller.groups();
   const selected = (key: string) =>
     state.overview.focus === 'list' && state.overview.selectedRow === key;
+  let box: ScrollBoxRenderable | undefined;
+  /** Keeps the selected row visible; only scrolls when it has moved outside the viewport. */
+  createEffect(() => {
+    const key = state.overview.focus === 'list' ? state.overview.selectedRow : undefined;
+    if (key === undefined || box === undefined) return;
+    const scrollbox = box;
+    scrollbox.afterLayout(() => {
+      scrollbox.scrollChildIntoView(rowID(key), { align: 'nearest' });
+    });
+  });
   return (
-    <scrollbox flexGrow={1} paddingLeft={1} paddingRight={1}>
+    <scrollbox
+      ref={(element: ScrollBoxRenderable) => {
+        box = element;
+      }}
+      flexGrow={1}
+      paddingLeft={1}
+      paddingRight={1}
+    >
       <text fg={props.theme.text} marginBottom={1}>
         <b>Sessions</b>
       </text>
@@ -48,12 +66,16 @@ export function Overview(props: { controller: AppController; theme: Theme; now: 
                         now={props.now}
                         session={sessionRow().session}
                         selected={selected(row.key)}
+                        id={rowID(row.key)}
                       />
                     )}
                   </Match>
                   <Match when={row.kind === 'toggle' ? row : undefined}>
                     {(toggle: Accessor<RowOf<'toggle'>>) => (
-                      <text fg={selected(row.key) ? props.theme.accent : props.theme.dim}>
+                      <text
+                        id={rowID(row.key)}
+                        fg={selected(row.key) ? props.theme.accent : props.theme.dim}
+                      >
                         {`${selected(row.key) ? '  ❯ ' : '    '}${
                           toggle().expanded ? '[Show less]' : `[Show more] ${toggle().hidden}`
                         }`}
@@ -68,7 +90,10 @@ export function Overview(props: { controller: AppController; theme: Theme; now: 
       </For>
       <Show when={!state.sessionsComplete}>
         <text fg={props.theme.dim}>Showing recent sessions only.</text>
-        <text fg={selected(loadMoreRowKey) ? props.theme.accent : props.theme.dim}>
+        <text
+          id={rowID(loadMoreRowKey)}
+          fg={selected(loadMoreRowKey) ? props.theme.accent : props.theme.dim}
+        >
           {`${selected(loadMoreRowKey) ? '  ❯ ' : '    '}${
             state.sessionsLoading
               ? '[Loading more sessions…]'
@@ -93,12 +118,17 @@ export function Overview(props: { controller: AppController; theme: Theme; now: 
   );
 }
 
+function rowID(key: string): string {
+  return `overview-row:${key}`;
+}
+
 function SessionLine(props: {
   controller: AppController;
   theme: Theme;
   now: number;
   session: SessionSummary;
   selected: boolean;
+  id: string;
 }) {
   const execution = () => props.controller.executionOf(props.session.id);
   const tasks = () => {
@@ -111,7 +141,7 @@ function SessionLine(props: {
     execution().state === 'waiting' ||
     (execution().state === 'idle' && props.session.outcome === 'failed');
   return (
-    <box flexDirection="row">
+    <box id={props.id} flexDirection="row" flexShrink={0}>
       <text fg={props.selected ? props.theme.accent : props.theme.dim}>
         {props.selected ? '  ❯ ' : '    '}
       </text>

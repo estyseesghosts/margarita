@@ -251,6 +251,49 @@ describe('app', () => {
     expect(controller.state.route).toMatchObject({ kind: 'conversation', sessionID: 'ses_2' });
   });
 
+  test('overview keeps the selected row visible after 50 down and 50 up presses on a 24-row terminal (issue 6)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = Array.from({ length: 60 }, (_, index) => ({
+      id: `ses_${index}`,
+      projectID: 'p',
+      directory: '/work/kohjoh',
+      title: `Session number ${index}`,
+      createdAt: 0,
+      updatedAt: index,
+      archived: false,
+    }));
+    const { controller, setup } = await mount(backend);
+    controller.openOverview();
+    await settle(setup);
+    const selectedSession = () => {
+      const id = controller.state.overview.selectedRow?.replace('session:', '');
+      return backend.sessions.find((session) => session.id === id);
+    };
+    const expectSelectedVisible = () => {
+      const frame = setup.captureCharFrame();
+      expect(selectedSession()).toBeDefined();
+      expect(frame).toContain(selectedSession()?.title ?? 'no-selection');
+    };
+    // Expand the group once so every session row is selectable.
+    for (let step = 0; step < 6; step += 1) setup.mockInput.pressArrow('down');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    // Clamp to the top row so the 50 downs below stay inside the list.
+    for (let step = 0; step < 61; step += 1) setup.mockInput.pressArrow('up');
+    await settle(setup);
+    expect(controller.state.overview.focus).toBe('list');
+    for (let step = 0; step < 50; step += 1) {
+      setup.mockInput.pressArrow('down');
+      await settle(setup);
+      expectSelectedVisible();
+    }
+    for (let step = 0; step < 50; step += 1) {
+      setup.mockInput.pressArrow('up');
+      await settle(setup);
+      expectSelectedVisible();
+    }
+  });
+
   test('projects collapse to six most recent sessions with inline Show more/less', async () => {
     const backend = new FakeBackend();
     backend.sessions = Array.from({ length: 8 }, (_, index) => ({
