@@ -160,6 +160,8 @@ describe('slash commands', () => {
   test('completion lists matching local then server commands', () => {
     expect(completeCommand('/re', [{ name: 'review' }]).map((entry) => entry.name)).toEqual([
       'resume',
+      'rename',
+      'revert',
       'review',
     ]);
     expect(completeCommand('/re x', [])).toEqual([]);

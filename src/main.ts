@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 
 import { createCliRenderer } from '@opentui/core';
 import { render } from '@opentui/solid';
@@ -13,6 +13,7 @@ import { listProjectFiles } from './app/project-files.ts';
 import { type CliOptions, helpText, parseArgs } from './cli/args.ts';
 import { exitCodes, runPrint } from './cli/print.ts';
 import { loadConfig } from './config/config.ts';
+import { fileGoalStore } from './config/goal-store.ts';
 import { loadState, saveState } from './config/local-state.ts';
 import { appPaths } from './config/paths.ts';
 import { buildKeymap } from './domain/keymap.ts';
@@ -87,6 +88,7 @@ async function run(options: CliOptions): Promise<number> {
     saveLocalState: (state) => saveState(paths.stateFile, state),
     listFiles: (root) => listProjectFiles(root),
     requestExit: () => exit.request?.(),
+    goalStore: fileGoalStore(join(paths.stateDir, 'goals'), () => new Date().toISOString()),
   });
 
   try {

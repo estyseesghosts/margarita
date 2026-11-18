@@ -84,8 +84,12 @@ function SessionLine(props: {
   selected: boolean;
 }) {
   const execution = () => props.controller.executionOf(props.session.id);
+  const tasks = () => {
+    const count = props.controller.planProgress(props.session.id);
+    return count === undefined ? '' : ` · ${count.done}/${count.total} tasks`;
+  };
   const status = () =>
-    `${executionLabel(execution())} · ${formatAge(props.controller.lastUsed(props.session), props.now)}`;
+    `${executionLabel(execution())}${tasks()} · ${formatAge(props.controller.lastUsed(props.session), props.now)}`;
   const attention = () =>
     execution().state === 'waiting' ||
     (execution().state === 'idle' && props.session.outcome === 'failed');

@@ -336,4 +336,98 @@ describe('app', () => {
     expect(transcript?.olderCursor).toBeUndefined();
     expect(transcript?.messages[0]?.id).toBe('m0000');
   });
+  test('goal, plan and Ctrl+T checklist; sync failure stays local', async () => {
+    const backend = backendWithSession();
+    backend.instructionsUnavailable = true;
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    for (const command of ['/goal Hit 30 FPS', '/plan profile; cull; test', '/sync on']) {
+      await setup.mockInput.typeText(command);
+      setup.mockInput.pressEnter();
+      await settle(setup);
+    }
+    expect(controller.state.notice?.text).toBe('Not synced to agent · local plan kept');
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    setup.mockInput.pressKey('t', { ctrl: true });
+    await settle(setup);
+    let frame = setup.captureCharFrame();
+    expect(frame).toContain('Goal: Hit 30 FPS');
+    expect(frame).toContain('Tasks 0/3');
+    expect(frame).toContain('Not synced to agent');
+    setup.mockInput.pressKey(' ');
+    await settle(setup);
+    setup.mockInput.pressKey(' ');
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('[x] profile');
+    expect(frame).toContain('Tasks 1/3');
+    backend.instructionsUnavailable = false;
+    setup.mockInput.pressArrow('down');
+    setup.mockInput.pressKey(' ');
+    await settle(setup);
+    const put = backend.calls.filter((call) => call.name === 'putInstruction').at(-1);
+    expect(String(put?.args[2])).toContain('cull [in progress]');
+  });
+
+  test('agent proposals need acceptance; reject keeps the plan', async () => {
+    const backend = backendWithSession();
+    backend.messages['ses_a']?.push({
+      kind: 'assistant',
+      id: 'm3',
+      createdAt: 4,
+      completedAt: 5,
+      agent: 'build',
+      model: { providerID: 'opencode', modelID: 'longcat' },
+      parts: [{ kind: 'text', text: ['Plan:', '1. Measure', '2. Fix'].join('\n') }],
+    });
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    for (const command of ['/plan keep me', '/plan adopt']) {
+      await setup.mockInput.typeText(command);
+      setup.mockInput.pressEnter();
+      await settle(setup);
+    }
+    expect(setup.captureCharFrame()).toContain('Proposed plan');
+    setup.mockInput.pressKey('r');
+    await settle(setup);
+    expect(controller.goalOf('ses_a')?.plan?.tasks.map((task) => task.title)).toEqual(['keep me']);
+    await setup.mockInput.typeText('/plan adopt');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    setup.mockInput.pressKey('a');
+    await settle(setup);
+    expect(controller.goalOf('ses_a')?.plan?.tasks.map((task) => task.title)).toEqual([
+      'Measure',
+      'Fix',
+    ]);
+  });
+
+  test('/revert stages, Esc restores; /rename and /fork call the server', async () => {
+    const backend = backendWithSession();
+    backend.revertFiles = [
+      { file: 'a.ts', patch: '', additions: 2, deletions: 1, status: 'modified', truncated: false },
+    ];
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    await setup.mockInput.typeText('/revert');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('a.ts  +2 −1');
+    setup.mockInput.pressEscape();
+    await settle(setup);
+    expect(backend.calls.some((call) => call.name === 'clearRevert')).toBe(true);
+    expect(backend.calls.some((call) => call.name === 'commitRevert')).toBe(false);
+    await setup.mockInput.typeText('/rename Faster');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    expect(controller.state.sessions['ses_a']?.title).toBe('Faster');
+    await setup.mockInput.typeText('/fork');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    expect(backend.calls.some((call) => call.name === 'forkSession')).toBe(true);
+    expect(controller.currentSession()?.id).not.toBe('ses_a');
+  });
 });

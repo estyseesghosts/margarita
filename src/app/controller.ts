@@ -14,6 +14,7 @@ import {
 } from '../adapter/backend.ts';
 import type { StreamStatus } from '../adapter/event-pump.ts';
 import type { AppConfig } from '../config/config.ts';
+import { GoalConflictError, type GoalStore, memoryGoalStore } from '../config/goal-store.ts';
 import type { LocalState } from '../config/local-state.ts';
 import { defaultAgent, nextAgent, selectableAgents } from '../domain/agent-cycle.ts';
 import type { BackendEvent } from '../domain/backend-event.ts';
@@ -28,6 +29,26 @@ import {
   type FormRequest,
   startEditor,
 } from '../domain/form.ts';
+import {
+  acceptProposal,
+  addEvidence,
+  emptyGoalPlan,
+  forkGoalPlan,
+  type GoalPlanV1,
+  instructionKey,
+  instructionText,
+  nextTaskState,
+  parseSteps,
+  progress,
+  proposePlan,
+  rejectProposal,
+  setAcceptance,
+  setGoal,
+  setSync,
+  setTaskState,
+  setUserPlan,
+  type TaskState,
+} from '../domain/goal-plan.ts';
 import { formatModelRef, type ModelSelection, sameModel } from '../domain/model-ref.ts';
 import { resolveModel } from '../domain/model-resolution.ts';
 import {
@@ -66,6 +87,8 @@ export type ControllerDeps = Readonly<{
   saveLocalState: (state: LocalState) => Promise<void>;
   listFiles: (root: string) => Promise<string[]>;
   requestExit: () => void;
+  /** Goal/plan sidecar storage; defaults to memory (tests). */
+  goalStore?: GoalStore;
 }>;
 
 const transcriptPageSize = 120;
@@ -91,12 +114,14 @@ export class AppController {
   private fileCache: { root: string; files: string[] } | undefined;
   private disposed = false;
   private persisted: LocalState;
+  private readonly goalStore: GoalStore;
 
   constructor(private readonly deps: ControllerDeps) {
     const [state, setState] = createStore<AppState>(initialState(deps.cwd));
     this.state = state;
     this.setState = setState;
     this.persisted = deps.localState;
+    this.goalStore = deps.goalStore ?? memoryGoalStore();
     setState('recentModels', [...deps.localState.recentModels]);
     this.loadHistoryFor(deps.cwd);
   }
@@ -513,6 +538,7 @@ export class AppController {
     const directory = this.state.sessions[sessionID]?.directory;
     if (directory !== undefined) this.loadHistoryFor(directory);
     void this.track('attach', this.loadConversation(sessionID));
+    void this.loadGoal(sessionID);
   }
 
   /**
@@ -1002,6 +1028,30 @@ export class AppController {
         return;
       case 'queue':
         this.setOverlay({ kind: 'queue', index: 0 });
+        return;
+      case 'goal':
+        await this.goalCommand(args);
+        return;
+      case 'criteria':
+        await this.changeGoal(
+          (doc) => setAcceptance(doc, parseSteps(args), this.isoNow()),
+          'Criteria saved',
+        );
+        return;
+      case 'plan':
+        await this.planCommand(args);
+        return;
+      case 'sync':
+        await this.syncCommand(args);
+        return;
+      case 'rename':
+        await this.renameCurrent(args);
+        return;
+      case 'fork':
+        await this.forkCurrent();
+        return;
+      case 'revert':
+        await this.stageRevert();
         return;
       case 'keys':
       case 'help':
@@ -1499,6 +1549,329 @@ export class AppController {
   }
 
   /** Every background promise ends here: failures become visible notices, never silence. */
+  // ---------------------------------------------------------------- goals & plans
+
+  private isoNow(): string {
+    return new Date(this.deps.now()).toISOString();
+  }
+
+  goalOf(sessionID: string): GoalPlanV1 | undefined {
+    return this.state.goals[sessionID];
+  }
+
+  /** The attached session's plan progress, for the footer and overview. */
+  planProgress(sessionID: string): { done: number; total: number } | undefined {
+    const plan = this.state.goals[sessionID]?.plan;
+    return plan === undefined || plan.tasks.length === 0 ? undefined : progress(plan);
+  }
+
+  private async loadGoal(sessionID: string): Promise<void> {
+    try {
+      const doc = await this.goalStore.load(sessionID);
+      if (doc !== undefined) this.setState('goals', sessionID, doc);
+    } catch (error) {
+      this.showNotice(`Goal file unreadable: ${errorText(error)}`, 'warn');
+    }
+  }
+
+  private requireSession(): SessionSummary | undefined {
+    const session = this.currentSession();
+    if (session === undefined) this.showNotice('Open a session first.', 'warn');
+    return session;
+  }
+
+  /**
+   * Applies an edit and saves with compare-and-swap. If another process saved first, the
+   * same edit is re-applied on top of its version (task IDs keep merges stable), so
+   * nothing is silently lost.
+   */
+  private async changeGoal(
+    change: (doc: GoalPlanV1) => GoalPlanV1,
+    notice?: string,
+    sessionID = this.currentSession()?.id,
+  ): Promise<GoalPlanV1 | undefined> {
+    if (sessionID === undefined) {
+      this.showNotice('Open a session first.', 'warn');
+      return undefined;
+    }
+    const session = this.state.sessions[sessionID];
+    const base =
+      this.state.goals[sessionID] ?? emptyGoalPlan('local', sessionID, session?.projectID ?? '');
+    let saved: GoalPlanV1;
+    try {
+      saved = await this.goalStore.save(change(base));
+    } catch (error) {
+      if (!(error instanceof GoalConflictError)) {
+        this.showNotice(`Goal not saved: ${errorText(error)}`, 'error');
+        return undefined;
+      }
+      try {
+        saved = await this.goalStore.save(change(error.current));
+        notice = `${notice ?? 'Saved'} · merged with a change from another window`;
+      } catch (retry) {
+        this.showNotice(`Goal not saved: ${errorText(retry)}`, 'error');
+        return undefined;
+      }
+    }
+    this.setState('goals', sessionID, saved);
+    if (notice !== undefined) this.showNotice(notice, 'dim');
+    await this.syncInstructions(sessionID);
+    return saved;
+  }
+
+  private async goalCommand(args: string): Promise<void> {
+    if (this.requireSession() === undefined) return;
+    if (args === '') {
+      this.setOverlay({ kind: 'tasks', index: 0 });
+      return;
+    }
+    if (args === 'clear') {
+      await this.changeGoal((doc) => setGoal(doc, '', this.isoNow()), 'Goal cleared');
+      return;
+    }
+    await this.changeGoal((doc) => setGoal(doc, args, this.isoNow()), `Goal set: ${args}`);
+  }
+
+  private async planCommand(args: string): Promise<void> {
+    const session = this.requireSession();
+    if (session === undefined) return;
+    const now = this.isoNow();
+    switch (args) {
+      case '':
+        this.setOverlay({ kind: 'tasks', index: 0 });
+        return;
+      case 'propose': {
+        // A visible, ordinary prompt; the reply is only a proposal until adopted.
+        const goal = this.state.goals[session.id]?.goal?.title;
+        const text = `Propose a short numbered plan${goal === undefined ? '' : ` for this goal: ${goal}`}. Reply with the numbered steps only; do not start working yet.`;
+        this.writeComposer(composerFrom(text));
+        await this.submit();
+        this.showNotice('When the reply arrives, /plan adopt to review it.', 'dim');
+        return;
+      }
+      case 'adopt': {
+        const steps = parseSteps(this.latestAssistantText(session.id));
+        if (steps.length === 0) {
+          this.showNotice('No list found in the latest reply.', 'warn');
+          return;
+        }
+        await this.changeGoal(
+          (doc) => proposePlan(doc, steps, now),
+          'Proposed plan · a accept · r reject',
+        );
+        this.setOverlay({ kind: 'tasks', index: 0 });
+        return;
+      }
+      case 'accept':
+        await this.acceptPlan();
+        return;
+      case 'reject':
+        await this.rejectPlan();
+        return;
+      case 'clear':
+        await this.changeGoal((doc) => {
+          const { plan: _plan, proposal: _proposal, ...rest } = doc;
+          return rest;
+        }, 'Plan cleared');
+        return;
+      default: {
+        const steps = parseSteps(args);
+        await this.changeGoal(
+          (doc) => setUserPlan(doc, steps, now),
+          `Plan saved · ${steps.length} tasks · Ctrl+T`,
+        );
+      }
+    }
+  }
+
+  async acceptPlan(): Promise<void> {
+    const id = this.currentSession()?.id;
+    if (id === undefined || this.state.goals[id]?.proposal === undefined) return;
+    await this.changeGoal((doc) => acceptProposal(doc, this.isoNow()), 'Plan accepted');
+  }
+
+  async rejectPlan(): Promise<void> {
+    const id = this.currentSession()?.id;
+    if (id === undefined || this.state.goals[id]?.proposal === undefined) return;
+    await this.changeGoal(rejectProposal, 'Proposal rejected; plan unchanged');
+  }
+
+  private latestAssistantText(sessionID: string): string {
+    const messages = this.state.transcripts[sessionID]?.messages ?? [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message?.kind !== 'assistant') continue;
+      const text = message.parts
+        .map((part) => (part.kind === 'text' ? part.text : ''))
+        .join('\n')
+        .trim();
+      if (text !== '') return text;
+    }
+    return '';
+  }
+
+  private latestAssistantID(sessionID: string): string | undefined {
+    const messages = this.state.transcripts[sessionID]?.messages ?? [];
+    return messages.findLast((message) => message.kind === 'assistant')?.id;
+  }
+
+  /** Ctrl+T checklist keys: ↑↓ move, Space cycle, b blocked, x cancel, e evidence, a/r proposal. */
+  tasksKey(key: { name: string; text?: string }): void {
+    const overlay = this.state.overlay;
+    const session = this.currentSession();
+    if (overlay.kind !== 'tasks' || session === undefined) return;
+    const doc = this.state.goals[session.id];
+    const tasks = (doc?.proposal ?? doc?.plan)?.tasks ?? [];
+    const task = tasks[overlay.index];
+    const count = tasks.length;
+    const now = this.isoNow();
+    const set = (state: TaskState) =>
+      void this.changeGoal((current) => setTaskState(current, task?.id ?? '', state, now));
+    if (key.name === 'escape' || key.name === 'q') this.closeOverlay();
+    else if (key.name === 'up' && count > 0) {
+      this.setOverlay({ kind: 'tasks', index: (overlay.index - 1 + count) % count });
+    } else if (key.name === 'down' && count > 0) {
+      this.setOverlay({ kind: 'tasks', index: (overlay.index + 1) % count });
+    } else if (doc?.proposal !== undefined) {
+      if (key.text === 'a') void this.acceptPlan();
+      else if (key.text === 'r') void this.rejectPlan();
+    } else if (task === undefined) {
+      return;
+    } else if (key.name === 'space' || key.text === ' ') set(nextTaskState(task.state));
+    else if (key.text === 'b') set(task.state === 'blocked' ? 'todo' : 'blocked');
+    else if (key.text === 'x') set(task.state === 'cancelled' ? 'todo' : 'cancelled');
+    else if (key.text === 'e') {
+      const messageID = this.latestAssistantID(session.id);
+      if (messageID === undefined) {
+        this.showNotice('No agent message to link yet.', 'warn');
+        return;
+      }
+      void this.changeGoal(
+        (current) => addEvidence(current, task.id, { messageID }, now),
+        'Linked the latest agent message as evidence',
+      );
+    }
+  }
+
+  private async syncCommand(args: string): Promise<void> {
+    const session = this.requireSession();
+    if (session === undefined) return;
+    if (args !== 'on' && args !== 'off') {
+      this.showNotice('Usage: /sync on|off', 'warn');
+      return;
+    }
+    const enabled = args === 'on';
+    if (!enabled) {
+      // Turning sync off removes the entry; local data is kept either way.
+      await this.deps.backend.removeInstruction(session.id, instructionKey).catch(() => {});
+      this.setState(
+        'goalSync',
+        produce((sync) => {
+          delete sync[session.id];
+        }),
+      );
+    }
+    await this.changeGoal(
+      (doc) => setSync(doc, enabled),
+      enabled ? 'Goal and plan shared with the agent' : 'No longer shared with the agent',
+    );
+  }
+
+  /** Writes the compact instruction entry when the user opted in; failures stay local. */
+  private async syncInstructions(sessionID: string): Promise<void> {
+    const doc = this.state.goals[sessionID];
+    const sync = doc?.modelInstructionSync;
+    if (doc === undefined || sync?.enabled !== true) return;
+    const text = instructionText(doc);
+    try {
+      if (text === '') await this.deps.backend.removeInstruction(sessionID, sync.key);
+      else await this.deps.backend.putInstruction(sessionID, sync.key, text);
+      this.setState('goalSync', sessionID, { revision: doc.revision });
+    } catch (error) {
+      this.setState('goalSync', sessionID, { revision: doc.revision, error: errorText(error) });
+      this.showNotice('Not synced to agent · local plan kept', 'warn');
+    }
+  }
+
+  // ---------------------------------------------------------------- rename / fork / revert
+
+  private async renameCurrent(title: string): Promise<void> {
+    const session = this.requireSession();
+    if (session === undefined) return;
+    if (title === '') {
+      this.showNotice('Usage: /rename <title>', 'warn');
+      return;
+    }
+    try {
+      await this.deps.backend.renameSession(session.id, title);
+      // The server's session event carries the authoritative title; reflect it now too.
+      this.setState('sessions', session.id, { ...session, title });
+      this.showNotice(`Renamed to ${title}`, 'dim');
+    } catch (error) {
+      this.showNotice(`Rename failed: ${errorText(error)}`, 'error');
+    }
+  }
+
+  private async forkCurrent(): Promise<void> {
+    const session = this.requireSession();
+    if (session === undefined) return;
+    try {
+      const forked = await this.deps.backend.forkSession(session.id);
+      this.setState('sessions', forked.id, forked);
+      const doc = this.state.goals[session.id];
+      if (doc !== undefined) {
+        // Copy, never alias: the fork gets its own sidecar file.
+        const copy = forkGoalPlan(doc, forked.id);
+        this.setState('goals', forked.id, await this.goalStore.save(copy).catch(() => copy));
+      }
+      this.openSession(forked.id);
+      this.showNotice('Forked into a new session', 'dim');
+    } catch (error) {
+      this.showNotice(`Fork failed: ${errorText(error)}`, 'error');
+    }
+  }
+
+  /** Stages a revert to the last user message and asks before committing. */
+  private async stageRevert(): Promise<void> {
+    const session = this.requireSession();
+    if (session === undefined) return;
+    const messageID = turnStart(this.state.transcripts[session.id]?.messages ?? []);
+    if (messageID === undefined) {
+      this.showNotice('Nothing to revert yet.', 'warn');
+      return;
+    }
+    try {
+      const files = await this.deps.backend.stageRevert(session.id, messageID);
+      this.setOverlay({ kind: 'revert', sessionID: session.id, messageID, files, busy: false });
+    } catch (error) {
+      this.showNotice(`Revert unavailable: ${errorText(error)}`, 'error');
+    }
+  }
+
+  /** Enter/y commits the staged revert; Esc/n restores the files. */
+  revertKey(key: { name: string; text?: string }): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'revert' || overlay.busy) return;
+    const confirm = key.name === 'return' || key.text === 'y';
+    const cancel = key.name === 'escape' || key.text === 'n';
+    if (!confirm && !cancel) return;
+    this.setOverlay({ ...overlay, busy: true });
+    const work = confirm
+      ? this.deps.backend.commitRevert(overlay.sessionID)
+      : this.deps.backend.clearRevert(overlay.sessionID);
+    void work.then(
+      () => {
+        this.closeOverlay();
+        this.showNotice(confirm ? 'Reverted' : 'Revert cancelled; files restored', 'dim');
+        if (confirm) void this.track('refresh', this.loadConversation(overlay.sessionID));
+      },
+      (error: unknown) => {
+        this.setOverlay({ ...overlay, busy: false });
+        this.showNotice(`Revert failed: ${errorText(error)}`, 'error');
+      },
+    );
+  }
+
   private async track(label: string, work: Promise<unknown>): Promise<void> {
     try {
       await work;

@@ -12,6 +12,7 @@ import {
   type FormRequest,
   visibleFields,
 } from '../domain/form.ts';
+import { type Goal, progress, type TaskState } from '../domain/goal-plan.ts';
 import { actionIDs, formatBinding, type Keymap } from '../domain/keymap.ts';
 import { formatModelRef } from '../domain/model-ref.ts';
 import type { SessionSummary, TokenUsage } from '../domain/session.ts';
@@ -165,6 +166,33 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
             </box>
           );
         }}
+      </Match>
+      <Match when={state.overlay.kind === 'tasks' ? state.overlay : undefined}>
+        {(overlay: Accessor<Extract<Overlay, { kind: 'tasks' }>>) => (
+          <TasksDialog
+            controller={props.controller}
+            theme={props.theme}
+            index={overlay().index}
+            frame={frame}
+          />
+        )}
+      </Match>
+      <Match when={state.overlay.kind === 'revert' ? state.overlay : undefined}>
+        {(overlay: Accessor<Extract<Overlay, { kind: 'revert' }>>) => (
+          <box {...frame('Revert · Enter confirm · Esc restore files')}>
+            <text fg={props.theme.text}>
+              {`Undo changes since your last message: ${diffSummary(overlay().files)}`}
+            </text>
+            <For each={overlay().files.slice(0, visibleRows)}>
+              {(file) => (
+                <text fg={dim()}>{`  ${file.file}  +${file.additions} −${file.deletions}`}</text>
+              )}
+            </For>
+            <Show when={overlay().busy}>
+              <text fg={dim()}>Working…</text>
+            </Show>
+          </box>
+        )}
       </Match>
       <Match when={state.overlay.kind === 'diff' ? state.overlay : undefined}>
         {(overlay: Accessor<DiffOverlay>) => (
@@ -357,6 +385,86 @@ function FormDialog(props: { form: FormRequest; editor: FormEditor; theme: Theme
       <text fg={props.theme.dim}>
         Enter next · Shift+Tab back · ↑↓ choose · Space toggle · Esc later · Ctrl+X decline
       </text>
+    </box>
+  );
+}
+
+const taskMarks: Record<TaskState, string> = {
+  todo: '[ ]',
+  'in-progress': '[~]',
+  blocked: '[!]',
+  done: '[x]',
+  cancelled: '[-]',
+};
+
+function TasksDialog(props: {
+  controller: AppController;
+  theme: Theme;
+  index: number;
+  frame: (title: string) => Record<string, unknown>;
+}) {
+  const doc = () => {
+    const session = props.controller.currentSession();
+    return session === undefined ? undefined : props.controller.goalOf(session.id);
+  };
+  const shown = () => doc()?.proposal ?? doc()?.plan;
+  const proposal = () => doc()?.proposal !== undefined;
+  const title = () => {
+    if (proposal()) return 'Proposed plan · a accept · r reject · Esc close';
+    const count = progress(shown());
+    return `Tasks ${count.done}/${count.total} · Space state · b blocked · x cancel · e evidence`;
+  };
+  const syncLine = () => {
+    const current = doc();
+    const session = props.controller.currentSession();
+    if (current?.modelInstructionSync?.enabled !== true || session === undefined) {
+      return 'Local plan · /sync on to share with the agent';
+    }
+    const result = props.controller.state.goalSync[session.id];
+    if (result === undefined) return 'Shared with the agent · not yet confirmed';
+    if (result.error !== undefined) return `Not synced to agent: ${result.error}`;
+    return `Shared with the agent · revision ${result.revision}`;
+  };
+  return (
+    <box {...props.frame(title())}>
+      <Show when={doc()?.goal}>
+        {(goal: Accessor<Goal>) => (
+          <box flexDirection="column">
+            <text fg={props.theme.accentLight}>{`Goal: ${goal().title}`}</text>
+            <For each={goal().acceptance}>
+              {(criterion) => <text fg={props.theme.dim}>{`  ✓ ${criterion}`}</text>}
+            </For>
+          </box>
+        )}
+      </Show>
+      <Show
+        when={(shown()?.tasks.length ?? 0) > 0}
+        fallback={
+          <text fg={props.theme.dim}>No plan. /plan step one; step two · or /plan propose</text>
+        }
+      >
+        <For each={shown()?.tasks ?? []}>
+          {(task, index) => {
+            const selected = () => index() === props.index;
+            return (
+              <text
+                fg={
+                  selected()
+                    ? props.theme.accent
+                    : task.state === 'done' || task.state === 'cancelled'
+                      ? props.theme.dim
+                      : task.state === 'blocked'
+                        ? props.theme.warn
+                        : props.theme.text
+                }
+              >
+                {`${selected() ? '❯' : ' '} ${taskMarks[task.state]} ${task.title}${task.evidence.length > 0 ? ` · ${task.evidence.length} evidence` : ''}`}
+              </text>
+            );
+          }}
+        </For>
+      </Show>
+      <text fg={props.theme.dim}>{syncLine()}</text>
     </box>
   );
 }

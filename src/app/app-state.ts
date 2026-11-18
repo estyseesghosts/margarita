@@ -5,6 +5,7 @@ import type { Composer } from '../domain/composer.ts';
 import { emptyComposer } from '../domain/composer.ts';
 import type { DiffScope, FileDiff } from '../domain/diff.ts';
 import type { FormEditor, FormRequest } from '../domain/form.ts';
+import type { GoalPlanV1 } from '../domain/goal-plan.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
 import type { PromptHistory } from '../domain/prompt-history.ts';
@@ -31,6 +32,8 @@ export type Overlay =
   | { kind: 'model-picker'; query: string; index: number }
   | { kind: 'history-search'; query: string; before: number }
   | { kind: 'form'; sessionID: string; editor: FormEditor }
+  | { kind: 'tasks'; index: number }
+  | { kind: 'revert'; sessionID: string; messageID: string; files: FileDiff[]; busy: boolean }
   | DiffOverlay;
 
 /** Read-only viewer over server-reported `session.diff` results. */
@@ -74,6 +77,10 @@ export type AppState = {
   running: Record<string, boolean>;
   permissions: Record<string, PermissionPrompt[]>;
   forms: Record<string, FormRequest[]>;
+  /** Goal/plan sidecar per session; absent until loaded. */
+  goals: Record<string, GoalPlanV1>;
+  /** Last instruction-sync outcome per session (not persisted). */
+  goalSync: Record<string, { revision: number; error?: string }>;
   /** True while a permission or form reply is in flight; blocks double submits. */
   answering: boolean;
   /** Index of the focused permission choice in the permission card. */
@@ -122,6 +129,8 @@ export function initialState(directory: string): AppState {
     running: {},
     permissions: {},
     forms: {},
+    goals: {},
+    goalSync: {},
     answering: false,
     permissionChoice: 0,
     transcripts: {},

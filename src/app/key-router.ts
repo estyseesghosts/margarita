@@ -115,7 +115,8 @@ function runAction(controller: AppController, action: ActionID, services: Router
       services.redraw();
       return true;
     case 'tasks.toggle':
-      controller.setOverlay({ kind: 'queue', index: 0 });
+      if (controller.currentSession() !== undefined)
+        controller.setOverlay({ kind: 'tasks', index: 0 });
       return true;
     case 'help.show':
       controller.setOverlay({ kind: 'help' });
@@ -129,6 +130,18 @@ function routeOverlay(controller: AppController, key: KeyInput): boolean {
   const overlay = controller.state.overlay;
   if (overlay.kind === 'diff' && !(key.ctrl && key.name === 'c')) {
     controller.diffKey(key);
+    return true;
+  }
+  if (overlay.kind === 'tasks' && key.ctrl && key.name === 't') {
+    controller.closeOverlay();
+    return true;
+  }
+  if (overlay.kind === 'tasks' && !(key.ctrl && key.name === 'c')) {
+    controller.tasksKey(key);
+    return true;
+  }
+  if (overlay.kind === 'revert') {
+    controller.revertKey(key.ctrl && key.name === 'c' ? { name: 'escape' } : key);
     return true;
   }
   if (overlay.kind === 'form' && !(key.ctrl && key.name === 'c')) {
