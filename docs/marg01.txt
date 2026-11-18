@@ -1,0 +1,721 @@
+ ▐▛███▛█   Claude Code v2.1.317
+▝▜██████▀  Sonnet 5.5 · Claude Pro
+ ▝▝   ▝▝   ~\workdir\opencode-stuff\margarita
+
+
+❯ you're working on margarita. read docs/marg00.txt to see where the last agent 
+  left off. make sure docs/22 and docs/23 were implemented. i'll do live        
+  behaviour testing myself.                                                     
+
+  Searched for 2 patterns, read 3 files, ran 2 shell commands (ctrl+o to expand)
+
+● Docs 22 and 23 aren't implemented. The last agent only listed them as "next".
+  I'm reading the transcript view and the style guide, then I'll build both.
+
+  Ran 6 shell commands (ctrl+o to expand)
+
+● Status: I've read the transcript view and the OpenTUI markdown and diff
+  renderables. I'm writing the pure domain helpers now: edit-to-diff, and a
+  sticky-prompt picker.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now map the server diff, then build the UI.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Nothing ran, because the shell rejected the script. I'll write the files with
+  the Write tool instead.
+
+  Listed 1 directory (ctrl+o to expand)
+
+● Write(src\ui\syntax.ts)
+  ⎿  Wrote 43 lines to src\ui\syntax.ts
+       1 import { SyntaxStyle } from '@opentui/core';
+       2 
+       3 import type { Theme } from './theme.ts';
+       4 
+       5 type Owner = Parameters<typeof SyntaxStyle.fromStyles>[1];
+       6 
+       7 /** Markdown and code colours derived from the semantic theme. *
+         /
+       8 export function createSyntaxStyle(theme: Theme, owner: Owner): S
+         yntaxStyle {
+     … +35 lines (ctrl+o to expand)
+
+● Write(src\domain\sticky-prompt.ts)
+  ⎿  Added 6 lines, removed 7 lines
+       2  export type PromptPosition = Readonly<{ key: string; text: stri
+          ng; top: number; bottom: number }>;
+       3  
+       4  /**
+       5 - * The prompt shown as the sticky header: the latest one whose 
+         -row has scrolled                                               
+       6 - * above the viewport. A prompt that is visible (or below) is n
+         -ever duplicated.                                               
+       7 - * `positions` must be in conversation order; tops are relative
+         - to the viewport.                                              
+       5 + * The prompt shown as the sticky header: the latest one whose 
+         +rows have all                                                  
+       6 + * scrolled above the viewport. A prompt that is visible (even 
+         +partly) or below                                               
+       7 + * is never duplicated. `positions` must be in conversation ord
+         +er.                                                            
+       8   */
+       9  export function stickyPrompt(positions: readonly PromptPosition
+          []): PromptPosition | undefined {
+      10    let found: PromptPosition | undefined;
+      11    for (const position of positions) {
+      12 -    if (position.top < 0) found = position;                    
+      12 +    if (position.bottom <= 0) found = position;                
+      13      else break;
+      14    }
+      15    return found;
+     ...
+      18  /** One line: first line of the prompt, cut to `width` with an 
+          ellipsis. */
+      19  export function truncatePrompt(text: string, width: number): st
+          ring {
+      20    const first = (text.split('\n')[0] ?? '').trim();
+      21 -  const multi = text.includes('\n');                           
+      21 +  const full = text.trim().includes('\n') ? `${first} …` : firs
+         +t;                                                             
+      22    const room = Math.max(1, width);
+      23 -  const full = multi ? `${first} …` : first;                   
+      24 -  return full.length <= room ? full : `${full.slice(0, Math.max
+         -(0, room - 1))}…`;                                             
+      23 +  return full.length <= room ? full : `${full.slice(0, room - 1
+         +)}…`;                                                          
+      24  }
+
+● Write(src\domain\sticky-prompt.test.ts)
+  ⎿  Wrote 34 lines to src\domain\sticky-prompt.test.ts
+       1 import { describe, expect, test } from 'bun:test';
+       2 
+       3 import { stickyPrompt, truncatePrompt } from './sticky-prompt.ts
+         ';
+       4 
+       5 const at = (key: string, top: number, bottom = top + 1) => ({ ke
+         y, text: key, top, bottom });
+       6 
+       7 describe('stickyPrompt', () => {
+       8   test('is the latest prompt that has scrolled fully above the v
+     … +27 lines (ctrl+o to expand)
+
+● Write(src\domain\edit-diff.test.ts)
+  ⎿  Wrote 41 lines to src\domain\edit-diff.test.ts
+       1 import { describe, expect, test } from 'bun:test';
+       2 
+       3 import { diffCounts, editDiff, filetypeOf } from './edit-diff.ts
+         ';
+       4 import type { ToolCall } from './transcript.ts';
+       5 
+       6 const call = (name: string, input: Record<string, unknown>, diff
+         ?: string): ToolCall => ({
+       7   id: 't',
+       8   name,
+     … +33 lines (ctrl+o to expand)
+
+  Made 1 scratchpad edit +144, ran 2 shell commands (ctrl+o to expand)
+
+● Msys Python can't see that path, so I'll run the script with PowerShell.
+
+  Searched for 2 patterns, ran 3 shell commands (ctrl+o to expand)
+
+● renderer.nativeScene has a resourceContext, so I'll use that as the owner.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Verify passes. I'll add a render test to confirm the markdown, diff gutter and
+  sticky header actually draw.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Markdown and the diff gutter render. My sticky assertion was wrong: at the
+  bottom the latest prompt is still visible, so no header is expected. I'll test
+  after paging up instead.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● My Python escaping turned \n into a real newline in the test file. I'll fix
+  that line with Edit.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Update(src\ui\app.test.tsx)
+  ⎿  Added 1 line, removed 2 lines
+      541      await settle(setup);
+      542      const middle = setup.captureCharFrame();
+      543      if (process.env['DUMP'] !== undefined) console.log(middle)
+           ;
+      544 -    const header = /^ ❯ question number (\d)/.exec(middle.spli
+          -t('                                                           
+      545 -')[0] ?? '');                                                 
+      544 +    const header = /^ ❯ question number (\d)/.exec(middle.spli
+          +t('\n')[0] ?? '');                                            
+      545      expect(header).not.toBeNull();
+      546      // The header names a prompt that is not also in the viewp
+           ort body.
+      547      expect(middle.split(`question number ${header?.[1]}`).leng
+           th).toBe(2);
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The sticky header works: it shows prompt 3 while prompt 4 is in view. The
+  PAGE_UP key name got typed into the composer as text, so I'll check how other
+  tests send page-up.
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+● The lint warnings say to move the helpers to module scope. I'll do that.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Docs 22 and 23 weren't implemented. The last agent only listed them as "next".
+  I've built both, and bun run verify passes with 175 tests and 1 skipped.
+
+  docs/22, sticky prompt header
+  - A one-row header overlays the top of the transcript. It shows the latest
+    prompt whose rows have scrolled fully above the viewport.
+  - It disappears once that prompt is visible, even partly, so it never
+    duplicates a prompt in view.
+  - The row is an overlay, so content doesn't jump when it switches.
+  - Long prompts are cut with … and multi-line prompts are marked, without
+    changing the message in scrollback.
+  - The logic is in src/domain/sticky-prompt.ts. It's wired into
+    src/ui/transcript-view.tsx through scroll-change and layout hooks.
+
+  docs/23, rendering
+  - Markdown: assistant text is now rendered as Markdown (headings, lists,
+    tables and highlighted code fences). The colours come from the theme through
+    the new src/ui/syntax.ts.
+  - Edit and write diffs: these now show as a diff with line numbers, red and
+    green row backgrounds, and a +N −N summary.
+    - The diff is the server's own when state.metadata.diff is present, which
+      gives real file line numbers.
+    - Otherwise it is built from the old and new text and numbered from 1. I
+      couldn't confirm what the real server sends, so that fallback may be what
+      you see.
+    - Added addedBg and removedBg to all themes. The helpers are in
+      src/domain/edit-diff.ts.
+  - Tool grouping: the collapsed tool grouping from the doc was already there
+    from earlier milestones, so I left it alone.
+
+  For your live testing
+  - In the test environment, tree-sitter code highlighting fails and falls back
+    to plain text. Markdown and diffs still render, but I couldn't check syntax
+    colours. Look at those first, especially in the packaged dist binary.
+  - Sticky-header changes are driven by scroll events and layout. I checked
+    page-up in tests, but not mouse-wheel scrolling or a streaming response.
+
+  Nothing is committed.
+
+✻ Cooked for 3m 38s · done 2:32 AM
+❯ sticky prompts look right, but tool calls are definitely not grouped. [Image  
+  #1] [Image #2] [Image #3] look at what marg looks like, and look at what i    
+  want it to look like.                                                         
+  ⎿  [Image #1]
+  ⎿  [Image #2]
+  ⎿  [Image #3]
+
+  Searched for 1 pattern, ran 4 shell commands (ctrl+o to expand)
+
+● Two old tests assert the previous wording and the old rule that a lone call
+  isn't grouped. I'm updating them.
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+● Tool calls now group the way your screenshots show, and bun run verify passes
+  (175 tests). I haven't looked at it in a live terminal.
+
+  Why marg wasn't grouping:
+  - Shell commands were never folded.
+  - Your server names its shell tool execute, which marg didn't recognise, so
+    those calls showed as a bare execute row.
+  - A single call was never grouped.
+
+  What changed:
+  - Grouping: consecutive read, search, web and shell calls now fold into one
+    dim line. A lone call folds too.
+  - Wording: the summaries are now Read 2 files, Searched for 1 pattern, Ran 2 
+    shell commands. A mix reads Read 2 files, searched for 1 pattern, ran 3 
+    shell commands.
+  - Group breaks: commentary text between calls still ends a group, as in your
+    screenshot. A failed call is also still shown on its own, expanded.
+  - Edits: these stay individual rows, now headed Update(path) or Write(path).
+    Below that comes Added N lines, removed M lines and the numbered diff.
+  - Expanding: Ctrl+O and per-group expansion still show every call's detail.
+
+  I updated two existing tests that asserted the old summary wording and the old
+  "lone call isn't grouped" rule.
+
+  If your server uses other tool names that still show as bare rows, tell me the
+  names and I'll map them.
+
+✻ Worked for 1m 0s · done 2:35 AM
+
+❯ this doesn't look very grouped to me. [Image #4] when you commit, make sure   
+  you follow ~\workdir\opencode-stuff\agents.md.                                
+  ⎿  [Image #4]
+
+● Each call is its own group, so the calls probably arrive as separate assistant
+  messages and grouping resets per message. I'm checking the fold loop.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Fixed, and verify passes with 176 tests. I'll commit now, following AGENTS.md:
+  the default git identity, no attribution lines, and not adding your untracked
+  docs.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Tool calls that the server splits across separate assistant messages now merge
+  into one group, so your screenshot's six Ran 1 shell command rows plus the
+  search should become Ran 6 shell commands, searched for 1 pattern. Grouping
+  used to reset at every message. I haven't looked at it in a live terminal. bun
+  run verify passes with 176 tests, including a new one for this case.
+
+  The change is committed as terezi jules@foxtails.me, with no attribution line.
+  Your untracked docs/22, docs/23 and docs/marg00.txt are left out.
+
+  Commentary text, user prompts and failed calls still end a group, and Ctrl+O
+  still expands everything.
+
+✻ Cogitated for 30s · done 2:38 AM
+
+❯ sweet. rewrite the readme, make it nice and cute, make sure a future user     
+  knows how to get this program running. set the version number to 0.0.1        
+  instead of 0.1.0. use my github account to open a new repository and push     
+  this public.                                                                  
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Now I'll write the README, bump the version and run verify.
+
+● Write(README.md)
+  ⎿  Added 93 lines, removed 75 lines
+        1 -# OpenCode v2 conversation-first TUI — engineering documentati
+          -on                                                            
+        1 +# 🍹 margarita                                                
+        2  
+        3 -**Status:** implementation specification, not an implementatio
+          -n. **Research snapshot:** 2026-11-18. **Upstream baseline:** O
+          -penCode v2.3.0 (2026-11-13). **Runtime:** Bun / TypeScript. **
+          -Frontend:** OpenTUI + Solid (proposed). **Server:** existing O
+          -penCode v2 background service.                                
+        3 +```                                                           
+        4 + /\_/\                                                        
+        5 +( o.o )   a tiny, calm terminal home for your OpenCode agents 
+        6 + > ^ <                                                        
+        7 +```                                                           
+        8  
+        5 -## Product in one paragraph                                   
+        9 +**margarita** (`marg` for short) is a cozy terminal frontend f
+          +or the [OpenCode](https://opencode.ai) v2 server.             
+       10 +A running agent is a *conversation*, not a tab or a pane: no h
+          +eader bar, no sidebars, no window manager                     
+       11 +inside your window manager. Just you, a prompt, and a tidy tra
+          +nscript.                                                      
+       12  
+        7 -Create a standalone minimal, Claude Code-like terminal fronten
+          -d for the **OpenCode v2** server. A running agent session is a
+          - conversation, not a tab or pane. Pressing **Left** from an em
+          -pty, unfocused composer returns to a lightweight **agent overv
+          -iew** with sessions grouped by **project folder**; that overvi
+          -ew contains its own prompt composer to launch a new session im
+          -mediately. Switching away detaches the *view*, not the executi
+          -ng session. No header bar, no multiplexed terminals, no persis
+          -tent sidebars. Collapsed tool activity by default; expand deta
+          -iled tool calls and available reasoning with `Ctrl+O`. Tiny, s
+          -table footer with **token counts and session USD spend**. `Shi
+          -ft+Tab` cycles **OpenCode agents** with `build` as default. Di
+          -rect single key/modifier shortcuts only; no multi-key `Ctrl+X 
+          -A` chords. Start directly from the shell with `unnamed --provi
+          -der openai --model gpt-6.1-sol --effort high "Prompt"`, subjec
+          -t to actual model/variant availability.                       
+       13 +## ✨ What it does                                            
+       14  
+        9 -## Non-negotiable UX contracts                                
+       15 +- 💬 **Conversation-first.** One chat fills the terminal. Pres
+          +s `Left` on an empty prompt to peek at everything else you hav
+          +e running.                                                    
+       16 +- 🗂️ **Overview of all your sessions**, grouped by project fol
+          +der and sorted by recent activity. Switching away never stops 
+          +an agent, so you can juggle several at once.                  
+       17 +- 🧺 **Quiet transcript.** Reads, searches and shell commands 
+          +fold into one line (`Read 3 files, ran 2 shell commands`). Edi
+          +ts show a real syntax-highlighted diff with line numbers. Fail
+          +ures are never hidden.                                        
+       18 +- 📌 **Sticky prompt header.** Scroll back through a long chat
+          + and the prompt for the part you're reading stays pinned to th
+          +e top.                                                        
+       19 +- 📝 **Markdown that looks like Markdown**: headings, lists, t
+          +ables and highlighted code blocks.                            
+       20 +- 🔍 **`Ctrl+O` for details**: exact tool inputs and outputs, 
+          +timings and any reasoning the model provides.                 
+       21 +- 🎯 **Goals, plans and a task checklist** (`Ctrl+T`) that sur
+          +vive restarts.                                                
+       22 +- 🧮 **A tiny footer** with agent, model, state, tokens and wh
+          +at the session has cost so far.                               
+       23 +- 🔐 **The server stays in charge.** Permissions, agents and h
+          +istory all live in OpenCode; margarita only asks nicely.      
+       24  
+       11 -1. **No header bar** in the conversation view. Session/project
+          - identification belongs in the overview, terminal title (optio
+          -nal), or a terse footer.                                      
+       12 -2. **No default split panes, tab strips, taskbar, file tree, P
+          -TY multiplexer or window manager**. The terminal is already a 
+          -window manager's canvas.                                      
+       13 -3. `Shift+Tab` = cycle selectable OpenCode agents. Default `bu
+          -ild` when available. `plan` is an agent, **not** a transplante
+          -d Claude permission mode.                                     
+       14 -4. **Left** on an *empty composer with cursor at the beginning
+          - and no modal/completion active* returns to overview. It must 
+          -**not** steal ordinary Left-arrow editing.                    
+       15 -5. Overview: grouped by folder; all relevant local projects; n
+          -ewest activity first within groups; status indicator, sessions
+          - in parallel, new-session composer; changing selection does **
+          -not** abort or cancel.                                        
+       16 -6. **Claude-style minimal transcript**: group repetitive tool 
+          -activity; keep errors and permission questions prominent; show
+          - available reasoning only in detailed transcript; never fabric
+          -ate hidden reasoning.                                         
+       17 -7. **Footer:** provider/model/variant, current agent, running/
+          -idle/needs-input state, session token usage and actual session
+          - spend. The number is a session total; do **not** label it con
+          -text-window occupancy unless separately computed.             
+       18 -8. **One CLI executable, positional interactive prompt**; `-p/
+          ---print` is explicit noninteractive mode, never assumed becaus
+          -e a prompt was supplied.                                      
+       19 -9. **Server remains authoritative** for agents, permissions, m
+          -odels, events, session history and mutations. The UI may persi
+          -st local presentation state but may not fork or impersonate a 
+          -backend agent.                                                
+       20 -10. **Multi-client-safe:** the frontend can detach/reattach to
+          - one running backend session. Never accidentally spawn a secon
+          -d agent loop or erase queued input.                           
+       25 +## 🌱 Getting started                                         
+       26  
+       22 -## Reading order                                              
+       27 +### What you need                                             
+       28  
+       24 -| File | Purpose |                                            
+       25 -| --- | --- |                                                 
+       26 -| [docs/01-product-contract.md](docs/01-product-contract.md) |
+          - Behavioral requirements, flows, exclusions |                 
+       27 -| [docs/02-upstream-source-map.md](docs/02-upstream-source-map
+          -.md) | Verified upstream API/source code and caveats |        
+       28 -| [docs/03-system-architecture.md](docs/03-system-architecture
+          -.md) | Packages, boundaries, process lifecycle |              
+       29 -| [docs/04-navigation-overview.md](docs/04-navigation-overview
+          -.md) | Left-arrow overview, project grouping, focus rules |   
+       30 -| [docs/05-conversation-rendering.md](docs/05-conversation-ren
+          -dering.md) | Minimal UI, grouping, detailed transcript, reason
+          -ing |                                                         
+       31 -| [docs/06-composer-and-keymap.md](docs/06-composer-and-keymap
+          -.md) | Single keybindings, collisions, editing behavior |     
+       32 -| [docs/07-cli-contract.md](docs/07-cli-contract.md) | Executa
+          -ble commands, argument validation, exit modes |               
+       33 -| [docs/08-server-adapter.md](docs/08-server-adapter.md) | Ope
+          -nCode v2 endpoint mapping and adapter API |                   
+       34 -| [docs/09-sessions-events.md](docs/09-sessions-events.md) | S
+          -ession/inbox state machines, sync, reconnect |                
+       35 -| [docs/10-models-agents.md](docs/10-models-agents.md) | Agent
+          - cycling, model catalog, variants/effort |                    
+       36 -| [docs/11-goals-plans-tasks.md](docs/11-goals-plans-tasks.md)
+          - | Explicit goals, plans, tasks and durable context |         
+       37 -| [docs/12-permissions-and-safety.md](docs/12-permissions-and-
+          -safety.md) | Permission UX and server enforcement |           
+       38 -| [docs/13-usage-footer.md](docs/13-usage-footer.md) | Tokens/
+          -cost semantics and footer rules |                             
+       39 -| [docs/14-terminal-platform.md](docs/14-terminal-platform.md)
+          - | Cross-platform input, resize, clipboard, accessibility |   
+       40 -| [docs/15-testing-acceptance.md](docs/15-testing-acceptance.m
+          -d) | Deterministic tests, fixtures, regressions |             
+       41 -| [docs/16-delivery-roadmap.md](docs/16-delivery-roadmap.md) |
+          - Milestones, issue-sized work, gates |                        
+       42 -| [docs/17-risks-open-questions.md](docs/17-risks-open-questio
+          -ns.md) | Confirmations and dependency risks |                 
+       43 -| [docs/18-implementation-recipes.md](docs/18-implementation-r
+          -ecipes.md) | TypeScript-oriented reducers, queue/reconnect rec
+          -ipes |                                                        
+       44 -| [docs/19-config-commands.md](docs/19-config-commands.md) | C
+          -onfig schema, slash commands, persistence and key overrides | 
+       45 -| [docs/20-conversation-interactions.md](docs/20-conversation-
+          -interactions.md) | Fine-grained UX interaction behavior |     
+       46 -| [adr/0001-through-0005.md](adr/0001-through-0005.md) | Archi
+          -tecture decision records |                                    
+       47 -| [checklists/upstream-verification.md](checklists/upstream-ve
+          -rification.md) | Upstream contract probes before coding |     
+       48 -| [checklists/done-criteria.md](checklists/done-criteria.md) |
+          - Release-level checks |                                       
+       29 +- [Bun](https://bun.sh) **1.4.4** (see `.bun-version`)        
+       30 +- A running **OpenCode v2.3** service. margarita finds the one
+          + registered on your machine and connects to it **read-only**: 
+          +it never starts, stops or reconfigures your service (unless yo
+          +u pass `--start-server` and none is registered).              
+       31  
+       50 -## Source of truth / citation policy                          
+       32 +### Option A: run from source                                 
+       33  
+       52 -Official public OpenCode v2 docs and **tagged** v2.3.0 source 
+          -files are cited inline, not unverified claims about an API. Cl
+          -aude Code docs are cited only to explain desired UX inspiratio
+          -n. UX requirements invented by this project are marked **desig
+          -n decision**. Anything relying on undocumented behavior is lab
+          -eled **verification required**. Do not treat code fragments in
+          - these documents as compiled, tested SDK examples: they are ad
+          -apter sketches until a lockfile is generated and `bun run type
+          -check` succeeds against the pinned SDK.                       
+       34 +```sh                                                         
+       35 +git clone https://github.com/estyseesghosts/margarita.git     
+       36 +cd margarita                                                  
+       37 +bun install                                                   
+       38 +bun run start            # same as `marg`                     
+       39 +bun run start "fix the flaky test"                            
+       40 +```                                                           
+       41  
+       54 -Use [docs/02-upstream-source-map.md](docs/02-upstream-source-m
+          -ap.md) as the first stop whenever OpenCode changes versions.  
+       42 +Want a real `marg` command? `bun link` registers it straight f
+          +rom source.                                                   
+       43  
+       56 -## First sprint                                               
+       44 +### Option B: build one self-contained executable             
+       45  
+       58 -Create the workspace and a tiny `connect → list sessions → cre
+          -ate session → prompt → stream assistant → detach to overview →
+          - reattach` vertical slice. Use OpenCode's **network client** `
+          -@opencode/client`, not the embedded `@opencode/sdk`. Use `Serv
+          -ice.ensure()` to discover or start the background service. Ren
+          -der real server messages and actual usage data before polishin
+          -g styling.                                                    
+       59 -                                                              
+       60 -## Running margarita                                          
+       61 -                                                              
+       62 -Requires Bun (see `.bun-version`) and an OpenCode v2.3 service
+          - that is already running. Margarita discovers the registered l
+          -ocal service read-only; it never starts, stops or reconfigures
+          - it unless you pass `--start-server` (and only when no service
+          - is registered).                                              
+       63 -                                                              
+       64 -The command is `marg`. Build a self-contained executable (Bun 
+          -runtime and OpenTUI's native library embedded) and put it on y
+          -our PATH:                                                     
+       65 -                                                              
+       46  ```sh
+       47  bun install
+       68 -bun run build                       # → dist/marg.exe (dist/ma
+          -rg elsewhere)                                                 
+       69 -bun run build bun-linux-x64         # cross-compile for anothe
+          -r target                                                      
+       48 +bun run build                  # → dist/marg.exe  (dist/marg o
+          +n macOS and Linux)                                            
+       49 +bun run build bun-linux-x64    # cross-compile for another tar
+          +get                                                           
+       50  ```
+       51  
+       72 -Copy `dist/marg.exe` into any directory on PATH (for example `
+          -%USERPROFILE%\.local\bin`). Alternatively `bun link` registers
+          - `marg` from source.                                          
+       52 +The result bundles the Bun runtime and OpenTUI's native librar
+          +y, so you can copy it anywhere on your `PATH`                 
+       53 +(for example `%USERPROFILE%\.local\bin` on Windows or `~/.loca
+          +l/bin` elsewhere). More in [ADR-0006](adr/0006-packaging.md). 
+       54  
+       55 +## 🧭 Using it                                                
+       56 +                                                              
+       57  ```sh
+       75 -marg                                # new session in the curre
+          -nt directory (Left → overview)                                
+       76 -marg "fix the flaky test"           # new session with that pr
+          -ompt                                                          
+       77 -marg --continue                     # latest session in this d
+          -irectory                                                      
+       78 -marg --resume                       # session overview        
+       79 -marg --resume ses_123               # exact session           
+       80 -marg -p -m opencode/longcat-2.5-free "summarize README.md"   #
+          - print mode                                                   
+       58 +marg                                  # new session in this di
+          +rectory                                                       
+       59 +marg "fix the flaky test"             # ...starting with a pro
+          +mpt                                                           
+       60 +marg --continue                       # pick up the latest ses
+          +sion here                                                     
+       61 +marg --resume                         # open the session overv
+          +iew                                                           
+       62 +marg --resume ses_123                 # jump to an exact sessi
+          +on                                                            
+       63 +marg -p -m opencode/longcat-2.5-free "summarize README.md"   #
+          + print mode (no TUI)                                          
+       64  marg --help
+       65  ```
+       66  
+       84 -From a checkout, `bun run start …` is equivalent.             
+       67 +Print mode is always explicit: giving a prompt never silently 
+          +turns it on.                                                  
+       68  
+       86 -The overview lists sessions by project, most recently used fir
+          -st, six per project; `[Show more]` expands the rest inline.   
+       69 +### ⌨️ Keys                                                   
+       70  
+       88 -Packaging rationale: [ADR-0006](adr/0006-packaging.md).       
+       71 +| Key | Does |                                                
+       72 +| --- | --- |                                                 
+       73 +| `Left` (empty prompt) | Open the overview |                 
+       74 +| `Shift+Tab` | Cycle agents (`build` ↔ `plan`) |             
+       75 +| `Alt+P` / `F2` | Pick a model / use the recent one |        
+       76 +| `Ctrl+O` | Toggle detailed transcript |                     
+       77 +| `Ctrl+R` | Search prompt history |                          
+       78 +| `Ctrl+S` | Stash the current draft |                        
+       79 +| `Ctrl+G` | Edit the prompt in `$EDITOR` |                   
+       80 +| `Ctrl+J` / `Alt+Enter` | Newline / steer the running agent |
+       81 +| `Ctrl+T` | Goal and task checklist |                        
+       82 +| `Ctrl+B` | Move running tools to the background |           
+       83 +| `Ctrl+C` | Interrupt, clear, then exit |                    
+       84 +| `F1` | Help |                                               
+       85  
+       90 -Keys: `Left` on an empty prompt opens the overview · `Shift+Ta
+          -b` agent · `Alt+P` model · `F2` recent model · `Ctrl+O` detail
+          -s · `Ctrl+R` history search · `Ctrl+S` stash · `Ctrl+G` `$EDIT
+          -OR` · `Ctrl+J` newline · `Alt+Enter` steer · `Ctrl+T` goal and
+          - task checklist · `Ctrl+B` move running tools to the backgroun
+          -d · `Ctrl+C` interrupt/clear/exit · `F1` help. Override in `%L
+          -OCALAPPDATA%\margarita\config.jsonc` (XDG config dir elsewhere
+          -).                                                            
+       86 +Everything is a single key press. There are no chords. Rebind 
+          +any of them in the config below.                              
+       87  
+       92 -Goals and plans: `/goal <title>`, `/criteria a; b`, `/plan ste
+          -p one; step two` (or a pasted list), `/plan propose` asks the 
+          -agent and `/plan adopt` turns its reply into a proposal you ac
+          -cept (`a`) or reject (`r`) in Ctrl+T. Plans are local (`goals/
+          -` under margarita's state directory) until you run `/sync on`,
+          - which writes a short instruction entry the agent sees; `/sync
+          - off` removes it. Session tools: `/rename`, `/fork`, `/revert`
+          - (confirm or restore), `/diff [turn]`, `/export [file]` (full 
+          -chat log as JSON).                                            
+       88 +### 🪄 Slash commands                                         
+       89  
+       94 -Config (`config.jsonc`):                                      
+       90 +`/goal <title>` · `/criteria a; b` · `/plan step one; step two
+          +` · `/plan propose` · `/plan adopt` · `/sync on|off` ·        
+       91 +`/rename` · `/fork` · `/revert` · `/diff [turn]` · `/export [f
+          +ile]`                                                         
+       92  
+       93 +Plans and goals are local (under margarita's state directory) 
+          +until you run `/sync on`, which leaves a short note for the ag
+          +ent.                                                          
+       94 +                                                              
+       95 +### ⚙️ Config                                                 
+       96 +                                                              
+       97 +`%LOCALAPPDATA%\margarita\config.jsonc` on Windows, or your XD
+          +G config directory elsewhere:                                 
+       98 +                                                              
+       99  ```jsonc
+      100  {
+      101    "agents": { "default": "build", "cycle": ["build", "plan"] }
+           ,
+      102    "input": { "enterWhileRunning": "queue" },       // or "stee
+           r"
+      100 -  "keys": { "tasks.toggle": "alt+t" },              // single 
+          -keys only, no chords; see F1 for action IDs                   
+      101 -  "ui": { "theme": "dark", "animation": true, "ascii": false }
+          -  // theme: dark | light | high-contrast                      
+      103 +  "keys": { "tasks.toggle": "alt+t" },              // single 
+          +keys only; F1 lists action IDs                                
+      104 +  "ui": { "theme": "dark", "animation": true, "ascii": false }
+          +  // dark | light | high-contrast                             
+      105  }
+      106  ```
+      107  
+      105 -Environment: `NO_COLOR`, `MARGARITA_NO_ANIMATION=1` (static ac
+          -tivity indicator), `MARGARITA_ASCII=1` (ASCII spinner frames),
+          - `MARGARITA_SERVER_PASSWORD` (for `--server`).                
+      108 +Environment knobs: `NO_COLOR`, `MARGARITA_NO_ANIMATION=1`, `MA
+          +RGARITA_ASCII=1`, and `MARGARITA_SERVER_PASSWORD` (for `--serv
+          +er`).                                                         
+      109  
+      107 -## Development                                                
+      110 +## 🛠️ Development                                             
+      111  
+      109 -- `bun run verify` — format check, oxlint (type-aware), typech
+          -eck, tests.                                                   
+      110 -- `MARGARITA_LIVE=1 bun test test/live-smoke.test.tsx` — read-
+          -only check against your running service.                      
+      111 -- Layers: `src/domain` (pure, tested), `src/adapter` (SDK mapp
+          -ing, event pump), `src/app` (controller, key router), `src/ui`
+          - (OpenTUI/Solid views), `src/cli` (args, print mode).         
+      112 +```sh                                                         
+      113 +bun run verify     # format check + oxlint (type-aware) + type
+          +check + tests                                                 
+      114 +```                                                           
+      115 +                                                              
+      116 +- `MARGARITA_LIVE=1 bun test test/live-smoke.test.tsx` runs a 
+          +read-only check against your running service.                 
+      117 +- Code layout: `src/domain` (pure logic) · `src/adapter` (Open
+          +Code client and events) · `src/app` (controller, keys) · `src/
+          +ui` (OpenTUI + Solid) · `src/cli` (args, print mode).         
+      118 +- Code style lives in the TypeScript guide used across this pr
+          +oject: Bun, strict TS, small modules.                         
+      119 +                                                              
+      120 +### 📚 Design docs                                            
+      121 +                                                              
+      122 +The product spec and decisions live in [`docs/`](docs/) (start
+          + with [01-product-contract](docs/01-product-contract.md)),    
+      123 +[`adr/`](adr/) and [`checklists/`](checklists/). The upstream 
+          +API notes are in                                              
+      124 +[02-upstream-source-map](docs/02-upstream-source-map.md); chec
+          +k them whenever OpenCode changes versions.                    
+      125 +                                                              
+      126 +## 💌 Status                                                  
+      127 +                                                              
+      128 +Early days: version **0.0.1**. It works against OpenCode v2.3.
+          +0, and some terminals (Windows Terminal, Ghostty, tmux)       
+      129 +still want a manual look-over; see [checklists/release-candida
+          +te.md](checklists/release-candidate.md).                      
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Margarita is now public at https://github.com/estyseesghosts/margarita, pushed
+  on master with all 26 commits. bun run verify passed (176 tests) before the
+  push.
+
+  - README: rewritten with a cat banner, a feature list, how to run from source
+    or build marg.exe, a usage, key and config reference, and a development
+    section. Everything the old README said about running it is still in there.
+  - Version: 0.0.1 in package.json and the test fixtures. marg --version reads
+    it from package.json.
+  - Account and commits: the repo is under estyseesghosts, the GitHub account gh
+    was logged into. Commits are authored by terezi jules@foxtails.me with no
+    attribution lines.
+  - What went public: nothing from the claude-code folder or private-gitignore/
+    (your screenshots) was pushed. Your untracked docs/22, docs/23 and
+    docs/marg00.txt stayed local. The full commit history is public, including
+    earlier commits.
+
+  The README clone URL assumes that account name, so it needs changing if you
+  want another owner.
+
+✻ Cogitated for 59s · done 2:40 AM
+
+❯ [Image #5] this looks bad. if we're this tight horizontally, we should        
+  drop/condense the stuff on the right side. the cat should never get squished  
+  like that.                                                                    
+  ⎿  [Image #5]
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● The welcome panel no longer squishes the cat. I haven't looked at it in a live
+  terminal at your window width, though bun run verify passes. It's committed
+  and pushed.
+
+  - Cat: it's now a fixed 7 columns wide and never shrinks.
+  - Right-hand hints: they only appear when the cat, the model and directory
+    lines, and the hints all fit side by side. At your width they're dropped.
+    The agent, model and folder lines stay, and wrap only if the window is very
+    narrow.
+
+  I didn't add a test for the narrow case.
+
+✻ Crunched for 42s · done 2:45 AM
