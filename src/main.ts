@@ -10,13 +10,16 @@ import { connect, ConnectionError, redactUrl } from './adapter/connection.ts';
 import { ServerConnectionManager, serverIDForConnection } from './adapter/server-manager.ts';
 import { AppController, errorText } from './app/controller.ts';
 import { createDebugLog, type DebugLog, noDebugLog } from './app/debug-log.ts';
+import { pairServer } from './app/pairing-service.ts';
 import { listProjectFiles } from './app/project-files.ts';
 import { type CliOptions, helpText, parseArgs } from './cli/args.ts';
 import { exitCodes, runPrint } from './cli/print.ts';
 import { loadConfig } from './config/config.ts';
+import { systemCredentialStore } from './config/credentials.ts';
 import { fileGoalStore } from './config/goal-store.ts';
 import { loadState, saveState } from './config/local-state.ts';
 import { appPaths } from './config/paths.ts';
+import { loadServerProfiles, saveServerProfiles } from './config/server-profiles.ts';
 import { buildKeymap } from './domain/keymap.ts';
 import type { ModelSelection } from './domain/model-ref.ts';
 import { App } from './ui/app.tsx';
@@ -144,6 +147,10 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
 
   const stateLoad = await loadState(paths.stateFile);
   if (stateLoad.warning !== undefined) process.stderr.write(`${stateLoad.warning}\n`);
+  const profileLoad = await loadServerProfiles(paths.serversFile);
+  if (profileLoad.warning !== undefined) process.stderr.write(`${profileLoad.warning}\n`);
+  let profiles = profileLoad.profiles;
+  const credentials = systemCredentialStore(platform, paths.stateDir);
 
   const exit: { request?: () => void } = {};
   const controller = new AppController({
@@ -160,6 +167,24 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     remoteFilesystem,
     requestExit: () => exit.request?.(),
     goalStore: fileGoalStore(join(paths.stateDir, 'goals'), () => new Date().toISOString()),
+    pair: async (request) => {
+      const result = await pairServer(request, {
+        servers,
+        profiles: () => profiles,
+        saveProfiles: async (next) => {
+          const saved = await saveServerProfiles(paths.serversFile, next);
+          profiles = saved;
+          return saved;
+        },
+        credentials,
+        ...(env['MARGARITA_SERVER_PASSWORD'] === undefined
+          ? {}
+          : { password: env['MARGARITA_SERVER_PASSWORD'] }),
+        ...(env['MARGARITA_ALLOW_INSECURE_HTTP'] === '1' ? { allowInsecureHttp: true } : {}),
+        toolOutputChars: configLoad.config.transcript.toolOutputChars,
+      });
+      return { shortname: result.shortname };
+    },
     debugLog,
   });
 

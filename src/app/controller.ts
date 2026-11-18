@@ -73,6 +73,12 @@ import {
   type OverviewRow,
   type ProjectGroup,
 } from '../domain/overview-groups.ts';
+import {
+  PairingError,
+  type PairRequest,
+  parsePairArgs,
+  redactPairingCode,
+} from '../domain/pairing.ts';
 import { directoryKey } from '../domain/path-identity.ts';
 import {
   historyBack,
@@ -140,6 +146,8 @@ export type ControllerDeps = Readonly<{
   writeFile?: (path: string, text: string) => Promise<void>;
   /** Goal/plan sidecar storage; defaults to memory (tests). */
   goalStore?: GoalStore;
+  /** Frontend-local pairing; implemented by main so the controller owns no network setup. */
+  pair?: (request: PairRequest) => Promise<{ shortname: string }>;
   /** Opt-in diagnostics sink (--debug-log); defaults to a silent no-op. */
   debugLog?: DebugLog;
 }>;
@@ -1895,10 +1903,41 @@ export class AppController {
       case 'quit':
         this.deps.requestExit();
         return;
+      case 'pair':
+        await this.pairCommand(args);
+        return;
       case 'server':
         return; // parsed into a server command before reaching here
       default:
         return;
+    }
+  }
+
+  /**
+   * `/pair` is frontend-local: it never enters the agent inbox and never interrupts a
+   * running turn. Codes and tokens are redacted from every message this method emits.
+   */
+  private async pairCommand(args: string): Promise<void> {
+    let request: PairRequest;
+    try {
+      request = parsePairArgs(args);
+    } catch (error) {
+      this.showNotice(
+        error instanceof PairingError ? error.message : 'Invalid /pair arguments.',
+        'warn',
+      );
+      return;
+    }
+    if (this.deps.pair === undefined) {
+      this.showNotice('Pairing is not available in this build.', 'warn');
+      return;
+    }
+    this.showNotice(`Pairing ${request.baseUrl}…`, 'dim');
+    try {
+      const result = await this.deps.pair(request);
+      this.showNotice(`Paired ${result.shortname}.`, 'dim');
+    } catch (error) {
+      this.showNotice(redactPairingCode(errorText(error), request.code), 'error');
     }
   }
 

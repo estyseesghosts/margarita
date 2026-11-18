@@ -25,6 +25,7 @@ export const localCommands = {
   help: 'Show help',
   quit: 'Exit (the session keeps running on the server)',
   server: 'Run a server command explicitly: /server <name> [args]',
+  pair: 'Pair a remote server: /pair <link> [--as name] or /pair --url <url> --as name',
 } as const;
 
 export type LocalCommandName = keyof typeof localCommands;
