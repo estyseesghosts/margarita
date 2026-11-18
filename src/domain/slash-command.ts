@@ -8,6 +8,7 @@ export const localCommands = {
   model: 'Pick or set model: /model [provider/model#variant]',
   effort: 'Set variant for the current model: /effort <variant>',
   transcript: 'Toggle detailed transcript',
+  diff: 'Files changed: /diff (session) or /diff turn (since your last message)',
   usage: 'Show token and spend breakdown',
   interrupt: 'Stop the running turn',
   queue: 'Show queued inputs',

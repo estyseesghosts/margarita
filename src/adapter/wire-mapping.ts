@@ -1,5 +1,6 @@
 import type {
   AgentInfo,
+  FileDiffInfo,
   FormField as WireFormField,
   FormInfo,
   ModelInfo,
@@ -12,6 +13,7 @@ import type {
 
 import type { AgentDescriptor } from '../domain/agent-cycle.ts';
 import { isRecord, readTokens } from '../domain/backend-event.ts';
+import type { FileDiff } from '../domain/diff.ts';
 import type { FormField, FormRequest } from '../domain/form.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
@@ -382,4 +384,16 @@ function toFormField(field: WireFormField): FormField {
     default:
       throw new WireFormatError('Unknown form field type.');
   }
+}
+
+/** File paths are sanitized for display; patches are sanitized per line when rendered. */
+export function toFileDiff(info: FileDiffInfo): FileDiff {
+  return {
+    file: sanitizeTerminalText(info.file),
+    patch: info.patch,
+    additions: info.additions,
+    deletions: info.deletions,
+    status: info.status,
+    truncated: info.more === true,
+  };
 }

@@ -1,6 +1,7 @@
 import type {
   Backend,
   Delivery,
+  DiffRange,
   MessagePage,
   PermissionDecision,
   PermissionPrompt,
@@ -11,6 +12,7 @@ import type {
 } from '../src/adapter/backend.ts';
 import type { AgentDescriptor } from '../src/domain/agent-cycle.ts';
 import type { BackendEvent } from '../src/domain/backend-event.ts';
+import type { FileDiff } from '../src/domain/diff.ts';
 import type { FormRequest, FormValue } from '../src/domain/form.ts';
 import type { ModelSelection } from '../src/domain/model-ref.ts';
 import type { CatalogModel } from '../src/domain/model-resolution.ts';
@@ -99,6 +101,46 @@ export class FakeBackend implements Backend {
     this.calls.push({ name: 'interrupt', args: [sessionID] });
     return true;
   }
+  diffs: FileDiff[] = [];
+  revertFiles: FileDiff[] = [];
+  /** When set, instruction writes fail (server without the experimental route). */
+  instructionsUnavailable = false;
+
+  async sessionDiff(sessionID: string, range: DiffRange): Promise<FileDiff[]> {
+    this.calls.push({ name: 'sessionDiff', args: [sessionID, range] });
+    return this.diffs;
+  }
+  async renameSession(sessionID: string, title: string): Promise<void> {
+    this.calls.push({ name: 'renameSession', args: [sessionID, title] });
+    this.sessions = this.sessions.map((session) =>
+      session.id === sessionID ? { ...session, title } : session,
+    );
+  }
+  async forkSession(sessionID: string, beforeMessageID?: string): Promise<SessionSummary> {
+    this.calls.push({ name: 'forkSession', args: [sessionID, beforeMessageID] });
+    const source = await this.getSession(sessionID);
+    const fork: SessionSummary = { ...source, id: `${sessionID}_fork`, createdAt: 5, updatedAt: 5 };
+    this.sessions.push(fork);
+    return fork;
+  }
+  async stageRevert(sessionID: string, messageID: string): Promise<FileDiff[]> {
+    this.calls.push({ name: 'stageRevert', args: [sessionID, messageID] });
+    return this.revertFiles;
+  }
+  async commitRevert(sessionID: string): Promise<void> {
+    this.calls.push({ name: 'commitRevert', args: [sessionID] });
+  }
+  async clearRevert(sessionID: string): Promise<void> {
+    this.calls.push({ name: 'clearRevert', args: [sessionID] });
+  }
+  async putInstruction(sessionID: string, key: string, value: string): Promise<void> {
+    this.calls.push({ name: 'putInstruction', args: [sessionID, key, value] });
+    if (this.instructionsUnavailable) throw new Error('NotFound');
+  }
+  async removeInstruction(sessionID: string, key: string): Promise<void> {
+    this.calls.push({ name: 'removeInstruction', args: [sessionID, key] });
+  }
+
   async switchAgent(sessionID: string, agent: string): Promise<void> {
     this.calls.push({ name: 'switchAgent', args: [sessionID, agent] });
   }

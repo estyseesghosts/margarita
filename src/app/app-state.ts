@@ -3,6 +3,7 @@ import type { StreamStatus } from '../adapter/event-pump.ts';
 import type { AgentDescriptor } from '../domain/agent-cycle.ts';
 import type { Composer } from '../domain/composer.ts';
 import { emptyComposer } from '../domain/composer.ts';
+import type { DiffScope, FileDiff } from '../domain/diff.ts';
 import type { FormEditor, FormRequest } from '../domain/form.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
@@ -29,7 +30,22 @@ export type Overlay =
   | { kind: 'queue'; index: number }
   | { kind: 'model-picker'; query: string; index: number }
   | { kind: 'history-search'; query: string; before: number }
-  | { kind: 'form'; sessionID: string; editor: FormEditor };
+  | { kind: 'form'; sessionID: string; editor: FormEditor }
+  | DiffOverlay;
+
+/** Read-only viewer over server-reported `session.diff` results. */
+export type DiffOverlay = {
+  kind: 'diff';
+  sessionID: string;
+  scope: DiffScope;
+  loading: boolean;
+  files: FileDiff[];
+  index: number;
+  /** Showing one file's patch instead of the file list. */
+  open: boolean;
+  offset: number;
+  error?: string;
+};
 
 export type Notice = Readonly<{ text: string; tone: 'dim' | 'warn' | 'error'; id: number }>;
 

@@ -8,6 +8,7 @@ import {
   type Backend,
   BackendError,
   type Delivery,
+  type DiffRange,
   type PermissionDecision,
   type PromptFile,
 } from '../adapter/backend.ts';
@@ -17,6 +18,7 @@ import type { LocalState } from '../config/local-state.ts';
 import { defaultAgent, nextAgent, selectableAgents } from '../domain/agent-cycle.ts';
 import type { BackendEvent } from '../domain/backend-event.ts';
 import { type Composer, composerFrom, emptyComposer } from '../domain/composer.ts';
+import { type DiffScope, patchLines, turnStart } from '../domain/diff.ts';
 import { projectExecution } from '../domain/execution.ts';
 import { activeMention, findFileMentions, rankPaths } from '../domain/file-reference.ts';
 import {
@@ -45,7 +47,13 @@ import {
 import type { Execution, SessionSummary } from '../domain/session.ts';
 import { completeCommand, type LocalCommandName, parseInput } from '../domain/slash-command.ts';
 import { type TranscriptMessage, transcriptWindowStep } from '../domain/transcript.ts';
-import { type AppState, initialState, type Overlay, type Route } from './app-state.ts';
+import {
+  type AppState,
+  type DiffOverlay,
+  initialState,
+  type Overlay,
+  type Route,
+} from './app-state.ts';
 
 export type ControllerDeps = Readonly<{
   backend: Backend;
@@ -63,6 +71,8 @@ export type ControllerDeps = Readonly<{
 const transcriptPageSize = 120;
 const transcriptCacheLimit = 8;
 const sessionPageLimit = 5;
+/** Lines a diff patch scrolls per PageUp/PageDown; matches the rendered window. */
+export const diffPageLines = 18;
 
 /**
  * Owns all frontend state and every server interaction. Views read `state` and call
@@ -978,6 +988,9 @@ export class AppController {
       case 'effort':
         await this.setEffort(args);
         return;
+      case 'diff':
+        await this.openDiff(args.trim() === 'turn' ? 'turn' : 'session');
+        return;
       case 'transcript':
         this.toggleDetails();
         return;
@@ -1278,6 +1291,79 @@ export class AppController {
       await this.refreshInputRequests(pending.sessionID);
     } finally {
       this.setState('answering', false);
+    }
+  }
+
+  /** Loads `session.diff` for the attached session into the diff viewer. */
+  async openDiff(scope: DiffScope): Promise<void> {
+    const session = this.currentSession();
+    if (session === undefined) {
+      this.showNotice('Open a session to see its changes.', 'warn');
+      return;
+    }
+    const range: DiffRange = {};
+    if (scope === 'turn') {
+      const from = turnStart(this.state.transcripts[session.id]?.messages ?? []);
+      if (from === undefined) {
+        this.showNotice('No turn yet; showing the whole session.', 'dim');
+        await this.openDiff('session');
+        return;
+      }
+      Object.assign(range, { from });
+    }
+    const base: DiffOverlay = {
+      kind: 'diff',
+      sessionID: session.id,
+      scope,
+      loading: true,
+      files: [],
+      index: 0,
+      open: false,
+      offset: 0,
+    };
+    this.setState('overlay', base);
+    try {
+      const files = await this.deps.backend.sessionDiff(session.id, range);
+      if (this.isDiffOverlay(session.id, scope)) {
+        this.setState('overlay', { ...base, loading: false, files });
+      }
+    } catch (error) {
+      if (this.isDiffOverlay(session.id, scope)) {
+        this.setState('overlay', { ...base, loading: false, error: errorText(error) });
+      }
+    }
+  }
+
+  private isDiffOverlay(sessionID: string, scope: DiffScope): boolean {
+    const overlay = this.state.overlay;
+    return overlay.kind === 'diff' && overlay.sessionID === sessionID && overlay.scope === scope;
+  }
+
+  /** List: ↑↓ select, Enter open, t toggles turn/session. Patch: ↑↓/PgUp/PgDn scroll, ← back. */
+  diffKey(key: { name: string; text?: string }): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'diff') return;
+    const update = (patch: Partial<DiffOverlay>) =>
+      this.setState('overlay', { ...overlay, ...patch });
+    if (overlay.open) {
+      const lines = patchLines(overlay.files[overlay.index]?.patch ?? '').length;
+      const clamp = (offset: number) => Math.max(0, Math.min(offset, Math.max(0, lines - 1)));
+      if (key.name === 'escape' || key.name === 'left' || key.name === 'q') {
+        update({ open: false, offset: 0 });
+      } else if (key.name === 'up') update({ offset: clamp(overlay.offset - 1) });
+      else if (key.name === 'down') update({ offset: clamp(overlay.offset + 1) });
+      else if (key.name === 'pageup') update({ offset: clamp(overlay.offset - diffPageLines) });
+      else if (key.name === 'pagedown') update({ offset: clamp(overlay.offset + diffPageLines) });
+      return;
+    }
+    const count = overlay.files.length;
+    if (key.name === 'escape' || key.name === 'q') this.closeOverlay();
+    else if (key.name === 'up' && count > 0) update({ index: (overlay.index - 1 + count) % count });
+    else if (key.name === 'down' && count > 0) update({ index: (overlay.index + 1) % count });
+    else if ((key.name === 'return' || key.name === 'right') && count > 0) {
+      update({ open: true, offset: 0 });
+    } else if (key.text === 't') {
+      void this.openDiff(overlay.scope === 'turn' ? 'session' : 'turn');
     }
   }
 

@@ -127,6 +127,10 @@ function runAction(controller: AppController, action: ActionID, services: Router
 
 function routeOverlay(controller: AppController, key: KeyInput): boolean {
   const overlay = controller.state.overlay;
+  if (overlay.kind === 'diff' && !(key.ctrl && key.name === 'c')) {
+    controller.diffKey(key);
+    return true;
+  }
   if (overlay.kind === 'form' && !(key.ctrl && key.name === 'c')) {
     controller.formKey(key);
     return true;
@@ -174,6 +178,9 @@ function routeOverlay(controller: AppController, key: KeyInput): boolean {
       return true;
     case 'form':
       controller.formKey(key);
+      return true;
+    case 'diff':
+      controller.diffKey(key);
       return true;
     case 'none':
       return false;

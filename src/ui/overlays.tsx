@@ -1,8 +1,10 @@
 import type { Accessor } from 'solid-js';
 import { For, Match, Show, Switch } from 'solid-js';
 
-import type { Overlay } from '../app/app-state.ts';
+import type { DiffOverlay, Overlay } from '../app/app-state.ts';
 import type { AppController } from '../app/controller.ts';
+import { diffPageLines } from '../app/controller.ts';
+import { diffSummary, type FileDiff, type PatchLine, patchLines } from '../domain/diff.ts';
 import {
   currentField,
   type FormEditor,
@@ -164,6 +166,11 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
           );
         }}
       </Match>
+      <Match when={state.overlay.kind === 'diff' ? state.overlay : undefined}>
+        {(overlay: Accessor<DiffOverlay>) => (
+          <DiffDialog overlay={overlay()} theme={props.theme} frame={frame} />
+        )}
+      </Match>
       <Match when={state.overlay.kind === 'form' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'form' }>>) => (
           <Show
@@ -194,6 +201,82 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
 }
 
 type Frame = (title: string) => Record<string, unknown>;
+
+const statusMark = { added: 'A', deleted: 'D', modified: 'M' } as const;
+
+/** File list, or one file's colored patch; everything comes from `session.diff`. */
+function DiffDialog(props: { overlay: DiffOverlay; theme: Theme; frame: Frame }) {
+  const file = () => props.overlay.files[props.overlay.index];
+  const scopeLabel = () => (props.overlay.scope === 'turn' ? 'this turn' : 'session');
+  const lineColor = (kind: PatchLine['kind']) => {
+    switch (kind) {
+      case 'add':
+        return props.theme.success;
+      case 'del':
+        return props.theme.error;
+      case 'hunk':
+        return props.theme.accent;
+      case 'meta':
+        return props.theme.dim;
+      default:
+        return props.theme.text;
+    }
+  };
+  return (
+    <Switch>
+      <Match when={props.overlay.open ? file() : undefined}>
+        {(current: Accessor<FileDiff>) => {
+          const lines = () => patchLines(current().patch);
+          return (
+            <box {...props.frame(`${current().file} · ↑↓ PgUp PgDn scroll · ← files`)}>
+              <For each={lines().slice(props.overlay.offset, props.overlay.offset + diffPageLines)}>
+                {(line) => (
+                  <text fg={lineColor(line.kind)}>{line.text === '' ? ' ' : line.text}</text>
+                )}
+              </For>
+              <text fg={props.theme.dim}>
+                {`lines ${Math.min(props.overlay.offset + 1, lines().length)}–${Math.min(props.overlay.offset + diffPageLines, lines().length)} of ${lines().length}${current().truncated ? ' · truncated by server' : ''}`}
+              </text>
+            </box>
+          );
+        }}
+      </Match>
+      <Match when={!props.overlay.open}>
+        <box
+          {...props.frame(
+            `Changes in ${scopeLabel()} · ${diffSummary(props.overlay.files)} · t ${props.overlay.scope === 'turn' ? 'session' : 'turn'} · Esc close`,
+          )}
+        >
+          <Switch>
+            <Match when={props.overlay.loading}>
+              <text fg={props.theme.dim}>Loading changes…</text>
+            </Match>
+            <Match when={props.overlay.error}>
+              {(error: Accessor<string>) => <text fg={props.theme.error}>{error()}</text>}
+            </Match>
+            <Match when={props.overlay.files.length === 0}>
+              <text fg={props.theme.dim}>No file changes reported.</text>
+            </Match>
+            <Match when={props.overlay.files.length > 0}>
+              <For each={props.overlay.files}>
+                {(entry, index) => {
+                  const selected = () => index() === props.overlay.index;
+                  return (
+                    <text fg={selected() ? props.theme.accent : props.theme.text}>
+                      {`${selected() ? '❯' : ' '} ${statusMark[entry.status]} ${entry.file}`}
+                      <span style={{ fg: props.theme.success }}>{`  +${entry.additions}`}</span>
+                      <span style={{ fg: props.theme.error }}>{` −${entry.deletions}`}</span>
+                    </text>
+                  );
+                }}
+              </For>
+            </Match>
+          </Switch>
+        </box>
+      </Match>
+    </Switch>
+  );
+}
 
 /** One field at a time, with progress and the field's own controls. */
 function FormDialog(props: { form: FormRequest; editor: FormEditor; theme: Theme; frame: Frame }) {

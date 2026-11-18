@@ -2,6 +2,7 @@ import { ClientError, OpenCode, type OpenCodeClient } from '@opencode/client';
 
 import type { AgentDescriptor } from '../domain/agent-cycle.ts';
 import { type BackendEvent, normalizeEvent } from '../domain/backend-event.ts';
+import type { FileDiff } from '../domain/diff.ts';
 import type { FormRequest, FormValue } from '../domain/form.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
@@ -13,6 +14,7 @@ import {
   type QueuedInput,
   toAgentDescriptor,
   toCatalogModel,
+  toFileDiff,
   toFormRequest,
   toModelSelection,
   toPermissionPrompt,
@@ -41,6 +43,8 @@ export class BackendError extends Error {
 
 export type SessionPage = Readonly<{ sessions: SessionSummary[]; nextCursor?: string }>;
 export type MessagePage = Readonly<{ messages: TranscriptMessage[]; olderCursor?: string }>;
+/** Message IDs bounding a diff; both open-ended when omitted. */
+export type DiffRange = Readonly<{ from?: string; to?: string }>;
 export type Delivery = 'queue' | 'steer';
 export type PermissionDecision = 'once' | 'always' | 'reject';
 
@@ -83,6 +87,16 @@ export interface Backend {
   runCommand(sessionID: string, name: string, text: string): Promise<void>;
   runShell(sessionID: string, command: string): Promise<void>;
   interrupt(sessionID: string): Promise<boolean>;
+  sessionDiff(sessionID: string, range: DiffRange): Promise<FileDiff[]>;
+  renameSession(sessionID: string, title: string): Promise<void>;
+  forkSession(sessionID: string, beforeMessageID?: string): Promise<SessionSummary>;
+  /** Stages a revert to just before `messageID`; returns the files it would restore. */
+  stageRevert(sessionID: string, messageID: string): Promise<FileDiff[]>;
+  commitRevert(sessionID: string): Promise<void>;
+  clearRevert(sessionID: string): Promise<void>;
+  /** Model-visible durable instruction entry (experimental server API). */
+  putInstruction(sessionID: string, key: string, value: string): Promise<void>;
+  removeInstruction(sessionID: string, key: string): Promise<void>;
   switchAgent(sessionID: string, agent: string): Promise<void>;
   switchModel(sessionID: string, model: ModelSelection): Promise<void>;
   listAgents(directory: string): Promise<AgentDescriptor[]>;
@@ -236,6 +250,58 @@ class OpenCodeBackend implements Backend {
       this.client.session.interrupt({ sessionID }),
     );
     return result.interrupted;
+  }
+
+  async sessionDiff(sessionID: string, range: DiffRange): Promise<FileDiff[]> {
+    const files = await call('session.diff', () =>
+      this.client.session.diff({
+        sessionID,
+        ...(range.from === undefined ? {} : { from: range.from }),
+        ...(range.to === undefined ? {} : { to: range.to }),
+      }),
+    );
+    return files.map(toFileDiff);
+  }
+
+  async renameSession(sessionID: string, title: string): Promise<void> {
+    await call('session.update', () => this.client.session.update({ sessionID, title }));
+  }
+
+  async forkSession(sessionID: string, beforeMessageID?: string): Promise<SessionSummary> {
+    const info = await call('session.fork', () =>
+      this.client.session.fork({
+        sessionID,
+        ...(beforeMessageID === undefined ? {} : { before: beforeMessageID }),
+      }),
+    );
+    return toSessionSummary(info);
+  }
+
+  async stageRevert(sessionID: string, messageID: string): Promise<FileDiff[]> {
+    const revert = await call('session.revert.stage', () =>
+      this.client.session.revert.stage({ sessionID, messageID, files: true }),
+    );
+    return (revert.files ?? []).map(toFileDiff);
+  }
+
+  async commitRevert(sessionID: string): Promise<void> {
+    await call('session.revert.commit', () => this.client.session.revert.commit({ sessionID }));
+  }
+
+  async clearRevert(sessionID: string): Promise<void> {
+    await call('session.revert.clear', () => this.client.session.revert.clear({ sessionID }));
+  }
+
+  async putInstruction(sessionID: string, key: string, value: string): Promise<void> {
+    await call('session.instructions.entry.put', () =>
+      this.client.experimental.session.instructions.entry.put({ sessionID, key, value }),
+    );
+  }
+
+  async removeInstruction(sessionID: string, key: string): Promise<void> {
+    await call('session.instructions.entry.remove', () =>
+      this.client.experimental.session.instructions.entry.remove({ sessionID, key }),
+    );
   }
 
   async switchAgent(sessionID: string, agent: string): Promise<void> {

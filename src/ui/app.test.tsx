@@ -268,6 +268,42 @@ describe('app', () => {
     expect(setup.captureCharFrame()).not.toContain('Permission needed');
   });
 
+  test('/diff turn lists server-reported files and opens a colored patch', async () => {
+    const backend = backendWithSession();
+    backend.diffs = [
+      {
+        file: 'src/gpu.ts',
+        patch: '@@ -1 +1 @@\n-slow()\n+fast()\n',
+        additions: 1,
+        deletions: 1,
+        status: 'modified',
+        truncated: false,
+      },
+    ];
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    await setup.mockInput.typeText('/diff turn');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    expect(backend.calls.find((call) => call.name === 'sessionDiff')?.args).toEqual([
+      'ses_a',
+      { from: 'm1' },
+    ]);
+    let frame = setup.captureCharFrame();
+    expect(frame).toContain('Changes in this turn · 1 file · +1 −1');
+    expect(frame).toContain('M src/gpu.ts');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('+fast()');
+    expect(frame).toContain('-slow()');
+    setup.mockInput.pressArrow('left');
+    setup.mockInput.pressEscape();
+    await settle(setup);
+    expect(controller.state.overlay.kind).toBe('none');
+  });
+
   test('long transcripts render a window; PageUp at the top reveals then fetches older pages', async () => {
     const backend = backendWithSession();
     backend.messages['ses_a'] = Array.from({ length: 300 }, (_, index) => ({
