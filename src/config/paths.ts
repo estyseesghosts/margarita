@@ -5,7 +5,13 @@ import { join } from 'node:path';
  * Margarita's own directories. They never overlap OpenCode's config or state.
  * Windows: %LOCALAPPDATA%\margarita; elsewhere XDG config/state homes.
  */
-export type AppPaths = Readonly<{ configFile: string; stateFile: string; stateDir: string }>;
+export type AppPaths = Readonly<{
+  configFile: string;
+  stateFile: string;
+  /** Non-secret registry of paired servers and their shortnames. */
+  serversFile: string;
+  stateDir: string;
+}>;
 
 export function appPaths(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): AppPaths {
   if (platform === 'win32') {
@@ -14,6 +20,7 @@ export function appPaths(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): App
     return {
       configFile: join(dir, 'config.jsonc'),
       stateFile: join(dir, 'state.json'),
+      serversFile: join(dir, 'servers.json'),
       stateDir: dir,
     };
   }
@@ -23,6 +30,7 @@ export function appPaths(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): App
   return {
     configFile: join(configHome, 'margarita', 'config.jsonc'),
     stateFile: join(stateDir, 'state.json'),
+    serversFile: join(stateDir, 'servers.json'),
     stateDir,
   };
 }

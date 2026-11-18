@@ -1,0 +1,293 @@
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
+
+import { isRecord } from '../domain/backend-event.ts';
+import { localServerID } from '../domain/server-identity.ts';
+
+/** A paired server. Identity is `serverID`; `shortname` is a user-editable alias. */
+export type ServerProfile = Readonly<{
+  serverID: string;
+  shortname: string;
+  /** Normalized API base URL: http(s), no credentials, query, hash, or trailing slash. */
+  baseUrl: string;
+  /** Additional addresses/aliases that refer to the same server. */
+  aliases?: readonly string[];
+  /** Free-form non-secret metadata advertised by the server. */
+  metadata?: Readonly<Record<string, string>>;
+}>;
+
+export type ServerProfiles = Readonly<{
+  schemaVersion: 1;
+  profiles: readonly ServerProfile[];
+}>;
+
+export const emptyServerProfiles: ServerProfiles = { schemaVersion: 1, profiles: [] };
+
+export class ProfileError extends Error {
+  override readonly name = 'ProfileError';
+}
+
+export type ProfileInput = Readonly<{
+  serverID: string;
+  shortname: string;
+  baseUrl: string;
+  aliases?: readonly string[];
+  metadata?: Readonly<Record<string, string>>;
+}>;
+
+const shortnamePattern = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+
+/** Shortnames are lowercase, URL-safe, and unique case-insensitively. */
+export function validateShortname(shortname: string): string {
+  if (!shortnamePattern.test(shortname)) {
+    throw new ProfileError(
+      'A shortname must be 1-32 lowercase letters, digits, or single dashes, and cannot start or end with a dash.',
+    );
+  }
+  return shortname;
+}
+
+/**
+ * Normalizes a server URL. Embedded credentials, non-http(s) schemes, and fragments are
+ * rejected; the path is kept (a server may live under a base path).
+ */
+export function normalizeServerUrl(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch (cause) {
+    throw new ProfileError('Invalid server URL.', { cause });
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ProfileError(`Unsupported URL protocol "${url.protocol}"; use http or https.`);
+  }
+  if (url.username !== '' || url.password !== '') {
+    throw new ProfileError('Do not put credentials in a server URL.');
+  }
+  if (url.hash !== '') throw new ProfileError('A server URL cannot contain a fragment.');
+  url.search = '';
+  url.pathname = url.pathname.replace(/\/+$/, '');
+  return url.toString().replace(/\/$/, '');
+}
+
+function normalizeProfile(input: ProfileInput): ServerProfile {
+  if (input.serverID.trim() === '') throw new ProfileError('A server needs an identity.');
+  if (input.serverID === localServerID) {
+    throw new ProfileError('The local server is reserved and cannot be paired as a remote.');
+  }
+  const aliases = (input.aliases ?? []).map((alias) => normalizeServerUrl(alias));
+  const metadata =
+    input.metadata === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(input.metadata).filter(([, value]) => typeof value === 'string'),
+        );
+  return {
+    serverID: input.serverID,
+    shortname: validateShortname(input.shortname),
+    baseUrl: normalizeServerUrl(input.baseUrl),
+    ...(aliases.length === 0 ? {} : { aliases }),
+    ...(metadata === undefined || Object.keys(metadata).length === 0 ? {} : { metadata }),
+  };
+}
+
+/** Throws when another profile already owns the shortname or server identity. */
+export function assertUnique(profiles: readonly ServerProfile[], candidate: ServerProfile): void {
+  const name = candidate.shortname.toLowerCase();
+  for (const profile of profiles) {
+    if (profile.serverID === candidate.serverID) continue;
+    if (profile.shortname.toLowerCase() === name) {
+      throw new ProfileError(`The shortname "${candidate.shortname}" is already in use.`);
+    }
+    if (profile.baseUrl === candidate.baseUrl) {
+      throw new ProfileError('That server address is already registered.');
+    }
+  }
+}
+
+/** Likely duplicates by normalized address or overlapping aliases; the user confirms the merge. */
+export function findDuplicates(
+  profiles: readonly ServerProfile[],
+  candidate: ProfileInput,
+): ServerProfile[] {
+  const addresses = new Set(
+    [candidate.baseUrl, ...(candidate.aliases ?? [])].map((url) => {
+      try {
+        return normalizeServerUrl(url);
+      } catch {
+        return url;
+      }
+    }),
+  );
+  return profiles.filter(
+    (profile) =>
+      profile.serverID !== candidate.serverID &&
+      [profile.baseUrl, ...(profile.aliases ?? [])].some((url) => addresses.has(url)),
+  );
+}
+
+/** Renames without touching identity, so cached sessions and goals stay attached. */
+export function renameProfile(
+  profiles: readonly ServerProfile[],
+  serverID: string,
+  shortname: string,
+): ServerProfile[] {
+  validateShortname(shortname);
+  const next = profiles.map((profile) =>
+    profile.serverID === serverID ? { ...profile, shortname } : profile,
+  );
+  const renamed = next.find((profile) => profile.serverID === serverID);
+  if (renamed === undefined) throw new ProfileError(`No server profile ${serverID}.`);
+  assertUnique(
+    next.filter((profile) => profile.serverID !== serverID),
+    renamed,
+  );
+  return next;
+}
+
+export function addProfile(
+  profiles: readonly ServerProfile[],
+  input: ProfileInput,
+): ServerProfile[] {
+  const profile = normalizeProfile(input);
+  assertUnique(profiles, profile);
+  return [...profiles, profile];
+}
+
+export function removeProfile(
+  profiles: readonly ServerProfile[],
+  serverID: string,
+): ServerProfile[] {
+  return profiles.filter((profile) => profile.serverID !== serverID);
+}
+
+export function parseServerProfiles(raw: unknown): ServerProfiles {
+  if (!isRecord(raw) || raw['schemaVersion'] !== 1 || !Array.isArray(raw['profiles'])) {
+    return emptyServerProfiles;
+  }
+  const profiles: ServerProfile[] = [];
+  for (const entry of raw['profiles']) {
+    if (!isRecord(entry)) continue;
+    const serverID = entry['serverID'];
+    const shortname = entry['shortname'];
+    const baseUrl = entry['baseUrl'];
+    if (
+      typeof serverID !== 'string' ||
+      typeof shortname !== 'string' ||
+      typeof baseUrl !== 'string'
+    )
+      continue;
+    try {
+      const profile = normalizeProfile({
+        serverID,
+        shortname,
+        baseUrl,
+        ...(Array.isArray(entry['aliases'])
+          ? {
+              aliases: entry['aliases'].filter(
+                (alias): alias is string => typeof alias === 'string',
+              ),
+            }
+          : {}),
+        ...(isRecord(entry['metadata'])
+          ? {
+              metadata: Object.fromEntries(
+                Object.entries(entry['metadata']).filter(
+                  (pair): pair is [string, string] => typeof pair[1] === 'string',
+                ),
+              ),
+            }
+          : {}),
+      });
+      // Skip records that collide with one already parsed: never drop the older one.
+      if (profiles.some((other) => other.serverID === profile.serverID)) continue;
+      if (profiles.some((other) => other.shortname === profile.shortname)) continue;
+      profiles.push(profile);
+    } catch {
+      // Malformed individual records are ignored; the rest of the registry survives.
+    }
+  }
+  return { schemaVersion: 1, profiles };
+}
+
+const lockStaleMs = 10_000;
+const lockRetryMs = 25;
+const lockTimeoutMs = 5_000;
+
+export async function loadServerProfiles(
+  path: string,
+): Promise<{ profiles: ServerProfiles; warning?: string }> {
+  let text: string;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch (cause) {
+    if (isRecord(cause) && cause['code'] === 'ENOENT') return { profiles: emptyServerProfiles };
+    return {
+      profiles: emptyServerProfiles,
+      warning: `Could not read paired servers: ${String(cause)}`,
+    };
+  }
+  try {
+    return { profiles: parseServerProfiles(JSON.parse(text)) };
+  } catch (cause) {
+    return {
+      profiles: emptyServerProfiles,
+      warning: `Paired servers were unreadable and were reset: ${String(cause)}`,
+    };
+  }
+}
+
+/** Read-merge-write so two Margarita processes adding profiles do not lose each other's work. */
+export function mergeProfiles(ours: ServerProfiles, theirs: ServerProfiles): ServerProfiles {
+  const byID = new Map<string, ServerProfile>();
+  for (const profile of theirs.profiles) byID.set(profile.serverID, profile);
+  for (const profile of ours.profiles) byID.set(profile.serverID, profile);
+  return { schemaVersion: 1, profiles: [...byID.values()] };
+}
+
+async function acquireLock(lockPath: string): Promise<() => Promise<void>> {
+  const deadline = Date.now() + lockTimeoutMs;
+  for (;;) {
+    try {
+      const handle = await open(lockPath, 'wx');
+      return async () => {
+        await handle.close();
+        await rm(lockPath, { force: true });
+      };
+    } catch (cause) {
+      if (!isRecord(cause) || cause['code'] !== 'EEXIST') throw cause;
+      try {
+        const info = await stat(lockPath);
+        if (Date.now() - info.mtimeMs > lockStaleMs) {
+          await rm(lockPath, { force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (Date.now() >= deadline) throw new ProfileError('Timed out waiting for the profile lock.');
+      await Bun.sleep(lockRetryMs);
+    }
+  }
+}
+
+export async function saveServerProfiles(
+  path: string,
+  profiles: ServerProfiles,
+): Promise<ServerProfiles> {
+  await mkdir(dirname(path), { recursive: true });
+  const release = await acquireLock(`${path}.lock`);
+  try {
+    const disk = await loadServerProfiles(path);
+    const merged = mergeProfiles(profiles, disk.profiles);
+    const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(temp, `${JSON.stringify(merged, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    await rename(temp, path);
+    return merged;
+  } finally {
+    await release();
+  }
+}
