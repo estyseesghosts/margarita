@@ -97,6 +97,9 @@ export class FakeBackend implements Backend {
   async runShell(sessionID: string, command: string): Promise<void> {
     this.calls.push({ name: 'runShell', args: [sessionID, command] });
   }
+  async backgroundTools(sessionID: string): Promise<void> {
+    this.calls.push({ name: 'backgroundTools', args: [sessionID] });
+  }
   async interrupt(sessionID: string): Promise<boolean> {
     this.calls.push({ name: 'interrupt', args: [sessionID] });
     return true;

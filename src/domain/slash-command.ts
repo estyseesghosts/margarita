@@ -12,6 +12,7 @@ export const localCommands = {
   usage: 'Show token and spend breakdown',
   interrupt: 'Stop the running turn',
   queue: 'Show queued inputs',
+  export: 'Save the whole chat log as JSON: /export [file]',
   goal: 'Set the session goal: /goal <title> · /goal clear · /goal (show)',
   criteria: 'Acceptance criteria for the goal: /criteria a; b',
   plan: 'Plan: /plan <steps> · /plan propose · /plan adopt · /plan accept|reject|clear',

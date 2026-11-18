@@ -87,6 +87,8 @@ export interface Backend {
   runCommand(sessionID: string, name: string, text: string): Promise<void>;
   runShell(sessionID: string, command: string): Promise<void>;
   interrupt(sessionID: string): Promise<boolean>;
+  /** Detaches running tool calls so the turn continues while they finish. */
+  backgroundTools(sessionID: string): Promise<void>;
   sessionDiff(sessionID: string, range: DiffRange): Promise<FileDiff[]>;
   renameSession(sessionID: string, title: string): Promise<void>;
   forkSession(sessionID: string, beforeMessageID?: string): Promise<SessionSummary>;
@@ -250,6 +252,10 @@ class OpenCodeBackend implements Backend {
       this.client.session.interrupt({ sessionID }),
     );
     return result.interrupted;
+  }
+
+  async backgroundTools(sessionID: string): Promise<void> {
+    await call('session.background', () => this.client.session.background({ sessionID }));
   }
 
   async sessionDiff(sessionID: string, range: DiffRange): Promise<FileDiff[]> {

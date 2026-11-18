@@ -114,6 +114,9 @@ function runAction(controller: AppController, action: ActionID, services: Router
     case 'screen.redraw':
       services.redraw();
       return true;
+    case 'tools.background':
+      void controller.backgroundTools();
+      return true;
     case 'tasks.toggle':
       if (controller.currentSession() !== undefined)
         controller.setOverlay({ kind: 'tasks', index: 0 });

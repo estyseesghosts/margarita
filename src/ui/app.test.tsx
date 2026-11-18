@@ -7,6 +7,8 @@ import { BackendError } from '../adapter/backend.ts';
 import { AppController } from '../app/controller.ts';
 import { defaultConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
+import { isRecord } from '../domain/backend-event.ts';
+import { composerFrom } from '../domain/composer.ts';
 import { buildKeymap } from '../domain/keymap.ts';
 import { App } from './app.tsx';
 import { pickTheme } from './theme.ts';
@@ -402,6 +404,56 @@ describe('app', () => {
       'Measure',
       'Fix',
     ]);
+  });
+
+  test('/export writes every page of the chat as JSON; Ctrl+B backgrounds running tools', async () => {
+    const backend = backendWithSession();
+    backend.messages['ses_a'] = Array.from({ length: 1200 }, (_, index) => ({
+      kind: 'user' as const,
+      id: `m${index}`,
+      createdAt: index,
+      text: `message ${index}`,
+      attachments: [],
+    }));
+    const written: { path: string; text: string }[] = [];
+    const controller = new AppController({
+      backend,
+      config: defaultConfig,
+      localState: emptyState,
+      platform: 'linux',
+      cwd: '/work/kohjoh',
+      version: '0.1.0',
+      now: () => 10_000,
+      saveLocalState: async () => {},
+      listFiles: async () => [],
+      requestExit: () => {},
+      writeFile: async (path, text) => {
+        written.push({ path, text });
+      },
+    });
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await Bun.sleep(20);
+    controller.setComposer(composerFrom('/export'));
+    await controller.submit();
+    expect(written).toHaveLength(1);
+    const log: unknown = JSON.parse(written[0]?.text ?? '{}');
+    expect(log).toMatchObject({ format: 'margarita.chatlog.v1' });
+    const messages: unknown = isRecord(log) ? log['messages'] : [];
+    expect(
+      Array.isArray(messages)
+        ? messages.map((message) => (isRecord(message) ? message['id'] : ''))
+        : [],
+    ).toEqual(Array.from({ length: 1200 }, (_, index) => `m${index}`));
+    expect(written[0]?.path).toContain('marg-ses_a.json');
+
+    await controller.backgroundTools();
+    expect(backend.calls.some((call) => call.name === 'backgroundTools')).toBe(false);
+    backend.active.add('ses_a');
+    await controller.bootstrap();
+    await controller.backgroundTools();
+    expect(backend.calls.some((call) => call.name === 'backgroundTools')).toBe(true);
+    controller.dispose();
   });
 
   test('/revert stages, Esc restores; /rename and /fork call the server', async () => {

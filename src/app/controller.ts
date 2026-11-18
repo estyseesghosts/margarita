@@ -87,6 +87,8 @@ export type ControllerDeps = Readonly<{
   saveLocalState: (state: LocalState) => Promise<void>;
   listFiles: (root: string) => Promise<string[]>;
   requestExit: () => void;
+  /** Writes an exported file; defaults to Bun.write. */
+  writeFile?: (path: string, text: string) => Promise<void>;
   /** Goal/plan sidecar storage; defaults to memory (tests). */
   goalStore?: GoalStore;
 }>;
@@ -94,6 +96,7 @@ export type ControllerDeps = Readonly<{
 const transcriptPageSize = 120;
 const transcriptCacheLimit = 8;
 const sessionPageLimit = 5;
+const exportPageSize = 500;
 /** Lines a diff patch scrolls per PageUp/PageDown; matches the rendered window. */
 export const diffPageLines = 18;
 
@@ -1029,6 +1032,9 @@ export class AppController {
       case 'queue':
         this.setOverlay({ kind: 'queue', index: 0 });
         return;
+      case 'export':
+        await this.exportChat(args);
+        return;
       case 'goal':
         await this.goalCommand(args);
         return;
@@ -1247,6 +1253,62 @@ export class AppController {
       this.showNotice(interrupted ? 'Interrupted' : 'Nothing was running', 'dim');
     } catch (error) {
       this.showNotice(errorText(error), 'error');
+    }
+  }
+
+  /** Ctrl+B: running tool calls continue in the background; the turn keeps going. */
+  async backgroundTools(): Promise<void> {
+    const session = this.currentSession();
+    if (session === undefined || this.state.running[session.id] !== true) {
+      this.showNotice('Nothing running to background.', 'dim');
+      return;
+    }
+    try {
+      await this.deps.backend.backgroundTools(session.id);
+      this.showNotice('Running tools moved to the background', 'dim');
+    } catch (error) {
+      this.showNotice(`Background failed: ${errorText(error)}`, 'error');
+    }
+  }
+
+  /**
+   * Fetches every page of the attached session (not just the cached window) and writes
+   * session metadata, messages and the local goal/plan as JSON.
+   */
+  async exportChat(target: string): Promise<void> {
+    const session = this.currentSession();
+    if (session === undefined) {
+      this.showNotice('Open a session to export it.', 'warn');
+      return;
+    }
+    const path = resolve(session.directory, target === '' ? `marg-${session.id}.json` : target);
+    try {
+      const pages: TranscriptMessage[][] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await this.deps.backend.listMessages(session.id, exportPageSize, cursor);
+        pages.unshift(page.messages);
+        cursor = page.olderCursor;
+      } while (cursor !== undefined);
+      const goal = this.state.goals[session.id];
+      const log = {
+        format: 'margarita.chatlog.v1',
+        exportedAt: new Date(this.deps.now()).toISOString(),
+        server: this.deps.backend.baseUrl,
+        session,
+        messages: pages.flat(),
+        ...(goal === undefined ? {} : { goal }),
+      };
+      const write =
+        this.deps.writeFile ?? (async (file, text) => void (await Bun.write(file, text)));
+      await write(
+        path,
+        `${JSON.stringify(log, null, 2)}
+`,
+      );
+      this.showNotice(`Exported ${log.messages.length} messages to ${path}`, 'dim');
+    } catch (error) {
+      this.showNotice(`Export failed: ${errorText(error)}`, 'error');
     }
   }
 

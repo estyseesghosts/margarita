@@ -16,6 +16,7 @@ export const actionIDs = [
   'composer.steer',
   'screen.redraw',
   'tasks.toggle',
+  'tools.background',
   'help.show',
 ] as const;
 
@@ -53,6 +54,7 @@ export const defaultBindings: Readonly<Record<ActionID, string>> = {
   'composer.steer': 'alt+enter',
   'screen.redraw': 'ctrl+l',
   'tasks.toggle': 'ctrl+t',
+  'tools.background': 'ctrl+b',
   'help.show': 'f1',
 };
 
