@@ -418,6 +418,9 @@ export class AppController {
   /** Loads catalogs and sessions. Errors propagate so startup can report them. */
   async bootstrap(): Promise<void> {
     await Promise.all([this.loadCatalog(this.deps.cwd, this.serverID), this.loadSessions()]);
+    // A remote server failing to load must not abort startup; the launch server failing
+    // still propagates so the CLI can report it with an actionable message.
+    if (this.launchLoadError !== undefined) throw this.launchLoadError;
   }
 
   private catalogGeneration = 0;
@@ -548,9 +551,40 @@ export class AppController {
     return sessionKey({ serverID, sessionID });
   }
 
+  /** Set when the launch server failed to refresh; bootstrap re-throws it for the CLI. */
+  private launchLoadError: unknown;
+
   async loadSessions(): Promise<void> {
+    this.launchLoadError = undefined;
     const servers = this.serverIDs();
-    const results = await Promise.all(servers.map((serverID) => this.loadServerSessions(serverID)));
+    // One host's failure never aborts the refresh for the others: a failed server keeps its
+    // cached rows and records the error, healthy servers update normally.
+    const results = await Promise.all(
+      servers.map(async (serverID) => {
+        try {
+          return {
+            ok: true as const,
+            error: undefined as string | undefined,
+            ...(await this.loadServerSessions(serverID)),
+          };
+        } catch (error) {
+          this.debugLog.write('load-sessions-failed', {
+            serverID,
+            errorKind: error instanceof BackendError ? error.kind : 'unknown',
+          });
+          if (serverID === this.serverID) this.launchLoadError = error;
+          return {
+            serverID,
+            ok: false as const,
+            error: error instanceof Error ? error.message : 'Could not reach the server',
+            fresh: {},
+            active: new Set<string>(),
+            cursor: undefined as string | undefined,
+          };
+        }
+      }),
+    );
+    const healthy = new Set(results.filter((result) => result.ok).map((result) => result.serverID));
     const fresh: Record<string, SessionSummary> = {};
     const running: Record<string, true> = {};
     const pages: Record<
@@ -561,21 +595,31 @@ export class AppController {
     for (const result of results) {
       Object.assign(fresh, result.fresh);
       for (const id of result.active) running[this.keyFor(result.serverID, id)] = true;
-      pages[result.serverID] = {
-        ...(result.cursor === undefined ? {} : { cursor: result.cursor }),
-        complete: result.cursor === undefined,
-        loading: false,
-      };
+      const previous = this.state.serverPages[result.serverID];
+      if (result.ok) {
+        pages[result.serverID] = {
+          ...(result.cursor === undefined ? {} : { cursor: result.cursor }),
+          complete: result.cursor === undefined,
+          loading: false,
+        };
+      } else {
+        pages[result.serverID] = {
+          ...(previous?.cursor === undefined ? {} : { cursor: previous.cursor }),
+          complete: previous?.complete ?? false,
+          loading: false,
+          error: result.error ?? 'Could not reach the server',
+        };
+      }
       activeByServer.set(result.serverID, result.active);
     }
     // Deletions while the stream was down are never replayed, and absence from the first
     // pages only means "not loaded". Ask the owning server about each cached ID the pages
-    // missed; never send one host's ID to another host.
+    // missed; never send one host's ID to another host, and never reconcile a failed host.
     const reconciled = await this.reconcileKnownSessions(
       Object.keys(this.state.sessions)
         .filter((key) => fresh[key] === undefined)
         .map(parseSessionKey)
-        .filter((ref) => servers.includes(ref.serverID)),
+        .filter((ref) => healthy.has(ref.serverID)),
     );
     batch(() => {
       this.setState('sessions', (current) => ({ ...current, ...reconciled.found, ...fresh }));
@@ -583,21 +627,23 @@ export class AppController {
       this.setState('serverPages', pages);
       this.setState(
         'sessionsComplete',
-        results.every((result) => result.cursor === undefined),
+        results.every((result) => result.ok && result.cursor === undefined),
       );
       this.setState(
         'sessionsCursor',
         results.find((result) => result.cursor !== undefined)?.cursor,
       );
       this.setState('sessionsLoading', false);
-      this.setState('sessionsError', undefined);
+      this.setState('sessionsError', results.find((result) => !result.ok)?.error);
       this.setState('running', (current) => ({ ...current, ...running }));
     });
     // Running sessions are the ones that can be blocked on input right now.
     await Promise.all(
       servers.flatMap((serverID) =>
         [...(activeByServer.get(serverID) ?? [])].map((sessionID) =>
-          this.refreshInputRequests(sessionID, serverID),
+          this.refreshInputRequests(sessionID, serverID).catch(() => {
+            // Unreachable host: its stale permission/form state stays as-is.
+          }),
         ),
       ),
     );

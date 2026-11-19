@@ -30,6 +30,12 @@ export type ManagedServer = Readonly<{
   error?: string;
   /** True when the server does not share this machine's filesystem. */
   remoteFilesystem: boolean;
+  /**
+   * Monotonic per-registration token. Stream guards compare this, never object identity:
+   * `setState` replaces the managed-server object, and object identity would mark every
+   * later status/event as stale.
+   */
+  registration: number;
 }>;
 
 export type ServerTarget = Readonly<{
@@ -56,6 +62,7 @@ export class ServerConnectionManager {
   private readonly servers = new Map<string, ManagedServer>();
   private readonly streams = new Map<string, () => Promise<void>>();
   private readonly listeners = new Set<() => void>();
+  private registrationSequence = 0;
   private disposed = false;
 
   /** Registers or replaces a server. Replacing aborts its old stream first. */
@@ -69,6 +76,7 @@ export class ServerConnectionManager {
       backend: target.backend,
       state: 'connecting',
       remoteFilesystem: target.remoteFilesystem ?? target.connection.origin === 'remote',
+      registration: (this.registrationSequence += 1),
     };
     this.servers.set(target.serverID, server);
     this.emit();
@@ -142,14 +150,19 @@ export class ServerConnectionManager {
     const server = this.servers.get(serverID);
     if (server === undefined) return;
     void this.stopStream(serverID);
+    const registration = server.registration;
+    const current = (): ManagedServer | undefined => {
+      const managed = this.servers.get(serverID);
+      return managed !== undefined && managed.registration === registration ? managed : undefined;
+    };
     const stop = startEventPump({
       source: (signal) => server.backend.events(signal),
       onBatch: (events, resync) => {
-        if (this.servers.get(serverID) !== server) return; // stale stream from a replaced server
+        if (current() === undefined) return; // stale stream from a replaced server
         handlers.onBatch(events, resync);
       },
       onStatus: (status, error) => {
-        if (this.servers.get(serverID) !== server) return;
+        if (current() === undefined) return;
         handlers.onStatus(status, error);
       },
     });

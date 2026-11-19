@@ -10,7 +10,11 @@ import { connect, type Connection, ConnectionError, redactUrl } from './adapter/
 import { serverIDForConnection } from './adapter/server-manager.ts';
 import { errorText } from './app/controller.ts';
 import { createDebugLog, type DebugLog, noDebugLog } from './app/debug-log.ts';
-import { type AssemblyConnection, createProductionAssembly } from './app/production-assembly.ts';
+import {
+  type AssemblyConnection,
+  createProductionAssembly,
+  wireServerStream,
+} from './app/production-assembly.ts';
 import { type CliOptions, helpText, parseArgs } from './cli/args.ts';
 import { exitCodes, runPrint } from './cli/print.ts';
 import { resolveWorkingDirectory } from './cli/target.ts';
@@ -118,6 +122,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   let serverID = 'local';
   let cwd = localCwd;
   let launchConnection: AssemblyConnection | undefined;
+  const connectionsExtra: AssemblyConnection[] = [];
   try {
     let connection: Connection;
     if (options.remote !== undefined) {
@@ -187,6 +192,21 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     });
     remoteFilesystem = connection.origin === 'remote';
     launchConnection = { serverID, connection, backend, remoteFilesystem };
+    // Policy: --server/--remote select the primary host, they never narrow the overview.
+    // A discovered local service is registered alongside the explicit host and all paired
+    // profiles stay available, so identical project names are always distinguishable.
+    if (options.remote !== undefined || options.server !== undefined) {
+      const local = await connect({ startServer: false }).catch(() => undefined);
+      if (local !== undefined) {
+        const localServerID = serverIDForConnection(local);
+        connectionsExtra.push({
+          serverID: localServerID,
+          connection: local,
+          backend: createBackend(local, { serverID: localServerID }),
+          remoteFilesystem: false,
+        });
+      }
+    }
     debugLog.write('connected', { baseUrl: redactUrl(backend.baseUrl), serverID });
   } catch (error) {
     debugLog.write('connect-failed', {
@@ -205,7 +225,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   if (stateLoad.warning !== undefined) process.stderr.write(`${stateLoad.warning}\n`);
 
   const exit: { request?: () => void } = {};
-  const { servers, controller } = createProductionAssembly({
+  const { servers, controller } = await createProductionAssembly({
     config: configLoad.config,
     platform,
     cwd,
@@ -213,7 +233,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     paths: { stateFile: paths.stateFile, serversFile: paths.serversFile, stateDir: paths.stateDir },
     env,
     credentials,
-    connections: launchConnection === undefined ? [] : [launchConnection],
+    connections: launchConnection === undefined ? [] : [launchConnection, ...connectionsExtra],
     profiles,
     localState: stateLoad.state,
     remoteFilesystem,
@@ -335,12 +355,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   // streams, so reconnects and unpair cannot duplicate subscriptions. Cached sessions stay
   // visible while a host is offline; only the launch server drives the single stream badge.
   for (const managed of servers.list()) {
-    servers.startStream(managed.serverID, {
-      onBatch: (events, resync) => controller.onEvents(events, resync),
-      onStatus: (status) => {
-        if (managed.serverID === serverID) controller.onStreamStatus(status);
-      },
-    });
+    wireServerStream(servers, controller, serverID, managed.serverID);
   }
   const stopPump = () => servers.dispose();
 

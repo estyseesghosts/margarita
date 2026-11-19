@@ -130,6 +130,16 @@ rather than resolved against your local machine. On Windows pointing at a Linux 
 `--cwd /home/me/app`. From Linux pointing at a Windows server: `--cwd 'C:\work\app'`.
 
 Without `--cwd`, `--remote` opens the overview and does not guess a remote directory.
+
+All paired profiles are restored at every startup, alongside the local service. If a paired
+server is offline or missing its credential, startup does not abort: that host shows up in
+the overview and `/servers` as unavailable (its rows keep whatever state was cached) while
+local and healthy remote hosts load normally. `--server` / `--remote` select which host is
+primary and where the working directory lives — they never narrow the overview. The
+discovered local service is registered alongside the explicit host (when one is running and
+reachable), and every other paired host is available too, so identical project directory
+names always come with their owning host attached.
+
 Profiles and goal/history data survive restarts; secrets live in Windows DPAPI, macOS
 Keychain, or the Linux Secret Service. If secure storage is unavailable, margarita refuses
 to persist a secret and asks you to re-pair or use the env var instead of writing plaintext.

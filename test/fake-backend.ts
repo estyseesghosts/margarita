@@ -348,7 +348,11 @@ export class FakeBackend implements Backend {
     if (failure !== undefined) throw failure;
     this.permissions = this.permissions.filter((permission) => permission.id !== requestID);
   }
+  /** When set, replaces the default silent event subscription (wire-stream tests). */
+  eventsHook?: (signal: AbortSignal) => AsyncIterable<BackendEvent>;
+
   events(signal: AbortSignal): AsyncIterable<BackendEvent> {
+    if (this.eventsHook !== undefined) return this.eventsHook(signal);
     // Stays silent until aborted, like an idle live stream.
     return {
       [Symbol.asyncIterator]: () => ({

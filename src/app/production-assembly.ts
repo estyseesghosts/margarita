@@ -1,7 +1,9 @@
 import { join } from 'node:path';
 
 import type { Backend } from '../adapter/backend.ts';
+import { createBackend } from '../adapter/backend.ts';
 import type { Connection } from '../adapter/connection.ts';
+import { type PairingFetch } from '../adapter/pairing.ts';
 import { ServerConnectionManager } from '../adapter/server-manager.ts';
 import type { AppConfig } from '../config/config.ts';
 import type { CredentialStore } from '../config/credentials.ts';
@@ -58,6 +60,11 @@ export type ProductionAssemblyInput = Readonly<{
   /** Test hooks; production callers leave these unset. */
   listFiles?: (root: string) => Promise<string[]>;
   saveLocalState?: (state: LocalState) => Promise<SaveResult | void>;
+  /** Pairing transport override for tests; production uses the real fetch. */
+  pairingFetch?: PairingFetch;
+  generateID?: () => string;
+  /** Backend factory override for restore/pair paths; production uses the real SDK backend. */
+  createBackend?: typeof createBackend;
   requestExit: () => void;
 }>;
 
@@ -68,12 +75,36 @@ export type ProductionAssembly = Readonly<{
   serverAdmin: ServerAdmin;
 }>;
 
+export function wireServerStream(
+  servers: ServerConnectionManager,
+  controller: AppController,
+  launchServerID: string,
+  targetID: string,
+): void {
+  servers.startStream(targetID, {
+    onBatch: (events, resync) => controller.onEvents(events, resync),
+    onStatus: (status) => {
+      const state =
+        status === 'live' ? 'online' : status === 'connecting' ? 'connecting' : 'offline';
+      servers.setState(targetID, state);
+      if (targetID === launchServerID) controller.onStreamStatus(status);
+    },
+  });
+}
+
+/** Trailing slashes are never meaningful for server identity; URLs are compared without them. */
+function baseOfUrl(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
 /**
  * Wires the server manager, credentials and profile store to the app controller exactly
  * as the real binary does. Used by `main.ts` and by production-composition tests, so the
  * missing-resolver class of bug cannot slip back in between the two.
  */
-export function createProductionAssembly(input: ProductionAssemblyInput): ProductionAssembly {
+export async function createProductionAssembly(
+  input: ProductionAssemblyInput,
+): Promise<ProductionAssembly> {
   const launch = input.connections[0];
   if (launch === undefined)
     throw new Error('The production assembly needs at least one connection.');
@@ -93,6 +124,40 @@ export function createProductionAssembly(input: ProductionAssemblyInput): Produc
   }
   const debugLog = input.debugLog ?? noDebugLog;
   let profiles = input.profiles;
+
+  // Restore every persisted paired server alongside the launch connection. Missing or
+  // unreadable credentials never abort startup; they register as `unauthorized` with no
+  // headers, so the overview can show the host without ever issuing a request.
+  const launchBase = baseOfUrl(launch.connection.baseUrl);
+  for (const profile of profiles.profiles) {
+    if (servers.get(profile.serverID) !== undefined) continue;
+    if (baseOfUrl(profile.baseUrl) === launchBase) continue;
+    const secret = await input.credentials.get(profile.serverID).catch(() => undefined);
+    const auth = profile.auth ?? 'bearer';
+    const headers =
+      secret === undefined
+        ? {}
+        : auth === 'basic'
+          ? { authorization: `Basic ${Buffer.from(`opencode:${secret}`).toString('base64')}` }
+          : { authorization: `Bearer ${secret}` };
+    const connection: Connection = { baseUrl: profile.baseUrl, headers, origin: 'remote' };
+    const restored = (input.createBackend ?? createBackend)(connection, {
+      serverID: profile.serverID,
+      toolOutputChars: input.config.transcript.toolOutputChars,
+    });
+    servers.add({
+      serverID: profile.serverID,
+      label: profile.shortname,
+      connection,
+      backend: restored,
+      remoteFilesystem: true,
+    });
+    servers.setState(profile.serverID, secret === undefined ? 'unauthorized' : 'connecting');
+    debugLog.write('server-restored', {
+      serverID: profile.serverID,
+      authorized: secret !== undefined,
+    });
+  }
 
   const keepFresh = (saved: ServerProfiles): ServerProfiles => {
     profiles = saved;
@@ -157,12 +222,19 @@ export function createProductionAssembly(input: ProductionAssemblyInput): Produc
         addProfile: async (inputProfile) =>
           keepFresh(await addServerProfile(input.paths.serversFile, inputProfile)),
         credentials: input.credentials,
+        ...(input.pairingFetch === undefined ? {} : { fetch: input.pairingFetch }),
+        ...(input.generateID === undefined ? {} : { generateID: input.generateID }),
+        ...(input.createBackend === undefined ? {} : { createBackend: input.createBackend }),
         ...(input.env['MARGARITA_SERVER_PASSWORD'] === undefined
           ? {}
           : { password: input.env['MARGARITA_SERVER_PASSWORD'] }),
         ...(input.env['MARGARITA_ALLOW_INSECURE_HTTP'] === '1' ? { allowInsecureHttp: true } : {}),
         toolOutputChars: input.config.transcript.toolOutputChars,
       });
+      // The new host joins subscriptions and the overview immediately: wire its stream and
+      // re-aggregate without a restart.
+      wireServerStream(servers, controller, launchServerID, result.serverID);
+      await controller.loadSessions().catch(() => {});
       return { shortname: result.shortname };
     },
     serverAdmin,

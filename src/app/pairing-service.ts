@@ -27,6 +27,8 @@ export type PairingServiceDeps = Readonly<{
   toolOutputChars?: number;
   /** Injectable for deterministic tests. */
   generateID?: () => string;
+  /** Backend factory override for tests; production uses the real SDK backend. */
+  createBackend?: typeof createBackend;
 }>;
 
 export type PairResult = Readonly<{
@@ -121,7 +123,7 @@ export async function pairServer(
 
   // Persist the secret first: a profile must never advertise a server Margarita cannot reach.
   if (credential !== '') await deps.credentials.set(serverID, credential);
-  const backend = createBackend(connection, {
+  const backend = (deps.createBackend ?? createBackend)(connection, {
     serverID,
     ...(deps.toolOutputChars === undefined ? {} : { toolOutputChars: deps.toolOutputChars }),
   });
