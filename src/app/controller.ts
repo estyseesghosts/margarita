@@ -256,8 +256,16 @@ export class AppController {
 
   // ---------------------------------------------------------------- identity
 
+  /**
+   * Resolves a backend by server. Fails closed: when a resolver is provided, an unknown or
+   * removed server throws instead of silently falling back to the launch backend; legacy
+   * single-backend callers provide no resolver and keep the launch backend explicitly.
+   */
   private backendFor(serverID: string): Backend {
-    return this.deps.backendFor?.(serverID) ?? this.deps.backend;
+    if (this.deps.backendFor === undefined) return this.deps.backend;
+    const resolved = this.deps.backendFor(serverID);
+    if (resolved === undefined) throw new Error(`Unknown server: ${serverID}`);
+    return resolved;
   }
 
   /**

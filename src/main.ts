@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 
 import { createCliRenderer } from '@opentui/core';
 import { render } from '@opentui/solid';
@@ -7,25 +7,18 @@ import { render } from '@opentui/solid';
 import packageJson from '../package.json' with { type: 'json' };
 import { type Backend, BackendError, createBackend } from './adapter/backend.ts';
 import { connect, type Connection, ConnectionError, redactUrl } from './adapter/connection.ts';
-import { ServerConnectionManager, serverIDForConnection } from './adapter/server-manager.ts';
-import { AppController, errorText } from './app/controller.ts';
+import { serverIDForConnection } from './adapter/server-manager.ts';
+import { errorText } from './app/controller.ts';
 import { createDebugLog, type DebugLog, noDebugLog } from './app/debug-log.ts';
-import { pairServer } from './app/pairing-service.ts';
-import { listProjectFiles } from './app/project-files.ts';
+import { type AssemblyConnection, createProductionAssembly } from './app/production-assembly.ts';
 import { type CliOptions, helpText, parseArgs } from './cli/args.ts';
 import { exitCodes, runPrint } from './cli/print.ts';
 import { resolveWorkingDirectory } from './cli/target.ts';
 import { loadConfig } from './config/config.ts';
 import { systemCredentialStore } from './config/credentials.ts';
-import { fileGoalStore } from './config/goal-store.ts';
-import { loadState, saveState } from './config/local-state.ts';
+import { loadState } from './config/local-state.ts';
 import { appPaths } from './config/paths.ts';
-import {
-  loadServerProfiles,
-  removeProfile,
-  renameProfile,
-  saveServerProfiles,
-} from './config/server-profiles.ts';
+import { loadServerProfiles } from './config/server-profiles.ts';
 import { buildKeymap } from './domain/keymap.ts';
 import type { ModelSelection } from './domain/model-ref.ts';
 import { App } from './ui/app.tsx';
@@ -117,14 +110,14 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
 
   const profileLoad = await loadServerProfiles(paths.serversFile);
   if (profileLoad.warning !== undefined) process.stderr.write(`${profileLoad.warning}\n`);
-  let profiles = profileLoad.profiles;
+  const profiles = profileLoad.profiles;
   const credentials = systemCredentialStore(platform, paths.stateDir);
 
   let backend: Backend;
   let remoteFilesystem = false;
   let serverID = 'local';
   let cwd = localCwd;
-  const servers = new ServerConnectionManager();
+  let launchConnection: AssemblyConnection | undefined;
   try {
     let connection: Connection;
     if (options.remote !== undefined) {
@@ -192,9 +185,8 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
       serverID,
       toolOutputChars: configLoad.config.transcript.toolOutputChars,
     });
-    const managed = servers.add({ serverID, connection, backend });
-    remoteFilesystem = managed.remoteFilesystem;
-    servers.setState(serverID, 'online');
+    remoteFilesystem = connection.origin === 'remote';
+    launchConnection = { serverID, connection, backend, remoteFilesystem };
     debugLog.write('connected', { baseUrl: redactUrl(backend.baseUrl), serverID });
   } catch (error) {
     debugLog.write('connect-failed', {
@@ -213,84 +205,20 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   if (stateLoad.warning !== undefined) process.stderr.write(`${stateLoad.warning}\n`);
 
   const exit: { request?: () => void } = {};
-  const controller = new AppController({
-    backend,
-    serverID,
+  const { servers, controller } = createProductionAssembly({
     config: configLoad.config,
-    localState: stateLoad.state,
     platform,
     cwd,
     version,
-    now: Date.now,
-    saveLocalState: (state) => saveState(paths.stateFile, state),
-    listFiles: (root) => listProjectFiles(root),
+    paths: { stateFile: paths.stateFile, serversFile: paths.serversFile, stateDir: paths.stateDir },
+    env,
+    credentials,
+    connections: launchConnection === undefined ? [] : [launchConnection],
+    profiles,
+    localState: stateLoad.state,
     remoteFilesystem,
-    requestExit: () => exit.request?.(),
-    goalStore: fileGoalStore(join(paths.stateDir, 'goals'), () => new Date().toISOString()),
-    pair: async (request) => {
-      const result = await pairServer(request, {
-        servers,
-        profiles: () => profiles,
-        saveProfiles: async (next) => {
-          const saved = await saveServerProfiles(paths.serversFile, next);
-          profiles = saved;
-          return saved;
-        },
-        credentials,
-        ...(env['MARGARITA_SERVER_PASSWORD'] === undefined
-          ? {}
-          : { password: env['MARGARITA_SERVER_PASSWORD'] }),
-        ...(env['MARGARITA_ALLOW_INSECURE_HTTP'] === '1' ? { allowInsecureHttp: true } : {}),
-        toolOutputChars: configLoad.config.transcript.toolOutputChars,
-      });
-      return { shortname: result.shortname };
-    },
-    serverAdmin: {
-      list: () =>
-        servers.list().map((entry) => ({
-          serverID: entry.serverID,
-          label: entry.label,
-          baseUrl: entry.backend.baseUrl,
-          state: entry.state,
-          active: entry.serverID === serverID,
-        })),
-      rename: async (targetID, label) => {
-        const renamed = renameProfile(profiles.profiles, targetID, label);
-        const saved = await saveServerProfiles(paths.serversFile, {
-          schemaVersion: 1,
-          profiles: renamed,
-        });
-        profiles = saved;
-        servers.setLabel(targetID, label);
-        return saved.profiles.map((profile) => ({
-          serverID: profile.serverID,
-          label: profile.shortname,
-          baseUrl: profile.baseUrl,
-          state: servers.get(profile.serverID)?.state ?? 'offline',
-          active: profile.serverID === serverID,
-        }));
-      },
-      unpair: async (targetID) => {
-        const saved = await saveServerProfiles(paths.serversFile, {
-          schemaVersion: 1,
-          profiles: removeProfile(profiles.profiles, targetID),
-        });
-        profiles = saved;
-        await credentials.delete(targetID).catch((error: unknown) => {
-          process.stderr.write(
-            `marg: could not remove the saved credential for ${targetID}: ${errorText(error)}\n`,
-          );
-        });
-        await servers.remove(targetID);
-      },
-    },
-    serverIDs: () => servers.list().map((managed) => managed.serverID),
-    serverInfo: (targetID) => {
-      const managed = servers.get(targetID);
-      if (managed === undefined) return undefined;
-      return { label: managed.label, online: managed.state === 'online' };
-    },
     debugLog,
+    requestExit: () => exit.request?.(),
   });
 
   try {
