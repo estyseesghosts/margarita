@@ -395,6 +395,14 @@ function NodeView(props: {
                 props.focused ? '  (Enter)' : ''
               }`}
             </text>
+            {/* One continuously updated action, visible while the group is collapsed. */}
+            <Show when={node().live}>
+              {(live: Accessor<string>) => (
+                <text fg={theme().dim}>
+                  {`    └ ${truncateToWidth(sanitizeText(live()), Math.max(8, props.width - 6))}`}
+                </text>
+              )}
+            </Show>
             <Show when={node().expanded}>
               <For each={node().tools}>
                 {(tool) => (

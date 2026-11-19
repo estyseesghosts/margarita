@@ -52,6 +52,22 @@ const compactionRecord = (id: string, state: 'running' | 'completed' | 'failed',
 const activityOf = (messages: Parameters<typeof markerAt>[0]) =>
   markerAt(messages, true)[0]?.activity;
 
+function toolMessage(status: 'running' | 'completed' | 'streaming'): TranscriptMessage {
+  return {
+    kind: 'assistant',
+    id: 'a',
+    createdAt: 11,
+    agent: 'build',
+    model,
+    parts: [
+      {
+        kind: 'tool',
+        tool: { id: 't', name: 'shell', status, input: {}, startedAt: 12 },
+      },
+    ],
+  };
+}
+
 describe('executionMarkers', () => {
   test('a bare queued user message produces no marker', () => {
     expect(markerAt([user('u', 10)], false)).toEqual([]);
@@ -224,6 +240,16 @@ describe('executionMarkers', () => {
       ]),
     ).toBe('Compacting conversation');
     expect(activityOf([user('u', 10), compactionRecord('c', 'completed', 12)])).toBeUndefined();
+  });
+
+  test('a finished tool never keeps labelling the running turn (issue #75)', () => {
+    // A completed call leaves the phase to the throbber's own verb instead of "Running".
+    expect(activityOf([user('u', 10), toolMessage('completed')])).toBeUndefined();
+    expect(activityOf([user('u', 10), toolMessage('streaming')])).toBe('Running');
+    // Reasoning after the call is authoritative again.
+    expect(activityOf([user('u', 10), toolMessage('completed'), reasoningMessage('r', 20)])).toBe(
+      'Thinking',
+    );
   });
 
   test('an interrupted assistant message with no idle of its own still terminates via idle', () => {

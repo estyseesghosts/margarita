@@ -86,6 +86,12 @@ export type TranscriptNode =
       key: string;
       summary: string;
       running: boolean;
+      /**
+       * One short, sanitized description of the call executing right now inside this
+       * group (`$ tail -8 log`, `lotus: get_issue`), shown beneath the collapsed row.
+       * Absent for historical groups: only a genuinely running/streaming call sets it.
+       */
+      live?: string;
       tools: readonly ToolCall[];
       expanded: boolean;
     }
@@ -329,11 +335,13 @@ function mergeAdjacentGroups(nodes: TranscriptNode[], options: FoldOptions): Tra
     } else {
       const tools = run.flatMap((group) => group.tools);
       const key = groupKey(tools);
+      const live = liveToolLine(tools, options.mcpServers);
       merged.push({
         kind: 'tool-group',
         key,
         summary: summarizeTools(tools, options.mcpServers),
         running: run.some((group) => group.running),
+        ...(live === undefined ? {} : { live }),
         tools,
         expanded: run.some((group) => group.expanded) || options.expandedGroups.has(key),
       });
@@ -373,11 +381,13 @@ function foldAssistant(
   };
   const emitGroup = (tools: ToolCall[]) => {
     const key = groupKey(tools);
+    const live = liveToolLine(tools, options.mcpServers);
     out.push({
       kind: 'tool-group',
       key,
       summary: summarizeTools(tools, options.mcpServers),
       running: tools.some((tool) => tool.status === 'running' || tool.status === 'streaming'),
+      ...(live === undefined ? {} : { live }),
       tools,
       expanded: options.expandedGroups.has(key),
     });
@@ -530,6 +540,52 @@ export function summarizeTools(
       index === 0 ? phrase : phrase.charAt(0).toLowerCase() + phrase.slice(1),
     )
     .join(', ');
+}
+
+const liveArgumentKeys = ['command', 'filePath', 'path', 'pattern', 'url', 'query', 'description'];
+
+const activityLabels: Readonly<Record<ToolCategory, string>> = {
+  read: 'Reading',
+  search: 'Searching',
+  edit: 'Editing',
+  shell: 'Running',
+  web: 'Fetching',
+  delegate: 'Delegating',
+  other: 'Working',
+};
+
+/**
+ * The one call to name beneath a collapsed group: the most recently started call that is
+ * genuinely `running`/`streaming`. A finished call never qualifies, so a collapsed
+ * historical group shows no fake live line (issue #75).
+ */
+export function activeTool(tools: readonly ToolCall[]): ToolCall | undefined {
+  return tools
+    .filter((tool) => tool.status === 'running' || tool.status === 'streaming')
+    .toSorted((left, right) => right.startedAt - left.startedAt)[0];
+}
+
+/**
+ * Safe single-line label for an executing call: `$ tail -8 file` for shell, `lotus:
+ * get_issue` for MCP, `Reading src/a.ts` for reads. Arguments are clipped to their first
+ * line and sanitized; the caller clips to the terminal width.
+ */
+export function liveToolLine(
+  tools: readonly ToolCall[],
+  mcpServers: readonly string[] = [],
+): string | undefined {
+  const active = activeTool(tools);
+  if (active === undefined) return undefined;
+  const identity = toolIdentity(active.name, mcpServers);
+  if (identity.kind === 'mcp') return `${identity.server}: ${identity.tool}`;
+  const category = classifyTool(active.name);
+  const verb = identity.kind === 'builtin' ? activityLabels[category] : 'Calling';
+  const target = liveArgumentKeys
+    .map((key) => active.input[key])
+    .find((value): value is string => typeof value === 'string' && value.trim() !== '');
+  const firstLine = target?.split('\n')[0]?.trim();
+  if (firstLine === undefined || firstLine === '') return verb;
+  return category === 'shell' ? `$ ${firstLine}` : `${verb} ${firstLine}`;
 }
 
 const argumentKeys = ['filePath', 'path', 'pattern', 'command', 'url', 'query', 'description'];

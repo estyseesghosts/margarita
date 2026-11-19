@@ -36,12 +36,19 @@ const activityByCategory: Readonly<Record<ToolCategory, string>> = {
   other: 'Working',
 };
 
+/** A call that has not settled yet; its status genuinely means "working right now". */
+function isToolActive(status: string): boolean {
+  return status === 'running' || status === 'streaming';
+}
+
 type SegmentAccum = {
   id: string;
   segStartedAt?: number;
   assistantCreated?: number;
   assistantCompleted?: number;
   toolCategory?: ToolCategory;
+  /** The most recently seen call, kept so the live activity follows a genuinely running one. */
+  lastTool?: { category: ToolCategory; status: string; startedAt: number };
   reasoningOpen: boolean;
   compacting: boolean;
   worked: boolean;
@@ -85,6 +92,11 @@ export function executionMarkers(
         if (accum === undefined) accum = startSegment(message);
         accum.lastMessageId = message.id;
         accum.toolCategory = 'shell';
+        accum.lastTool = {
+          category: 'shell',
+          status: message.status,
+          startedAt: message.createdAt,
+        };
         accum.worked = true;
         break;
       case 'assistant': {
@@ -98,6 +110,11 @@ export function executionMarkers(
         for (const part of message.parts) {
           if (part.kind === 'tool') {
             accum.toolCategory = classifyTool(part.tool.name);
+            accum.lastTool = {
+              category: accum.toolCategory,
+              status: part.tool.status,
+              startedAt: part.tool.startedAt,
+            };
             accum.reasoningOpen = false;
           } else if (part.kind === 'reasoning') {
             accum.reasoningOpen = !part.done;
@@ -147,8 +164,11 @@ function markerFrom(accum: SegmentAccum, isRunning: boolean): ExecutionMarker | 
   if (isRunning) {
     let activity: string | undefined;
     if (accum.compacting) activity = 'Compacting conversation';
+    // A finished call must not keep labelling the turn: only a genuinely running tool
+    // names the phase, otherwise the throbber's own verb stands in (issue #75).
+    else if (accum.lastTool !== undefined && isToolActive(accum.lastTool.status))
+      activity = activityByCategory[accum.lastTool.category];
     else if (accum.reasoningOpen) activity = 'Thinking';
-    else if (accum.toolCategory !== undefined) activity = activityByCategory[accum.toolCategory];
     return {
       id: accum.id,
       afterMessageId: accum.lastMessageId,

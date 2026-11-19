@@ -1417,6 +1417,40 @@ function groupedBackend(): FakeBackend {
   return backend;
 }
 
+function liveBackend(): FakeBackend {
+  const backend = backendWithSession();
+  const model = { providerID: 'opencode', modelID: 'longcat' };
+  backend.mcpServers = ['lotus'];
+  backend.messages = {
+    ses_a: [
+      { kind: 'user', id: 'm1', createdAt: 1, text: 'check the deploy', attachments: [] },
+      {
+        kind: 'assistant',
+        id: 'mA',
+        createdAt: 2,
+        agent: 'build',
+        model,
+        parts: [
+          groupedBashPart('s0'),
+          groupedBashPart('s1'),
+          {
+            kind: 'tool',
+            tool: {
+              id: 'live',
+              name: 'lotus_get_issue',
+              status: 'running',
+              input: { issue: '7' },
+              startedAt: 9,
+            },
+          },
+        ],
+      },
+    ],
+  };
+  backend.active = new Set(['ses_a']);
+  return backend;
+}
+
 describe('grouped activity (issue #23)', () => {
   test('compact frame shows a few grouped rows, the visible failure and the final reply', async () => {
     const { controller, setup } = await mount(groupedBackend());
@@ -1443,6 +1477,22 @@ describe('grouped activity (issue #23)', () => {
     expect(detailedFrame).toContain('Changed(src/index.ts)');
     expect(detailedFrame).toContain('bash s10.log');
     expect(detailedFrame).toContain('edit src/fixed.ts');
+    controller.dispose();
+  });
+});
+
+describe('live action beneath a collapsed group (issue #75)', () => {
+  test('a collapsed group shows the executing call without Ctrl+O', async () => {
+    const { controller, setup } = await mount(liveBackend());
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+
+    expect(frame).toContain('Ran 2 shell commands, called lotus 1 time…');
+    // The live line names the executing MCP call on its own row beneath the group.
+    expect(frame).toContain('└ lotus: get_issue');
+    // It is not the historical group that shows a fake action: the running one only.
+    expect(frame).not.toContain('└ $ bun run');
     controller.dispose();
   });
 });

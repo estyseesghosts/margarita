@@ -428,6 +428,19 @@ function summaryOf(nodes: TranscriptNode[]): string | undefined {
   return group?.kind === 'tool-group' ? group.summary : undefined;
 }
 
+function runningTool(
+  id: string,
+  name: string,
+  input: Record<string, unknown> = {},
+  startedAt = 10,
+): ToolCall {
+  return { id, name, status: 'running', input, startedAt };
+}
+
+function toolPart(entry: ToolCall): AssistantPart {
+  return { kind: 'tool', tool: entry };
+}
+
 describe('MCP activity in compact groups (issue #74)', () => {
   test('a mixed fixture names reads, MCP calls and shell commands together', () => {
     const parts: AssistantPart[] = [
@@ -515,6 +528,90 @@ describe('MCP activity in compact groups (issue #74)', () => {
     expect(call?.kind === 'tool' ? describeTool(call.tool, ['lotus']) : undefined).toBe(
       'lotus: get_issue',
     );
+  });
+});
+
+describe('live action beneath a collapsed group (issue #75)', () => {
+  test('a running shell command is the live line while collapsed', () => {
+    const nodes = foldTranscript(
+      [
+        assistant([
+          toolPart({ ...runningTool('h', 'read', { path: 'src/a.ts' }, 1), status: 'completed' }),
+          toolPart({ ...runningTool('h2', 'read', { path: 'src/b.ts' }, 2), status: 'completed' }),
+          toolPart(
+            runningTool('s', 'shell', { command: 'tail -8 /var/log/platinum.log\nmore args' }),
+          ),
+        ]),
+      ],
+      compact,
+    );
+    const group = nodes[0];
+    expect(group?.kind === 'tool-group' && group.expanded).toBe(false);
+    expect(group?.kind === 'tool-group' && group.live).toBe('$ tail -8 /var/log/platinum.log');
+  });
+
+  test('an MCP call names its server and operation', () => {
+    const nodes = foldTranscript(
+      [assistant([toolPart(runningTool('l', 'lotus_get_issue', { id: 4 }))])],
+      { ...compact, mcpServers: ['lotus'] },
+    );
+    expect(nodes[0]?.kind === 'tool-group' && nodes[0].live).toBe('lotus: get_issue');
+  });
+
+  test('the live line follows the most recently started call, not the last seen', () => {
+    const nodes = foldTranscript(
+      [
+        assistant([
+          toolPart(runningTool('slow', 'read', { path: 'src/slow.ts' }, 5)),
+          toolPart(runningTool('new', 'shell', { command: 'bun test' }, 9)),
+        ]),
+      ],
+      compact,
+    );
+    expect(nodes[0]?.kind === 'tool-group' && nodes[0].live).toBe('$ bun test');
+  });
+
+  test('a finished call leaves no stale live line on historical groups', () => {
+    const nodes = foldTranscript(
+      [
+        assistant([
+          toolPart({
+            ...runningTool('s', 'shell', { command: 'bun test' }),
+            status: 'completed',
+            completedAt: 20,
+          }),
+          { kind: 'text', text: 'The tests are green.' },
+        ]),
+      ],
+      compact,
+    );
+    expect(nodes[0]?.kind === 'tool-group' && nodes[0].live).toBeUndefined();
+  });
+
+  test('a failing call is not presented as currently running', () => {
+    const nodes = foldTranscript(
+      [
+        assistant([
+          toolPart({
+            ...runningTool('f', 'shell', { command: 'false' }),
+            status: 'error',
+            error: 'exit 1',
+          }),
+        ]),
+      ],
+      compact,
+    );
+    expect(nodes[0]?.kind).toBe('tool');
+  });
+
+  test('the live line is sanitized to a single row', () => {
+    const nodes = foldTranscript(
+      [assistant([toolPart(runningTool('s', 'shell', { command: 'echo \u001b[2Jhi\nsecond' }))])],
+      compact,
+    );
+    const live = nodes[0]?.kind === 'tool-group' ? nodes[0].live : undefined;
+    expect(live?.includes('\n')).toBe(false);
+    expect(live?.startsWith('$ echo ')).toBe(true);
   });
 });
 
