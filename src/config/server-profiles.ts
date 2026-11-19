@@ -242,12 +242,58 @@ export async function loadServerProfiles(
   }
 }
 
-/** Read-merge-write so two Margarita processes adding profiles do not lose each other's work. */
-export function mergeProfiles(ours: ServerProfiles, theirs: ServerProfiles): ServerProfiles {
-  const byID = new Map<string, ServerProfile>();
-  for (const profile of theirs.profiles) byID.set(profile.serverID, profile);
-  for (const profile of ours.profiles) byID.set(profile.serverID, profile);
-  return { schemaVersion: 1, profiles: [...byID.values()] };
+/**
+ * Atomic locked read-modify-write. The operation sees the current disk state, so removal is
+ * durable: a profile deleted from one process cannot be resurrected by another process's
+ * stale snapshot, while unrelated profiles added elsewhere are always retained.
+ */
+export async function updateServerProfiles(
+  path: string,
+  operation: (disk: ServerProfiles) => ServerProfiles,
+): Promise<ServerProfiles> {
+  await mkdir(dirname(path), { recursive: true });
+  const release = await acquireLock(`${path}.lock`);
+  try {
+    const disk = (await loadServerProfiles(path)).profiles;
+    const next = operation(disk);
+    const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(temp, `${JSON.stringify(next, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    await rename(temp, path);
+    return next;
+  } finally {
+    await release();
+  }
+}
+
+/** Adds a profile against current disk state; rejects duplicates instead of merging them. */
+export async function addServerProfile(path: string, input: ProfileInput): Promise<ServerProfiles> {
+  return updateServerProfiles(path, (disk) => ({
+    schemaVersion: 1,
+    profiles: addProfile(disk.profiles, input),
+  }));
+}
+
+/** Renames a profile under lock; the disk registry, not a stale snapshot, decides what exists. */
+export async function renameServerProfile(
+  path: string,
+  serverID: string,
+  shortname: string,
+): Promise<ServerProfiles> {
+  return updateServerProfiles(path, (disk) => ({
+    schemaVersion: 1,
+    profiles: renameProfile(disk.profiles, serverID, shortname),
+  }));
+}
+
+/** Removes a profile durably under lock; absence of the record survives restarts. */
+export async function removeServerProfile(path: string, serverID: string): Promise<ServerProfiles> {
+  return updateServerProfiles(path, (disk) => ({
+    schemaVersion: 1,
+    profiles: removeProfile(disk.profiles, serverID),
+  }));
 }
 
 async function acquireLock(lockPath: string): Promise<() => Promise<void>> {
@@ -273,26 +319,5 @@ async function acquireLock(lockPath: string): Promise<() => Promise<void>> {
       if (Date.now() >= deadline) throw new ProfileError('Timed out waiting for the profile lock.');
       await Bun.sleep(lockRetryMs);
     }
-  }
-}
-
-export async function saveServerProfiles(
-  path: string,
-  profiles: ServerProfiles,
-): Promise<ServerProfiles> {
-  await mkdir(dirname(path), { recursive: true });
-  const release = await acquireLock(`${path}.lock`);
-  try {
-    const disk = await loadServerProfiles(path);
-    const merged = mergeProfiles(profiles, disk.profiles);
-    const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(temp, `${JSON.stringify(merged, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600,
-    });
-    await rename(temp, path);
-    return merged;
-  } finally {
-    await release();
   }
 }

@@ -6,10 +6,9 @@ import { type PairingFetch, redeemPairing, serverInfo } from '../adapter/pairing
 import type { ServerConnectionManager } from '../adapter/server-manager.ts';
 import type { CredentialStore } from '../config/credentials.ts';
 import {
-  addProfile,
   findDuplicates,
   normalizeServerUrl,
-  type ServerProfile,
+  type ProfileInput,
   type ServerProfiles,
   validateShortname,
 } from '../config/server-profiles.ts';
@@ -18,7 +17,8 @@ import { PairingError, type PairRequest, suggestShortname } from '../domain/pair
 export type PairingServiceDeps = Readonly<{
   servers: ServerConnectionManager;
   profiles: () => ServerProfiles;
-  saveProfiles: (profiles: ServerProfiles) => Promise<ServerProfiles>;
+  /** Persists the new profile under a lock, arbitrated against current disk state. */
+  addProfile: (input: ProfileInput) => Promise<ServerProfiles>;
   credentials: CredentialStore;
   fetch?: PairingFetch;
   /** Env-provided password for manual-URL pairing; never read from argv. */
@@ -44,7 +44,7 @@ function profileFor(input: {
   shortname: string;
   baseUrl: string;
   auth: 'bearer' | 'basic';
-}): ServerProfile {
+}) {
   return {
     serverID: input.serverID,
     shortname: input.shortname,
@@ -125,14 +125,13 @@ export async function pairServer(
     serverID,
     ...(deps.toolOutputChars === undefined ? {} : { toolOutputChars: deps.toolOutputChars }),
   });
-  const profiles = addProfile(deps.profiles().profiles, {
-    serverID,
-    shortname,
-    baseUrl: connection.baseUrl,
-    auth,
-  });
   try {
-    const saved = await deps.saveProfiles({ schemaVersion: 1, profiles });
+    const saved = await deps.addProfile({
+      serverID,
+      shortname,
+      baseUrl: connection.baseUrl,
+      auth,
+    });
     const profile =
       saved.profiles.find((entry) => entry.serverID === serverID) ??
       profileFor({

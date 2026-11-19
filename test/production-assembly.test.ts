@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -8,7 +8,7 @@ import { createProductionAssembly } from '../src/app/production-assembly.ts';
 import { defaultConfig } from '../src/config/config.ts';
 import { memoryCredentialStore } from '../src/config/credentials.ts';
 import { emptyState } from '../src/config/local-state.ts';
-import { emptyServerProfiles } from '../src/config/server-profiles.ts';
+import { emptyServerProfiles, loadServerProfiles } from '../src/config/server-profiles.ts';
 import { FakeBackend } from './fake-backend.ts';
 
 function remoteConnection(url: string): Connection {
@@ -100,6 +100,66 @@ describe('production assembly (main-path wiring)', () => {
     expect(local.calls.filter((call) => call.name === 'prompt')).toHaveLength(0);
 
     controller.dispose();
+    await assembly.servers.dispose();
+  });
+
+  test('unpair removes the credential, the profile and the live server durably', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'margarita-unpair-'));
+    const serversFile = join(directory, 'servers.json');
+    await writeFile(
+      serversFile,
+      JSON.stringify({
+        schemaVersion: 1,
+        profiles: [
+          {
+            serverID: 'srv_1',
+            shortname: 'buildbox',
+            baseUrl: 'http://build.test:4096',
+            auth: 'bearer',
+          },
+        ],
+      }),
+    );
+    const credentials = memoryCredentialStore();
+    await credentials.set('srv_1', 'tok_secret');
+    const { local, remote } = collidingBackends();
+    const assembly = createProductionAssembly({
+      config: defaultConfig,
+      platform: 'linux',
+      cwd: '/work/lotus',
+      version: '0.0.1',
+      paths: { stateFile: join(directory, 'state.json'), serversFile, stateDir: directory },
+      env: {},
+      credentials,
+      connections: [
+        {
+          serverID: 'local',
+          connection: remoteConnection('http://launch.test:4096'),
+          backend: local,
+          remoteFilesystem: false,
+        },
+        {
+          serverID: 'srv_1',
+          label: 'buildbox',
+          connection: remoteConnection('http://build.test:4096'),
+          backend: remote,
+          remoteFilesystem: true,
+        },
+      ],
+      profiles: (await loadServerProfiles(serversFile)).profiles,
+      localState: emptyState,
+      requestExit: () => {},
+    });
+
+    await assembly.serverAdmin.unpair('srv_1');
+
+    // The record is gone from disk, so no restart or stale snapshot can bring it back.
+    expect((await loadServerProfiles(serversFile)).profiles.profiles).toHaveLength(0);
+    expect(await credentials.get('srv_1')).toBeUndefined();
+    expect(assembly.servers.list().map((managed) => managed.serverID)).toEqual(['local']);
+    expect(() => assembly.servers.backendFor('srv_1')).toThrow('Unknown server');
+
+    assembly.controller.dispose();
     await assembly.servers.dispose();
   });
 

@@ -5,15 +5,16 @@ import { join } from 'node:path';
 
 import {
   addProfile,
+  addServerProfile,
   emptyServerProfiles,
   findDuplicates,
   loadServerProfiles,
-  mergeProfiles,
   normalizeServerUrl,
   parseServerProfiles,
   ProfileError,
+  removeServerProfile,
   renameProfile,
-  saveServerProfiles,
+  renameServerProfile,
   validateShortname,
 } from './server-profiles.ts';
 
@@ -28,8 +29,7 @@ describe('server profiles', () => {
     const dir = await mkdtemp(join(tmpdir(), 'marg-servers-'));
     try {
       const path = join(dir, 'servers.json');
-      const profiles = { ...emptyServerProfiles, profiles: addProfile([], buildbox) };
-      await saveServerProfiles(path, profiles);
+      await addServerProfile(path, buildbox);
       const loaded = await loadServerProfiles(path);
       expect(loaded.profiles.profiles).toEqual([
         {
@@ -47,13 +47,12 @@ describe('server profiles', () => {
     const dir = await mkdtemp(join(tmpdir(), 'marg-servers-'));
     try {
       const path = join(dir, 'servers.json');
-      await saveServerProfiles(path, {
-        ...emptyServerProfiles,
-        profiles: addProfile([], buildbox),
-      });
-      await saveServerProfiles(path, {
-        ...emptyServerProfiles,
-        profiles: addProfile([], { ...buildbox, serverID: 'srv_2', shortname: 'home' }),
+      await addServerProfile(path, buildbox);
+      await addServerProfile(path, {
+        ...buildbox,
+        serverID: 'srv_2',
+        shortname: 'home',
+        baseUrl: 'https://home.example.com/opencode',
       });
       const loaded = await loadServerProfiles(path);
       expect(loaded.profiles.profiles.map((profile) => profile.shortname).toSorted()).toEqual([
@@ -130,10 +129,7 @@ describe('server profiles', () => {
     const dir = await mkdtemp(join(tmpdir(), 'marg-servers-'));
     try {
       const path = join(dir, 'servers.json');
-      await saveServerProfiles(path, {
-        ...emptyServerProfiles,
-        profiles: addProfile([], buildbox),
-      });
+      await addServerProfile(path, buildbox);
       const text = await readFile(path, 'utf8');
       expect(text).not.toContain('password');
       expect(text).not.toContain('token');
@@ -143,20 +139,72 @@ describe('server profiles', () => {
     }
   });
 
-  test('merge prefers our newer profile without dropping theirs', () => {
-    const ours = {
-      ...emptyServerProfiles,
-      profiles: addProfile([], { ...buildbox, shortname: 'office' }),
-    };
-    const theirs = {
-      ...emptyServerProfiles,
-      profiles: addProfile([], { ...buildbox, serverID: 'srv_2', shortname: 'home' }),
-    };
-    const merged = mergeProfiles(ours, theirs);
-    expect(merged.profiles.find((profile) => profile.serverID === 'srv_1')?.shortname).toBe(
-      'office',
-    );
-    expect(merged.profiles.find((profile) => profile.serverID === 'srv_2')?.shortname).toBe('home');
+  test('a removed profile is durable against a stale snapshot', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'marg-servers-'));
+    try {
+      const path = join(dir, 'servers.json');
+      await addServerProfile(path, buildbox);
+      await addServerProfile(path, {
+        ...buildbox,
+        serverID: 'srv_2',
+        shortname: 'home',
+        baseUrl: 'https://home.example.com/opencode',
+      });
+      // A stale in-memory snapshot still mentioning B cannot restore B: operations read disk.
+      const removed = await removeServerProfile(path, 'srv_1');
+      expect(removed.profiles.map((profile) => profile.serverID)).toEqual(['srv_2']);
+      // Operations started after the removal also never see B again.
+      const after = await addServerProfile(path, {
+        ...buildbox,
+        serverID: 'srv_3',
+        shortname: 'x',
+        baseUrl: 'https://x.example.com/opencode',
+      });
+      expect(after.profiles.map((profile) => profile.serverID)).toEqual(['srv_2', 'srv_3']);
+      const loaded = await loadServerProfiles(path);
+      expect(loaded.profiles.profiles.map((profile) => profile.serverID)).toEqual([
+        'srv_2',
+        'srv_3',
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('concurrent add(A)/remove(B) and rename(A)/remove(B) keep unrelated profiles', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'marg-servers-'));
+    try {
+      const path = join(dir, 'servers.json');
+      await addServerProfile(path, buildbox);
+      await addServerProfile(path, {
+        ...buildbox,
+        serverID: 'srv_2',
+        shortname: 'home',
+        baseUrl: 'https://home.example.com/opencode',
+      });
+      const [added, removed] = await Promise.all([
+        addServerProfile(path, {
+          ...buildbox,
+          serverID: 'srv_3',
+          shortname: 'x',
+          baseUrl: 'https://x.example.com/opencode',
+        }),
+        removeServerProfile(path, 'srv_1'),
+      ]);
+      expect(added.profiles.map((profile) => profile.serverID)).toContain('srv_3');
+      expect(removed.profiles.map((profile) => profile.serverID)).not.toContain('srv_1');
+      const loaded = await loadServerProfiles(path);
+      expect(loaded.profiles.profiles.map((profile) => profile.serverID).toSorted()).toEqual([
+        'srv_2',
+        'srv_3',
+      ]);
+      await renameServerProfile(path, 'srv_3', 'thunder');
+      await removeServerProfile(path, 'srv_2');
+      const final = await loadServerProfiles(path);
+      expect(final.profiles.profiles.map((profile) => profile.shortname)).toEqual(['thunder']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test('parse accepts an empty registry and rejects the wrong schema', () => {

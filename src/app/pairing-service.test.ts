@@ -2,7 +2,12 @@ import { describe, expect, test } from 'bun:test';
 
 import { ServerConnectionManager } from '../adapter/server-manager.ts';
 import { memoryCredentialStore } from '../config/credentials.ts';
-import { emptyServerProfiles, type ServerProfiles } from '../config/server-profiles.ts';
+import {
+  addProfile,
+  emptyServerProfiles,
+  type ProfileInput,
+  type ServerProfiles,
+} from '../config/server-profiles.ts';
 import { PairingError } from '../domain/pairing.ts';
 import { pairServer } from './pairing-service.ts';
 
@@ -27,9 +32,9 @@ function harness() {
       servers,
       credentials,
       profiles: () => profiles,
-      saveProfiles: async (next: ServerProfiles) => {
-        profiles = next;
-        return next;
+      addProfile: async (input: ProfileInput) => {
+        profiles = { schemaVersion: 1, profiles: addProfile(profiles.profiles, input) };
+        return profiles;
       },
       fetch: async (url: string) =>
         url.includes('/auth/connect')

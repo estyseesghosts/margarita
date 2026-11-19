@@ -1,5 +1,4 @@
 import { join } from 'node:path';
-import process from 'node:process';
 
 import type { Backend } from '../adapter/backend.ts';
 import type { Connection } from '../adapter/connection.ts';
@@ -9,12 +8,12 @@ import type { CredentialStore } from '../config/credentials.ts';
 import { fileGoalStore, type GoalStore } from '../config/goal-store.ts';
 import { type LocalState, type SaveResult, saveState } from '../config/local-state.ts';
 import {
-  removeProfile,
-  renameProfile,
-  saveServerProfiles,
+  addServerProfile,
+  removeServerProfile,
+  renameServerProfile,
   type ServerProfiles,
 } from '../config/server-profiles.ts';
-import { AppController, errorText, type ServerAdmin, type ServerListing } from './controller.ts';
+import { AppController, type ServerAdmin, type ServerListing } from './controller.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { pairServer } from './pairing-service.ts';
 import { listProjectFiles } from './project-files.ts';
@@ -65,6 +64,8 @@ export type ProductionAssemblyInput = Readonly<{
 export type ProductionAssembly = Readonly<{
   servers: ServerConnectionManager;
   controller: AppController;
+  /** The same admin surface the controller wires; exposed for assembly-path tests. */
+  serverAdmin: ServerAdmin;
 }>;
 
 /**
@@ -93,8 +94,7 @@ export function createProductionAssembly(input: ProductionAssemblyInput): Produc
   const debugLog = input.debugLog ?? noDebugLog;
   let profiles = input.profiles;
 
-  const saveAndKeep = async (next: ServerProfiles): Promise<ServerProfiles> => {
-    const saved = await saveServerProfiles(input.paths.serversFile, next);
+  const keepFresh = (saved: ServerProfiles): ServerProfiles => {
     profiles = saved;
     return saved;
   };
@@ -111,8 +111,7 @@ export function createProductionAssembly(input: ProductionAssemblyInput): Produc
   const serverAdmin: ServerAdmin = {
     list: () => serversListing(),
     rename: async (targetID, label) => {
-      const renamed = renameProfile(profiles.profiles, targetID, label);
-      const saved = await saveAndKeep({ schemaVersion: 1, profiles: renamed });
+      const saved = keepFresh(await renameServerProfile(input.paths.serversFile, targetID, label));
       servers.setLabel(targetID, label);
       return saved.profiles.map((profile) => ({
         serverID: profile.serverID,
@@ -123,15 +122,10 @@ export function createProductionAssembly(input: ProductionAssemblyInput): Produc
       }));
     },
     unpair: async (targetID) => {
-      await saveAndKeep({
-        schemaVersion: 1,
-        profiles: removeProfile(profiles.profiles, targetID),
-      });
-      await input.credentials.delete(targetID).catch((error: unknown) => {
-        process.stderr.write(
-          `marg: could not remove the saved credential for ${targetID}: ${errorText(error)}\n`,
-        );
-      });
+      // Credential first: if the secret cannot be removed, nothing else changes and the
+      // failure is surfaced instead of reporting a half-finished unpair as done.
+      await input.credentials.delete(targetID);
+      keepFresh(await removeServerProfile(input.paths.serversFile, targetID));
       await servers.remove(targetID);
     },
   };
@@ -160,7 +154,8 @@ export function createProductionAssembly(input: ProductionAssemblyInput): Produc
       const result = await pairServer(request, {
         servers,
         profiles: () => profiles,
-        saveProfiles: saveAndKeep,
+        addProfile: async (inputProfile) =>
+          keepFresh(await addServerProfile(input.paths.serversFile, inputProfile)),
         credentials: input.credentials,
         ...(input.env['MARGARITA_SERVER_PASSWORD'] === undefined
           ? {}
@@ -182,5 +177,5 @@ export function createProductionAssembly(input: ProductionAssemblyInput): Produc
     debugLog,
   });
 
-  return { servers, controller };
+  return { servers, controller, serverAdmin };
 }
