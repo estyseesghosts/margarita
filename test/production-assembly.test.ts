@@ -191,6 +191,78 @@ describe('production assembly (main-path wiring)', () => {
     controller.dispose();
     await assembly.servers.dispose();
   });
+
+  test('colliding remote queue identities route cancel and steer to the owning host only (issue #104)', async () => {
+    const { assembly, local, remote } = await makeAssembly();
+    const { controller } = assembly;
+    await controller.bootstrap();
+
+    // Both hosts own ses_same; each carries queued items under its own server-qualified key.
+    local.inbox = [
+      { id: 'in_same', kind: 'user', delivery: 'queue', text: 'local queued', createdAt: 1 },
+    ];
+    local.inboxSession = { in_same: 'ses_same' };
+    remote.inbox = [
+      { id: 'in_same', kind: 'user', delivery: 'queue', text: 'remote queued', createdAt: 2 },
+      { id: 'in_extra', kind: 'user', delivery: 'queue', text: 'remote extra', createdAt: 3 },
+    ];
+    remote.inboxSession = { in_same: 'ses_same', in_extra: 'ses_same' };
+
+    controller.openSession('ses_same', 'srv_1');
+    for (let round = 0; round < 10; round += 1) await Bun.sleep(0);
+
+    // The remote view shows only the remote host's queue for the colliding ID.
+    const remoteView = controller.currentView();
+    expect(remoteView?.serverID).toBe('srv_1');
+    expect(remoteView?.queued.map((item) => item.id)).toEqual(['in_same', 'in_extra']);
+
+    // Cancel the colliding id: only the remote backend is touched; local never sees it.
+    await controller.cancelQueued('in_same');
+    expect(remote.calls.filter((call) => call.name === 'cancelQueued')).toHaveLength(1);
+    expect(local.calls.filter((call) => call.name === 'cancelQueued')).toHaveLength(0);
+    expect(controller.currentView()?.queued.map((item) => item.id)).toEqual(['in_extra']);
+
+    // Steer an item that belongs to this host only.
+    await controller.promoteQueued('in_extra');
+    expect(remote.calls.filter((call) => call.name === 'changeDelivery')).toHaveLength(1);
+    expect(local.calls.filter((call) => call.name === 'changeDelivery')).toHaveLength(0);
+
+    // An item that belongs to no host here is never acted on from this view.
+    await controller.promoteQueued('not_here');
+    expect(remote.calls.filter((call) => call.name === 'changeDelivery')).toHaveLength(1);
+
+    controller.dispose();
+    await assembly.servers.dispose();
+  });
+
+  test('stale running flags on a remote session clear when the host reports idle (issue #104)', async () => {
+    const { assembly } = await makeAssembly();
+    const { controller } = assembly;
+    await controller.bootstrap();
+    controller.openSession('ses_same', 'srv_1');
+    for (let round = 0; round < 10; round += 1) await Bun.sleep(0);
+
+    const remoteKey = 'server:srv_1/session:ses_same';
+
+    // The host reports the session running.
+    controller.onEvents(
+      'srv_1',
+      [{ kind: 'execution', sessionID: 'ses_same', state: 'started' }],
+      false,
+    );
+    expect(controller.state.running[remoteKey]).toBe(true);
+
+    // The host then reports the turn finished; the stale running flag is cleared.
+    controller.onEvents(
+      'srv_1',
+      [{ kind: 'execution', sessionID: 'ses_same', state: 'succeeded' }],
+      false,
+    );
+    expect(controller.state.running[remoteKey]).toBe(false);
+
+    controller.dispose();
+    await assembly.servers.dispose();
+  });
 });
 
 function summaryFor(serverID: string, id: string, updatedAt: number) {
