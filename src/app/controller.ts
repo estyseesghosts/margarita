@@ -1,4 +1,4 @@
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, posix, resolve, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { batch } from 'solid-js';
@@ -3244,7 +3244,29 @@ export class AppController {
       this.showNotice('Open a session to export it.', 'warn');
       return;
     }
-    const path = resolve(session.directory, target === '' ? `marg-${session.id}.json` : target);
+    // Exports are always written to the LOCAL machine. Never derive the output location
+    // from session.directory, which is a path on the (possibly remote) server and may use
+    // a different OS's syntax (#89). Relative targets resolve against the local cwd;
+    // absolute targets are used as-is on the client OS. An absolute target that looks
+    // like it belongs to the remote host on a cross-platform launch is refused with a
+    // clarifying notice instead of being written to an unexpected local place.
+    const nativeShape = this.deps.platform === 'win32' ? 'windows' : 'posix';
+    if (
+      target !== '' &&
+      this.isRemoteServer(session.serverID) &&
+      isServerAbsolutePath(target) &&
+      serverPathShape(target) !== nativeShape
+    ) {
+      this.showNotice(
+        `Refusing to export to "${target}": that looks like a ${serverPathShape(target)} path on the ` +
+          `remote server, but exports are written locally to ${this.deps.cwd}. Use a local path.`,
+        'warn',
+      );
+      return;
+    }
+    const paths = this.deps.platform === 'win32' ? win32 : posix;
+    const fileName = target === '' ? `marg-${session.id}.json` : target;
+    const outputPath = paths.resolve(this.deps.cwd, fileName);
     try {
       const pages: TranscriptMessage[][] = [];
       let cursor: string | undefined;
@@ -3265,11 +3287,11 @@ export class AppController {
       const write =
         this.deps.writeFile ?? (async (file, text) => void (await Bun.write(file, text)));
       await write(
-        path,
+        outputPath,
         `${JSON.stringify(log, null, 2)}
 `,
       );
-      this.showNotice(`Exported ${log.messages.length} messages to ${path}`, 'dim');
+      this.showNotice(`Exported ${log.messages.length} messages to ${outputPath}`, 'dim');
     } catch (error) {
       this.showNotice(`Export failed: ${errorText(error)}`, 'error');
     }

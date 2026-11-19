@@ -2525,6 +2525,198 @@ describe('queue overlay keyboard selection matches visible user items (issue #88
   });
 });
 
+describe('export writes to a deliberate local destination (#89)', () => {
+  test('default export writes to the local cwd, never the session directory', async () => {
+    const writes: { path: string; text: string }[] = [];
+    const backend = sessionWithMessages('/some/project', [
+      { kind: 'user', id: 'm1', createdAt: 1, text: 'hello', attachments: [] },
+    ]);
+    const { controller } = exportHarness(backend, {
+      cwd: '/work/kohjoh',
+      writeFile: async (path, text) => {
+        writes.push({ path, text });
+      },
+    });
+    try {
+      await openAndExport(controller, 'ses_a');
+      expect(writes).toHaveLength(1);
+      // Resolved against the local cwd, not the session's /some/project directory.
+      expect(writes[0]!.path).toBe('/work/kohjoh/marg-ses_a.json');
+      expect(writes[0]!.text).toContain('hello');
+      expect(controller.state.notice?.tone).toBe('dim');
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('a remote session still exports to the local machine', async () => {
+    const writes: { path: string; text: string }[] = [];
+    const backend = sessionWithMessages('/srv/app', [
+      { kind: 'user', id: 'm1', createdAt: 1, text: 'remote hello', attachments: [] },
+    ]);
+    const { controller } = exportHarness(backend, {
+      serverID: 'srv_1',
+      platform: 'linux',
+      cwd: '/work/kohjoh',
+      writeFile: async (path, text) => {
+        writes.push({ path, text });
+      },
+    });
+    try {
+      await openAndExport(controller, 'ses_a', 'srv_1');
+      expect(writes).toHaveLength(1);
+      // The remote /srv/app directory is never used as the local output base.
+      expect(writes[0]!.path).toBe('/work/kohjoh/marg-ses_a.json');
+      expect(writes[0]!.text).toContain('remote hello');
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('a relative target resolves against the local cwd', async () => {
+    const writes: { path: string; text: string }[] = [];
+    const backend = sessionWithMessages('/srv/app', [
+      { kind: 'user', id: 'm1', createdAt: 1, text: 'relative', attachments: [] },
+    ]);
+    const { controller } = exportHarness(backend, {
+      serverID: 'srv_1',
+      platform: 'linux',
+      cwd: '/work/kohjoh',
+      writeFile: async (path, text) => {
+        writes.push({ path, text });
+      },
+    });
+    try {
+      await openAndExport(controller, 'ses_a', 'srv_1', 'out.json');
+      expect(writes[0]!.path).toBe('/work/kohjoh/out.json');
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('an absolute local target is used as-is', async () => {
+    const writes: { path: string; text: string }[] = [];
+    const backend = sessionWithMessages('/srv/app', [
+      { kind: 'user', id: 'm1', createdAt: 1, text: 'absolute', attachments: [] },
+    ]);
+    const { controller } = exportHarness(backend, {
+      serverID: 'srv_1',
+      platform: 'linux',
+      cwd: '/work/kohjoh',
+      writeFile: async (path, text) => {
+        writes.push({ path, text });
+      },
+    });
+    try {
+      await openAndExport(controller, 'ses_a', 'srv_1', '/tmp/out.json');
+      expect(writes[0]!.path).toBe('/tmp/out.json');
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('a cross-platform absolute remote target is refused instead of written locally', async () => {
+    const writes: { path: string; text: string }[] = [];
+    const backend = sessionWithMessages('/srv/app', [
+      { kind: 'user', id: 'm1', createdAt: 1, text: 'refused', attachments: [] },
+    ]);
+    // Windows client, Linux remote session: a POSIX absolute target looks remote.
+    const { controller } = exportHarness(backend, {
+      serverID: 'srv_1',
+      platform: 'win32',
+      cwd: 'C:\\work',
+      writeFile: async (path, text) => {
+        writes.push({ path, text });
+      },
+    });
+    try {
+      await openAndExport(controller, 'ses_a', 'srv_1', '/srv/app');
+      expect(writes).toHaveLength(0);
+      expect(controller.state.notice?.tone).toBe('warn');
+      expect(controller.state.notice?.text).toContain('Refusing to export');
+      expect(controller.state.notice?.text).toContain('C:\\work');
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('the exported file contains the complete paginated transcript', async () => {
+    const writes: { path: string; text: string }[] = [];
+    const messages: TranscriptMessage[] = [
+      { kind: 'user', id: 'm1', createdAt: 1, text: 'first', attachments: [] },
+      { kind: 'user', id: 'm2', createdAt: 2, text: 'second', attachments: [] },
+      { kind: 'user', id: 'm3', createdAt: 3, text: 'third', attachments: [] },
+    ];
+    const backend = sessionWithMessages('/some/project', messages);
+    const { controller } = exportHarness(backend, {
+      cwd: '/work/kohjoh',
+      writeFile: async (path, text) => {
+        writes.push({ path, text });
+      },
+    });
+    try {
+      await openAndExport(controller, 'ses_a');
+      const log = JSON.parse(writes[0]!.text);
+      expect(log.format).toBe('margarita.chatlog.v1');
+      expect(log.messages.map((message: { text: string }) => message.text)).toEqual([
+        'first',
+        'second',
+        'third',
+      ]);
+    } finally {
+      controller.dispose();
+    }
+  });
+});
+
+function exportHarness(
+  backend: FakeBackend,
+  options: {
+    platform?: NodeJS.Platform;
+    cwd?: string;
+    serverID?: string;
+    writeFile: (path: string, text: string) => Promise<void>;
+  },
+) {
+  const controller = new AppController({
+    backend,
+    config: defaultConfig,
+    localState: emptyState,
+    platform: options.platform ?? 'linux',
+    cwd: options.cwd ?? '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+    serverInfo: () => ({ online: true }),
+    writeFile: options.writeFile,
+    // `serverID` is omitted (not set to undefined) when absent, due to
+    // exactOptionalPropertyTypes.
+    ...(options.serverID !== undefined ? { serverID: options.serverID } : {}),
+  });
+  return { backend, controller };
+}
+
+const sessionWithMessages = (directory: string, messages: TranscriptMessage[]) => {
+  const backend = new FakeBackend();
+  backend.sessions = [{ ...fakeSession('ses_a'), directory }];
+  backend.messages = { ses_a: messages };
+  return backend;
+};
+
+async function openAndExport(
+  controller: AppController,
+  sessionID: string,
+  serverID: string = 'local',
+  target: string = '',
+): Promise<void> {
+  await controller.bootstrap();
+  controller.openSession(sessionID, serverID);
+  await flush();
+  await controller.exportChat(target);
+}
+
 function configFor(delivery: 'queue' | 'steer') {
   return delivery === 'queue'
     ? defaultConfig
