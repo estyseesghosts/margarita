@@ -10,6 +10,8 @@ import { emptyState } from '../config/local-state.ts';
 import { isRecord } from '../domain/backend-event.ts';
 import { composerFrom } from '../domain/composer.ts';
 import { buildKeymap } from '../domain/keymap.ts';
+import { directoryKey } from '../domain/path-identity.ts';
+import { projectLabel } from '../domain/project-label.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
 import { App } from './app.tsx';
 import { pickTheme } from './theme.ts';
@@ -1404,5 +1406,207 @@ describe('grouped activity (issue #23)', () => {
     expect(detailedFrame).toContain('bash s10.log');
     expect(detailedFrame).toContain('edit src/fixed.ts');
     controller.dispose();
+  });
+});
+
+function hexOf(color: { toInts(): readonly [number, number, number, number] }): string {
+  const [r, g, b] = color.toInts();
+  return `#${[r, g, b].map((value) => Math.round(value).toString(16).padStart(2, '0')).join('')}`;
+}
+
+async function mountProjects(
+  options: {
+    themeName?: 'dark' | 'light' | 'high-contrast';
+    ascii?: boolean;
+    noColor?: boolean;
+  } = {},
+) {
+  const local = new FakeBackend();
+  local.serverID = 'local';
+  local.sessions = [
+    {
+      id: 'ses_a',
+      serverID: 'local',
+      projectID: 'p',
+      directory: '/work/kohjoh',
+      title: 'Local refactor',
+      createdAt: 1,
+      updatedAt: 5,
+      archived: false,
+    },
+    {
+      id: 'ses_d',
+      serverID: 'local',
+      projectID: 'p',
+      directory: '/work/kohjoh',
+      title: 'Needs a decision',
+      createdAt: 1,
+      updatedAt: 6,
+      archived: false,
+    },
+  ];
+  local.active = new Set(['ses_d']);
+  local.permissions = [
+    { id: 'per_a', sessionID: 'ses_d', action: 'bash deploy', resources: [], save: [] },
+  ];
+  const bravo = new FakeBackend();
+  bravo.serverID = 'srv_b';
+  bravo.sessions = [
+    {
+      id: 'ses_b',
+      serverID: 'srv_b',
+      projectID: 'p',
+      directory: '/srv/app',
+      title: 'Bravo build',
+      createdAt: 1,
+      updatedAt: 9,
+      archived: false,
+    },
+  ];
+  bravo.active = new Set(['ses_b']);
+  const charlie = new FakeBackend();
+  charlie.serverID = 'srv_c';
+  charlie.sessions = [
+    {
+      id: 'ses_c',
+      serverID: 'srv_c',
+      projectID: 'p',
+      directory: '/srv/app',
+      title: 'Charlie build',
+      createdAt: 1,
+      updatedAt: 8,
+      archived: false,
+      outcome: 'failed',
+    },
+  ];
+  const backends = new Map([
+    ['local', local],
+    ['srv_b', bravo],
+    ['srv_c', charlie],
+  ]);
+  const controller = new AppController({
+    backend: local,
+    backendFor: (serverID: string) => backends.get(serverID),
+    serverIDs: () => ['local', 'srv_b', 'srv_c'],
+    serverInfo: (serverID: string) =>
+      serverID === 'local'
+        ? undefined
+        : { label: serverID === 'srv_b' ? 'bravo' : 'charlie', online: true },
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: async () => [],
+    requestExit: () => {},
+  });
+  await controller.bootstrap();
+  const theme =
+    options.noColor === true ? pickTheme({ NO_COLOR: '1' }) : pickTheme({}, options.themeName);
+  const setup = await testRender(
+    () =>
+      App({
+        controller,
+        keymap: buildKeymap({}).keymap,
+        theme,
+        animate: false,
+        ascii: options.ascii ?? false,
+        env: {},
+      }),
+    { width: 80, height: 32 },
+  );
+  current = setup;
+  await setup.renderOnce();
+  return { controller, setup };
+}
+
+function spanDump(setup: Setup) {
+  return setup.captureSpans().lines.map((line) =>
+    line.spans.map((span) => ({
+      text: span.text,
+      fg: hexOf(span.fg),
+      bg: hexOf(span.bg),
+    })),
+  );
+}
+type SpanDump = ReturnType<typeof spanDump>;
+
+function titleSpans(dump: SpanDump, needle: string, background: string) {
+  return dump.flatMap((line) =>
+    line.filter((span) => span.text.includes(needle) && span.bg === background),
+  );
+}
+
+/** The span on the same line as `needle` whose trimmed text is exactly the dot glyph. */
+function dotSpan(dump: SpanDump, needle: string, glyph: string) {
+  const line = dump.find((entry) => entry.some((span) => span.text.includes(needle)));
+  const dot = line?.find((span) => span.text.trim() === glyph);
+  if (dot === undefined)
+    throw new Error(
+      `no dot span on the ${needle} line; line spans: ${JSON.stringify(line) ?? 'missing line'}`,
+    );
+  return dot;
+}
+
+describe('overview project titles and semantic dots (issue #68)', () => {
+  for (const themeName of ['dark', 'light', 'high-contrast'] as const) {
+    test(`title text is filled with its own computed label in ${themeName}`, async () => {
+      const { setup } = await mountProjects({ themeName });
+      const dump = spanDump(setup);
+      const localLabel = projectLabel('local', directoryKey('/work/kohjoh', 'linux'));
+      const bravoLabel = projectLabel('srv_b', directoryKey('/srv/app', 'linux'));
+      const charlieLabel = projectLabel('srv_c', directoryKey('/srv/app', 'linux'));
+      const [localTitle] = titleSpans(dump, 'kohjoh', localLabel.background.toLowerCase());
+      expect(localTitle?.fg).toBe(localLabel.foreground.toLowerCase());
+      const [bravoTitle] = titleSpans(dump, 'app', bravoLabel.background.toLowerCase());
+      expect(bravoTitle?.fg).toBe(bravoLabel.foreground.toLowerCase());
+      const [charlieTitle] = titleSpans(dump, 'app', charlieLabel.background.toLowerCase());
+      expect(charlieTitle?.fg).toBe(charlieLabel.foreground.toLowerCase());
+      // The two identical basenames carry different remote markers outside the label.
+      const flat = dump.flat();
+      expect(flat.some((span) => span.text.includes('bravo'))).toBe(true);
+      expect(flat.some((span) => span.text.includes('charlie'))).toBe(true);
+    });
+  }
+
+  test('session dots are semantic grey/yellow/green/red, never the brand accent', async () => {
+    const { setup } = await mountProjects({});
+    const dump = spanDump(setup);
+    const dark = pickTheme({}, 'dark');
+    expect(dotSpan(dump, 'Local refactor', '●').fg).toBe(dark.dim.toLowerCase());
+    expect(dotSpan(dump, 'Needs a decision', '●').fg).toBe(dark.warn.toLowerCase());
+    expect(dotSpan(dump, 'Bravo build', '●').fg).toBe(dark.success.toLowerCase());
+    expect(dotSpan(dump, 'Charlie build', '●').fg).toBe(dark.error.toLowerCase());
+    // The brand accent (a pink) appears nowhere as a dot colour.
+    expect(dotSpan(dump, 'Bravo build', '●').fg).not.toBe(dark.accent.toLowerCase());
+  });
+
+  test('ASCII mode renders symbolic fallbacks with the same semantic colours', async () => {
+    const { setup } = await mountProjects({ ascii: true });
+    const dump = spanDump(setup);
+    const dark = pickTheme({}, 'dark');
+    expect(dotSpan(dump, 'Local refactor', 'o').fg).toBe(dark.dim.toLowerCase());
+    expect(dotSpan(dump, 'Needs a decision', '?').fg).toBe(dark.warn.toLowerCase());
+    expect(dotSpan(dump, 'Bravo build', '*').fg).toBe(dark.success.toLowerCase());
+    expect(dotSpan(dump, 'Charlie build', '!').fg).toBe(dark.error.toLowerCase());
+  });
+
+  test('NO_COLOR emits no filled title label and keeps text readable', async () => {
+    const { setup } = await mountProjects({ noColor: true });
+    const dump = spanDump(setup);
+    const flat = dump.flat();
+    // The computed label fill colours must not appear anywhere.
+    const fills = [
+      projectLabel('local', directoryKey('/work/kohjoh', 'linux')).background,
+      projectLabel('srv_b', directoryKey('/srv/app', 'linux')).background,
+      projectLabel('srv_c', directoryKey('/srv/app', 'linux')).background,
+    ].map((hex) => hex.toLowerCase());
+    for (const fill of fills) {
+      expect(flat.some((span) => span.bg === fill)).toBe(false);
+    }
+    expect(flat.some((span) => span.text.includes('kohjoh'))).toBe(true);
+    expect(flat.some((span) => span.text.includes('bravo'))).toBe(true);
   });
 });

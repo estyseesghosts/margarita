@@ -88,6 +88,11 @@ export function pickTheme(env: NodeJS.ProcessEnv, name: keyof typeof themes = 'd
   return env['NO_COLOR'] !== undefined && env['NO_COLOR'] !== '' ? plain : themes[name];
 }
 
+/** True for the collapsed no-colour theme (NO_COLOR). Filled labels must not be emitted. */
+export function isNoColorTheme(theme: Theme): boolean {
+  return theme === plain;
+}
+
 /** Linear blend of two `#rrggbb` colours, `t` in [0,1]. */
 export function blend(from: string, to: string, t: number): string {
   const a = parseHex(from);

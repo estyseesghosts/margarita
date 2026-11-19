@@ -9,7 +9,7 @@ import { projectLabel } from '../domain/project-label.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import { executionLabel } from '../domain/session.ts';
 import { formatAge } from '../domain/usage-format.ts';
-import type { Theme } from './theme.ts';
+import { isNoColorTheme, type Theme } from './theme.ts';
 
 type RowOf<K extends OverviewRow['kind']> = Extract<OverviewRow, { kind: K }>;
 
@@ -69,7 +69,14 @@ export function Overview(props: {
         {(group) => (
           <box flexDirection="column" marginBottom={1}>
             <text>
-              <Show when={props.ascii !== true}>
+              <Show
+                when={!isNoColorTheme(props.theme)}
+                fallback={
+                  <span style={{ fg: props.theme.text }}>
+                    <b>{group.name}</b>
+                  </span>
+                }
+              >
                 <span
                   style={{
                     bg: projectLabel(
@@ -82,12 +89,10 @@ export function Overview(props: {
                     ).foreground,
                   }}
                 >
-                  {' ██ '}
+                  {' '}
+                  <b>{group.name}</b>{' '}
                 </span>
               </Show>
-              <span style={{ fg: props.theme.text }}>
-                <b>{group.name}</b>
-              </span>
               <Show when={group.remote}>
                 <span style={{ fg: props.theme.accent }}>
                   {`  ${props.ascii === true ? '[remote]' : '🖥'} ${group.serverLabel ?? 'remote'}`}
@@ -193,7 +198,7 @@ function SessionLine(props: {
       idle: props.theme.dim,
       failed: props.theme.error,
       'needs-input': props.theme.warn,
-      working: props.theme.accent,
+      working: props.theme.success,
       unknown: props.theme.dim,
     })[state()];
   return (
