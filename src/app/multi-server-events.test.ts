@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
 import { FakeBackend } from '../../test/fake-backend.ts';
+import { BackendError } from '../adapter/backend.ts';
 import { defaultConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
+import { composerFrom } from '../domain/composer.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import { AppController } from './controller.ts';
 
@@ -510,6 +512,142 @@ describe('server-qualified conversation views (issue #78)', () => {
     // An item that belongs to the other host is never acted on from here.
     await controller.promoteQueued('not_queued_here');
     expect(remote.calls.filter((call) => call.name === 'changeDelivery')).toHaveLength(1);
+    controller.dispose();
+  });
+});
+
+/** A remote with no prompts/forms, so a busy turn reads as `working`, not `waiting`. */
+function idleRemote() {
+  const { controller, remote } = harness();
+  remote.permissions = [];
+  remote.forms = [];
+  return { controller, remote };
+}
+
+describe('stale running flags clear on refresh (issue #80)', () => {
+  test('a dropped completion is reconciled to idle; Enter is no longer implicitly queued', async () => {
+    const { controller, remote } = idleRemote();
+    remote.active = new Set([sessionID]);
+    await controller.bootstrap();
+    controller.openSession(sessionID, remoteID);
+    await flush();
+    // The host reports the session running: the snapshot says working.
+    expect(controller.state.running[remoteKey]).toBe(true);
+    expect(controller.currentView()?.execution.state).toBe('working');
+
+    // The completion event is lost during a disconnect; the reconnect's complete active set
+    // no longer contains it.
+    remote.active = new Set<string>();
+    controller.onEvents(remoteID, [], true);
+    await flush();
+    await flush();
+
+    expect(controller.state.running[remoteKey]).toBeUndefined();
+    expect(controller.currentView()?.execution.state).toBe('idle');
+    // The dot is recomputed from the same execution selector, so it is idle too.
+    const summary = controller.state.sessions[remoteKey];
+    if (summary === undefined) throw new Error('expected the remote summary to be cached');
+    expect(controller.statusOf(summary)).toBe('idle');
+
+    // Enter is a plain prompt delivery now: no implicit queue/steer override.
+    controller.setComposer(composerFrom('after recovery'));
+    await controller.submit();
+    const prompt = remote.calls.filter((call) => call.name === 'prompt').at(-1);
+    expect(prompt?.args[1]).toMatchObject({ text: 'after recovery' });
+    expect(prompt?.args[1]).not.toMatchObject({ delivery: defaultConfig.input.enterWhileRunning });
+    controller.dispose();
+  });
+
+  test('a failed remote refresh preserves B’s cached status and never touches A', async () => {
+    const { controller, local, remote } = harness();
+    local.active = new Set([sessionID]);
+    remote.active = new Set([sessionID]);
+    await controller.bootstrap();
+    expect(controller.state.running[sessionID]).toBe(true);
+    expect(controller.state.running[remoteKey]).toBe(true);
+
+    // B becomes unreachable: its listing throws, so its refresh proves nothing.
+    let down = true;
+    remote.listSessionsHook = async () => {
+      if (down) throw new BackendError('transport', 'session.list', 'down');
+      return { sessions: remote.sessions };
+    };
+    controller.onEvents(remoteID, [], true);
+    await flush();
+    await flush();
+
+    // B keeps its cached running flag (nothing was proven idle), A is untouched.
+    expect(controller.state.running[remoteKey]).toBe(true);
+    expect(controller.state.running[sessionID]).toBe(true);
+
+    // When B answers again with the real active set it converges.
+    down = false;
+    controller.onEvents(remoteID, [], true);
+    await flush();
+    await flush();
+    expect(controller.state.running[remoteKey]).toBe(true);
+    expect(controller.state.running[sessionID]).toBe(true);
+    controller.dispose();
+  });
+
+  test('a snapshot never overwrites an execution event that arrived while it was in flight', async () => {
+    const { controller, remote } = harness();
+    remote.active = new Set<string>();
+    await controller.bootstrap();
+    expect(controller.state.running[remoteKey]).not.toBe(true);
+
+    // The snapshot's active set is captured before the turn starts, then the event lands
+    // before the (slow) listing resolves.
+    const hold = Promise.withResolvers<void>();
+    remote.listSessionsHook = async () => {
+      await hold.promise;
+      return { sessions: remote.sessions };
+    };
+    const refresh = controller.loadSessions(remoteID);
+    controller.onEvents(remoteID, [{ kind: 'execution', sessionID, state: 'started' }], false);
+    await flush();
+    expect(controller.state.running[remoteKey]).toBe(true);
+    hold.resolve();
+    await refresh;
+    await flush();
+
+    // The stale snapshot said idle, but the newer event wins.
+    expect(controller.state.running[remoteKey]).toBe(true);
+
+    // The inverse: a completion event during a snapshot that still reports running.
+    remote.active = new Set([sessionID]);
+    const holdCompletion = Promise.withResolvers<void>();
+    remote.listSessionsHook = async () => {
+      await holdCompletion.promise;
+      return { sessions: remote.sessions };
+    };
+    const second = controller.loadSessions(remoteID);
+    controller.onEvents(remoteID, [{ kind: 'execution', sessionID, state: 'succeeded' }], false);
+    await flush();
+    expect(controller.state.running[remoteKey]).not.toBe(true);
+    holdCompletion.resolve();
+    await second;
+    await flush();
+    expect(controller.state.running[remoteKey]).not.toBe(true);
+    controller.dispose();
+  });
+
+  test('paginated refresh reconciles the same active set as a full resync', async () => {
+    const { controller, remote } = idleRemote();
+    remote.active = new Set([sessionID]);
+    // Always offers another page, so a full load stays incomplete and pagination applies.
+    remote.listSessionsHook = async () => ({
+      sessions: remote.sessions,
+      nextCursor: 'more',
+    });
+    await controller.bootstrap();
+    expect(controller.state.running[remoteKey]).toBe(true);
+    expect(controller.state.serverPages[remoteID]?.complete).toBe(false);
+
+    // A later page proves the session idle; the paginated path clears the flag too.
+    remote.active = new Set<string>();
+    await controller.loadMoreSessions();
+    expect(controller.state.running[remoteKey]).toBeUndefined();
     controller.dispose();
   });
 });

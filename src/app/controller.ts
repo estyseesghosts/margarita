@@ -638,6 +638,42 @@ export class AppController {
     return this.deps.platformFor?.(serverID) ?? 'linux';
   }
 
+  /**
+   * Monotonic sequence for execution events, per qualified session key, plus the counter
+   * they draw from. A session refresh stores the counter when its request begins; an event
+   * stamped later is newer than that snapshot and must win over it (issue #80).
+   */
+  private runningEventSequence = 0;
+  private readonly runningEventSeq = new Map<string, number>();
+
+  /**
+   * Reconciles one host's running flags against a complete active set. A session the host no
+   * longer reports running is cleared — including a flag left behind by a completion event
+   * missed while disconnected (#80). Only this host's keys are touched, and a per-key event
+   * that arrived after the snapshot began is newer than the snapshot, so it wins in both
+   * directions instead of being resurrected or cleared by stale data.
+   */
+  private reconcileRunning(
+    serverID: string,
+    active: ReadonlySet<string>,
+    snapshotSeq: number,
+  ): void {
+    const superseded = (key: string) => (this.runningEventSeq.get(key) ?? 0) > snapshotSeq;
+    this.setState(
+      produce((state) => {
+        for (const key of Object.keys(state.running)) {
+          const ref = parseSessionKey(key);
+          if (ref.serverID !== serverID || active.has(ref.sessionID) || superseded(key)) continue;
+          delete state.running[key];
+        }
+        for (const sessionID of active) {
+          const key = this.keyFor(serverID, sessionID);
+          if (!superseded(key)) state.running[key] = true;
+        }
+      }),
+    );
+  }
+
   /** Set when the launch server failed to refresh; bootstrap re-throws it for the CLI. */
   private launchLoadError: unknown;
 
@@ -649,12 +685,16 @@ export class AppController {
     const results = await Promise.all(
       servers.map(async (targetID) => {
         const epoch = this.nextRefreshEpoch(targetID);
+        // Captured before the first request: any execution event stamped after this point is
+        // newer than the snapshot and must not be overwritten by it.
+        const snapshotSeq = this.runningEventSequence;
         try {
           return {
             ok: true as const,
             error: undefined as string | undefined,
             cause: undefined as unknown,
             ...(await this.loadServerSessions(targetID, epoch)),
+            snapshotSeq,
           };
         } catch (error) {
           this.debugLog.write('load-sessions-failed', {
@@ -671,6 +711,7 @@ export class AppController {
             fresh: {},
             active: new Set<string>(),
             cursor: undefined as string | undefined,
+            snapshotSeq,
           };
         }
       }),
@@ -690,7 +731,6 @@ export class AppController {
     }
     const healthy = new Set(applied.filter((result) => result.ok).map((result) => result.serverID));
     const fresh: Record<string, SessionSummary> = {};
-    const running: Record<string, true> = {};
     const pages: Record<
       string,
       { cursor?: string; complete: boolean; loading: boolean; error?: string }
@@ -698,7 +738,6 @@ export class AppController {
     const activeByServer = new Map<string, Set<string>>();
     for (const result of applied) {
       Object.assign(fresh, result.fresh);
-      for (const id of result.active) running[this.keyFor(result.serverID, id)] = true;
       const previous = this.state.serverPages[result.serverID];
       if (result.ok) {
         pages[result.serverID] = {
@@ -752,7 +791,10 @@ export class AppController {
       }
       this.setState('sessionsLoading', false);
       this.setState('sessionsError', applied.find((result) => !result.ok)?.error);
-      this.setState('running', (current) => ({ ...current, ...running }));
+      for (const result of applied) {
+        // A failed refresh proves nothing about what runs now: keep that host's cache.
+        if (result.ok) this.reconcileRunning(result.serverID, result.active, result.snapshotSeq);
+      }
     });
     // Running sessions are the ones that can be blocked on input right now.
     await Promise.all(
@@ -864,6 +906,7 @@ export class AppController {
     );
     this.transcriptOrder = this.transcriptOrder.filter((entry) => entry !== key);
     this.goalVersions.delete(key);
+    this.runningEventSeq.delete(key);
     const route = this.state.route;
     if (
       route.kind === 'conversation' &&
@@ -896,6 +939,8 @@ export class AppController {
     const results = await Promise.all(
       servers.map(async (serverID) => {
         const epoch = this.nextRefreshEpoch(serverID);
+        // Snapshot boundary: events stamped after this are newer than the active set below.
+        const snapshotSeq = this.runningEventSequence;
         let backend;
         try {
           backend = this.backendFor(serverID);
@@ -903,6 +948,7 @@ export class AppController {
           return {
             serverID,
             epoch,
+            snapshotSeq,
             ok: false as const,
             error: error instanceof Error ? error.message : 'Unknown server',
             cause: error,
@@ -914,11 +960,12 @@ export class AppController {
             backend.listSessions(cursor === undefined ? {} : { cursor }),
             backend.activeSessionIDs(),
           ]);
-          return { serverID, epoch, ok: true as const, page, active };
+          return { serverID, epoch, snapshotSeq, ok: true as const, page, active };
         } catch (error) {
           return {
             serverID,
             epoch,
+            snapshotSeq,
             ok: false as const,
             error: error instanceof Error ? error.message : 'Unknown error loading sessions',
             cause: error,
@@ -964,11 +1011,7 @@ export class AppController {
           complete: result.page.nextCursor === undefined,
           loading: false,
         });
-        this.setState('running', (current) => {
-          const merged = { ...current };
-          for (const id of result.active) merged[this.keyFor(result.serverID, id)] = true;
-          return merged;
-        });
+        this.reconcileRunning(result.serverID, result.active, result.snapshotSeq);
       }
       const all = this.serverIDs().map((serverID) => this.state.serverPages[serverID]);
       this.setState(
@@ -1184,14 +1227,18 @@ export class AppController {
           });
         }
         return;
-      case 'execution':
-        this.setState('running', this.keyFor(serverID, event.sessionID), event.state === 'started');
+      case 'execution': {
+        const key = this.keyFor(serverID, event.sessionID);
+        // Stamp the event so a snapshot that began before it can never overwrite it.
+        this.runningEventSeq.set(key, (this.runningEventSequence += 1));
+        this.setState('running', key, event.state === 'started');
         this.scheduleSummary(event.sessionID, serverID);
         if (attached === event.sessionID) this.scheduleTranscript(event.sessionID, serverID);
         else this.markStale(event.sessionID, serverID);
         if (event.state !== 'started')
           void this.track('requests', this.refreshInputRequests(event.sessionID, serverID));
         return;
+      }
       case 'transcript-changed':
         if (this.state.sessions[this.keyFor(serverID, event.sessionID)] === undefined)
           this.scheduleSummary(event.sessionID, serverID);
