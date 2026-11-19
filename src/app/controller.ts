@@ -158,6 +158,8 @@ export type ConversationView = Readonly<{
   queued: readonly QueuedInput[];
   nativeGoal: NativeGoalState | undefined;
   awaitingSteer: string | undefined;
+  /** The viewed host's stream status, for the footer's stale/reconnecting presentation. */
+  stream: StreamStatus;
   execution: Execution;
 }>;
 
@@ -242,6 +244,9 @@ export class AppController {
   private readonly transcriptDirty = new Set<string>();
   private readonly summaryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private transcriptOrder: string[] = [];
+  /** Per-host stream status: the viewed conversation's footer must reflect its own host,
+   *  not the launch server's badge (issue #109). */
+  private readonly streamByServer = new Map<string, StreamStatus>();
   private readonly debugLog: DebugLog;
 
   /**
@@ -370,11 +375,16 @@ export class AppController {
 
   // ---------------------------------------------------------------- selectors
 
+  /** The viewed host's stream status, falling back to the launch server's badge. */
+  streamStatusOf(serverID: string): StreamStatus {
+    return this.streamByServer.get(serverID) ?? this.state.stream;
+  }
+
   executionOf(sessionID: string, serverID: string = this.activeServerID()): Execution {
     const key = this.keyFor(serverID, sessionID);
     const permissions = this.state.permissions[key] ?? [];
     return projectExecution({
-      connected: this.state.stream !== 'reconnecting',
+      connected: this.streamStatusOf(serverID) !== 'reconnecting',
       loaded: this.state.sessions[key] !== undefined,
       running: this.state.running[key] === true,
       outcome: this.state.sessions[key]?.outcome,
@@ -418,6 +428,7 @@ export class AppController {
       queued: (this.state.inbox[key] ?? []).filter((item) => item.kind === 'user'),
       nativeGoal: this.state.nativeGoals[key],
       awaitingSteer: this.state.awaitingSteer[key],
+      stream: this.streamStatusOf(route.serverID),
       execution: this.executionOf(route.sessionID, route.serverID),
     };
   }
@@ -1162,6 +1173,9 @@ export class AppController {
 
   onStreamStatus(serverID: string, status: StreamStatus): void {
     this.debugLog.write('stream-status', { serverID, status });
+    // Track every host's stream so the viewed conversation's footer reflects its own host,
+    // not the launch server's badge (issue #109).
+    this.streamByServer.set(serverID, status);
     // The single stream badge belongs to the launch server; per-server health lives on the
     // manager. A remote reconnect resyncs that host only and never touches the badge.
     if (serverID !== this.serverID) return;

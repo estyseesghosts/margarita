@@ -107,7 +107,7 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
         ...(session?.tokens === undefined ? {} : { tokens: session.tokens }),
         ...(session?.cost === undefined ? {} : { cost: session.cost }),
         queued: view.queued.length,
-        stale: state.stream !== 'live',
+        stale: view.stream !== 'live',
         ...(badge === '' ? {} : { goal: badge }),
       },
       props.width - 2,

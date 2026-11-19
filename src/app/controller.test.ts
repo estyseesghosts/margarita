@@ -271,6 +271,37 @@ function catalogController() {
   };
 }
 
+/** Two-host controller: local ('/proj-a', '/shared') and remote srv_1 ('/proj-b', '/shared'). */
+function twoHostController() {
+  const backendA = new FakeBackend();
+  const backendB = new FakeBackend();
+  backendB.serverID = 'srv_1';
+  backendA.sessions = [
+    { ...fakeSession('ses_a'), directory: '/proj-a' },
+    { ...fakeSession('ses_same'), directory: '/shared' },
+  ];
+  backendB.sessions = [
+    { ...fakeSession('ses_b'), serverID: 'srv_1', directory: '/proj-b' },
+    { ...fakeSession('ses_same'), serverID: 'srv_1', directory: '/shared' },
+  ];
+  const controller = new AppController({
+    backend: backendA,
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+    serverIDs: () => ['srv_1'],
+    backendFor: (serverID: string) => (serverID === 'srv_1' ? backendB : backendA),
+    serverInfo: () => ({ online: true }),
+  });
+  return { controller, backendA, backendB };
+}
+
 function isPromptDraft(value: unknown): value is PromptDraft {
   return typeof value === 'object' && value !== null && 'text' in value && 'files' in value;
 }
@@ -1665,6 +1696,66 @@ describe('createSession scopes agent/model to the target project (issue #108)', 
       expect(aCreate).toHaveLength(1);
       // The invalid modelB is scoped to /proj-a's valid default (modelA), never sent as-is.
       expect(aCreate[0]!.args[0]).toEqual({ directory: '/proj-a', model: modelA });
+    } finally {
+      controller.dispose();
+    }
+  });
+});
+
+describe('conversation footer derives stream/stale status from the viewed host (issue #109)', () => {
+  test('execution and stale status reflect the viewed host, not the launch server', async () => {
+    const { controller } = twoHostController();
+    try {
+      await controller.bootstrap();
+      controller.onStreamStatus('local', 'live');
+      controller.onStreamStatus('srv_1', 'reconnecting');
+
+      // Remote conversation on B reads stale/reconnecting even though launch is live.
+      controller.openSession('ses_b', 'srv_1');
+      const bView = controller.currentView();
+      expect(bView).toBeDefined();
+      if (bView === undefined) return;
+      expect(bView.serverID).toBe('srv_1');
+      expect(bView.stream).toBe('reconnecting');
+      expect(bView.execution).toEqual({ state: 'unknown', reason: 'disconnected' });
+
+      // Launch host conversation stays fresh.
+      controller.openSession('ses_a', 'local');
+      const aView = controller.currentView();
+      expect(aView).toBeDefined();
+      if (aView === undefined) return;
+      expect(aView.serverID).toBe('local');
+      expect(aView.stream).toBe('live');
+      expect(aView.execution).toEqual({ state: 'idle' });
+
+      // When B reconnects, its footer becomes live without A's stream changing.
+      controller.onStreamStatus('srv_1', 'live');
+      controller.openSession('ses_b', 'srv_1');
+      expect(controller.currentView()?.stream).toBe('live');
+      expect(controller.currentView()?.execution).toEqual({ state: 'idle' });
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('identical session IDs on different hosts keep separate footer health', async () => {
+    const { controller } = twoHostController();
+    try {
+      await controller.bootstrap();
+      controller.onStreamStatus('local', 'live');
+      controller.onStreamStatus('srv_1', 'reconnecting');
+
+      // Both hosts own a session literally named 'ses_same'.
+      controller.openSession('ses_same', 'srv_1');
+      expect(controller.currentView()?.stream).toBe('reconnecting');
+      expect(controller.currentView()?.execution).toEqual({
+        state: 'unknown',
+        reason: 'disconnected',
+      });
+
+      controller.openSession('ses_same', 'local');
+      expect(controller.currentView()?.stream).toBe('live');
+      expect(controller.currentView()?.execution).toEqual({ state: 'idle' });
     } finally {
       controller.dispose();
     }
