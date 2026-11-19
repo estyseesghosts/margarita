@@ -1125,3 +1125,32 @@ describe('server-owned project path normalization (issue #67)', () => {
     await assembly.servers.dispose();
   });
 });
+
+describe('production restore policy (issue #72)', () => {
+  test('a paired profile pointing at the launch base URL is never duplicated as a remote', async () => {
+    const fixture = await restoreFixture();
+    const credentials = fixture.credentials;
+    await credentials.set('srv_mirror', 'tok_mirror');
+    const assembly = await createProductionAssembly(
+      restoreInput(fixture, {
+        profiles: {
+          schemaVersion: 1,
+          // Same origin+path as the launch connection: must not be registered twice.
+          profiles: [
+            {
+              serverID: 'srv_mirror',
+              shortname: 'mirror',
+              baseUrl: 'http://launch.test:4096',
+              auth: 'bearer',
+            },
+          ],
+        },
+      }),
+    );
+    // The launch server stands alone; the mirror is skipped even with a valid credential.
+    expect(assembly.servers.list().map((entry) => entry.serverID)).toEqual(['local']);
+    expect(await credentials.get('srv_mirror')).toBe('tok_mirror');
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
+});
