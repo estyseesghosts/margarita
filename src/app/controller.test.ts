@@ -2236,6 +2236,115 @@ describe('image paste and attachments (issue #42)', () => {
     expect(controller.state.attachments.map((attachment) => attachment.name)).toEqual(['shot.png']);
     controller.dispose();
   });
+
+  test('the first prompt of a new session keeps its attachments (issue #77)', async () => {
+    const backend = new FakeBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    // The overview composer is the new-session composer.
+    controller.attachImage(pngBytes, 'image/png', 'shot.png');
+    controller.setComposer(composerFrom('look at this'));
+
+    await controller.submit();
+
+    expect(backend.calls.filter((call) => call.name === 'createSession')).toHaveLength(1);
+    expect(backend.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    const draft = promptDraft(backend);
+    expect(draft.text).toBe('look at this');
+    expect(draft.files).toEqual([{ uri: `data:image/png;base64,${pngData}`, name: 'shot.png' }]);
+    // The chip clears only after the server acknowledged the prompt.
+    expect(controller.state.attachments).toEqual([]);
+    controller.dispose();
+  });
+
+  test('the /new route keeps every attachment in its first prompt', async () => {
+    const backend = new FakeBackend();
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.startNewSession('/work/kohjoh');
+    controller.attachImage(pngBytes, 'image/png', 'one.png');
+    controller.attachImage(pngBytes, 'application/pdf', 'two.pdf');
+    controller.setComposer(composerFrom('summarize'));
+
+    await controller.submit();
+
+    const draft = promptDraft(backend);
+    expect(draft.text).toBe('summarize');
+    expect(draft.files).toEqual([
+      { uri: `data:image/png;base64,${pngData}`, name: 'one.png' },
+      { uri: `data:application/pdf;base64,${pngData}`, name: 'two.pdf' },
+    ]);
+    expect(controller.state.attachments).toEqual([]);
+    controller.dispose();
+  });
+
+  test('a route change while the session is being created cannot swap in other attachments', async () => {
+    const backend = attachedBackend();
+    const created = deferred<SessionSummary>();
+    backend.createSessionHook = () => created.promise;
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+
+    controller.attachImage(pngBytes, 'image/png', 'original.png');
+    controller.setComposer(composerFrom('look at this'));
+    const submitting = controller.submit();
+    await flush();
+
+    // The user wanders off to another session, attaching a different file there.
+    controller.openSession('ses_a');
+    controller.attachImage(pngBytes, 'image/png', 'elsewhere.png');
+    created.resolve({
+      ...fakeSession('ses_new'),
+      directory: '/work/kohjoh',
+    });
+    await submitting;
+
+    const prompt = backend.calls.find((call) => call.name === 'prompt');
+    if (prompt === undefined || !isPromptDraft(prompt.args[1])) throw new Error('prompt missing');
+    expect(prompt.args[1].files).toEqual([
+      { uri: `data:image/png;base64,${pngData}`, name: 'original.png' },
+    ]);
+    // The other route's unsent draft is untouched by the send.
+    controller.openSession('ses_a');
+    expect(controller.state.attachments.map((attachment) => attachment.name)).toEqual([
+      'elsewhere.png',
+    ]);
+    controller.dispose();
+  });
+
+  test('a rejected first prompt leaves its attachment retrievable, never silently dropped', async () => {
+    const backend = new FakeBackend();
+    backend.promptError = new Error('server unreachable');
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.attachImage(pngBytes, 'image/png', 'shot.png');
+    controller.setComposer(composerFrom('look at this'));
+
+    await controller.submit();
+
+    expect(backend.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    expect(controller.state.attachments.map((attachment) => attachment.name)).toEqual(['shot.png']);
+    expect(controller.state.composer.text).toBe('look at this');
+    expect(controller.state.notice?.tone).toBe('error');
+    controller.dispose();
+  });
+
+  test('a rejected session creation keeps the draft and its attachments', async () => {
+    const backend = new FakeBackend();
+    backend.createSessionError = new BackendError('transport', 'session.create', 'unreachable');
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.attachImage(pngBytes, 'image/png', 'shot.png');
+    controller.setComposer(composerFrom('look at this'));
+
+    await controller.submit();
+
+    expect(backend.calls.filter((call) => call.name === 'prompt')).toHaveLength(0);
+    expect(controller.state.attachments.map((attachment) => attachment.name)).toEqual(['shot.png']);
+    expect(controller.state.composer.text).toBe('look at this');
+    expect(controller.state.notice?.tone).toBe('error');
+    controller.dispose();
+  });
 });
 
 function adminHarness() {

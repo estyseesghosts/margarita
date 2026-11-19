@@ -256,4 +256,42 @@ describe('production composition collisions (issue #72)', () => {
     // An offline-capable dispose must complete, not hang on the stream.
     await assembly.servers.dispose();
   });
+
+  // Issue #77: the first prompt of a new session carried no attachments because the
+  // controller read the composer back after attaching to the fresh (empty) session.
+  test('the first prompt of a new remote session keeps its image and PDF (issue #77)', async () => {
+    const fixture = await compositionFixture();
+    const assembly = await createProductionAssembly(fixture.input());
+    const { controller } = assembly;
+    await controller.bootstrap();
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]);
+    const pdf = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 1, 2, 3]);
+    const pngData = Buffer.from(png).toString('base64');
+    const pdfData = Buffer.from(pdf).toString('base64');
+
+    // The /new route for a directory on the remote host (the overview composer path is
+    // covered in controller.test.ts; both must keep the envelope).
+    controller.startNewSession(sharedDir, 'srv_b');
+    controller.attachImage(png, 'image/png', 'shot.png');
+    controller.attachImage(pdf, 'application/pdf', 'spec.pdf');
+    controller.setComposer(composerFrom('read these'));
+
+    await controller.submit();
+    await flush();
+
+    const prompts = fixture.bravo.calls.filter((call) => call.name === 'prompt');
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]?.args[1]).toEqual({
+      text: 'read these',
+      files: [
+        { uri: `data:image/png;base64,${pngData}`, name: 'shot.png' },
+        { uri: `data:application/pdf;base64,${pdfData}`, name: 'spec.pdf' },
+      ],
+    });
+    expect(fixture.local.calls.filter((call) => call.name === 'createSession')).toHaveLength(0);
+    expect(controller.state.attachments).toEqual([]);
+
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
 });

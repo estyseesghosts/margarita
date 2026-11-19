@@ -46,6 +46,17 @@ export class FakeBackend implements Backend {
     limit?: number;
   }) => Promise<SessionPage>;
 
+  /** When set, createSession throws instead of creating (first-prompt admission tests). */
+  createSessionError?: Error;
+  /** When set, createSession delegates here (in-flight route-change tests). */
+  createSessionHook?: (args: {
+    directory: string;
+    agent?: string;
+    model?: ModelSelection;
+  }) => Promise<SessionSummary>;
+  /** When set, prompt throws instead of admitting (transport-failure tests). */
+  promptError?: Error;
+
   /** When set, listAgents delegates here (catalog scoping/generation tests). */
   listAgentsHook?: () => Promise<AgentDescriptor[]>;
 
@@ -70,6 +81,8 @@ export class FakeBackend implements Backend {
     model?: ModelSelection;
   }): Promise<SessionSummary> {
     this.calls.push({ name: 'createSession', args: [args] });
+    if (this.createSessionHook !== undefined) return this.createSessionHook(args);
+    if (this.createSessionError !== undefined) throw this.createSessionError;
     const session: SessionSummary = {
       id: `ses_${this.sessions.length + 1}`,
       serverID: this.serverID,
@@ -133,6 +146,7 @@ export class FakeBackend implements Backend {
   }
   async prompt(sessionID: string, draft: PromptDraft): Promise<QueuedInput> {
     this.calls.push({ name: 'prompt', args: [sessionID, draft] });
+    if (this.promptError !== undefined) throw this.promptError;
     const delivery = draft.delivery ?? 'queue';
     const item: QueuedInput = {
       id: `in_${this.inbox.length + 1}`,

@@ -2124,8 +2124,9 @@ export class AppController {
     text: string,
     directory: string,
     attachments: readonly Attachment[] = this.state.attachments,
+    serverID: string = this.activeServerID(),
   ): Promise<PromptFile[]> {
-    const mentioned = await this.resolveFiles(text, directory);
+    const mentioned = await this.resolveFiles(text, directory, serverID);
     return [...mentioned, ...attachments.map((attachment) => attachmentPromptFile(attachment))];
   }
 
@@ -2220,6 +2221,10 @@ export class AppController {
     const agent = this.state.overview.agent;
     const model = this.state.overview.model;
     const { serverID, directory } = project;
+    // Submission envelope, captured before any route or draft change: opening the new
+    // session restores its own (empty) draft, so reading the composer back afterwards
+    // silently dropped the user's prompt and attachments (issue #77).
+    const attachments = [...this.state.attachments];
     this.setState('admitting', true);
     let session: SessionSummary;
     try {
@@ -2245,28 +2250,30 @@ export class AppController {
       ...session,
       serverID: sessionServerID,
     });
-    if (text !== undefined) {
-      this.clearComposer(text);
+    if (text === undefined) {
       this.openSession(session.id, sessionServerID);
-      this.writeComposer(composerFrom(text));
-      const sentAttachments = [...this.state.attachments];
-      const sent = await this.admit(
-        text,
-        directory,
-        async () => {
-          await this.backendFor(sessionServerID).prompt(session.id, {
-            text,
-            files: await this.promptFiles(text, directory, sentAttachments),
-          });
-        },
-        undefined,
-        sentAttachments,
-      );
-      if (!sent)
-        this.showNotice(`Session ${session.id} was created but the prompt was not sent.`, 'error');
-    } else {
-      this.openSession(session.id, sessionServerID);
+      return session.id;
     }
+    // Empty the route we are leaving (its draft must not keep a copy of the sent prompt),
+    // then restore the envelope into the created session until the server acknowledges it.
+    this.clearComposer(text, attachments);
+    this.openSession(session.id, sessionServerID);
+    this.writeComposer(composerFrom(text));
+    this.setState('attachments', [...attachments]);
+    const sent = await this.admit(
+      text,
+      directory,
+      async () => {
+        await this.backendFor(sessionServerID).prompt(session.id, {
+          text,
+          files: await this.promptFiles(text, directory, attachments, sessionServerID),
+        });
+      },
+      undefined,
+      attachments,
+    );
+    if (!sent)
+      this.showNotice(`Session ${session.id} was created but the prompt was not sent.`, 'error');
     return session.id;
   }
 
