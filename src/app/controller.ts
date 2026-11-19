@@ -568,27 +568,27 @@ export class AppController {
   /** Set when the launch server failed to refresh; bootstrap re-throws it for the CLI. */
   private launchLoadError: unknown;
 
-  async loadSessions(): Promise<void> {
-    this.launchLoadError = undefined;
-    const servers = this.serverIDs();
+  async loadSessions(serverID?: string): Promise<void> {
+    if (serverID === undefined || serverID === this.serverID) this.launchLoadError = undefined;
+    const servers = serverID === undefined ? this.serverIDs() : [serverID];
     // One host's failure never aborts the refresh for the others: a failed server keeps its
     // cached rows and records the error, healthy servers update normally.
     const results = await Promise.all(
-      servers.map(async (serverID) => {
+      servers.map(async (targetID) => {
         try {
           return {
             ok: true as const,
             error: undefined as string | undefined,
-            ...(await this.loadServerSessions(serverID)),
+            ...(await this.loadServerSessions(targetID)),
           };
         } catch (error) {
           this.debugLog.write('load-sessions-failed', {
-            serverID,
+            serverID: targetID,
             errorKind: error instanceof BackendError ? error.kind : 'unknown',
           });
-          if (serverID === this.serverID) this.launchLoadError = error;
+          if (targetID === this.serverID) this.launchLoadError = error;
           return {
-            serverID,
+            serverID: targetID,
             ok: false as const,
             error: error instanceof Error ? error.message : 'Could not reach the server',
             fresh: {},
@@ -637,25 +637,38 @@ export class AppController {
     );
     batch(() => {
       this.setState('sessions', (current) => ({ ...current, ...reconciled.found, ...fresh }));
-      for (const ref of reconciled.deleted) this.forgetSession(ref.sessionID);
-      this.setState('serverPages', pages);
-      this.setState(
-        'sessionsComplete',
-        results.every((result) => result.ok && result.cursor === undefined),
-      );
-      this.setState(
-        'sessionsCursor',
-        results.find((result) => result.cursor !== undefined)?.cursor,
-      );
+      for (const ref of reconciled.deleted) this.forgetSession(ref.sessionID, ref.serverID);
+      if (serverID === undefined) {
+        this.setState('serverPages', pages);
+        this.setState(
+          'sessionsComplete',
+          results.every((result) => result.ok && result.cursor === undefined),
+        );
+        this.setState(
+          'sessionsCursor',
+          results.find((result) => result.cursor !== undefined)?.cursor,
+        );
+      } else {
+        // A single-server resync updates that host's page only; the rest keep their state.
+        const hostPage = pages[serverID];
+        if (hostPage !== undefined) this.setState('serverPages', serverID, hostPage);
+        this.setState(
+          'sessionsComplete',
+          this.serverIDs().every((id) => {
+            const page = id === serverID ? pages[id] : this.state.serverPages[id];
+            return page?.complete === true;
+          }),
+        );
+      }
       this.setState('sessionsLoading', false);
       this.setState('sessionsError', results.find((result) => !result.ok)?.error);
       this.setState('running', (current) => ({ ...current, ...running }));
     });
     // Running sessions are the ones that can be blocked on input right now.
     await Promise.all(
-      servers.flatMap((serverID) =>
-        [...(activeByServer.get(serverID) ?? [])].map((sessionID) =>
-          this.refreshInputRequests(sessionID, serverID).catch(() => {
+      servers.flatMap((targetID) =>
+        [...(activeByServer.get(targetID) ?? [])].map((sessionID) =>
+          this.refreshInputRequests(sessionID, targetID).catch(() => {
             // Unreachable host: its stale permission/form state stays as-is.
           }),
         ),
@@ -713,23 +726,28 @@ export class AppController {
   }
 
   /** Drops every cached trace of a session the server no longer has. */
-  private forgetSession(sessionID: string): void {
+  private forgetSession(sessionID: string, serverID: string = this.activeServerID()): void {
+    const key = this.keyFor(serverID, sessionID);
     this.setState(
       produce((state) => {
-        delete state.sessions[this.sessionKeyOf(sessionID)];
-        delete state.transcripts[this.sessionKeyOf(sessionID)];
-        delete state.inbox[this.sessionKeyOf(sessionID)];
-        delete state.permissions[this.sessionKeyOf(sessionID)];
-        delete state.forms[this.sessionKeyOf(sessionID)];
-        delete state.goals[this.sessionKeyOf(sessionID)];
-        delete state.nativeGoals[this.sessionKeyOf(sessionID)];
-        delete state.awaitingSteer[this.sessionKeyOf(sessionID)];
-        delete state.running[this.sessionKeyOf(sessionID)];
+        delete state.sessions[key];
+        delete state.transcripts[key];
+        delete state.inbox[key];
+        delete state.permissions[key];
+        delete state.forms[key];
+        delete state.goals[key];
+        delete state.nativeGoals[key];
+        delete state.awaitingSteer[key];
+        delete state.running[key];
       }),
     );
-    this.goalVersions.delete(this.sessionKeyOf(sessionID));
+    this.goalVersions.delete(key);
     const route = this.state.route;
-    if (route.kind === 'conversation' && route.sessionID === sessionID) {
+    if (
+      route.kind === 'conversation' &&
+      route.serverID === serverID &&
+      route.sessionID === sessionID
+    ) {
       this.setState('route', { kind: 'overview' });
       this.showNotice('This session was deleted on the server.', 'warn');
     }
@@ -918,107 +936,133 @@ export class AppController {
 
   // ---------------------------------------------------------------- events
 
-  onStreamStatus(status: StreamStatus): void {
-    this.debugLog.write('stream-status', { status });
+  onStreamStatus(serverID: string, status: StreamStatus): void {
+    this.debugLog.write('stream-status', { serverID, status });
+    // The single stream badge belongs to the launch server; per-server health lives on the
+    // manager. A remote reconnect resyncs that host only and never touches the badge.
+    if (serverID !== this.serverID) return;
     const reconnected = status === 'live' && this.state.stream === 'reconnecting';
     this.setState('stream', status);
     if (status === 'reconnecting') this.showNotice('Connection lost · retrying', 'warn', false);
-    if (reconnected) void this.track('resync', this.resync());
+    if (reconnected) void this.track('resync', this.resync(serverID));
   }
 
-  onEvents(events: readonly BackendEvent[], resync: boolean): void {
+  onEvents(serverID: string, events: readonly BackendEvent[], resync: boolean): void {
     this.debugLog.write('events', {
+      serverID,
       count: events.length,
       kinds: [...new Set(events.map((event) => event.kind))],
       resync,
     });
     if (this.disposed) return;
     if (resync) {
-      void this.track('resync', this.resync());
+      void this.track('resync', this.resync(serverID));
       return;
     }
     batch(() => {
-      for (const event of events) this.applyEvent(event);
+      for (const event of events) this.applyEvent(serverID, event);
     });
   }
 
-  private async resync(): Promise<void> {
-    await this.loadSessions();
-    void this.track('catalog', this.loadCatalog(this.currentDirectory()));
+  /**
+   * A stream (re)connect means we may have missed events for that host: refetch that
+   * host's snapshot only. Other servers are untouched; the route keeps what it has.
+   */
+  private async resync(serverID: string): Promise<void> {
+    await this.loadSessions(serverID);
     const route = this.state.route;
-    if (route.kind === 'conversation') await this.loadConversation(route.sessionID);
+    const routeServer =
+      route.kind === 'overview' ? this.state.overview.project.serverID : route.serverID;
+    // The catalog is one global pair of lists scoped to (directory, server); reload it
+    // only when the resyncing server owns the scope the user is looking at.
+    if (routeServer === serverID)
+      void this.track('catalog', this.loadCatalog(this.currentDirectory(), serverID));
+    if (route.kind === 'conversation' && route.serverID === serverID)
+      await this.loadConversation(route.sessionID, serverID);
     // Goal reads that failed while disconnected are re-tried; a successful push or read
     // during the outage already superseded them (version guard).
     const unattached = Object.entries(this.state.nativeGoals)
       .filter(
-        ([id, goal]) =>
+        ([key, goal]) =>
           goal.status === 'unavailable' &&
-          (route.kind !== 'conversation' || route.sessionID !== id),
+          parseSessionKey(key).serverID === serverID &&
+          (route.kind !== 'conversation' || route.sessionID !== parseSessionKey(key).sessionID),
       )
-      .map(([id]) => id);
-    await Promise.all(unattached.map((id) => this.refreshNativeGoal(id)));
-    for (const id of Object.keys(this.state.transcripts)) {
-      if (route.kind !== 'conversation' || route.sessionID !== id) {
-        this.setState('transcripts', this.sessionKeyOf(id), 'stale', true);
+      .map(([key]) => parseSessionKey(key).sessionID);
+    await Promise.all(unattached.map((id) => this.refreshNativeGoal(id, serverID).catch(() => {})));
+    for (const key of Object.keys(this.state.transcripts)) {
+      if (parseSessionKey(key).serverID === serverID) {
+        if (route.kind !== 'conversation' || route.sessionID !== parseSessionKey(key).sessionID) {
+          this.setState('transcripts', key, 'stale', true);
+        }
       }
     }
-    if (this.state.notice?.text === 'Connection lost · retrying') this.clearNotice();
+    if (serverID === this.serverID && this.state.notice?.text === 'Connection lost · retrying')
+      this.clearNotice();
   }
 
-  private applyEvent(event: BackendEvent): void {
+  private applyEvent(serverID: string, event: BackendEvent): void {
     const attached =
-      this.state.route.kind === 'conversation' ? this.state.route.sessionID : undefined;
+      this.state.route.kind === 'conversation' && this.state.route.serverID === serverID
+        ? this.state.route.sessionID
+        : undefined;
     switch (event.kind) {
       case 'connected':
         return;
-      case 'catalog-changed':
-        void this.track('catalog', this.loadCatalog(this.currentDirectory()));
+      case 'catalog-changed': {
+        const route = this.state.route;
+        const routeServer =
+          route.kind === 'overview' ? this.state.overview.project.serverID : route.serverID;
+        if (routeServer !== serverID) return; // another host's catalog is not ours to reload
+        void this.track('catalog', this.loadCatalog(this.currentDirectory(), serverID));
         return;
+      }
       case 'revert-changed':
         // Immediate reconcile (not debounced): opens the recovery dialog for a staged
         // revert we do not know about, or drops one resolved elsewhere.
-        void this.track('revert', this.refreshSummary(event.sessionID));
+        void this.track('revert', this.refreshSummary(event.sessionID, serverID));
         return;
       case 'session-changed':
-        this.scheduleSummary(event.sessionID);
+        this.scheduleSummary(event.sessionID, serverID);
         return;
       case 'session-deleted':
-        this.forgetSession(event.sessionID);
+        this.forgetSession(event.sessionID, serverID);
         return;
       case 'usage':
-        if (this.state.sessions[this.sessionKeyOf(event.sessionID)] !== undefined) {
-          this.setState('sessions', this.sessionKeyOf(event.sessionID), {
+        if (this.state.sessions[this.keyFor(serverID, event.sessionID)] !== undefined) {
+          this.setState('sessions', this.keyFor(serverID, event.sessionID), {
             cost: event.cost,
             tokens: event.tokens,
           });
         }
         return;
       case 'execution':
-        this.setState('running', this.sessionKeyOf(event.sessionID), event.state === 'started');
-        this.scheduleSummary(event.sessionID);
-        if (attached === event.sessionID) this.scheduleTranscript(event.sessionID);
-        else this.markStale(event.sessionID);
+        this.setState('running', this.keyFor(serverID, event.sessionID), event.state === 'started');
+        this.scheduleSummary(event.sessionID, serverID);
+        if (attached === event.sessionID) this.scheduleTranscript(event.sessionID, serverID);
+        else this.markStale(event.sessionID, serverID);
         if (event.state !== 'started')
-          void this.track('requests', this.refreshInputRequests(event.sessionID));
+          void this.track('requests', this.refreshInputRequests(event.sessionID, serverID));
         return;
       case 'transcript-changed':
-        if (this.state.sessions[this.sessionKeyOf(event.sessionID)] === undefined)
-          this.scheduleSummary(event.sessionID);
-        if (attached === event.sessionID) this.scheduleTranscript(event.sessionID);
-        else this.markStale(event.sessionID);
+        if (this.state.sessions[this.keyFor(serverID, event.sessionID)] === undefined)
+          this.scheduleSummary(event.sessionID, serverID);
+        if (attached === event.sessionID) this.scheduleTranscript(event.sessionID, serverID);
+        else this.markStale(event.sessionID, serverID);
         return;
       case 'inbox-changed':
         if (attached === event.sessionID)
-          void this.track('inbox', this.refreshInbox(event.sessionID));
+          void this.track('inbox', this.refreshInbox(event.sessionID, serverID));
         return;
       case 'input-requests-changed':
-        void this.track('requests', this.refreshInputRequests(event.sessionID));
+        void this.track('requests', this.refreshInputRequests(event.sessionID, serverID));
         return;
       case 'goal-changed':
-        this.bumpGoalVersion(event.sessionID);
+        this.bumpGoalVersion(event.sessionID, serverID);
         this.setNativeGoalState(
           event.sessionID,
           event.goal === null ? { status: 'none' } : { status: 'verified', goal: event.goal },
+          serverID,
         );
         return;
       default:
@@ -1026,20 +1070,22 @@ export class AppController {
     }
   }
 
-  private markStale(sessionID: string): void {
-    if (this.state.transcripts[this.sessionKeyOf(sessionID)] !== undefined) {
-      this.setState('transcripts', this.sessionKeyOf(sessionID), 'stale', true);
+  private markStale(sessionID: string, serverID: string = this.activeServerID()): void {
+    const key = this.keyFor(serverID, sessionID);
+    if (this.state.transcripts[key] !== undefined) {
+      this.setState('transcripts', key, 'stale', true);
     }
   }
 
   /** Coalesces bursts of summary-changing events into one `session.get`. */
-  private scheduleSummary(sessionID: string): void {
-    if (this.summaryTimers.has(sessionID)) return;
+  private scheduleSummary(sessionID: string, serverID: string = this.activeServerID()): void {
+    const key = `${serverID} ${sessionID}`;
+    if (this.summaryTimers.has(key)) return;
     this.summaryTimers.set(
-      sessionID,
+      key,
       setTimeout(() => {
-        this.summaryTimers.delete(sessionID);
-        void this.track('session', this.refreshSummary(sessionID));
+        this.summaryTimers.delete(key);
+        void this.track('session', this.refreshSummary(sessionID, serverID));
       }, 150),
     );
   }
@@ -1087,22 +1133,23 @@ export class AppController {
   // ---------------------------------------------------------------- transcripts
 
   /** Throttled canonical refetch: at most one request in flight per session. */
-  private scheduleTranscript(sessionID: string): void {
-    if (this.transcriptInFlight.has(sessionID)) {
-      this.transcriptDirty.add(sessionID);
+  private scheduleTranscript(sessionID: string, serverID: string = this.activeServerID()): void {
+    const key = `${serverID} ${sessionID}`;
+    if (this.transcriptInFlight.has(key)) {
+      this.transcriptDirty.add(key);
       return;
     }
     const run = (async () => {
       try {
-        await this.fetchLatest(sessionID);
+        await this.fetchLatest(sessionID, serverID);
         await delay(80);
       } finally {
-        this.transcriptInFlight.delete(sessionID);
+        this.transcriptInFlight.delete(key);
       }
-      if (this.transcriptDirty.delete(sessionID) && !this.disposed)
-        this.scheduleTranscript(sessionID);
+      if (this.transcriptDirty.delete(key) && !this.disposed)
+        this.scheduleTranscript(sessionID, serverID);
     })();
-    this.transcriptInFlight.set(sessionID, run);
+    this.transcriptInFlight.set(key, run);
     void this.track('transcript', run);
   }
 
@@ -2853,8 +2900,8 @@ export class AppController {
    */
   private goalVersions = new Map<string, number>();
 
-  private bumpGoalVersion(sessionID: string): number {
-    const key = this.sessionKeyOf(sessionID);
+  private bumpGoalVersion(sessionID: string, serverID: string = this.activeServerID()): number {
+    const key = this.keyFor(serverID, sessionID);
     const next = (this.goalVersions.get(key) ?? 0) + 1;
     this.goalVersions.set(key, next);
     return next;
@@ -2865,39 +2912,46 @@ export class AppController {
    * "no goal"; any failure is `unavailable` and keeps the last verified reading, marked
    * stale. The last known value is never presented as authoritative after a failure.
    */
-  async refreshNativeGoal(sessionID: string): Promise<NativeGoal | null> {
-    const version = this.bumpGoalVersion(sessionID);
-    const directory = this.state.sessions[this.sessionKeyOf(sessionID)]?.directory;
-    const previous = this.state.nativeGoals[this.sessionKeyOf(sessionID)];
+  async refreshNativeGoal(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): Promise<NativeGoal | null> {
+    const version = this.bumpGoalVersion(sessionID, serverID);
+    const key = this.keyFor(serverID, sessionID);
+    const directory = this.state.sessions[key]?.directory;
+    const previous = this.state.nativeGoals[key];
     // Only show a spinner from a genuine unknown; a known reading stays on screen while the
     // refresh runs, so a routine re-read never blinks the badge away.
     if (previous === undefined || previous.status === 'unknown') {
-      this.setNativeGoalState(sessionID, { status: 'loading' });
+      this.setNativeGoalState(sessionID, { status: 'loading' }, serverID);
     }
     try {
-      const goal = await this.backend.getGoal(sessionID, directory);
-      if (version !== this.goalVersions.get(this.sessionKeyOf(sessionID)))
-        return this.nativeGoalOf(sessionID);
+      const goal = await this.backendFor(serverID).getGoal(sessionID, directory);
+      if (version !== this.goalVersions.get(key)) return this.nativeGoalOf(sessionID, serverID);
       this.setNativeGoalState(
         sessionID,
         goal === null ? { status: 'none' } : { status: 'verified', goal },
+        serverID,
       );
       return goal;
     } catch (error) {
       const kind = error instanceof BackendError ? error.kind : 'unknown';
       this.debugLog.write('backend-error', { operation: 'opencode.goal.get', kind });
-      if (version !== this.goalVersions.get(this.sessionKeyOf(sessionID)))
-        return this.nativeGoalOf(sessionID);
-      const last = this.lastVerifiedGoal(sessionID);
-      this.setNativeGoalState(sessionID, {
-        status: 'unavailable',
-        reason: goalFailureReason(kind),
-        message: errorText(error),
+      if (version !== this.goalVersions.get(key)) return this.nativeGoalOf(sessionID, serverID);
+      const last = this.lastVerifiedGoal(sessionID, serverID);
+      this.setNativeGoalState(
         sessionID,
-        ...(directory === undefined ? {} : { directory }),
-        ...(last === undefined ? {} : { last }),
-      });
-      return this.nativeGoalOf(sessionID);
+        {
+          status: 'unavailable',
+          reason: goalFailureReason(kind),
+          message: errorText(error),
+          sessionID,
+          ...(directory === undefined ? {} : { directory }),
+          ...(last === undefined ? {} : { last }),
+        },
+        serverID,
+      );
+      return this.nativeGoalOf(sessionID, serverID);
     }
   }
 
@@ -2905,37 +2959,47 @@ export class AppController {
    * Replaces the whole reading. A path setter would merge into the previous state and
    * leave fields from another status (a stale `goal`, or an old failure) behind.
    */
-  private setNativeGoalState(sessionID: string, goal: NativeGoalState): void {
+  private setNativeGoalState(
+    sessionID: string,
+    goal: NativeGoalState,
+    serverID: string = this.activeServerID(),
+  ): void {
     this.setState(
       'nativeGoals',
       produce((goals) => {
-        goals[sessionID] = goal;
+        goals[this.keyFor(serverID, sessionID)] = goal;
       }),
     );
   }
 
   /** The last goal the plugin actually returned, if that reading still exists. */
-  private lastVerifiedGoal(sessionID: string): NativeGoal | undefined {
-    const current = this.state.nativeGoals[this.sessionKeyOf(sessionID)];
+  private lastVerifiedGoal(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): NativeGoal | undefined {
+    const current = this.state.nativeGoals[this.keyFor(serverID, sessionID)];
     if (current?.status === 'verified') return current.goal;
     if (current?.status === 'unavailable') return current.last;
     return undefined;
   }
 
   /** The goal currently believed to exist. A stale reading is never used for actions. */
-  nativeGoalOf(sessionID: string): NativeGoal | null {
-    return verifiedGoal(this.state.nativeGoals[this.sessionKeyOf(sessionID)]);
+  nativeGoalOf(sessionID: string, serverID: string = this.activeServerID()): NativeGoal | null {
+    return verifiedGoal(this.state.nativeGoals[this.keyFor(serverID, sessionID)]);
   }
 
   /** Full goal knowledge for a session, including stale/unavailable readings (for display). */
-  nativeGoalStateOf(sessionID: string): NativeGoalState | undefined {
-    return this.state.nativeGoals[this.sessionKeyOf(sessionID)];
+  nativeGoalStateOf(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): NativeGoalState | undefined {
+    return this.state.nativeGoals[this.keyFor(serverID, sessionID)];
   }
 
-  private clearSteerIntent(sessionID: string): void {
+  private clearSteerIntent(sessionID: string, serverID: string = this.activeServerID()): void {
     this.setState(
       produce((state) => {
-        delete state.awaitingSteer[this.sessionKeyOf(sessionID)];
+        delete state.awaitingSteer[this.keyFor(serverID, sessionID)];
       }),
     );
   }

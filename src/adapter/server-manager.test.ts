@@ -81,6 +81,45 @@ describe('ServerConnectionManager', () => {
     expect(manager.backendFor('local')).toBeDefined();
   });
 
+  test('stream callbacks survive state transitions; only replacement goes stale', async () => {
+    const manager = new ServerConnectionManager();
+    const fake = server('srv_1', 'http://one:4096');
+    manager.add({ serverID: 'srv_1', ...fake });
+    const statuses: string[] = [];
+    let batches = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fake.backend.eventsHook = (signal: AbortSignal) =>
+      (async function* () {
+        yield { kind: 'connected' };
+        await gate;
+        yield { kind: 'session-changed', sessionID: 'ses_x' };
+        await new Promise<void>((resolve) =>
+          signal.addEventListener('abort', () => resolve(), { once: true }),
+        );
+      })();
+    manager.startStream('srv_1', {
+      onBatch: () => {
+        batches += 1;
+      },
+      onStatus: (_serverID, status) => statuses.push(status),
+    });
+    for (let round = 0; round < 10; round += 1) await Bun.sleep(0);
+    expect(statuses).toContain('live');
+    // A state transition replaces the managed-server object; the stream is NOT stale.
+    manager.setState('srv_1', 'online');
+    release();
+    await Bun.sleep(75);
+    expect(batches).toBe(1);
+    // Re-registering the server replaces the registration; the old stream goes stale.
+    manager.add({ serverID: 'srv_1', ...server('srv_1', 'http://two:4096') });
+    await Bun.sleep(75);
+    expect(batches).toBe(1);
+    await manager.dispose();
+  });
+
   test('replacing a server aborts its old stream so subscriptions do not duplicate', async () => {
     const manager = new ServerConnectionManager();
     const first = server('srv_1', 'http://one:4096');

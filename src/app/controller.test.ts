@@ -674,7 +674,11 @@ describe('staged revert recovery (issue #8)', () => {
       const { revert: _revert, ...rest } = session;
       backend.sessions.splice(index, 1, rest);
     }
-    controller.onEvents([{ kind: 'revert-changed', sessionID: 'ses_a', action: 'cleared' }], false);
+    controller.onEvents(
+      'local',
+      [{ kind: 'revert-changed', sessionID: 'ses_a', action: 'cleared' }],
+      false,
+    );
     await flush();
     expect(controller.state.overlay.kind).toBe('none');
     controller.dispose();
@@ -702,7 +706,7 @@ describe('reconnect reconciliation (issue #36)', () => {
     expect(Object.keys(controller.state.sessions).toSorted()).toEqual(['ses_a', 'ses_b', 'ses_c']);
 
     backend.sessions = backend.sessions.filter((session) => session.id !== 'ses_b');
-    controller.onEvents([], true);
+    controller.onEvents('local', [], true);
     await flush();
     expect(Object.keys(controller.state.sessions).toSorted()).toEqual(['ses_a', 'ses_c']);
     controller.dispose();
@@ -716,7 +720,7 @@ describe('reconnect reconciliation (issue #36)', () => {
     backend.getSession = async () => {
       throw new BackendError('transport', 'session.get', 'down');
     };
-    controller.onEvents([], true);
+    controller.onEvents('local', [], true);
     await flush();
     expect(controller.state.sessions['ses_b']).toBeDefined();
     controller.dispose();
@@ -734,7 +738,7 @@ describe('reconnect reconciliation (issue #36)', () => {
       .map((session) =>
         session.id === 'ses_c' ? { ...session, archived: true, directory: '/moved' } : session,
       );
-    controller.onEvents([], true);
+    controller.onEvents('local', [], true);
     await flush();
     expect(controller.state.sessions['ses_c']).toMatchObject({
       archived: true,
@@ -1077,7 +1081,7 @@ describe('tool-group focus', () => {
 
     // The stream folds another tool into the same group: first-tool key stays stable.
     backend.messages['ses_a'] = [groupedTranscript([...groupFixture, fakeTool('t6', 'read')])];
-    controller.onEvents([], true); // same resync path events take in production
+    controller.onEvents('local', [], true); // same resync path events take in production
     await flush();
     expect(controller.state.focusedGroup).toBe('group:t1');
 
@@ -1254,6 +1258,7 @@ describe('native opencode goal (issue #21)', () => {
   test('a goal.changed event replaces the tracked native goal', async () => {
     const { controller } = await goalFixture();
     controller.onEvents(
+      'local',
       [
         {
           kind: 'goal-changed',
@@ -1324,6 +1329,7 @@ describe('native opencode goal (issue #21)', () => {
     controller.openSession('ses_a');
     await flush();
     controller.onEvents(
+      'local',
       [
         {
           kind: 'goal-changed',
@@ -1553,16 +1559,17 @@ describe('native opencode goal (issue #21)', () => {
     expect(controller.nativeGoalStateOf('ses_a')?.status).toBe('unavailable');
 
     mode = 'ok';
-    controller.onEvents([], true);
+    controller.onEvents('local', [], true);
     await flush();
     await flush();
     expect(controller.nativeGoalStateOf('ses_a')?.status).toBe('verified');
 
     // A read in flight during reconnect answers after a newer push: the push wins.
     mode = 'hold';
-    controller.onEvents([], true);
+    controller.onEvents('local', [], true);
     await flush();
     controller.onEvents(
+      'local',
       [
         {
           kind: 'goal-changed',

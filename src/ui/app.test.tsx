@@ -823,7 +823,7 @@ describe('live activity indicator (issues 24, 25)', () => {
         { kind: 'compaction' as const, id: 'c1', createdAt: 3, state: 'completed' as const },
       ],
     };
-    controller.onEvents([], true);
+    controller.onEvents('local', [], true);
     await settle(setup);
     await settle(setup);
     const done = setup.captureCharFrame();

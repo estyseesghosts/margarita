@@ -8,6 +8,7 @@ import type { Connection } from '../src/adapter/connection.ts';
 import {
   createProductionAssembly,
   type ProductionAssemblyInput,
+  wireServerStream,
 } from '../src/app/production-assembly.ts';
 import { defaultConfig } from '../src/config/config.ts';
 import { memoryCredentialStore } from '../src/config/credentials.ts';
@@ -480,5 +481,57 @@ describe('startup restore of paired servers', () => {
     ).toEqual(['local', 'srv_a', 'srv_b']);
     restarted.controller.dispose();
     await restarted.servers.dispose();
+  });
+});
+
+describe('stream reconnect through the production wiring (issue #63)', () => {
+  test('a restored remote’s reconnect resyncs only that host', async () => {
+    const fixture = await restoreFixture();
+    let campListCalls = 0;
+    fixture.camp.listSessionsHook = async () => {
+      campListCalls += 1;
+      return { sessions: fixture.camp.sessions };
+    };
+    fixture.local.sessions = [summaryFor('local', 'ses_local', 3)];
+    let localListCalls = 0;
+    fixture.local.listSessionsHook = async () => {
+      localListCalls += 1;
+      return { sessions: fixture.local.sessions };
+    };
+    // The restored host's stream connects on its own schedule and announces with 'connected'.
+    fixture.camp.eventsHook = (signal) =>
+      (async function* () {
+        yield { kind: 'connected' };
+        await new Promise<void>((resolve) =>
+          signal.addEventListener('abort', () => resolve(), { once: true }),
+        );
+      })();
+
+    const assembly = await createProductionAssembly(
+      restoreInput(fixture, {
+        createBackend: (_connection, options) => {
+          if (options?.serverID === 'srv_b') return fixture.camp;
+          return fixture.createBackend(_connection, options);
+        },
+      }),
+    );
+    await assembly.controller.bootstrap();
+    expect(campListCalls).toBe(1);
+    expect(localListCalls).toBe(1);
+
+    // The runtime wires its stream — exactly what main.ts does at startup and after pairing.
+    wireServerStream(assembly.servers, assembly.controller, 'srv_b');
+    await Bun.sleep(75); // the pump flushes its 'connected' resync after 50ms
+    await flush();
+
+    expect(campListCalls).toBeGreaterThan(1); // the reconnect resynced B
+    expect(localListCalls).toBe(1); // A never reloaded
+    // The single stream badge is not driven by the remote stream.
+    expect(assembly.controller.state.stream).not.toBe('reconnecting');
+    // A's cached rows survived.
+    expect(assembly.controller.state.sessions['ses_local']).toBeDefined();
+    expect(assembly.servers.get('srv_b')?.state).toBe('online');
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
   });
 });

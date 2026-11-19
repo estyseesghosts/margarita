@@ -75,19 +75,23 @@ export type ProductionAssembly = Readonly<{
   serverAdmin: ServerAdmin;
 }>;
 
+/**
+ * Starts (or replaces) the event stream for one server. Per-server stream status is applied
+ * to the manager; the single UI stream badge is driven by the launch server only, decided
+ * inside the controller.
+ */
 export function wireServerStream(
   servers: ServerConnectionManager,
   controller: AppController,
-  launchServerID: string,
   targetID: string,
 ): void {
   servers.startStream(targetID, {
-    onBatch: (events, resync) => controller.onEvents(events, resync),
-    onStatus: (status) => {
+    onBatch: (_serverID, events, resync) => controller.onEvents(targetID, events, resync),
+    onStatus: (_serverID, status) => {
       const state =
         status === 'live' ? 'online' : status === 'connecting' ? 'connecting' : 'offline';
       servers.setState(targetID, state);
-      if (targetID === launchServerID) controller.onStreamStatus(status);
+      controller.onStreamStatus(targetID, status);
     },
   });
 }
@@ -233,7 +237,7 @@ export async function createProductionAssembly(
       });
       // The new host joins subscriptions and the overview immediately: wire its stream and
       // re-aggregate without a restart.
-      wireServerStream(servers, controller, launchServerID, result.serverID);
+      wireServerStream(servers, controller, result.serverID);
       await controller.loadSessions().catch(() => {});
       return { shortname: result.shortname };
     },

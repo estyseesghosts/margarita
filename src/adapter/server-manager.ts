@@ -47,8 +47,8 @@ export type ServerTarget = Readonly<{
 }>;
 
 export type StreamHandlers = Readonly<{
-  onBatch: (events: readonly BackendEvent[], resync: boolean) => void;
-  onStatus: (status: StreamStatus, error?: unknown) => void;
+  onBatch: (serverID: string, events: readonly BackendEvent[], resync: boolean) => void;
+  onStatus: (serverID: string, status: StreamStatus, error?: unknown) => void;
 }>;
 
 export type StreamState = Readonly<{ serverID: string; status: StreamStatus }>;
@@ -159,11 +159,11 @@ export class ServerConnectionManager {
       source: (signal) => server.backend.events(signal),
       onBatch: (events, resync) => {
         if (current() === undefined) return; // stale stream from a replaced server
-        handlers.onBatch(events, resync);
+        handlers.onBatch(serverID, events, resync);
       },
       onStatus: (status, error) => {
         if (current() === undefined) return;
-        handlers.onStatus(status, error);
+        handlers.onStatus(serverID, status, error);
       },
     });
     this.streams.set(serverID, stop);

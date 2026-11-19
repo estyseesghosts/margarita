@@ -355,7 +355,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   // streams, so reconnects and unpair cannot duplicate subscriptions. Cached sessions stay
   // visible while a host is offline; only the launch server drives the single stream badge.
   for (const managed of servers.list()) {
-    wireServerStream(servers, controller, serverID, managed.serverID);
+    wireServerStream(servers, controller, managed.serverID);
   }
   const stopPump = () => servers.dispose();
 
