@@ -635,6 +635,54 @@ function liveOf(startedAt: number) {
   return nodes[0]?.kind === 'tool-group' ? nodes[0].live : undefined;
 }
 
+function liveOfExternal(name: string, input: Record<string, unknown> = {}) {
+  const nodes = foldTranscript([assistant([toolPart(runningTool('x', name, input, 1))])], compact);
+  return nodes[0]?.kind === 'tool-group' ? nodes[0].live : undefined;
+}
+
+describe('unknown external tools are named in the live line (issue #114)', () => {
+  test('an executing external tool with empty input shows its name, not just Calling', () => {
+    const live = liveOfExternal('weather_get_forecast');
+    expect(live?.text).toBe('weather_get_forecast');
+    expect(live?.text).not.toBe('Calling');
+  });
+
+  test('an external tool with arguments shows a short safe name and target', () => {
+    const live = liveOfExternal('weather_get_forecast', { query: 'London' });
+    expect(live?.text).toBe('weather_get_forecast London');
+  });
+
+  test('terminal escape sequences are stripped from the external tool name', () => {
+    const live = liveOfExternal('weather\u001b[2J_get_forecast');
+    expect(live?.text).toBe('weather_get_forecast');
+  });
+
+  test('a newline in the external tool name is clipped to the first line', () => {
+    const live = liveOfExternal('weather_get\nforecast');
+    expect(live?.text).toBe('weather_get');
+  });
+
+  test('a very long external tool name is clamped with an ellipsis', () => {
+    const live = liveOfExternal('x'.repeat(200));
+    expect(live?.text).toBe('x'.repeat(47) + '…');
+  });
+
+  test('a long argument is truncated and does not leak the full payload', () => {
+    const live = liveOfExternal('weather_get_forecast', {
+      query: 'a'.repeat(200),
+    });
+    expect(live?.text).toBe(`weather_get_forecast ${'a'.repeat(47)}…`);
+  });
+
+  test('a recognized MCP call still names its server and operation', () => {
+    const nodes = foldTranscript(
+      [assistant([toolPart(runningTool('l', 'lotus_get_issue', { id: 4 }))])],
+      { ...compact, mcpServers: ['lotus'] },
+    );
+    expect(nodes[0]?.kind === 'tool-group' && nodes[0].live?.text).toBe('lotus: get_issue');
+  });
+});
+
 describe('background hint after a long running shell command (issue #76)', () => {
   test('the hint appears only after strictly more than 10 seconds', () => {
     expect(backgroundHint(liveOf(1000), 10_000)).toBe(false); // 9.0s

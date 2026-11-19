@@ -1,6 +1,8 @@
 import type { ExecutionMarker } from './execution-segment.ts';
 import type { ModelSelection } from './model-ref.ts';
+import { sanitizeTerminalText } from './sanitize-text.ts';
 import { assertNever } from './session.ts';
+import { truncatePrompt } from './sticky-prompt.ts';
 
 /** Frontend projection of server messages; adapters map wire types into these. */
 export type ToolStatus = 'streaming' | 'running' | 'completed' | 'error';
@@ -538,6 +540,9 @@ export function summarizeTools(
     .join(', ');
 }
 
+/** Longest single-line tool name shown before it is clamped with an ellipsis. */
+const liveToolNameMaxWidth = 48;
+
 const liveArgumentKeys = ['command', 'filePath', 'path', 'pattern', 'url', 'query', 'description'];
 
 const activityLabels: Readonly<Record<ToolCategory, string>> = {
@@ -588,7 +593,26 @@ export function liveToolLine(
   if (identity.kind === 'mcp')
     return { text: `${identity.server}: ${identity.tool}`, startedAt: active.startedAt, shell };
   const category = classifyTool(active.name);
-  const verb = identity.kind === 'builtin' ? activityLabels[category] : 'Calling';
+  // Unknown external calls keep their own sanitized name so the user can tell what is
+  // executing instead of only a generic verb, plus the first safe argument when available
+  // (issue #114).
+  if (identity.kind === 'external') {
+    const name = truncatePrompt(
+      (sanitizeTerminalText(active.name).split('\n')[0] ?? '').trim(),
+      liveToolNameMaxWidth,
+    );
+    const firstLine = liveArgumentKeys
+      .map((key) => active.input[key])
+      .find((value): value is string => typeof value === 'string' && value.trim() !== '')
+      ?.split('\n')[0]
+      ?.trim();
+    const arg =
+      firstLine === undefined || firstLine === ''
+        ? ''
+        : ` ${truncatePrompt(sanitizeTerminalText(firstLine), liveToolNameMaxWidth)}`;
+    return { text: name + arg, startedAt: active.startedAt, shell };
+  }
+  const verb = activityLabels[category];
   const target = liveArgumentKeys
     .map((key) => active.input[key])
     .find((value): value is string => typeof value === 'string' && value.trim() !== '');
