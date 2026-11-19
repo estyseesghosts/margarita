@@ -137,43 +137,90 @@ function commandAvailable(command: string): boolean {
   return Bun.which(command) !== null;
 }
 
-function keychainCredentialStore(): CredentialStore {
-  if (!commandAvailable('security')) return unavailableCredentialStore('security not found');
-  const service = 'margarita';
+const service = 'margarita';
+
+/** The exact subprocess invocation the keychain store performs; everything is captured here. */
+export type KeychainCommand = Readonly<{
+  argv: readonly string[];
+  /** Secrets are fed here, never through argv or the environment. */
+  stdin?: string;
+}>;
+
+export type KeychainResult = Readonly<{
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}>;
+
+export type KeychainRunner = (command: KeychainCommand) => KeychainResult;
+
+/** Launches `security` with no inherited environment and the secret only on stdin. */
+const spawnSecurity: KeychainRunner = (command) => {
+  const child = Bun.spawnSync([...command.argv], {
+    stdin: command.stdin === undefined ? 'ignore' : Buffer.from(command.stdin, 'utf8'),
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: {},
+  });
+  return {
+    exitCode: child.exitCode,
+    stdout: child.stdout.toString(),
+    stderr: child.stderr.toString(),
+  };
+};
+
+/** Margarita-generated identities only; rejects anything that could be read as a flag. */
+const serverIDPattern = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+function assertSafeAccount(serverID: string): void {
+  if (!serverIDPattern.test(serverID)) {
+    throw new CredentialError('Unsafe server identity for the Keychain account.');
+  }
+}
+
+/**
+ * Interaction with the `security` CLI. The secret travels to `security` on stdin (never
+ * argv, environment, or logs): the interactive `-i` mode parses the command line from
+ * stdin, so the password stays off the spawned process list. The account is validated
+ * and single-quoted the shell way, and newlines are refused — the interactive command
+ * line is single-line by construction. Tests inject a runner; the injected path never
+ * probes the host. The `security` probe only gates the real launcher, so on non-macOS
+ * hosts callers get `unavailable` instead of confusing subprocess failures.
+ */
+export function keychainCredentialStore(runner: KeychainRunner = spawnSecurity): CredentialStore {
+  if (runner === spawnSecurity && !commandAvailable('security')) {
+    return unavailableCredentialStore('security not found');
+  }
   return {
     kind: 'system',
     description: 'macOS Keychain',
     async get(serverID) {
-      const result = Bun.spawnSync([
-        'security',
-        'find-generic-password',
-        '-s',
-        service,
-        '-a',
-        serverID,
-        '-w',
-      ]);
+      assertSafeAccount(serverID);
+      const result = runner({
+        argv: ['security', 'find-generic-password', '-s', service, '-a', serverID, '-w'],
+      });
       if (result.exitCode !== 0) return undefined;
-      return result.stdout.toString().trim();
+      return result.stdout.trim();
     },
     async set(serverID, secret) {
+      assertSafeAccount(serverID);
       if (secret === '') throw new CredentialError('Refusing to store an empty credential.');
-      const result = Bun.spawnSync([
-        'security',
-        'add-generic-password',
-        '-U',
-        '-s',
-        service,
-        '-a',
-        serverID,
-        '-w',
-        secret,
-      ]);
-      if (result.exitCode !== 0)
+      if (/[\r\n]/.test(secret)) {
+        throw new CredentialError('Refusing to store a credential containing newline characters.');
+      }
+      const quoted = `'${secret.replaceAll("'", "'\\''")}'`;
+      const result = runner({
+        argv: ['security', '-i'],
+        stdin: `add-generic-password -U -s ${service} -a ${serverID} -w ${quoted}\n`,
+      });
+      if (result.exitCode !== 0) {
+        // Never echo stderr/stdout: they may contain fragments of the secret.
         throw new CredentialError('Could not write to the macOS Keychain.');
+      }
     },
     async delete(serverID) {
-      Bun.spawnSync(['security', 'delete-generic-password', '-s', service, '-a', serverID]);
+      assertSafeAccount(serverID);
+      runner({ argv: ['security', 'delete-generic-password', '-s', service, '-a', serverID] });
     },
   };
 }
