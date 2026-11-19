@@ -105,6 +105,105 @@ describe('@file completion', () => {
   });
 });
 
+/** Two hosts whose sessions share a directory string, with distinct file indexes. */
+function completionController(listFiles: (root: string) => Promise<string[]>) {
+  const backendA = new FakeBackend();
+  backendA.sessions = [{ ...fakeSession('ses_a'), directory: '/work/app' }];
+  const backendB = new FakeBackend();
+  backendB.serverID = 'srv_1';
+  backendB.sessions = [{ ...fakeSession('ses_b'), directory: '/work/app' }];
+  backendB.findProjectFiles = async () => ['b1.ts', 'b2.ts'];
+  const controller = new AppController({
+    backend: backendA,
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles,
+    requestExit: () => {},
+    serverIDs: () => ['srv_1'],
+    backendFor: (serverID: string) => (serverID === 'srv_1' ? backendB : backendA),
+    serverInfo: () => ({ online: true }),
+  });
+  return { controller, backendA, backendB };
+}
+
+describe('completion results are scoped to the viewed host (#112)', () => {
+  test('a late completion from another host with the same directory is rejected', async () => {
+    const scan = deferred<string[]>();
+    const { controller } = completionController(() => scan.promise);
+    try {
+      await controller.bootstrap();
+      // Seed host B's draft with '@x' so switching back to it keeps the same mention
+      // without starting a fresh completion request.
+      controller.openSession('ses_b', 'srv_1');
+      controller.setComposer(composerFrom('@x'));
+      controller.openSession('ses_a', 'local');
+      // Host A's slow scan is in flight with the same '@x' mention and directory string.
+      controller.setComposer(composerFrom('@x'));
+      // Switch to host B while A's scan is still pending.
+      controller.openSession('ses_b', 'srv_1');
+      scan.resolve(['x1.ts', 'x2.ts']); // host A's late result (would match '@x' locally)
+      await flush();
+      // A's late results must never populate B's completion.
+      expect(controller.state.completion).toBeUndefined();
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test("the current host's own completion results remain after another host's late result", async () => {
+    const scanA = deferred<string[]>();
+    const { controller } = completionController(() => scanA.promise);
+    try {
+      await controller.bootstrap();
+      controller.openSession('ses_a', 'local');
+      controller.setComposer(composerFrom('@x')); // host A's slow scan is in flight
+      // Switch to host B and re-trigger completion on B.
+      controller.openSession('ses_b', 'srv_1');
+      controller.setComposer(composerFrom('@x'));
+      await flush(); // let B's own completion resolve
+      scanA.resolve(['x1.ts', 'x2.ts']); // host A's late result (would match '@x' locally)
+      await flush();
+      expect(controller.state.completion?.items.map((item) => item.label)).toEqual([
+        '@b1.ts',
+        '@b2.ts',
+      ]);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('switching sessions on the same host during a pending completion cannot restore the old overlay', async () => {
+    const scan = deferred<string[]>();
+    const backend = new FakeBackend();
+    backend.sessions = [
+      { ...fakeSession('ses_a'), directory: '/work/app' },
+      { ...fakeSession('ses_b'), directory: '/work/app' },
+    ];
+    const controller = makeController(() => scan.promise, backend);
+    try {
+      await controller.bootstrap();
+      controller.openSession('ses_a');
+      controller.setComposer(composerFrom('@x')); // slow scan in flight
+      controller.openSession('ses_b'); // switch to another session on the same host
+      scan.resolve(['x1.ts']);
+      await flush();
+      expect(controller.state.completion).toBeUndefined();
+      expect(controller.state.route).toEqual({
+        kind: 'conversation',
+        serverID: 'local',
+        sessionID: 'ses_b',
+      });
+    } finally {
+      controller.dispose();
+    }
+  });
+});
+
 function remoteController(remoteFiles: string[], directory: string, cwd: string) {
   const backend = new FakeBackend();
   backend.remoteFiles = remoteFiles;

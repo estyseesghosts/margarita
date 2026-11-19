@@ -267,6 +267,9 @@ export class AppController {
   private fileCache: { root: string; files: string[] } | undefined;
   private readonly fileScans = new Map<string, Promise<string[]>>();
   private completionRequest = 0;
+  /** Bumped whenever the completion context changes (route, project, tab or server), so an
+   * in-flight file scan can be rejected even when its directory string and mention did not. */
+  private completionGeneration = 0;
   private disposed = false;
   private persisted: LocalState;
   /** In-flight saves, serialized per controller. */
@@ -447,10 +450,12 @@ export class AppController {
 
   cycleOverviewTab(direction: -1 | 1): void {
     this.setState('overview', 'tab', nextTab(this.state.overview.tab, direction));
+    this.invalidateCompletion();
   }
 
   setOverviewTab(tab: OverviewTab): void {
     this.setState('overview', 'tab', tab);
+    this.invalidateCompletion();
   }
 
   tabLabel(tab: OverviewTab): string {
@@ -1522,6 +1527,7 @@ export class AppController {
   openSession(sessionID: string, serverID: string = this.serverID): void {
     this.debugLog.write('route', { kind: 'conversation', serverID, sessionID });
     this.saveDraft();
+    this.invalidateCompletion();
     const transcript = this.state.transcripts[this.keyFor(serverID, sessionID)];
     batch(() => {
       this.setState('route', { kind: 'conversation', serverID, sessionID });
@@ -1555,6 +1561,7 @@ export class AppController {
   startNewSession(directory: string, serverID: string = this.serverID): void {
     this.debugLog.write('route', { kind: 'new', serverID, directory });
     this.saveDraft();
+    this.invalidateCompletion();
     batch(() => {
       this.setState('route', { kind: 'new', serverID, directory });
       this.setState('overlay', { kind: 'none' });
@@ -1574,6 +1581,7 @@ export class AppController {
   openOverview(): void {
     this.debugLog.write('route', { kind: 'overview' });
     this.saveDraft();
+    this.invalidateCompletion();
     const project = this.currentProject();
     batch(() => {
       this.setState('route', { kind: 'overview' });
@@ -1679,6 +1687,9 @@ export class AppController {
         // one: reset new-session defaults so they are scoped to the new catalog (#108).
         this.setState('overview', 'agent', undefined);
         this.setState('overview', 'model', undefined);
+        // A project switch retargets new-session completion, so an in-flight file scan for
+        // the previous project must not land here (issue #112).
+        this.invalidateCompletion();
       }
     }
   }
@@ -1967,11 +1978,18 @@ export class AppController {
     if (this.state.completion !== undefined) this.setState('completion', undefined);
   }
 
+  /** Bump so any in-flight file scan is rejected even if its directory string and mention
+   * are unchanged (issue #112). */
+  private invalidateCompletion(): void {
+    this.completionGeneration += 1;
+  }
+
   private async completeFiles(partial: string, start: number): Promise<void> {
     const request = ++this.completionRequest;
     const root = this.currentDirectory();
     // The selected route's server decides the filesystem, not the launch connection.
     const serverID = this.activeServerID();
+    const generation = this.completionGeneration;
     const remote = this.isRemoteServer(serverID);
     const files = remote
       ? await this.backendFor(serverID)
@@ -1981,6 +1999,8 @@ export class AppController {
     const mention = activeMention(this.state.composer.text, this.state.composer.cursor);
     if (
       request !== this.completionRequest || // a newer mention superseded this one
+      this.activeServerID() !== serverID || // switched to a different host mid-scan
+      this.completionGeneration !== generation || // route/project/tab switched mid-scan
       mention === undefined ||
       mention.start !== start ||
       mention.path !== partial || // same offset, different query (`@a` → `@src`)
