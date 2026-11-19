@@ -7,7 +7,7 @@ import { FakeBackend } from '../../test/fake-backend.ts';
 import { BackendError, type BackendErrorKind, type PromptDraft } from '../adapter/backend.ts';
 import { defaultConfig } from '../config/config.ts';
 import type { AppConfig } from '../config/config.ts';
-import { emptyState } from '../config/local-state.ts';
+import { emptyState, type LocalState } from '../config/local-state.ts';
 import { composerFrom } from '../domain/composer.ts';
 import { buildKeymap } from '../domain/keymap.ts';
 import type { GoalQueryFailure, NativeGoal } from '../domain/native-goal.ts';
@@ -150,6 +150,43 @@ function multiServerController() {
     serverInfo: () => ({ online: true }),
   });
   return { controller, local, remote };
+}
+
+/** Controller seeded with persisted history; captures every persisted local-state snapshot. */
+function historyController(localState: LocalState, backend: FakeBackend = new FakeBackend()) {
+  const saved: { value?: LocalState } = {};
+  const controller = new AppController({
+    backend,
+    config: defaultConfig,
+    localState,
+    platform: 'linux',
+    cwd: '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async (state) => {
+      saved.value = state;
+    },
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+  });
+  return { controller, saved };
+}
+
+/** Walks the overview selection (from the composer) onto the session for `directory`. */
+function selectRowForDirectory(controller: AppController, directory: string): void {
+  controller.focusOverviewComposer();
+  const rows = controller.overviewRows();
+  const targetIndex = rows.findIndex(
+    (row) => row.kind === 'session' && row.session.directory === directory,
+  );
+  if (targetIndex < 0) throw new Error(`no overview row for ${directory}`);
+  // From the composer, one Up lands on the last row; each further Up steps back one row.
+  const ups = rows.length - targetIndex;
+  for (let i = 0; i < ups; i += 1) controller.moveOverviewSelection(-1);
+  const row = controller.selectedOverviewRow();
+  if (row?.kind !== 'session' || row.session.directory !== directory) {
+    throw new Error(`failed to select ${directory}`);
+  }
 }
 
 function isPromptDraft(value: unknown): value is PromptDraft {
@@ -1384,6 +1421,73 @@ describe('openOverview preserves the originating project (issue #106)', () => {
       expect(creations[0]!.args[0]).toEqual({ directory: '/remote/proj' });
       // No session was created on the local host (the rows[0] fallback target).
       expect(local.calls.filter((call) => call.name === 'createSession')).toHaveLength(0);
+    } finally {
+      controller.dispose();
+    }
+  });
+});
+
+describe('overview selection reloads project-scoped history (issue #107)', () => {
+  test("switching the overview selection reloads the selected project's history", async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [
+      { ...fakeSession('ses_a'), directory: '/proj-a' },
+      { ...fakeSession('ses_b'), directory: '/proj-b' },
+    ];
+    const { controller } = historyController(
+      { ...emptyState, history: { '/proj-a': ['A prompt'], '/proj-b': ['B prompt'] } },
+      backend,
+    );
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+
+      selectRowForDirectory(controller, '/proj-a');
+      expect(controller.state.history.entries).toEqual(['A prompt']);
+      expect(controller.state.history.index).toBeUndefined();
+
+      selectRowForDirectory(controller, '/proj-b');
+      expect(controller.state.history.entries).toEqual(['B prompt']);
+      expect(controller.state.history.index).toBeUndefined();
+      expect(controller.historyUp()).toBe(true);
+      expect(controller.state.composer.text).toBe('B prompt');
+
+      // Returning to A still recalls A; neither switch clobbers the other project's entries.
+      selectRowForDirectory(controller, '/proj-a');
+      expect(controller.state.history.entries).toEqual(['A prompt']);
+      expect(controller.historyUp()).toBe(true);
+      expect(controller.state.composer.text).toBe('A prompt');
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test("sending a prompt persists only to the target project's bucket, not another project's", async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [
+      { ...fakeSession('ses_a'), directory: '/proj-a' },
+      { ...fakeSession('ses_b'), directory: '/proj-b' },
+    ];
+    const { controller, saved } = historyController(
+      { ...emptyState, history: { '/proj-a': ['A prompt'], '/proj-b': ['B prompt'] } },
+      backend,
+    );
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+
+      // Select B so its history is in memory, then send a prompt from B.
+      selectRowForDirectory(controller, '/proj-b');
+      expect(controller.state.history.entries).toEqual(['B prompt']);
+
+      await controller.createSessionWithPrompt(
+        { serverID: 'local', directory: '/proj-b' },
+        'new B',
+      );
+      await flush();
+
+      expect(saved.value?.history['/proj-b']).toEqual(['B prompt', 'new B']);
+      expect(saved.value?.history['/proj-a']).toEqual(['A prompt']);
     } finally {
       controller.dispose();
     }

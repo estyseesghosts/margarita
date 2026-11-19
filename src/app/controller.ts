@@ -1650,7 +1650,17 @@ export class AppController {
                 : { serverID: group.serverID, directory: group.directory };
             })()
           : undefined; // loadmore keeps the current project
-    if (project !== undefined) this.setState('overview', 'project', project);
+    if (project !== undefined) {
+      const current = this.state.overview.project;
+      const changed =
+        current.serverID !== project.serverID ||
+        directoryKey(current.directory, this.platformFor(current.serverID)) !==
+          directoryKey(project.directory, this.platformFor(project.serverID));
+      this.setState('overview', 'project', project);
+      // Reload the newly selected project's persisted history so Up/Down and prompt
+      // recording always target the viewed project, never the one just left (#107).
+      if (changed) this.loadHistoryFor(project.directory, project.serverID);
+    }
   }
 
   selectedOverviewRow(): OverviewRow | undefined {
@@ -2162,9 +2172,16 @@ export class AppController {
   }
 
   private rememberPrompt(text: string, directory: string, serverID: string = this.serverID): void {
-    const history = recordEntry(this.state.history, text, this.deps.config.history.limit);
-    this.setState('history', history);
     const key = this.projectKeyOf(directory, serverID);
+    // Derive prior entries from the target project's persisted bucket, never from whichever
+    // project's state.history happens to be in memory (issue #107).
+    const prior = this.historyEntriesFor(directory, serverID, key);
+    const history = recordEntry(
+      { entries: prior, savedDraft: '' },
+      text,
+      this.deps.config.history.limit,
+    );
+    this.setState('history', history);
     this.persist({ history: { ...this.persisted.history, [key]: history.entries } });
   }
 
