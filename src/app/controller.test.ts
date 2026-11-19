@@ -2431,20 +2431,16 @@ describe('server management commands', () => {
     controller.dispose();
   });
 
-  test('/unpair of the active server asks for confirmation first', async () => {
+  test('/unpair of the active server refuses to unpair the launch server', async () => {
     const harness = adminHarness();
     const controller = controllerWith(harness.admin);
     controller.setComposer(composerFrom('/unpair local'));
     await controller.submit();
-    expect(controller.state.overlay).toEqual({
-      kind: 'unpair-confirm',
-      serverID: 'local',
-      label: 'local',
-    });
+    expect(controller.state.overlay).toEqual({ kind: 'none' });
     expect(harness.calls).toEqual([]);
-    await controller.confirmUnpair();
-    expect(harness.calls).toEqual(['unpair:local']);
-    expect(controller.state.route).toEqual({ kind: 'overview' });
+    expect(controller.state.notice?.text).toContain(
+      'Cannot unpair the launch/server you are currently connected to',
+    );
     controller.dispose();
   });
 

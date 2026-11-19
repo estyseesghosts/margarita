@@ -651,3 +651,148 @@ describe('stale running flags clear on refresh (issue #80)', () => {
     controller.dispose();
   });
 });
+
+/** Both hosts own `ses_same`; B has a revert staged on the server already. */
+function revertHarness() {
+  const { controller, local, remote } = harness();
+  local.messages = { [sessionID]: [userMessage('m_local', 'A text')] };
+  remote.messages = { [sessionID]: [userMessage('m_remote', 'B text')] };
+  remote.sessions = remote.sessions.map((entry) => ({
+    ...entry,
+    revert: { messageID: 'm_remote', files: [] },
+  }));
+  return { controller, local, remote };
+}
+
+describe('staged reverts are bound to their owning host (issue #82)', () => {
+  test('a revert staged on B while A is foreground never hijacks A or mutates A', async () => {
+    const { controller, local } = revertHarness();
+    await controller.bootstrap();
+    controller.openSession(sessionID, localID);
+    await flush();
+    expect(controller.state.overlay.kind).toBe('none');
+
+    // B re-reports its stage; A is the foreground conversation.
+    controller.onEvents(remoteID, [{ kind: 'revert-changed', sessionID, action: 'staged' }], false);
+    await flush();
+    await Bun.sleep(400); // the debounced summary refresh
+    await flush();
+
+    // No modal appears over A; A is not mutated.
+    expect(controller.state.overlay.kind).toBe('none');
+    expect(local.calls.filter((call) => call.name === 'commitRevert')).toHaveLength(0);
+    expect(local.calls.filter((call) => call.name === 'clearRevert')).toHaveLength(0);
+    // B's row carries the stage; A's does not.
+    expect(controller.state.sessions[remoteKey]?.revert?.messageID).toBe('m_remote');
+    expect(controller.state.sessions[sessionID]?.revert).toBeUndefined();
+    // The user was not told about a dialog they cannot act on from here.
+    expect(controller.state.notice?.text ?? '').not.toContain('revert was staged');
+    controller.dispose();
+  });
+
+  test('switching into B makes its staged revert actionable; confirm hits only B', async () => {
+    const { controller, local, remote } = revertHarness();
+    await controller.bootstrap();
+    controller.openSession(sessionID, localID);
+    await flush();
+    expect(controller.state.overlay.kind).toBe('none');
+
+    controller.openSession(sessionID, remoteID);
+    await flush();
+    expect(controller.state.overlay).toMatchObject({
+      kind: 'revert',
+      serverID: remoteID,
+      sessionID,
+      messageID: 'm_remote',
+    });
+
+    controller.revertKey({ name: 'return' });
+    await flush();
+
+    expect(remote.calls.filter((call) => call.name === 'commitRevert')).toHaveLength(1);
+    expect(local.calls.filter((call) => call.name === 'commitRevert')).toHaveLength(0);
+    expect(local.calls.filter((call) => call.name === 'clearRevert')).toHaveLength(0);
+    expect(controller.state.overlay.kind).toBe('none');
+    controller.dispose();
+  });
+
+  test('cancel clears only the owning host’s stage', async () => {
+    const { controller, local, remote } = revertHarness();
+    await controller.bootstrap();
+    controller.openSession(sessionID, remoteID);
+    await flush();
+    expect(controller.state.overlay).toMatchObject({ kind: 'revert', serverID: remoteID });
+
+    controller.revertKey({ name: 'escape' });
+    await flush();
+
+    expect(remote.calls.filter((call) => call.name === 'clearRevert')).toHaveLength(1);
+    expect(local.calls.filter((call) => call.name === 'clearRevert')).toHaveLength(0);
+    expect(local.calls.filter((call) => call.name === 'commitRevert')).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('leaving for A after the modal opened makes no key act on B’s hidden stage', async () => {
+    const { controller, local, remote } = revertHarness();
+    await controller.bootstrap();
+    controller.openSession(sessionID, remoteID);
+    await flush();
+    expect(controller.state.overlay).toMatchObject({ kind: 'revert', serverID: remoteID });
+
+    // The user navigates away without answering, then presses Enter on A.
+    controller.openSession(sessionID, localID);
+    await flush();
+    controller.revertKey({ name: 'return' });
+    await flush();
+
+    // The hidden dialog dismissed itself; no host's stage was committed.
+    expect(local.calls.filter((call) => call.name === 'commitRevert')).toHaveLength(0);
+    expect(remote.calls.filter((call) => call.name === 'commitRevert')).toHaveLength(0);
+    expect(controller.state.overlay.kind).toBe('none');
+    controller.dispose();
+  });
+
+  test('a mid-flight commit targets B, and B’s summary is stamped under B’s key', async () => {
+    const { controller, local, remote } = revertHarness();
+    await controller.bootstrap();
+    controller.openSession(sessionID, remoteID);
+    await flush();
+    expect(controller.state.overlay).toMatchObject({ kind: 'revert', serverID: remoteID });
+
+    // The user answers Enter and immediately switches to A while the verify RPC is in flight.
+    const hold = Promise.withResolvers<void>();
+    const realGet = remote.getSession.bind(remote);
+    remote.getSession = async (id: string) => {
+      await hold.promise;
+      return realGet(id);
+    };
+    controller.revertKey({ name: 'return' });
+    controller.openSession(sessionID, localID);
+    await flush();
+    hold.resolve();
+    await flush();
+
+    expect(remote.calls.filter((call) => call.name === 'commitRevert')).toHaveLength(1);
+    expect(local.calls.filter((call) => call.name === 'commitRevert')).toHaveLength(0);
+    expect(local.calls.filter((call) => call.name === 'clearRevert')).toHaveLength(0);
+    // The verified summary landed on B's key; A's row never gained the stage.
+    expect(controller.state.sessions[remoteKey]?.serverID).toBe(remoteID);
+    expect(controller.state.sessions[sessionID]?.revert).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('exiting with a stage open clears it on its owning host', async () => {
+    const { controller, local, remote } = revertHarness();
+    await controller.bootstrap();
+    controller.openSession(sessionID, remoteID);
+    await flush();
+    expect(controller.state.overlay).toMatchObject({ kind: 'revert', serverID: remoteID });
+
+    expect(await controller.flushRevertOnExit()).toBeUndefined();
+
+    expect(remote.calls.filter((call) => call.name === 'clearRevert')).toHaveLength(1);
+    expect(local.calls.filter((call) => call.name === 'clearRevert')).toHaveLength(0);
+    expect(controller.state.overlay.kind).toBe('none');
+    controller.dispose();
+  });
+});

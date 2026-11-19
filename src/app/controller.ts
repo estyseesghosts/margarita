@@ -2668,12 +2668,15 @@ export class AppController {
       this.showNotice(`Unknown server "${name}".`, 'warn');
       return;
     }
+    // Reject unpairing the launch/active server or the local service;
+    // these are immutable backend assumptions and removing them would break
+    // the controller's state and subsequent loads/interactions.
     if (target.serverID === this.serverID) {
-      this.setOverlay({
-        kind: 'unpair-confirm',
-        serverID: target.serverID,
-        label: target.label,
-      });
+      this.showNotice(
+        'Cannot unpair the launch/server you are currently connected to. ' +
+          'Switch to another host or restart margarita without it first.',
+        'error',
+      );
       return;
     }
     await this.performUnpair(target);
@@ -2716,14 +2719,20 @@ export class AppController {
     }
     try {
       await admin.unpair(target.serverID);
-      this.forgetServer(target.serverID);
-      this.showNotice(
-        `Unpaired ${target.label}. Remote sessions keep running; this only removed local access.`,
-        'dim',
-      );
     } catch (error) {
       this.showNotice(errorText(error), 'error');
+      // If unpair itself failed, do not attempt further cleanup that would be
+      // based on a now-absent admin state.
+      return;
     }
+    // Forget all cached frontend records bound to this server so no route,
+    // in-flight request, stream, or overview selection remains attached to
+    // a removed host.
+    this.forgetServer(target.serverID);
+    this.showNotice(
+      `Unpaired ${target.label}. Remote sessions keep running; this only removed local access.`,
+      'dim',
+    );
   }
 
   /** True when a key belongs to `serverID`'s qualified namespace (expansion keys). */
@@ -4000,16 +4009,32 @@ export class AppController {
    * opens the recovery dialog for a server-staged revert this instance has no overlay for,
    * or drops a dialog whose staged revert vanished. A dialog the user is actively
    * confirming/cancelling (`busy`) is left alone.
+   *
+   * The dialog is bound to its owning host: a revert staged on host B while the user is
+   * looking at host A must never hijack A's view (issue #82). A background change only
+   * updates B's row; the modal appears when that conversation is actually in the foreground.
    */
   private reconcileStagedRevert(sessionID: string, serverID: string = this.activeServerID()): void {
     const session = this.state.sessions[this.keyFor(serverID, sessionID)];
     const overlay = this.state.overlay;
     const staged = session?.revert;
     if (staged !== undefined) {
-      if (overlay.kind === 'revert' && overlay.sessionID === sessionID) return;
-      if (overlay.kind === 'revert') return; // another session's dialog is in front
+      if (overlay.kind === 'revert' && overlay.serverID === serverID) {
+        if (overlay.sessionID === sessionID) return;
+      }
+      if (overlay.kind === 'revert') return; // another conversation's dialog is in front
+      // Only the attached (server, session) may open a modal; a detached host at most
+      // updates its own cached row, which the overview already reflects.
+      const route = this.state.route;
+      if (
+        route.kind !== 'conversation' ||
+        route.serverID !== serverID ||
+        route.sessionID !== sessionID
+      )
+        return;
       this.setOverlay({
         kind: 'revert',
+        serverID,
         sessionID,
         messageID: staged.messageID,
         files: staged.files === undefined ? [] : [...staged.files],
@@ -4018,7 +4043,12 @@ export class AppController {
       this.showNotice('A revert was staged on this session. Confirm or cancel it.', 'warn');
       return;
     }
-    if (overlay.kind === 'revert' && overlay.sessionID === sessionID && !overlay.busy) {
+    if (
+      overlay.kind === 'revert' &&
+      overlay.serverID === serverID &&
+      overlay.sessionID === sessionID &&
+      !overlay.busy
+    ) {
       this.closeOverlay();
       this.showNotice('The staged revert was resolved elsewhere.', 'dim');
     }
@@ -4028,16 +4058,35 @@ export class AppController {
   private async stageRevert(): Promise<void> {
     const session = this.requireSession();
     if (session === undefined) return;
+    const serverID = session.serverID;
     const messageID = turnStart(
-      this.state.transcripts[this.keyFor(session.serverID, session.id)]?.messages ?? [],
+      this.state.transcripts[this.keyFor(serverID, session.id)]?.messages ?? [],
     );
     if (messageID === undefined) {
       this.showNotice('Nothing to revert yet.', 'warn');
       return;
     }
     try {
-      const files = await this.backend.stageRevert(session.id, messageID);
-      this.setOverlay({ kind: 'revert', sessionID: session.id, messageID, files, busy: false });
+      const files = await this.backendFor(serverID).stageRevert(session.id, messageID);
+      // The route may have changed while the RPC was in flight: the dialog belongs to the
+      // host whose stage this is, and only that conversation may open it.
+      const route = this.state.route;
+      if (
+        route.kind !== 'conversation' ||
+        route.serverID !== serverID ||
+        route.sessionID !== session.id
+      ) {
+        this.showNotice('A revert was staged on this session. Return to it to confirm.', 'warn');
+        return;
+      }
+      this.setOverlay({
+        kind: 'revert',
+        serverID,
+        sessionID: session.id,
+        messageID,
+        files,
+        busy: false,
+      });
     } catch (error) {
       this.showNotice(`Revert unavailable: ${errorText(error)}`, 'error');
     }
@@ -4047,6 +4096,17 @@ export class AppController {
   revertKey(key: { name: string; text?: string }): void {
     const overlay = this.state.overlay;
     if (overlay.kind !== 'revert' || overlay.busy) return;
+    // A dialog belongs to one conversation. If the route moved on, no key may act on a
+    // stage the user can no longer see; dismissing is the only safe behavior (issue #82).
+    const route = this.state.route;
+    if (
+      route.kind !== 'conversation' ||
+      route.serverID !== overlay.serverID ||
+      route.sessionID !== overlay.sessionID
+    ) {
+      this.closeOverlay();
+      return;
+    }
     const confirm = key.name === 'return' || key.text === 'y';
     const cancel = key.name === 'escape' || key.text === 'n';
     if (!confirm && !cancel) return;
@@ -4061,6 +4121,7 @@ export class AppController {
   private async verifyAndRunRevert(
     overlay: {
       kind: 'revert';
+      serverID: string;
       sessionID: string;
       messageID: string;
       files: FileDiff[];
@@ -4068,9 +4129,11 @@ export class AppController {
     },
     confirm: boolean,
   ): Promise<void> {
+    // Every call below is bound to the dialog's owning host, never to the current route.
+    const backend = this.backendFor(overlay.serverID);
     let summary;
     try {
-      summary = await this.backend.getSession(overlay.sessionID);
+      summary = await backend.getSession(overlay.sessionID);
     } catch (error) {
       // Can't verify: do not act blindly on the worktree.
       this.setOverlay({ ...overlay, busy: false });
@@ -4081,7 +4144,11 @@ export class AppController {
       return;
     }
     const staged = summary?.revert;
-    this.storeSessionSummary(summary);
+    this.setState(
+      'sessions',
+      this.keyFor(overlay.serverID, overlay.sessionID),
+      reconcile({ ...summary, serverID: overlay.serverID }),
+    );
     if (staged?.messageID !== overlay.messageID) {
       // The stage changed or vanished under us (another client committed/cleared it).
       this.closeOverlay();
@@ -4092,11 +4159,13 @@ export class AppController {
       return;
     }
     try {
-      if (confirm) await this.backend.commitRevert(overlay.sessionID);
-      else await this.backend.clearRevert(overlay.sessionID);
+      if (confirm) await backend.commitRevert(overlay.sessionID);
+      else await backend.clearRevert(overlay.sessionID);
     } catch (error) {
       this.setState('overlay', (current) =>
-        current.kind === 'revert' && current.sessionID === overlay.sessionID
+        current.kind === 'revert' &&
+        current.serverID === overlay.serverID &&
+        current.sessionID === overlay.sessionID
           ? { ...current, busy: false }
           : current,
       );
@@ -4105,12 +4174,14 @@ export class AppController {
     }
     this.closeOverlay();
     this.showNotice(confirm ? 'Reverted' : 'Revert cancelled; files restored', 'dim');
-    if (confirm) void this.track('refresh', this.loadConversation(overlay.sessionID));
+    if (confirm)
+      void this.track('refresh', this.loadConversation(overlay.sessionID, overlay.serverID));
   }
 
   /**
    * Best-effort safe clear of a staged revert when the user is exiting: abandoning the
    * dialog means restoring the files, never leaving the mutation silently staged.
+   * The clear targets the dialog's owning host, not whatever route is selected now.
    * Returns an error message if the clear failed (caller should surface it).
    */
   async flushRevertOnExit(): Promise<string | undefined> {
@@ -4121,7 +4192,7 @@ export class AppController {
       return undefined;
     }
     try {
-      await this.backend.clearRevert(overlay.sessionID);
+      await this.backendFor(overlay.serverID).clearRevert(overlay.sessionID);
       this.setOverlay({ kind: 'none' });
       return undefined;
     } catch (error) {

@@ -39,7 +39,15 @@ export type Overlay =
   | { kind: 'unpair-confirm'; serverID: string; label: string }
   | { kind: 'form'; sessionID: string; editor: FormEditor }
   | { kind: 'tasks'; index: number }
-  | { kind: 'revert'; sessionID: string; messageID: string; files: FileDiff[]; busy: boolean }
+  | {
+      kind: 'revert';
+      /** Owning host: two servers can both own the same session ID. */
+      serverID: string;
+      sessionID: string;
+      messageID: string;
+      files: FileDiff[];
+      busy: boolean;
+    }
   | DiffOverlay;
 
 /** Read-only viewer over server-reported `session.diff` results. */
