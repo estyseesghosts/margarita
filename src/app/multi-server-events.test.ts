@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { FakeBackend } from '../../test/fake-backend.ts';
-import { BackendError } from '../adapter/backend.ts';
+import { BackendError, type PromptDraft } from '../adapter/backend.ts';
 import { defaultConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
 import { composerFrom } from '../domain/composer.ts';
@@ -793,6 +793,124 @@ describe('staged reverts are bound to their owning host (issue #82)', () => {
     expect(remote.calls.filter((call) => call.name === 'clearRevert')).toHaveLength(1);
     expect(local.calls.filter((call) => call.name === 'clearRevert')).toHaveLength(0);
     expect(controller.state.overlay.kind).toBe('none');
+    controller.dispose();
+  });
+});
+
+function asyncRoutingHarness() {
+  const local = new FakeBackend();
+  const remote = new FakeBackend();
+  local.serverID = localID;
+  remote.serverID = remoteID;
+  local.sessions = [session(localID)];
+  remote.sessions = [session(remoteID)];
+  // Hold the remote's prompt behind a gate so the test can navigate away while it is in flight.
+  const held = Promise.withResolvers<void>();
+  const realPrompt = remote.prompt.bind(remote);
+  remote.prompt = async (id: string, draft: PromptDraft) => {
+    await held.promise;
+    return realPrompt(id, draft);
+  };
+  const controller = new AppController({
+    backend: local,
+    backendFor: (serverID: string) => (serverID === remoteID ? remote : local),
+    serverIDs: () => [localID, remoteID],
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/lotus',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+  });
+  return { controller, local, remote, held };
+}
+
+describe('async requests stay bound to their originating host (issue #86)', () => {
+  test('submit on B, then navigating to A sends nothing to A and leaves A’s composer alone', async () => {
+    const { controller, local, remote, held } = asyncRoutingHarness();
+    await controller.bootstrap();
+    controller.openSession(sessionID, remoteID);
+    await flush();
+    expect(controller.state.route).toEqual({
+      kind: 'conversation',
+      serverID: remoteID,
+      sessionID,
+    });
+
+    controller.setComposer(composerFrom('hello from B'));
+    const submitted = controller.submit();
+    await flush(); // submit is blocked on the held remote.prompt
+    expect(local.calls.filter((call) => call.name === 'prompt')).toHaveLength(0);
+    expect(remote.calls.filter((call) => call.name === 'prompt')).toHaveLength(0);
+
+    // Switch to A while B’s submit is in flight.
+    controller.openSession(sessionID, localID);
+    await flush();
+    expect(controller.state.route).toMatchObject({ kind: 'conversation', serverID: localID });
+
+    held.resolve();
+    await submitted;
+    await flush();
+
+    // The prompt went only to B; A never received a request and A’s composer is untouched.
+    expect(local.calls.filter((call) => call.name === 'prompt')).toHaveLength(0);
+    expect(remote.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    expect(controller.state.composer.text).toBe('');
+    controller.dispose();
+  });
+
+  test('switching sessions on one host preserves the originating host and draft', async () => {
+    const { controller, local, remote, held } = asyncRoutingHarness();
+    remote.sessions = [session(remoteID), { ...session(remoteID), id: 'ses_b2' }];
+    await controller.bootstrap();
+    controller.openSession(sessionID, remoteID);
+    await flush();
+    controller.setComposer(composerFrom('on B1'));
+    const submitted = controller.submit();
+    await flush(); // blocked on held remote.prompt
+
+    // Switch to B2 on the same host while B1’s submit is in flight.
+    controller.openSession('ses_b2', remoteID);
+    await flush();
+    expect(controller.state.route).toMatchObject({ kind: 'conversation', sessionID: 'ses_b2' });
+
+    held.resolve();
+    await submitted;
+    await flush();
+
+    // The prompt went to B (the originating host), never to A.
+    expect(local.calls.filter((call) => call.name === 'prompt')).toHaveLength(0);
+    expect(remote.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    // B2’s composer is untouched; B1’s draft was parked by the session switch, not wiped.
+    expect(controller.state.composer.text).toBe('');
+    controller.dispose();
+  });
+
+  test('a submit transport error on B does not touch A when navigating away', async () => {
+    const { controller, local, remote, held } = asyncRoutingHarness();
+    await controller.bootstrap();
+    controller.openSession(sessionID, remoteID);
+    await flush();
+    controller.setComposer(composerFrom('hello from B'));
+    remote.promptError = new BackendError('transport', 'prompt', 'boom');
+    const submitted = controller.submit();
+    await flush(); // blocked on the held (failing) remote.prompt
+
+    controller.openSession(sessionID, localID);
+    await flush();
+    expect(controller.state.route).toMatchObject({ kind: 'conversation', serverID: localID });
+
+    held.resolve();
+    await submitted;
+    await flush();
+
+    // The failing request went only to B; A is untouched and B’s draft is not wiped into A.
+    expect(local.calls.filter((call) => call.name === 'prompt')).toHaveLength(0);
+    expect(remote.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    expect(controller.state.composer.text).toBe('');
     controller.dispose();
   });
 });

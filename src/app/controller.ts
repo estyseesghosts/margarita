@@ -2124,35 +2124,44 @@ export class AppController {
       await this.createSessionWithPrompt(this.currentProject(), text);
       return;
     }
-    const routeServerID = this.state.route.serverID;
-    const sessionID = this.state.route.sessionID;
+    // Capture the originating host/session before any await: a user may navigate to another
+    // host while this request is in flight, and every RPC plus every composer side effect
+    // must target the originating session, never the route the user happens to be on now.
+    const origin: SessionRef = {
+      serverID: this.state.route.serverID,
+      sessionID: this.state.route.sessionID,
+    };
     const directory =
-      this.state.sessions[this.keyFor(routeServerID, sessionID)]?.directory ?? this.deps.cwd;
+      this.state.sessions[this.keyFor(origin.serverID, origin.sessionID)]?.directory ??
+      this.deps.cwd;
     const commandNotice =
       'The request may or may not have been delivered (connection problem); check for its effects before resending.';
     const isPromptDelivery = parsed.kind === 'prompt';
     const sentAttachments = isPromptDelivery ? [...this.state.attachments] : [];
     const admitted = await this.admit(
+      origin,
       text,
       directory,
       async () => {
+        const backend = this.backendFor(origin.serverID);
         switch (parsed.kind) {
           case 'shell':
-            await this.backend.runShell(sessionID, parsed.command);
+            await backend.runShell(origin.sessionID, parsed.command);
             return;
           case 'server':
-            await this.backend.runCommand(sessionID, parsed.name, parsed.args);
+            await backend.runCommand(origin.sessionID, parsed.name, parsed.args);
             return;
           case 'prompt': {
-            const running = this.state.running[this.keyFor(routeServerID, sessionID)] === true;
+            const running =
+              this.state.running[this.keyFor(origin.serverID, origin.sessionID)] === true;
             const delivery =
               deliveryOverride ?? (running ? this.deps.config.input.enterWhileRunning : undefined);
-            await this.backend.prompt(sessionID, {
+            await backend.prompt(origin.sessionID, {
               text,
-              files: await this.promptFiles(text, directory, sentAttachments),
+              files: await this.promptFiles(text, directory, sentAttachments, origin.serverID),
               ...(delivery === undefined ? {} : { delivery }),
             });
-            await this.refreshInbox(sessionID);
+            await this.refreshInbox(origin.sessionID, origin.serverID);
             return;
           }
           default:
@@ -2163,15 +2172,24 @@ export class AppController {
       sentAttachments,
     );
     if (admitted) {
-      if (parsed.kind === 'prompt') {
-        // The follow-up landed; reactivate the goal that Esc interrupted (if any).
-        await this.maybeResumeInterruptedGoal(sessionID);
-      } else if (parsed.kind === 'server' && parsed.name === 'goal') {
-        const command = parsed.args.trim().toLowerCase();
-        if (command === 'pause' || command === 'resume' || command === 'clear') {
-          this.clearSteerIntent(sessionID);
+      // Only act on the originating session: if the route moved on, the draft was already
+      // parked by admit and no follow-up should land on another host.
+      const route = this.state.route;
+      if (
+        route.kind === 'conversation' &&
+        route.serverID === origin.serverID &&
+        route.sessionID === origin.sessionID
+      ) {
+        if (parsed.kind === 'prompt') {
+          // The follow-up landed; reactivate the goal that Esc interrupted (if any).
+          await this.maybeResumeInterruptedGoal(origin.sessionID, origin.serverID);
+        } else if (parsed.kind === 'server' && parsed.name === 'goal') {
+          const command = parsed.args.trim().toLowerCase();
+          if (command === 'pause' || command === 'resume' || command === 'clear') {
+            this.clearSteerIntent(origin.sessionID, origin.serverID);
+          }
+          await this.refreshNativeGoal(origin.sessionID, origin.serverID);
         }
-        await this.refreshNativeGoal(sessionID);
       }
     }
   }
@@ -2183,6 +2201,7 @@ export class AppController {
   }
 
   private async admit(
+    origin: SessionRef,
     text: string,
     directory: string,
     send: () => Promise<void>,
@@ -2193,8 +2212,17 @@ export class AppController {
     try {
       await send();
       this.debugLog.write('action', { action: 'submit', ok: true });
-      if (text.trim() !== '') this.rememberPrompt(text, directory, this.activeServerID());
-      this.clearComposer(text, sentAttachments);
+      if (text.trim() !== '') this.rememberPrompt(text, directory, origin.serverID);
+      // Only clear the composer if we are still on the originating session: a route change
+      // mid-request means the composer now belongs to another session and must not be wiped.
+      const route = this.state.route;
+      if (
+        route.kind === 'conversation' &&
+        route.serverID === origin.serverID &&
+        route.sessionID === origin.sessionID
+      ) {
+        this.clearComposer(text, sentAttachments);
+      }
       return true;
     } catch (error) {
       this.debugLog.write('action', {
@@ -2205,9 +2233,13 @@ export class AppController {
       if (error instanceof BackendError && error.kind === 'transport') {
         // The request may have landed. Show server state instead of resending blindly.
         this.showNotice(transportNotice, 'error');
-        if (this.state.route.kind === 'conversation') {
-          this.scheduleTranscript(this.state.route.sessionID);
-          void this.track('inbox', this.refreshInbox(this.state.route.sessionID));
+        if (
+          this.state.route.kind === 'conversation' &&
+          this.state.route.serverID === origin.serverID &&
+          this.state.route.sessionID === origin.sessionID
+        ) {
+          this.scheduleTranscript(origin.sessionID);
+          void this.track('inbox', this.refreshInbox(origin.sessionID, origin.serverID));
         }
       } else {
         this.showNotice(errorText(error), 'error');
@@ -2391,6 +2423,7 @@ export class AppController {
     this.writeComposer(composerFrom(text));
     this.setState('attachments', [...attachments]);
     const sent = await this.admit(
+      { serverID: sessionServerID, sessionID: session.id },
       text,
       directory,
       async () => {
@@ -2469,11 +2502,25 @@ export class AppController {
    * open or prompt it. Returns the summary, or undefined when the server cannot find it.
    */
   async ensureSession(sessionID: string): Promise<SessionSummary | undefined> {
+    // The session may belong to any registered host, not just the one the route currently
+    // shows: qualify by session ID across every server before picking a backend.
+    for (const serverID of this.serverIDs()) {
+      const known = this.state.sessions[this.keyFor(serverID, sessionID)];
+      if (known !== undefined) {
+        try {
+          const session = await this.backendFor(serverID).getSession(sessionID);
+          this.storeSessionSummary(session);
+          return session;
+        } catch {
+          return known;
+        }
+      }
+    }
     const active = this.activeServerID();
     const known = this.state.sessions[this.keyFor(active, sessionID)];
     if (known !== undefined) return known;
     try {
-      const session = await this.backend.getSession(sessionID);
+      const session = await this.backendFor(active).getSession(sessionID);
       this.storeSessionSummary(session);
       return session;
     } catch (error) {
@@ -2485,19 +2532,32 @@ export class AppController {
   async sendToSession(sessionID: string, text: string): Promise<boolean> {
     // Ensure the stored summary is authoritative before interpreting file mentions.
     await this.ensureSession(sessionID);
-    const active = this.activeServerID();
-    const activeKey = this.keyFor(active, sessionID);
+    // Resolve the session's owning host. Prefer the route's server (the user opened the
+    // session there); fall back to any registered host that owns it, so a session opened
+    // on a remote host is never retargeted to the launch backend just because both hosts
+    // happen to reuse a session ID (issue #86).
+    let serverID = this.activeServerID();
+    if (this.state.sessions[this.keyFor(serverID, sessionID)] === undefined) {
+      for (const id of this.serverIDs()) {
+        if (this.state.sessions[this.keyFor(id, sessionID)] !== undefined) {
+          serverID = id;
+          break;
+        }
+      }
+    }
+    const activeKey = this.keyFor(serverID, sessionID);
     const directory = this.state.sessions[activeKey]?.directory ?? this.deps.cwd;
     this.writeComposer(composerFrom(text));
     const running = this.state.running[activeKey] === true;
     const sentAttachments = [...this.state.attachments];
     return this.admit(
+      { serverID, sessionID },
       text,
       directory,
       async () => {
-        await this.backend.prompt(sessionID, {
+        await this.backendFor(serverID).prompt(sessionID, {
           text,
-          files: await this.promptFiles(text, directory, sentAttachments),
+          files: await this.promptFiles(text, directory, sentAttachments, serverID),
           ...(running ? { delivery: this.deps.config.input.enterWhileRunning } : {}),
         });
       },
@@ -3404,12 +3464,18 @@ export class AppController {
   }
 
   async answerPermission(decision?: PermissionDecision): Promise<void> {
+    const session = this.currentSession();
     const pending = this.pendingPermission();
-    if (pending === undefined || this.state.answering) return;
+    if (pending === undefined || session === undefined || this.state.answering) return;
     const choice = decision ?? this.permissionChoices()[this.state.permissionChoice] ?? 'reject';
     this.setState('answering', true);
     try {
-      await this.backend.replyPermission(pending.sessionID, pending.id, choice);
+      // The permission belongs to its owning host, not whatever route is active now.
+      await this.backendFor(session.serverID).replyPermission(
+        pending.sessionID,
+        pending.id,
+        choice,
+      );
     } catch (error) {
       if (
         error instanceof BackendError &&
@@ -3422,7 +3488,7 @@ export class AppController {
     }
     // Close only after the server confirms the request is gone.
     try {
-      await this.refreshInputRequests(pending.sessionID);
+      await this.refreshInputRequests(pending.sessionID, session.serverID);
     } finally {
       this.setState('answering', false);
     }
