@@ -15,6 +15,7 @@ import { memoryCredentialStore } from '../src/config/credentials.ts';
 import { emptyState } from '../src/config/local-state.ts';
 import { emptyServerProfiles, loadServerProfiles } from '../src/config/server-profiles.ts';
 import { composerFrom } from '../src/domain/composer.ts';
+import { projectKey } from '../src/domain/server-identity.ts';
 import { FakeBackend } from './fake-backend.ts';
 
 function remoteConnection(url: string): Connection {
@@ -121,7 +122,7 @@ describe('production assembly (main-path wiring)', () => {
             serverID: 'srv_1',
             shortname: 'buildbox',
             baseUrl: 'http://build.test:4096',
-            auth: 'bearer',
+            auth: 'bearer' as const,
           },
         ],
       }),
@@ -227,7 +228,7 @@ async function restoreFixture(): Promise<RestoreFixture> {
           serverID: 'srv_a',
           shortname: 'buildbox',
           baseUrl: 'http://build.test:4096',
-          auth: 'bearer',
+          auth: 'bearer' as const,
         },
         { serverID: 'srv_b', shortname: 'camp', baseUrl: 'http://camp.test:4096', auth: 'bearer' },
       ],
@@ -284,13 +285,13 @@ function restoreInput(
           serverID: 'srv_a',
           shortname: 'buildbox',
           baseUrl: 'http://build.test:4096',
-          auth: 'bearer',
+          auth: 'bearer' as const,
         },
         {
           serverID: 'srv_b',
           shortname: 'camp',
           baseUrl: 'http://camp.test:4096',
-          auth: 'bearer',
+          auth: 'bearer' as const,
         },
       ],
     },
@@ -564,13 +565,13 @@ async function threeServerFixture(): Promise<ThreeFixture> {
           serverID: 'srv_b',
           shortname: 'bravo',
           baseUrl: 'http://bravo.test:4096',
-          auth: 'bearer',
+          auth: 'bearer' as const,
         },
         {
           serverID: 'srv_c',
           shortname: 'charlie',
           baseUrl: 'http://charlie.test:4096',
-          auth: 'bearer',
+          auth: 'bearer' as const,
         },
       ],
     }),
@@ -634,13 +635,13 @@ function threeServerInput(
           serverID: 'srv_b',
           shortname: 'bravo',
           baseUrl: 'http://bravo.test:4096',
-          auth: 'bearer',
+          auth: 'bearer' as const,
         },
         {
           serverID: 'srv_c',
           shortname: 'charlie',
           baseUrl: 'http://charlie.test:4096',
-          auth: 'bearer',
+          auth: 'bearer' as const,
         },
       ],
     },
@@ -766,6 +767,360 @@ describe('three-server failure isolation (issue #66)', () => {
     expect(controller.state.sessions[cKey]).toBeDefined();
     expect(assembly.servers.get('srv_c')?.state).toBe('online');
 
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
+});
+
+// ---------------------------------------------------------- issue #67
+
+function winSession(serverID: string, id: string, directory: string, updatedAt: number) {
+  return {
+    id,
+    serverID,
+    projectID: 'p',
+    directory,
+    createdAt: 0,
+    updatedAt,
+    archived: false,
+  };
+}
+
+/** Same spirit as `threeServerFixture`, but every profile carries a caller-chosen platform. */
+async function pathStyleFixture(options: {
+  bravoPlatform?: NodeJS.Platform;
+  charliePlatform?: NodeJS.Platform;
+  bravoSessions?: readonly ReturnType<typeof winSession>[];
+  charlieSessions?: readonly ReturnType<typeof winSession>[];
+}): Promise<ThreeFixture> {
+  const directory = await mkdtemp(join(tmpdir(), 'margarita-pathstyle-'));
+  const serversFile = join(directory, 'servers.json');
+  const bravoProfile = {
+    serverID: 'srv_b',
+    shortname: 'bravo',
+    baseUrl: 'http://bravo.test:4096',
+    auth: 'bearer' as const,
+    ...(options.bravoPlatform === undefined ? {} : { platform: options.bravoPlatform }),
+  };
+  const charlieProfile = {
+    serverID: 'srv_c',
+    shortname: 'charlie',
+    baseUrl: 'http://charlie.test:4096',
+    auth: 'bearer' as const,
+    ...(options.charliePlatform === undefined ? {} : { platform: options.charliePlatform }),
+  };
+  await writeFile(
+    serversFile,
+    JSON.stringify({ schemaVersion: 1, profiles: [bravoProfile, charlieProfile] }),
+  );
+  const credentials = memoryCredentialStore();
+  await credentials.set('srv_b', 'tok_b');
+  await credentials.set('srv_c', 'tok_c');
+  const local = new FakeBackend();
+  local.serverID = 'local';
+  const bravo = new FakeBackend();
+  bravo.serverID = 'srv_b';
+  bravo.sessions = [...(options.bravoSessions ?? [])];
+  const charlie = new FakeBackend();
+  charlie.serverID = 'srv_c';
+  charlie.sessions = [...(options.charlieSessions ?? [])];
+  const fakes = new Map([
+    ['srv_b', bravo],
+    ['srv_c', charlie],
+  ]);
+  const createBackend: NonNullable<ProductionAssemblyInput['createBackend']> = (
+    _connection,
+    options2,
+  ) => fakes.get(options2?.serverID ?? '') ?? new FakeBackend();
+  return { directory, serversFile, credentials, local, bravo, charlie, createBackend };
+}
+
+function pathStyleInput(
+  fixture: ThreeFixture,
+  options: {
+    frontend: NodeJS.Platform;
+    bravoPlatform?: NodeJS.Platform;
+    charliePlatform?: NodeJS.Platform;
+    localState?: ProductionAssemblyInput['localState'];
+    pairingFetch?: ProductionAssemblyInput['pairingFetch'];
+    generateID?: ProductionAssemblyInput['generateID'];
+  },
+): ProductionAssemblyInput {
+  const bravoProfile = {
+    serverID: 'srv_b',
+    shortname: 'bravo',
+    baseUrl: 'http://bravo.test:4096',
+    auth: 'bearer' as const,
+    ...(options.bravoPlatform === undefined ? {} : { platform: options.bravoPlatform }),
+  };
+  const charlieProfile = {
+    serverID: 'srv_c',
+    shortname: 'charlie',
+    baseUrl: 'http://charlie.test:4096',
+    auth: 'bearer' as const,
+    ...(options.charliePlatform === undefined ? {} : { platform: options.charliePlatform }),
+  };
+  return {
+    ...threeServerInput(fixture),
+    platform: options.frontend,
+    profiles: { schemaVersion: 1, profiles: [bravoProfile, charlieProfile] },
+    ...(options.localState === undefined ? {} : { localState: options.localState }),
+    ...(options.pairingFetch === undefined ? {} : { pairingFetch: options.pairingFetch }),
+    ...(options.generateID === undefined ? {} : { generateID: options.generateID }),
+  };
+}
+
+describe('server-owned project path normalization (issue #67)', () => {
+  test('a Windows frontend keeps distinct Linux /srv/App and /srv/app projects apart', async () => {
+    const fixture = await pathStyleFixture({
+      bravoPlatform: 'linux',
+      bravoSessions: [
+        winSession('srv_b', 'ses_app', '/srv/app', 1),
+        winSession('srv_b', 'ses_APP', '/srv/App', 2),
+      ],
+    });
+    const assembly = await createProductionAssembly(
+      pathStyleInput(fixture, { frontend: 'win32', bravoPlatform: 'linux' }),
+    );
+    await assembly.controller.bootstrap();
+
+    const bravoGroups = assembly.controller.groups().filter((group) => group.serverID === 'srv_b');
+    expect(bravoGroups.map((group) => group.directory).toSorted()).toEqual([
+      '/srv/App',
+      '/srv/app',
+    ]);
+    expect(new Set(bravoGroups.map((group) => group.key)).size).toBe(2);
+
+    // After a restart, the recorded platform restores from servers.json and the result is the same.
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+    const restarted = await createProductionAssembly(
+      pathStyleInput(fixture, { frontend: 'win32', bravoPlatform: 'linux' }),
+    );
+    await restarted.controller.bootstrap();
+    expect(
+      restarted.controller
+        .groups()
+        .filter((group) => group.serverID === 'srv_b')
+        .map((group) => group.directory)
+        .toSorted(),
+    ).toEqual(['/srv/App', '/srv/app']);
+    expect(restarted.servers.platformFor('srv_b')).toBe('linux');
+    restarted.controller.dispose();
+    await restarted.servers.dispose();
+  });
+
+  test('a Linux frontend resolves Windows C:\\Work\\App and c:/work/app to the same project', async () => {
+    const fixture = await pathStyleFixture({
+      bravoPlatform: 'win32',
+      bravoSessions: [
+        winSession('srv_b', 'ses_one', 'C:\\Work\\App', 1),
+        winSession('srv_b', 'ses_two', 'c:/work/app', 2),
+      ],
+    });
+    const assembly = await createProductionAssembly(
+      pathStyleInput(fixture, { frontend: 'linux', bravoPlatform: 'win32' }),
+    );
+    await assembly.controller.bootstrap();
+    const bravoGroups = assembly.controller.groups().filter((group) => group.serverID === 'srv_b');
+    expect(bravoGroups).toHaveLength(1);
+    expect(bravoGroups[0]?.sessions.map((entry) => entry.id).toSorted()).toEqual([
+      'ses_one',
+      'ses_two',
+    ]);
+    expect(assembly.servers.platformFor('srv_b')).toBe('win32');
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
+
+  test('identical directory names on two different servers stay separate projects', async () => {
+    const fixture = await pathStyleFixture({
+      bravoPlatform: 'linux',
+      charliePlatform: 'linux',
+      bravoSessions: [winSession('srv_b', 'ses_b', '/srv/app', 1)],
+      charlieSessions: [winSession('srv_c', 'ses_c', '/srv/app', 2)],
+    });
+    const assembly = await createProductionAssembly(
+      pathStyleInput(fixture, {
+        frontend: 'win32',
+        bravoPlatform: 'linux',
+        charliePlatform: 'linux',
+      }),
+    );
+    await assembly.controller.bootstrap();
+    const shared = assembly.controller.groups().filter((group) => group.directory === '/srv/app');
+    expect(shared.map((group) => group.serverID).toSorted()).toEqual(['srv_b', 'srv_c']);
+    expect(new Set(shared.map((group) => group.key)).size).toBe(2);
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
+
+  test('a paired server without a recorded path style falls back to case-preserving POSIX', async () => {
+    const fixture = await pathStyleFixture({
+      // No platform recorded, exactly like a server paired before this change.
+      bravoSessions: [
+        winSession('srv_b', 'ses_app', '/srv/app', 1),
+        winSession('srv_b', 'ses_APP', '/srv/App', 2),
+      ],
+    });
+    const assembly = await createProductionAssembly(pathStyleInput(fixture, { frontend: 'win32' }));
+    await assembly.controller.bootstrap();
+    expect(assembly.servers.platformFor('srv_b')).toBeUndefined();
+    const bravoGroups = assembly.controller.groups().filter((group) => group.serverID === 'srv_b');
+    expect(bravoGroups.map((group) => group.directory).toSorted()).toEqual([
+      '/srv/App',
+      '/srv/app',
+    ]);
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
+
+  test('pairing records the server OS style from authenticated metadata', async () => {
+    const fixture = await pathStyleFixture({});
+    let generated = 0;
+    const assembly = await createProductionAssembly(
+      pathStyleInput(fixture, {
+        frontend: 'linux',
+        pairingFetch: (url: string) => {
+          const body = url.includes('/auth/connect/')
+            ? {
+                token: `tok_${url.includes('winhost') ? 'win' : url.includes('unchost') ? 'unc' : 'posix'}`,
+              }
+            : url.includes('winhost')
+              ? { version: '2.3.0', paths: { tmp: 'C:\\Users\\build\\AppData\\Local\\Temp' } }
+              : url.includes('unchost')
+                ? { version: '2.3.0', paths: { tmp: '\\\\fileserver\\share\\temp' } }
+                : url.includes('nohost')
+                  ? { version: '2.3.0' }
+                  : { version: '2.3.0', paths: { tmp: '/var/folders/xx/T' } };
+          return Promise.resolve(
+            new Response(JSON.stringify(body), {
+              headers: { 'content-type': 'application/json' },
+            }),
+          );
+        },
+        generateID: () => (generated += 1).toString(),
+      }),
+    );
+    await assembly.controller.bootstrap();
+
+    for (const host of ['winhost', 'posthost', 'unchost', 'nohost'] as const) {
+      assembly.controller.setComposer(
+        composerFrom(`/pair https://${host}.test:4096/auth/connect/code${host} --as ${host}`),
+      );
+      await assembly.controller.submit();
+      await flush();
+    }
+
+    const persisted = await loadServerProfiles(fixture.serversFile);
+    const recorded = new Map(
+      persisted.profiles.profiles.map((profile) => [profile.shortname, profile.platform]),
+    );
+    expect(recorded.get('winhost')).toBe('win32');
+    expect(recorded.get('posthost')).toBe('linux');
+    expect(recorded.get('unchost')).toBe('win32');
+    expect(recorded.get('nohost')).toBeUndefined();
+    // And a restart honors what the pair-time metadata recorded.
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+    const reloaded = await loadServerProfiles(fixture.serversFile);
+    const restarted = await createProductionAssembly({
+      ...pathStyleInput(fixture, { frontend: 'linux' }),
+      profiles: reloaded.profiles,
+    });
+    expect(restarted.servers.platformFor('srv_1')).toBe('win32');
+    expect(restarted.servers.platformFor('srv_2')).toBe('linux');
+    expect(restarted.servers.platformFor('srv_3')).toBe('win32');
+    expect(restarted.servers.platformFor('srv_4')).toBeUndefined();
+    restarted.controller.dispose();
+    await restarted.servers.dispose();
+  });
+
+  test('a legacy win32-folded history bucket is adopted only when unambiguously owned', async () => {
+    // Windows frontend; bravo is a legacy server (path style unknown -> case-preserving POSIX).
+    const fixture = await pathStyleFixture({
+      bravoSessions: [winSession('srv_b', 'ses_app', '/srv/app', 1)],
+    });
+    const posixKey = projectKey({ serverID: 'srv_b', directory: '/srv/app' }, 'linux');
+    const foldKey = projectKey({ serverID: 'srv_b', directory: '/srv/app' }, 'win32');
+    const assembly = await createProductionAssembly(
+      pathStyleInput(fixture, {
+        frontend: 'win32',
+        localState: {
+          schemaVersion: 1,
+          history: {
+            // Recorded before path stamping: a win32 frontend folded the POSIX remote key.
+            [foldKey]: ['remote fold prompt'],
+            // Current-format bucket; must always be visible to this project.
+            [posixKey]: ['posix prompt'],
+          },
+          recentModels: [],
+        },
+      }),
+    );
+    await assembly.controller.bootstrap();
+    // /srv/app is the only raw directory on bravo claiming the folded key: adopt it.
+    assembly.controller.startNewSession('/srv/app', 'srv_b');
+    expect(assembly.controller.state.history.entries).toEqual([
+      'posix prompt',
+      'remote fold prompt',
+    ]);
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
+
+  test('a contested win32-folded history bucket is shared by nobody', async () => {
+    const fixture = await pathStyleFixture({
+      bravoSessions: [
+        winSession('srv_b', 'ses_app', '/srv/app', 1),
+        winSession('srv_b', 'ses_APP', '/srv/App', 2),
+      ],
+    });
+    const foldKey = projectKey({ serverID: 'srv_b', directory: '/srv/app' }, 'win32');
+    const posixKey = projectKey({ serverID: 'srv_b', directory: '/srv/app' }, 'linux');
+    const caseKey = projectKey({ serverID: 'srv_b', directory: '/srv/App' }, 'linux');
+    const assembly = await createProductionAssembly(
+      pathStyleInput(fixture, {
+        frontend: 'win32',
+        localState: {
+          schemaVersion: 1,
+          history: {
+            // Both /srv/app and /srv/App win32-fold onto this bucket; the raw text is lost there.
+            [foldKey]: ['contested prompt'],
+            [posixKey]: ['posix prompt'],
+            [caseKey]: ['case prompt'],
+          },
+          recentModels: [],
+        },
+      }),
+    );
+    await assembly.controller.bootstrap();
+    assembly.controller.startNewSession('/srv/app', 'srv_b');
+    expect(assembly.controller.state.history.entries).toEqual(['posix prompt']);
+    assembly.controller.startNewSession('/srv/App', 'srv_b');
+    expect(assembly.controller.state.history.entries).toEqual(['case prompt']);
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
+
+  test('a legacy case-preserving history bucket for a Windows local project is adopted', async () => {
+    const fixture = await pathStyleFixture({});
+    const assembly = await createProductionAssembly(
+      pathStyleInput(fixture, {
+        frontend: 'win32',
+        localState: {
+          schemaVersion: 1,
+          history: {
+            // POSIX-frontend artifact for a Windows launch directory (case-preserving form).
+            'C:\\Work\\App': ['legacy local prompt'],
+          },
+          recentModels: [],
+        },
+      }),
+    );
+    await assembly.controller.bootstrap();
+    assembly.controller.startNewSession('C:\\Work\\App', 'local');
+    expect(assembly.controller.state.history.entries).toEqual(['legacy local prompt']);
     assembly.controller.dispose();
     await assembly.servers.dispose();
   });

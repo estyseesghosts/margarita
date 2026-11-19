@@ -25,7 +25,7 @@ function session(
 }
 
 const groupOptions = {
-  platform: 'win32' as const,
+  platformFor: () => 'win32' as const,
   showArchived: false,
   showChildren: false,
   activityOf: (entry: SessionSummary) => entry.updatedAt,
@@ -77,7 +77,7 @@ describe('groupSessions', () => {
         session('b', '/x', 2, { parentID: 'c' }),
         session('c', '/x', 3),
       ],
-      { ...groupOptions, platform: 'linux' },
+      { ...groupOptions, platformFor: () => 'linux' as const },
     );
     expect(groups[0]?.sessions.map((entry) => entry.id)).toEqual(['c']);
   });
@@ -143,7 +143,7 @@ describe('groupRows', () => {
     archived: false,
   }));
   const [group] = groupSessions(sessions, {
-    platform: 'linux',
+    platformFor: () => 'linux' as const,
     showArchived: false,
     showChildren: false,
     activityOf: (entry) => entry.updatedAt,

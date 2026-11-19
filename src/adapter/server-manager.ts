@@ -30,6 +30,8 @@ export type ManagedServer = Readonly<{
   error?: string;
   /** True when the server does not share this machine's filesystem. */
   remoteFilesystem: boolean;
+  /** The server's own path style (recorded from authenticated metadata), if known. */
+  platform?: NodeJS.Platform;
   /**
    * Monotonic per-registration token. Stream guards compare this, never object identity:
    * `setState` replaces the managed-server object, and object identity would mark every
@@ -44,6 +46,8 @@ export type ServerTarget = Readonly<{
   connection: Connection;
   backend: Backend;
   remoteFilesystem?: boolean;
+  /** The server's own path style; defaults to unknown (POSIX-case-tolerant comparison). */
+  platform?: NodeJS.Platform;
 }>;
 
 export type StreamHandlers = Readonly<{
@@ -76,6 +80,7 @@ export class ServerConnectionManager {
       backend: target.backend,
       state: 'connecting',
       remoteFilesystem: target.remoteFilesystem ?? target.connection.origin === 'remote',
+      ...(target.platform === undefined ? {} : { platform: target.platform }),
       registration: (this.registrationSequence += 1),
     };
     this.servers.set(target.serverID, server);
@@ -94,6 +99,14 @@ export class ServerConnectionManager {
 
   list(): ManagedServer[] {
     return [...this.servers.values()];
+  }
+
+  /**
+   * The server's own path style, or undefined when unknown. Callers decide the fallback
+   * (never the frontend OS): project identity must degrade to case-preserving comparison.
+   */
+  platformFor(serverID: string): NodeJS.Platform | undefined {
+    return this.servers.get(serverID)?.platform;
   }
 
   /** Fails closed: unknown or removed servers never fall back to another backend. */

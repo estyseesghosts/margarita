@@ -19,7 +19,12 @@ export type ProjectGroup = Readonly<{
 }>;
 
 export type GroupOptions = Readonly<{
-  platform: NodeJS.Platform;
+  /**
+   * Path style of the server that owns each session. Paths are compared with the owning
+   * server's OS rules — never the frontend's — so case-distinct Linux directories are not
+   * merged by a Windows frontend, and Windows drive/UNC paths compare case-insensitively.
+   */
+  platformFor: (serverID: string) => NodeJS.Platform;
   showArchived: boolean;
   showChildren: boolean;
   /** Stable activity time per session; avoids rows jumping on every streamed token. */
@@ -44,7 +49,7 @@ export function groupSessions(
     if (session.parentID !== undefined && !options.showChildren) continue;
     const key = projectKey(
       { serverID: session.serverID, directory: session.directory },
-      options.platform,
+      options.platformFor(session.serverID),
     );
     const bucket = buckets.get(key);
     if (bucket === undefined) buckets.set(key, [session]);

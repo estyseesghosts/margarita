@@ -72,10 +72,14 @@ export function Overview(props: {
               <Show when={props.ascii !== true}>
                 <span
                   style={{
-                    bg: projectLabel(group.serverID, directoryKey(group.directory, 'linux'))
-                      .background,
-                    fg: projectLabel(group.serverID, directoryKey(group.directory, 'linux'))
-                      .foreground,
+                    bg: projectLabel(
+                      group.serverID,
+                      directoryKey(group.directory, props.controller.platformFor(group.serverID)),
+                    ).background,
+                    fg: projectLabel(
+                      group.serverID,
+                      directoryKey(group.directory, props.controller.platformFor(group.serverID)),
+                    ).foreground,
                   }}
                 >
                   {' ██ '}

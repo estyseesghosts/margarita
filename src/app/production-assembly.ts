@@ -33,6 +33,8 @@ export type AssemblyConnection = Readonly<{
   connection: Connection;
   backend: Backend;
   remoteFilesystem?: boolean;
+  /** The server's own path style; the launch connection defaults to this machine's. */
+  platform?: NodeJS.Platform;
 }>;
 
 /**
@@ -118,6 +120,8 @@ export async function createProductionAssembly(
   const launchBackend = launch.backend;
   const servers = new ServerConnectionManager();
   for (const registration of input.connections) {
+    const platform =
+      registration.platform ?? (registration === launch ? input.platform : undefined);
     servers.add({
       serverID: registration.serverID,
       ...(registration.label === undefined ? {} : { label: registration.label }),
@@ -125,6 +129,7 @@ export async function createProductionAssembly(
       backend: registration.backend,
       remoteFilesystem:
         registration.remoteFilesystem ?? registration.connection.origin === 'remote',
+      ...(platform === undefined ? {} : { platform }),
     });
     servers.setState(registration.serverID, 'online');
   }
@@ -157,6 +162,7 @@ export async function createProductionAssembly(
       connection,
       backend: restored,
       remoteFilesystem: true,
+      ...(profile.platform === undefined ? {} : { platform: profile.platform }),
     });
     servers.setState(profile.serverID, secret === undefined ? 'unauthorized' : 'connecting');
     debugLog.write('server-restored', {
@@ -253,6 +259,8 @@ export async function createProductionAssembly(
       return { label: managed.label, online: managed.state === 'online' };
     },
     setServerHealth: (targetID, result) => servers.applyHealth(targetID, result),
+    /** Per-server path style from authenticated metadata; never the frontend's. */
+    platformFor: (targetID) => servers.platformFor(targetID),
     debugLog,
   });
 

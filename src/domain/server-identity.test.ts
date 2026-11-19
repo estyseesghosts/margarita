@@ -88,7 +88,7 @@ describe('server-scoped overview groups', () => {
         session('ses_a', 'srv_1', '/work/project'),
       ],
       {
-        platform: 'linux',
+        platformFor: () => 'linux' as const,
         showArchived: false,
         showChildren: true,
         activityOf: (entry) => entry.updatedAt,
@@ -108,7 +108,7 @@ describe('server-scoped overview groups', () => {
         session('ses_remote', 'srv_1', '/work/lotus', 30),
       ],
       {
-        platform: 'linux',
+        platformFor: () => 'linux' as const,
         showArchived: false,
         showChildren: true,
         activityOf: (entry) => entry.updatedAt,

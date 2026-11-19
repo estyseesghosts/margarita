@@ -88,6 +88,7 @@ export async function pairServer(
   let connection: Connection;
   let credential: string;
   let auth: 'bearer' | 'basic';
+  let platform: NodeJS.Platform | undefined;
   if (request.code !== '') {
     auth = 'bearer';
     const redeemed = await redeemPairing(baseUrl, request.code, {
@@ -96,6 +97,7 @@ export async function pairServer(
         ? {}
         : { allowInsecureHttp: deps.allowInsecureHttp }),
     });
+    platform = redeemed.platform;
     connection = {
       baseUrl: redeemed.baseUrl,
       headers: { authorization: `Bearer ${redeemed.token}` },
@@ -111,12 +113,13 @@ export async function pairServer(
     const normalized = policy.toString().replace(/\/$/, '');
     const headers =
       deps.password === undefined ? {} : { authorization: basicAuthHeader(deps.password) };
-    await serverInfo(normalized, headers.authorization ?? '', {
+    const info = await serverInfo(normalized, headers.authorization ?? '', {
       ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
       ...(deps.allowInsecureHttp === undefined
         ? {}
         : { allowInsecureHttp: deps.allowInsecureHttp }),
     });
+    platform = info.platform;
     connection = { baseUrl: normalized, headers, origin: 'remote' };
     credential = deps.password ?? '';
   }
@@ -133,6 +136,7 @@ export async function pairServer(
       shortname,
       baseUrl: connection.baseUrl,
       auth,
+      ...(platform === undefined ? {} : { platform }),
     });
     const profile =
       saved.profiles.find((entry) => entry.serverID === serverID) ??
@@ -148,6 +152,7 @@ export async function pairServer(
       connection,
       backend,
       remoteFilesystem: true,
+      ...(platform === undefined ? {} : { platform }),
     });
     deps.servers.setState(serverID, 'online');
     return { serverID, shortname: profile.shortname, baseUrl: connection.baseUrl };

@@ -16,6 +16,12 @@ export type ServerProfile = Readonly<{
   auth?: 'bearer' | 'basic';
   /** Free-form non-secret metadata advertised by the server. */
   metadata?: Readonly<Record<string, string>>;
+  /**
+   * The server's own path style, derived from its authenticated API metadata. Absent for
+   * legacy profiles: readers fall back to case-preserving POSIX semantics (never the
+   * frontend OS), so two distinct directories can not be silently merged.
+   */
+  platform?: NodeJS.Platform;
 }>;
 
 export type ServerProfiles = Readonly<{
@@ -36,9 +42,20 @@ export type ProfileInput = Readonly<{
   aliases?: readonly string[];
   auth?: 'bearer' | 'basic';
   metadata?: Readonly<Record<string, string>>;
+  platform?: NodeJS.Platform;
 }>;
 
 const shortnamePattern = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+
+/** Platforms the pairing flow can derive from authenticated server metadata. */
+export const derivingPlatforms = ['win32', 'darwin', 'linux'] as const;
+export type RecordedPlatform = (typeof derivingPlatforms)[number];
+
+/** Validates a persisted platform; anything else is dropped (never trusted as-is). */
+export function normalizePlatform(value: unknown): NodeJS.Platform | undefined {
+  if (typeof value !== 'string') return undefined;
+  return derivingPlatforms.find((platform) => platform === value);
+}
 
 /** Shortnames are lowercase, URL-safe, and unique case-insensitively. */
 export function validateShortname(shortname: string): string {
@@ -85,6 +102,7 @@ function normalizeProfile(input: ProfileInput): ServerProfile {
       : Object.fromEntries(
           Object.entries(input.metadata).filter(([, value]) => typeof value === 'string'),
         );
+  const platform = normalizePlatform(input.platform);
   return {
     serverID: input.serverID,
     shortname: validateShortname(input.shortname),
@@ -92,6 +110,7 @@ function normalizeProfile(input: ProfileInput): ServerProfile {
     ...(aliases.length === 0 ? {} : { aliases }),
     ...(input.auth === undefined ? {} : { auth: input.auth }),
     ...(metadata === undefined || Object.keys(metadata).length === 0 ? {} : { metadata }),
+    ...(platform === undefined ? {} : { platform }),
   };
 }
 
@@ -182,6 +201,7 @@ export function parseServerProfiles(raw: unknown): ServerProfiles {
     )
       continue;
     try {
+      const parsedPlatform = normalizePlatform(entry['platform']);
       const profile = normalizeProfile({
         serverID,
         shortname,
@@ -203,6 +223,7 @@ export function parseServerProfiles(raw: unknown): ServerProfiles {
               ),
             }
           : {}),
+        ...(parsedPlatform === undefined ? {} : { platform: parsedPlatform }),
       });
       // Skip records that collide with one already parsed: never drop the older one.
       if (profiles.some((other) => other.serverID === profile.serverID)) continue;

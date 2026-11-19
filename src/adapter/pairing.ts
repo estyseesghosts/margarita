@@ -8,6 +8,7 @@ export type RedeemedPairing = Readonly<{
   token: string;
   version: string;
   hostname?: string;
+  platform?: NodeJS.Platform;
 }>;
 
 export type RedeemOptions = Readonly<{
@@ -58,11 +59,26 @@ async function jsonResponse(response: Response, operation: string): Promise<unkn
   }
 }
 
+/**
+ * Derives the server's path style from authenticated `/api/info` metadata. Temporary-directory
+ * shape is the only OS signal the service exposes: drive-letter/UNC means Windows, anything
+ * else is POSIX (compared case-sensitively). Returns undefined when the server does not
+ * advertise a string `paths.tmp`; callers fall back to case-preserving POSIX semantics.
+ */
+function platformFromInfo(raw: Record<string, unknown>): NodeJS.Platform | undefined {
+  const paths = raw['paths'];
+  if (!isRecord(paths)) return undefined;
+  const tmp = paths['tmp'];
+  if (typeof tmp !== 'string' || tmp.trim() === '') return undefined;
+  if (/^[A-Za-z]:[\\/]/u.test(tmp) || tmp.startsWith('\\\\')) return 'win32';
+  return 'linux'; // POSIX separators; case-sensitive comparison holds for every POSIX flavor.
+}
+
 export async function serverInfo(
   baseUrl: string,
   authorization: string,
   options: RedeemOptions = {},
-): Promise<{ version: string; hostname?: string }> {
+): Promise<{ version: string; hostname?: string; platform?: NodeJS.Platform }> {
   const fetchImpl = options.fetch ?? fetch;
   const url = new URL('/api/info', baseUrl);
   assertSecureTransport(url, options.allowInsecureHttp === true);
@@ -79,9 +95,11 @@ export async function serverInfo(
       `This server runs OpenCode ${raw['version']}; Margarita needs a compatible v2 service.`,
     );
   }
+  const platform = platformFromInfo(raw);
   return {
     version: raw['version'],
     ...(typeof raw['hostname'] === 'string' ? { hostname: raw['hostname'] } : {}),
+    ...(platform === undefined ? {} : { platform }),
   };
 }
 

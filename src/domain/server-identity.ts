@@ -66,6 +66,29 @@ export function parseProjectKey(
   return { serverID: decodeURIComponent(match[1] ?? ''), directory, directoryKey: directory };
 }
 
+/**
+ * Project keys previous versions of Margarita could have persisted for the same project.
+ * `linux` was derived with POSIX rules case-sensitively, `win32` folded case and separators.
+ * The current key is always one of these two forms (or its own platform's), so callers can
+ * compare and skip it. A win32-folded candidate loses case information: two distinct POSIX
+ * directories on the same server fold onto one legacy key, and callers must not attribute
+ * it without a uniqueness check.
+ */
+export function legacyProjectKeys(
+  ref: ProjectRef,
+  platform: NodeJS.Platform,
+): readonly { key: string; platform: NodeJS.Platform }[] {
+  const candidates: { key: string; platform: NodeJS.Platform }[] = [];
+  const current = projectKey(ref, platform);
+  for (const legacy of ['linux', 'win32'] as const) {
+    if (legacy === platform) continue;
+    const key = projectKey(ref, legacy);
+    if (key === current) continue;
+    candidates.push({ key, platform: legacy });
+  }
+  return candidates;
+}
+
 /** Session identity of a server summary. */
 export function sessionRefOf(session: { serverID: string; id: string }): SessionRef {
   return { serverID: session.serverID, sessionID: session.id };

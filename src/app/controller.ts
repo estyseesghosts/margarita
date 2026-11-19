@@ -94,6 +94,7 @@ import {
   searchHistory,
 } from '../domain/prompt-history.ts';
 import {
+  legacyProjectKeys,
   localServerID,
   parseSessionKey,
   projectKey,
@@ -184,6 +185,11 @@ export type ControllerDeps = Readonly<{
     serverID: string,
     result: { ok: true } | { ok: false; error: unknown },
   ) => void;
+  /**
+   * The owning server's own path style, recorded from its authenticated metadata when paired.
+   * Absent/undefined means unknown: callers fall back to case-preserving POSIX semantics.
+   */
+  platformFor?: (serverID: string) => NodeJS.Platform | undefined;
   /** Every server to aggregate in the overview; defaults to the launch server only. */
   serverIDs?: () => readonly string[];
   /** Opt-in diagnostics sink (--debug-log); defaults to a silent no-op. */
@@ -310,7 +316,7 @@ export class AppController {
 
   /** Canonical project key for a directory on this server. */
   projectKeyOf(directory: string, serverID: string = this.serverID): string {
-    return projectKey({ serverID, directory }, this.deps.platform);
+    return projectKey({ serverID, directory }, this.platformFor(serverID));
   }
 
   // ---------------------------------------------------------------- selectors
@@ -374,7 +380,7 @@ export class AppController {
       online: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
     });
     return groupSessions(filtered, {
-      platform: this.deps.platform,
+      platformFor: (serverID) => this.platformFor(serverID),
       showArchived: this.deps.config.sessions.showArchived,
       showChildren: this.deps.config.sessions.showChildren,
       activityOf: (session) => this.lastUsed(session),
@@ -434,7 +440,7 @@ export class AppController {
 
   /** Catalog scope: server identity plus canonical directory, never directory alone. */
   private catalogScope(directory: string, serverID: string): string {
-    return `${serverID}\u0000${directoryKey(directory, this.deps.platform)}`;
+    return `${serverID}\u0000${directoryKey(directory, this.platformFor(serverID))}`;
   }
 
   async loadCatalog(directory: string, serverID: string = this.activeServerID()): Promise<void> {
@@ -459,7 +465,7 @@ export class AppController {
     generation: number,
     scope: string,
   ): Promise<void> {
-    this.setState('catalogDirectory', directoryKey(directory, this.deps.platform));
+    this.setState('catalogDirectory', directoryKey(directory, this.platformFor(serverID)));
     this.setState('catalogServerID', serverID);
     this.setState('catalogLoading', true);
     this.setState('catalogError', undefined);
@@ -475,7 +481,7 @@ export class AppController {
       if (generation !== this.catalogGeneration || this.catalogScope(directory, serverID) !== scope)
         return;
       batch(() => {
-        this.setState('catalogDirectory', directoryKey(directory, this.deps.platform));
+        this.setState('catalogDirectory', directoryKey(directory, this.platformFor(serverID)));
         this.setState('catalogServerID', serverID);
         this.setState('agents', selectableAgents(agents, this.deps.config.agents.cycle));
         this.setState('models', models);
@@ -502,7 +508,7 @@ export class AppController {
   catalogFresh(directory: string, serverID: string = this.activeServerID()): boolean {
     return (
       this.state.catalogServerID === serverID &&
-      this.state.catalogDirectory === directoryKey(directory, this.deps.platform) &&
+      this.state.catalogDirectory === directoryKey(directory, this.platformFor(serverID)) &&
       !this.state.catalogLoading &&
       this.state.catalogError === undefined
     );
@@ -514,7 +520,7 @@ export class AppController {
     if (
       this.state.catalogLoading &&
       this.state.catalogServerID === serverID &&
-      this.state.catalogDirectory === directoryKey(directory, this.deps.platform)
+      this.state.catalogDirectory === directoryKey(directory, this.platformFor(serverID))
     ) {
       return; // already loading exactly this project's catalog
     }
@@ -554,6 +560,17 @@ export class AppController {
 
   private keyFor(serverID: string, sessionID: string): string {
     return sessionKey({ serverID, sessionID });
+  }
+
+  /**
+   * The owning server's path style. Launch server: this process. Paired servers: what the
+   * server advertised at pair time (authenticated metadata). Unknown (legacy profiles):
+   * case-preserving POSIX — never the frontend's OS, so distinct directories on a case-
+   * sensitive server are never silently merged by a Windows frontend.
+   */
+  platformFor(serverID: string): NodeJS.Platform {
+    if (serverID === this.serverID) return this.deps.platform;
+    return this.deps.platformFor?.(serverID) ?? 'linux';
   }
 
   /** Set when the launch server failed to refresh; bootstrap re-throws it for the CLI. */
@@ -1864,6 +1881,47 @@ export class AppController {
     });
   }
 
+  /**
+   * History entries for a project: the current key plus, for hosts paired before path-style
+   * stamping existed, guarded legacy buckets. A POSIX directory on a Windows frontend was
+   * stored win32-folded (case-insensitive, separators `\`); the fold is lossy, so entries
+   * are adopted only when this directory is the only raw directory on the server claiming
+   * the folded key — otherwise the two projects would share each other's prompt history.
+   */
+  private historyEntriesFor(directory: string, serverID: string, key: string): string[] {
+    const limit = this.deps.config.history.limit;
+    const current = [...(this.persisted.history[key] ?? [])];
+    const entries = [...current];
+    const seen = new Set(entries);
+    for (const candidate of legacyProjectKeys(
+      { serverID, directory },
+      this.platformFor(serverID),
+    )) {
+      if (candidate.platform === 'win32' && this.win32FoldClaims(candidate.key, serverID) !== 1)
+        continue;
+      for (const entry of this.persisted.history[candidate.key] ?? []) {
+        if (seen.has(entry)) continue;
+        seen.add(entry);
+        entries.push(entry);
+      }
+    }
+    return entries.slice(-limit);
+  }
+
+  /** How many distinct directories on the server win32-fold onto `key`. */
+  private win32FoldClaims(key: string, serverID: string): number {
+    const raws = new Set(
+      Object.values(this.state.sessions)
+        .filter((session) => session.serverID === serverID)
+        .map((session) => session.directory),
+    );
+    let claims = 0;
+    for (const raw of raws) {
+      if (projectKey({ serverID, directory: raw }, 'win32') === key) claims += 1;
+    }
+    return claims;
+  }
+
   private loadHistoryFor(directory: string, serverID: string = this.serverID): void {
     const key = this.projectKeyOf(directory, serverID);
     // Read the live snapshot: prompts recorded this run live in `persisted`, not in the
@@ -1872,7 +1930,7 @@ export class AppController {
     // previous project would otherwise make historyUp() look like the end of this list.
     // A fresh array reference also keeps store mutations away from the persisted snapshot.
     this.setState('history', {
-      entries: [...(this.persisted.history[key] ?? [])],
+      entries: this.historyEntriesFor(directory, serverID, key),
       index: undefined,
       savedDraft: '',
     });
@@ -2204,7 +2262,7 @@ export class AppController {
    * stored in state before attach so directory/model metadata is correct.
    */
   async findLatestSessionIn(directory: string): Promise<SessionSummary | undefined> {
-    const key = directoryKey(directory, this.deps.platform);
+    const key = directoryKey(directory, this.platformFor(this.serverID));
     const directoryQuery = { directory };
     let cursor: string | undefined;
     let pages = 0;
@@ -2216,7 +2274,7 @@ export class AppController {
         );
         for (const session of page.sessions) {
           if (session.archived || session.parentID !== undefined) continue;
-          if (directoryKey(session.directory, this.deps.platform) !== key) continue;
+          if (directoryKey(session.directory, this.platformFor(this.serverID)) !== key) continue;
           if (best === undefined || session.updatedAt > best.updatedAt) best = session;
         }
         cursor = page.nextCursor;
@@ -2236,13 +2294,13 @@ export class AppController {
 
   /** Fallback used only when the server cannot filter by directory: match loaded pages. */
   private latestSessionInState(directory: string): SessionSummary | undefined {
-    const key = directoryKey(directory, this.deps.platform);
+    const key = directoryKey(directory, this.platformFor(this.serverID));
     return Object.values(this.state.sessions)
       .filter(
         (session) =>
           !session.archived &&
           session.parentID === undefined &&
-          directoryKey(session.directory, this.deps.platform) === key,
+          directoryKey(session.directory, this.platformFor(this.serverID)) === key,
       )
       .toSorted((left, right) => right.updatedAt - left.updatedAt)[0];
   }
