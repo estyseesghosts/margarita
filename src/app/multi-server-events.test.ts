@@ -796,3 +796,95 @@ describe('staged reverts are bound to their owning host (issue #82)', () => {
     controller.dispose();
   });
 });
+
+function reconcileHarness() {
+  const local = new FakeBackend();
+  const remote = new FakeBackend();
+  local.serverID = localID;
+  remote.serverID = remoteID;
+  local.sessions = [session(localID)];
+  remote.sessions = [session(remoteID)];
+  // The remote's getSession is held behind a gate until the test releases it.
+  const held = Promise.withResolvers<SessionSummary>();
+  remote.getSession = async (id: string) => {
+    await held.promise;
+    return { ...session(remoteID), id };
+  };
+  const serverIDsList = [localID, remoteID];
+  const controller = new AppController({
+    backend: local,
+    backendFor: (serverID: string) => (serverID === remoteID ? remote : local),
+    serverIDs: () => [...serverIDsList],
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/lotus',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+  });
+  return { controller, local, remote, held, serverIDsList };
+}
+
+describe('session refresh epochs are rechecked before committing (issue #85)', () => {
+  test('a held reconciliation response loses to a newer refresh', async () => {
+    const { controller, remote, held } = reconcileHarness();
+    // Prime the cache: remote owns ses_same.
+    await controller.loadSessions(remoteID);
+    expect(controller.state.sessions[remoteKey]).toBeDefined();
+
+    // Remote's next listing returns nothing, so the cached remote row is a reconcile miss
+    // and getSession is held behind a gate. The old refresh blocks on it.
+    remote.sessions = [];
+    const old = controller.loadSessions(remoteID);
+    await flush(); // let it reach the held reconciliation
+
+    // A newer remote refresh lists the updated session and commits it.
+    remote.sessions = [{ ...session(remoteID), title: 'newer' }];
+    await controller.loadSessions(remoteID);
+    await flush();
+    expect(controller.state.sessions[remoteKey]?.title).toBe('newer');
+
+    // Resolve the stale old getSession: it must not clobber the newer snapshot.
+    held.resolve({ ...session(remoteID), title: 'stale' });
+    await old;
+    await flush();
+    expect(controller.state.sessions[remoteKey]?.title).toBe('newer');
+    expect(controller.state.sessions[sessionID]).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('unpairing the remote during reconciliation resurrects nothing', async () => {
+    const { controller, remote, held, serverIDsList } = reconcileHarness();
+    // Prime the cache with a distinguishable title.
+    remote.sessions = [{ ...session(remoteID), title: 'primed' }];
+    await controller.loadSessions(remoteID);
+    expect(controller.state.sessions[remoteKey]?.title).toBe('primed');
+
+    // Remote's next listing returns nothing, so the cached remote row is a reconcile miss
+    // and getSession is held behind a gate.
+    remote.sessions = [];
+    const old = controller.loadSessions(remoteID);
+    await flush(); // let it reach the held reconciliation
+
+    // Unpair B mid-reconciliation: deregister it and drop its cached rows.
+    const index = serverIDsList.indexOf(remoteID);
+    expect(index).toBeGreaterThanOrEqual(0);
+    serverIDsList.splice(index, 1);
+    delete controller.state.sessions[remoteKey];
+    delete controller.state.running[remoteKey];
+
+    // Resolve the stale old getSession: it must not re-apply the stale row.
+    held.resolve({ ...session(remoteID), id: sessionID, title: 'stale' });
+    await old;
+    await flush();
+
+    // B's rows are not resurrected as stale and B is no longer a registered host.
+    expect(controller.state.sessions[remoteKey]?.title).not.toBe('stale');
+    expect(controller.state.running[remoteKey]).toBeUndefined();
+    expect(serverIDsList).not.toContain(remoteID);
+    controller.dispose();
+  });
+});

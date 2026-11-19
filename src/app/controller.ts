@@ -689,18 +689,34 @@ export class AppController {
     const servers = serverID === undefined ? this.serverIDs() : [serverID];
     // One host's failure never aborts the refresh for the others: a failed server keeps its
     // cached rows and records the error, healthy servers update normally.
-    const results = await Promise.all(
-      servers.map(async (targetID) => {
+    type SessionLoadResult = Readonly<{
+      serverID: string;
+      epoch: number;
+      ok: boolean;
+      error: string | undefined;
+      cause: unknown;
+      fresh: Record<string, SessionSummary>;
+      active: Set<string>;
+      cursor: string | undefined;
+      snapshotSeq: number;
+    }>;
+    const results = await Promise.all<SessionLoadResult>(
+      servers.map(async (targetID): Promise<SessionLoadResult> => {
         const epoch = this.nextRefreshEpoch(targetID);
         // Captured before the first request: any execution event stamped after this point is
         // newer than the snapshot and must not be overwritten by it.
         const snapshotSeq = this.runningEventSequence;
         try {
+          const loaded = await this.loadServerSessions(targetID, epoch);
           return {
-            ok: true as const,
+            serverID: loaded.serverID,
+            epoch: loaded.epoch,
+            ok: true,
             error: undefined as string | undefined,
             cause: undefined as unknown,
-            ...(await this.loadServerSessions(targetID, epoch)),
+            fresh: loaded.fresh,
+            active: loaded.active,
+            cursor: loaded.cursor ?? undefined,
             snapshotSeq,
           };
         } catch (error) {
@@ -712,19 +728,19 @@ export class AppController {
           return {
             serverID: targetID,
             epoch,
-            ok: false as const,
+            ok: false,
             error: error instanceof Error ? error.message : 'Could not reach the server',
             cause: error,
             fresh: {},
             active: new Set<string>(),
-            cursor: undefined as string | undefined,
+            cursor: undefined,
             snapshotSeq,
           };
         }
       }),
     );
-    // Only the freshest refresh for a still-registered host is applied; anything older or
-    // whose server was removed mid-flight is dropped wholesale so it cannot resurrect rows.
+    // Only the freshest refresh for a still-registered host may be applied; anything older
+    // or whose server was removed mid-flight is dropped so it cannot resurrect rows.
     const registered = new Set(this.serverIDs());
     const applied = results.filter(
       (result) =>
@@ -737,45 +753,50 @@ export class AppController {
       );
     }
     const healthy = new Set(applied.filter((result) => result.ok).map((result) => result.serverID));
-    const fresh: Record<string, SessionSummary> = {};
-    const pages: Record<
-      string,
-      { cursor?: string; complete: boolean; loading: boolean; error?: string }
-    > = {};
+
+    // Reconcile and commit per host, rechecking registration and freshness after every
+    // asynchronous stage: an old response must never clobber a newer refresh, and a host
+    // removed mid-flight must not resurrect its rows, active flags, or page metadata.
+    const committed: string[] = [];
     const activeByServer = new Map<string, Set<string>>();
+    // Live registration: a host may be unpaired while its refresh is in flight.
+    const isRegistered = (id: string) => this.serverIDs().includes(id);
     for (const result of applied) {
-      Object.assign(fresh, result.fresh);
-      const previous = this.state.serverPages[result.serverID];
-      if (result.ok) {
-        pages[result.serverID] = {
+      if (!isRegistered(result.serverID) || !this.isRefreshCurrent(result.serverID, result.epoch))
+        continue;
+
+      const missed = Object.keys(this.state.sessions)
+        .filter((key) => result.fresh[key] === undefined)
+        .map(parseSessionKey)
+        .filter((ref) => healthy.has(ref.serverID) && ref.serverID === result.serverID);
+
+      const reconciled = await this.reconcileKnownSessions(missed);
+
+      if (!isRegistered(result.serverID) || !this.isRefreshCurrent(result.serverID, result.epoch))
+        continue;
+
+      batch(() => {
+        this.setState('sessions', (current) => ({
+          ...current,
+          ...reconciled.found,
+          ...result.fresh,
+        }));
+        for (const ref of reconciled.deleted) this.forgetSession(ref.sessionID, ref.serverID);
+        const page: { cursor?: string; complete: boolean; loading: boolean; error?: string } = {
           ...(result.cursor === undefined ? {} : { cursor: result.cursor }),
           complete: result.cursor === undefined,
           loading: false,
+          ...(result.ok ? {} : { error: result.error ?? 'Could not reach the server' }),
         };
-      } else {
-        pages[result.serverID] = {
-          ...(previous?.cursor === undefined ? {} : { cursor: previous.cursor }),
-          complete: previous?.complete ?? false,
-          loading: false,
-          error: result.error ?? 'Could not reach the server',
-        };
-      }
-      activeByServer.set(result.serverID, result.active);
+        this.setState('serverPages', result.serverID, page);
+        if (result.ok) this.reconcileRunning(result.serverID, result.active, result.snapshotSeq);
+      });
+      committed.push(result.serverID);
+      if (result.ok) activeByServer.set(result.serverID, result.active);
     }
-    // Deletions while the stream was down are never replayed, and absence from the first
-    // pages only means "not loaded". Ask the owning server about each cached ID the pages
-    // missed; never send one host's ID to another host, and never reconcile a failed host.
-    const reconciled = await this.reconcileKnownSessions(
-      Object.keys(this.state.sessions)
-        .filter((key) => fresh[key] === undefined)
-        .map(parseSessionKey)
-        .filter((ref) => healthy.has(ref.serverID)),
-    );
+
     batch(() => {
-      this.setState('sessions', (current) => ({ ...current, ...reconciled.found, ...fresh }));
-      for (const ref of reconciled.deleted) this.forgetSession(ref.sessionID, ref.serverID);
       if (serverID === undefined) {
-        this.setState('serverPages', pages);
         this.setState(
           'sessionsComplete',
           applied.every((result) => result.ok && result.cursor === undefined),
@@ -786,23 +807,17 @@ export class AppController {
         );
       } else {
         // A single-server resync updates that host's page only; the rest keep their state.
-        const hostPage = pages[serverID];
-        if (hostPage !== undefined) this.setState('serverPages', serverID, hostPage);
         this.setState(
           'sessionsComplete',
-          this.serverIDs().every((id) => {
-            const page = id === serverID ? pages[id] : this.state.serverPages[id];
-            return page?.complete === true;
-          }),
+          this.serverIDs().every((id) => this.state.serverPages[id]?.complete === true),
         );
       }
-      this.setState('sessionsLoading', false);
+      // Only a refresh that actually applied a host may clear the loading flag; a newer
+      // or unrelated refresh keeps it set until that operation completes.
+      if (committed.length > 0) this.setState('sessionsLoading', false);
       this.setState('sessionsError', applied.find((result) => !result.ok)?.error);
-      for (const result of applied) {
-        // A failed refresh proves nothing about what runs now: keep that host's cache.
-        if (result.ok) this.reconcileRunning(result.serverID, result.active, result.snapshotSeq);
-      }
     });
+
     // Running sessions are the ones that can be blocked on input right now.
     await Promise.all(
       servers.flatMap((targetID) =>
@@ -878,7 +893,8 @@ export class AppController {
             };
           } catch (error) {
             if (error instanceof BackendError && error.kind === 'not-found') deleted.push(ref);
-            // Any other failure proves nothing: keep the row.
+            // Any other failure proves nothing: keep the row. A host removed mid-
+            // reconciliation is not reconcilable here and is skipped entirely.
           }
         }),
       );
