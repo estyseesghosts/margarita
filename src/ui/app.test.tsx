@@ -1553,6 +1553,118 @@ describe('live action beneath a collapsed group (issue #75)', () => {
   });
 });
 
+/** One shell call in a foldable group; `startedAt` is chosen relative to `now` per test. */
+function liveShellBackend(status: 'running' | 'completed' = 'running', startedAt = 0): FakeBackend {
+  const backend = new FakeBackend();
+  backend.sessions = [
+    {
+      id: 'ses_a',
+      serverID: 'local',
+      projectID: 'p',
+      directory: '/work/kohjoh',
+      title: 'Live shell',
+      agent: 'build',
+      tokens: { input: 100, output: 10, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      cost: 0,
+      createdAt: 1,
+      updatedAt: 2,
+      archived: false,
+    },
+  ];
+  backend.messages = {
+    ses_a: [
+      { kind: 'user', id: 'm1', createdAt: 1, text: 'run it', attachments: [] },
+      {
+        kind: 'assistant',
+        id: 'mA',
+        createdAt: 2,
+        agent: 'build',
+        model: { providerID: 'opencode', modelID: 'longcat' },
+        parts: [
+          {
+            kind: 'tool',
+            tool: {
+              id: 's1',
+              name: 'bash',
+              status,
+              input: { command: 'bun test' },
+              startedAt,
+              ...(status === 'completed' ? { completedAt: startedAt + 100 } : {}),
+            },
+          },
+        ],
+      },
+    ],
+  };
+  backend.active = new Set(['ses_a']);
+  return backend;
+}
+
+const countOccurrences = (frame: string, needle: string) => frame.split(needle).length - 1;
+/** True when the only hint row sits immediately below the row containing `anchor`. */
+const hintFollows = (frame: string, anchor: string) => {
+  const lines = frame.split('\n');
+  const index = lines.findIndex((line) => line.includes(anchor));
+  return index >= 0 && (lines[index + 1] ?? '').includes('to move to background');
+};
+
+describe('expanded tool groups do not duplicate the running action (#111)', () => {
+  test('collapsed shows one live row; expanded and detailed show one tool row each', async () => {
+    const { controller, setup } = await mount(liveShellBackend());
+    controller.openSession('ses_a');
+    await settle(setup);
+    let frame = setup.captureCharFrame();
+    expect(countOccurrences(frame, '└ $ bun test')).toBe(1);
+    expect(countOccurrences(frame, 'bash bun test')).toBe(0);
+
+    controller.toggleGroup('group:s1');
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(countOccurrences(frame, 'bash bun test')).toBe(1);
+    expect(countOccurrences(frame, '└ $ bun test')).toBe(0);
+
+    // Ctrl+O detailed mode renders the call on its own, never a second live copy.
+    controller.toggleDetails();
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(countOccurrences(frame, 'bash bun test')).toBe(1);
+    expect(countOccurrences(frame, '└ $ bun test')).toBe(0);
+    controller.dispose();
+  });
+
+  test('the 10s hint stays once and adjacent to the shell across expansion', async () => {
+    const { controller, setup } = await mount(liveShellBackend('running', 0), {
+      now: () => 15_000,
+    });
+    controller.openSession('ses_a');
+    await settle(setup);
+    let frame = setup.captureCharFrame();
+    expect(countOccurrences(frame, 'to move to background')).toBe(1);
+    expect(hintFollows(frame, '└ $ bun test')).toBe(true);
+
+    controller.toggleGroup('group:s1');
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(countOccurrences(frame, 'bash bun test')).toBe(1);
+    expect(countOccurrences(frame, '└ $ bun test')).toBe(0);
+    expect(countOccurrences(frame, 'to move to background')).toBe(1);
+    expect(hintFollows(frame, 'bash bun test')).toBe(true);
+    controller.dispose();
+  });
+
+  test('a finished group never shows a live row or hint', async () => {
+    const { controller, setup } = await mount(liveShellBackend('completed', 0), {
+      now: () => 60_000,
+    });
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(countOccurrences(frame, '└ $ bun test')).toBe(0);
+    expect(countOccurrences(frame, 'to move to background')).toBe(0);
+    controller.dispose();
+  });
+});
+
 /** Two hosts, both owning `ses_same`, with different queued counts and goal readings. */
 async function mountColliding() {
   const local = new FakeBackend();

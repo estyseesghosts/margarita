@@ -30,6 +30,7 @@ import { assertNever } from '../domain/session.ts';
 import { stickyPrompt, truncatePrompt } from '../domain/sticky-prompt.ts';
 import { type ThrobberFacts } from '../domain/throbber.ts';
 import {
+  activeTool,
   backgroundHint,
   describeTool,
   foldTranscript,
@@ -408,48 +409,66 @@ function NodeView(props: {
         )}
       </Match>
       <Match when={props.node.kind === 'tool-group' ? props.node : undefined}>
-        {(node: Accessor<NodeOf<'tool-group'>>) => (
-          <box flexDirection="column" marginTop={1}>
-            <text fg={props.focused ? theme().accent : theme().dim}>
-              {`${props.focused ? '▸' : ' '}  ${node().summary}${node().running ? '…' : ''}${
-                props.focused ? '  (Enter)' : ''
-              }`}
-            </text>
-            {/* One continuously updated action, visible while the group is collapsed. */}
-            <Show when={node().live}>
-              {(live: Accessor<LiveTool>) => (
-                <>
-                  <text fg={theme().dim}>
-                    {`    └ ${truncateToWidth(sanitizeText(live().text), Math.max(8, props.width - 6))}`}
-                  </text>
-                  <Show
-                    when={backgroundHint(live(), props.now) && props.backgroundKey !== undefined}
-                  >
-                    <text fg={theme().dim}>
-                      {`      └ ${props.backgroundKey} to move to background`}
-                    </text>
-                  </Show>
-                </>
-              )}
-            </Show>
-            <Show when={node().expanded}>
-              <For each={node().tools}>
-                {(tool) => (
-                  <ToolView
-                    tool={tool}
-                    expanded
-                    detailed={props.detailed}
-                    theme={theme()}
-                    syntax={props.syntax}
-                    width={props.width}
-                    focused={false}
-                    mcpServers={props.mcpServers}
-                  />
-                )}
-              </For>
-            </Show>
-          </box>
-        )}
+        {(node: Accessor<NodeOf<'tool-group'>>) => {
+          // The background hint describes the one running call. It follows that call's own
+          // row when the group is expanded, so the action is never shown twice (issue #111).
+          const activeID = () => activeTool(node().tools)?.id;
+          const hintText = (): string | undefined => {
+            const key = props.backgroundKey;
+            return key === undefined || !backgroundHint(node().live, props.now)
+              ? undefined
+              : `${key} to move to background`;
+          };
+          return (
+            <box flexDirection="column" marginTop={1}>
+              <text fg={props.focused ? theme().accent : theme().dim}>
+                {`${props.focused ? '▸' : ' '}  ${node().summary}${node().running ? '…' : ''}${
+                  props.focused ? '  (Enter)' : ''
+                }`}
+              </text>
+              {/* One continuously updated action, only while the group is collapsed. */}
+              <Show when={!node().expanded}>
+                <Show when={node().live}>
+                  {(live: Accessor<LiveTool>) => (
+                    <>
+                      <text fg={theme().dim}>
+                        {`    └ ${truncateToWidth(sanitizeText(live().text), Math.max(8, props.width - 6))}`}
+                      </text>
+                      <Show when={hintText()}>
+                        {(text: Accessor<string>) => (
+                          <text fg={theme().dim}>{`      └ ${text()}`}</text>
+                        )}
+                      </Show>
+                    </>
+                  )}
+                </Show>
+              </Show>
+              <Show when={node().expanded}>
+                <For each={node().tools}>
+                  {(tool) => (
+                    <>
+                      <ToolView
+                        tool={tool}
+                        expanded
+                        detailed={props.detailed}
+                        theme={theme()}
+                        syntax={props.syntax}
+                        width={props.width}
+                        focused={false}
+                        mcpServers={props.mcpServers}
+                      />
+                      <Show when={activeID() === tool.id ? hintText() : undefined}>
+                        {(text: Accessor<string>) => (
+                          <text fg={theme().dim}>{`      └ ${text()}`}</text>
+                        )}
+                      </Show>
+                    </>
+                  )}
+                </For>
+              </Show>
+            </box>
+          );
+        }}
       </Match>
       <Match when={props.node.kind === 'shell' ? props.node : undefined}>
         {(node: Accessor<NodeOf<'shell'>>) => (
