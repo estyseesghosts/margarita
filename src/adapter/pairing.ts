@@ -3,6 +3,16 @@ import { PairingError, redactPairingCode } from '../domain/pairing.ts';
 
 export type PairingFetch = (url: string, init: RequestInit) => Promise<Response>;
 
+/**
+ * Resolves an API path beneath the server's base path. A server may live under a
+ * path-prefixed reverse proxy (https://host/opencode); absolute API roots would drop the
+ * prefix and hit the wrong endpoint. The base keeps its path; a trailing slash is ensured.
+ */
+function apiUrl(baseUrl: string, relative: string): string {
+  const base = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  return new URL(relative, base).toString();
+}
+
 export type RedeemedPairing = Readonly<{
   baseUrl: string;
   token: string;
@@ -80,7 +90,7 @@ export async function serverInfo(
   options: RedeemOptions = {},
 ): Promise<{ version: string; hostname?: string; platform?: NodeJS.Platform }> {
   const fetchImpl = options.fetch ?? fetch;
-  const url = new URL('/api/info', baseUrl);
+  const url = new URL(apiUrl(baseUrl, 'api/info'));
   assertSecureTransport(url, options.allowInsecureHttp === true);
   const response = await fetchImpl(url.toString(), {
     headers: { accept: 'application/json', authorization },
@@ -114,7 +124,7 @@ export async function redeemPairing(
   options: RedeemOptions = {},
 ): Promise<RedeemedPairing> {
   const fetchImpl = options.fetch ?? fetch;
-  const url = new URL(`/auth/connect/${encodeURIComponent(code)}`, baseUrl);
+  const url = new URL(apiUrl(baseUrl, `auth/connect/${encodeURIComponent(code)}`));
   assertSecureTransport(url, options.allowInsecureHttp === true);
   let response: Response;
   try {

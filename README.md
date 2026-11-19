@@ -115,6 +115,12 @@ Or point at a URL you already know (no one-time code):
 Manual pairing asks for the password through the secure credential flow, not the composer
 history. `MARGARITA_SERVER_PASSWORD` still works for a direct `--server` connection.
 
+Servers behind a path-prefixed reverse proxy are supported: point `/pair` at
+`https://host.example/opencode/auth/connect/<code>` (or `/pair --url https://host.example/opencode --as buildbox`)
+and every request — the pairing redemption, `/api/info`, the API client and the event
+stream — stays beneath `/opencode`. Redirects of any kind are never followed, so a pairing
+link or token is never sent anywhere the proxy forwards it. HTTPS policy is unchanged.
+
 From Bash or PowerShell:
 
 ```sh
