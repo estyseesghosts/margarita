@@ -1,4 +1,3 @@
-import type { KeyEvent } from '@opentui/core';
 import { useKeyboard, usePaste, useRenderer, useTerminalDimensions } from '@opentui/solid';
 import type { Accessor } from 'solid-js';
 import { createSignal, Match, onCleanup, Show, Switch } from 'solid-js';
@@ -23,8 +22,17 @@ export type AppProps = Readonly<{
   env: NodeJS.ProcessEnv;
 }>;
 
-/** Normalizes an OpenTUI key event; views never see raw escape sequences. */
-export function toKeyInput(event: KeyEvent): KeyInput {
+/** Structural subset of a terminal key event; KeyEvent satisfies this. */
+export type KeyEventLike = Readonly<{
+  name: string;
+  ctrl: boolean;
+  meta: boolean;
+  option: boolean;
+  shift: boolean;
+  sequence: string;
+}>;
+
+export function toKeyInput(event: KeyEventLike): KeyInput {
   const sequence = event.sequence;
   const printable = sequence.length > 0 && graphemes(sequence).length === 1 && !event.ctrl;
   return {
@@ -63,6 +71,14 @@ export function App(props: AppProps) {
 
   useKeyboard((event) => {
     if (editing || event.eventType === 'release') return;
+    props.controller.debugKey({
+      name: event.name === 'enter' ? 'return' : event.name,
+      ctrl: event.ctrl,
+      alt: event.meta || event.option,
+      shift: event.shift,
+      eventType: event.eventType,
+      sequenceLength: event.sequence.length,
+    });
     const handled = routeKey(controller, props.keymap, toKeyInput(event), {
       openEditor,
       redraw: () => renderer.requestRender(),

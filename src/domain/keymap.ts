@@ -1,4 +1,10 @@
-/** Every bindable action. Configuration refers to these IDs, never raw key bytes. */
+/**
+ * Every bindable action. Configuration refers to these IDs, never raw key bytes.
+ * `composer.steer` ships two universal bindings on purpose: `f6` works in every
+ * terminal, while the modified Enter needs a terminal that reports modified keys
+ * (kitty keyboard protocol — not every Windows Terminal build does). A config
+ * override replaces the whole list for its action.
+ */
 export const actionIDs = [
   'agent.cycle',
   'agent.cyclePrevious',
@@ -39,27 +45,27 @@ export type KeyPress = Readonly<{
   shift: boolean;
 }>;
 
-export const defaultBindings: Readonly<Record<ActionID, string>> = {
-  'agent.cycle': 'shift+tab',
-  'agent.cyclePrevious': 'alt+shift+tab',
-  'model.pick': 'alt+p',
-  'model.recentNext': 'f2',
-  'transcript.details': 'ctrl+o',
-  'transcript.pageUp': 'pageup',
-  'transcript.pageDown': 'pagedown',
-  'transcript.top': 'ctrl+home',
-  'transcript.bottom': 'ctrl+end',
-  'transcript.groupPrevious': 'ctrl+up',
-  'transcript.groupNext': 'ctrl+down',
-  'history.search': 'ctrl+r',
-  'composer.stash': 'ctrl+s',
-  'composer.editor': 'ctrl+g',
-  'composer.newline': 'ctrl+j',
-  'composer.steer': 'ctrl+enter',
-  'screen.redraw': 'ctrl+l',
-  'tasks.toggle': 'ctrl+t',
-  'tools.background': 'ctrl+b',
-  'help.show': 'f1',
+export const defaultBindings: Readonly<Record<ActionID, readonly string[]>> = {
+  'agent.cycle': ['shift+tab'],
+  'agent.cyclePrevious': ['alt+shift+tab'],
+  'model.pick': ['alt+p'],
+  'model.recentNext': ['f2'],
+  'transcript.details': ['ctrl+o'],
+  'transcript.pageUp': ['pageup'],
+  'transcript.pageDown': ['pagedown'],
+  'transcript.top': ['ctrl+home'],
+  'transcript.bottom': ['ctrl+end'],
+  'transcript.groupPrevious': ['ctrl+up'],
+  'transcript.groupNext': ['ctrl+down'],
+  'history.search': ['ctrl+r'],
+  'composer.stash': ['ctrl+s'],
+  'composer.editor': ['ctrl+g'],
+  'composer.newline': ['ctrl+j'],
+  'composer.steer': ['f6', 'ctrl+enter', 'alt+enter'],
+  'screen.redraw': ['ctrl+l'],
+  'tasks.toggle': ['ctrl+t'],
+  'tools.background': ['ctrl+b'],
+  'help.show': ['f1'],
 };
 
 export type BindingParse = { ok: true; binding: KeyBinding } | { ok: false; error: string };
@@ -105,7 +111,7 @@ export function formatBinding(binding: KeyBinding): string {
   return [...parts.filter((part) => part !== ''), binding.key].join('+');
 }
 
-export type Keymap = ReadonlyMap<ActionID, KeyBinding>;
+export type Keymap = ReadonlyMap<ActionID, readonly KeyBinding[]>;
 
 export type KeymapBuild = Readonly<{ keymap: Keymap; errors: readonly string[] }>;
 
@@ -115,10 +121,15 @@ export type KeymapBuild = Readonly<{ keymap: Keymap; errors: readonly string[] }
  */
 export function buildKeymap(overrides: Readonly<Record<string, string>>): KeymapBuild {
   const errors: string[] = [];
-  const keymap = new Map<ActionID, KeyBinding>();
+  const keymap = new Map<ActionID, readonly KeyBinding[]>();
   for (const action of actionIDs) {
-    const parsed = parseBinding(defaultBindings[action]);
-    if (parsed.ok) keymap.set(action, parsed.binding);
+    const bindings: KeyBinding[] = [];
+    for (const spec of defaultBindings[action]) {
+      const parsed = parseBinding(spec);
+      if (parsed.ok) bindings.push(parsed.binding);
+      else errors.push(`${action}: invalid default binding "${spec}"`);
+    }
+    keymap.set(action, bindings);
   }
   for (const [action, spec] of Object.entries(overrides)) {
     if (!isActionID(action)) {
@@ -131,20 +142,21 @@ export function buildKeymap(overrides: Readonly<Record<string, string>>): Keymap
       continue;
     }
     const clash = [...keymap.entries()].find(
-      ([other, binding]) => other !== action && sameBinding(binding, parsed.binding),
+      ([other, bindings]) =>
+        other !== action && bindings.some((binding) => sameBinding(binding, parsed.binding)),
     );
     if (clash !== undefined) {
       errors.push(`${action}: "${spec}" is already bound to ${clash[0]}`);
       continue;
     }
-    keymap.set(action, parsed.binding);
+    keymap.set(action, [parsed.binding]);
   }
   return { keymap, errors };
 }
 
 export function actionFor(keymap: Keymap, press: KeyPress): ActionID | undefined {
-  for (const [action, binding] of keymap) {
-    if (matches(binding, press)) return action;
+  for (const [action, bindings] of keymap) {
+    if (bindings.some((binding) => matches(binding, press))) return action;
   }
   return undefined;
 }

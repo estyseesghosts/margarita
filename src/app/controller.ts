@@ -222,6 +222,22 @@ export class AppController {
   private readonly summaryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private transcriptOrder: string[] = [];
   private readonly debugLog: DebugLog;
+
+  /**
+   * Opt-in `--debug-log` diagnostics for key routing: which key the TUI saw and with
+   * which modifiers. Never logs typed characters — only the key identity — so session
+   * text cannot leak into the log.
+   */
+  debugKey(event: {
+    name: string;
+    ctrl: boolean;
+    alt: boolean;
+    shift: boolean;
+    eventType: string;
+    sequenceLength: number;
+  }): void {
+    this.debugLog.write('keypress', event);
+  }
   private fileCache: { root: string; files: string[] } | undefined;
   private readonly fileScans = new Map<string, Promise<string[]>>();
   private completionRequest = 0;
@@ -2030,7 +2046,7 @@ export class AppController {
     }
   }
 
-  /** Sends the current draft with steer delivery (Ctrl+Enter or /steer). */
+  /** Sends the current draft with steer delivery (F6, or Ctrl+Enter where the terminal reports it, or /steer). */
   async steer(): Promise<void> {
     if (this.state.route.kind !== 'conversation') return;
     await this.submit('steer');
@@ -3038,7 +3054,7 @@ export class AppController {
   }
 
   /**
-   * Ctrl+Enter on an empty composer sends now the next pending queued user message (FIFO):
+   * F6 (or Ctrl+Enter where the terminal reports modified Enter) on an empty composer sends now the next pending queued user message (FIFO):
    * the same promote mechanism, offered positionally as the send-now hint above the active
    * task. With no queued follow-up it falls back to steering whatever the empty composer
    * would have meant before.

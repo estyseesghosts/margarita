@@ -116,7 +116,7 @@ export const tips = [
   'Press Shift+Tab to switch agents',
   'Press Ctrl+O to show tool details',
   'Press Ctrl+C to interrupt the running turn',
-  'Press Ctrl+Enter to steer instead of queueing',
+  'Press F6 to steer instead of queueing',
   'Press F1 for all key bindings',
 ] as const;
 

@@ -26,7 +26,7 @@ afterEach(() => {
   current = undefined;
 });
 
-async function mount(backend: FakeBackend) {
+async function mount(backend: FakeBackend, options: { kittyKeyboard?: boolean } = {}) {
   const controller = new AppController({
     backend,
     config: defaultConfig,
@@ -50,7 +50,9 @@ async function mount(backend: FakeBackend) {
         ascii: false,
         env: {},
       }),
-    { width: 80, height: 24 },
+    options.kittyKeyboard === undefined
+      ? { width: 80, height: 24 }
+      : { width: 80, height: 24, kittyKeyboard: options.kittyKeyboard },
   );
   current = setup;
   await setup.renderOnce();
@@ -1061,7 +1063,7 @@ describe('queued messages preview (issue #29)', () => {
 
     const queued1 = frame.indexOf('first follow-up');
     const queued2 = frame.indexOf('second follow-up');
-    const hint = frame.indexOf('ctrl+enter to steer now');
+    const hint = frame.indexOf('f6 to steer now');
     const marker = frame.search(verb);
     const composerPlaceholder = frame.lastIndexOf('← overview');
 
@@ -1074,19 +1076,55 @@ describe('queued messages preview (issue #29)', () => {
     expect(marker).toBeGreaterThan(queued2);
     expect(marker).toBeLessThan(composerPlaceholder);
     // The hint appears exactly once (only for the FIFO-next item).
-    expect(frame.match(/ctrl\+enter to steer now/g)).toHaveLength(1);
+    expect(frame.match(/f6 to steer now/g)).toHaveLength(1);
     // The multiline item is clipped to one line.
     expect(frame).not.toContain('multiline note\n');
     controller.dispose();
   });
 
-  test('Ctrl+Enter on an empty composer promotes the oldest queued item to steer; failure leaves it queued', async () => {
+  test('Ctrl+Enter via the kitty keyboard protocol promotes the oldest queued item', async () => {
+    const backend = runningWithQueue();
+    const { controller, setup } = await mount(backend, { kittyKeyboard: true });
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    setup.mockInput.pressKey('RETURN', { ctrl: true });
+    await settle(setup);
+
+    expect(backend.calls).toEqual(
+      expect.arrayContaining([{ name: 'changeDelivery', args: ['ses_a', 'in_1', 'steer'] }]),
+    );
+    expect(controller.state.inbox['ses_a']?.find((item) => item.id === 'in_1')?.delivery).toBe(
+      'steer',
+    );
+    controller.dispose();
+  });
+
+  test('F6 with a draft steers the draft as a steer, without touching the queue', async () => {
     const backend = runningWithQueue();
     const { controller, setup } = await mount(backend);
     controller.openSession('ses_a');
     await settle(setup);
 
-    setup.mockInput.pressKey('RETURN', { meta: true });
+    await setup.mockInput.typeText('hurry up');
+    await settle(setup);
+    setup.mockInput.pressKey('F6');
+    await settle(setup);
+
+    const prompt = backend.calls.find((call) => call.name === 'prompt');
+    expect(prompt?.args[0]).toBe('ses_a');
+    expect(prompt?.args[1]).toMatchObject({ text: 'hurry up', delivery: 'steer' });
+    expect(backend.calls.filter((call) => call.name === 'changeDelivery')).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('F6 on an empty composer promotes the oldest queued item to steer; failure leaves it queued', async () => {
+    const backend = runningWithQueue();
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    setup.mockInput.pressKey('F6');
     await settle(setup);
 
     expect(backend.calls).toEqual(
@@ -1098,7 +1136,7 @@ describe('queued messages preview (issue #29)', () => {
     const frame = setup.captureCharFrame();
     expect(frame).toContain('first follow-up');
     expect(frame).toContain('second follow-up');
-    expect(frame.match(/ctrl\+enter to steer now/g)).toHaveLength(1);
+    expect(frame.match(/f6 to steer now/g)).toHaveLength(1);
     // Existing in-flight delivery failure leaves the item queued.
     controller.dispose();
   });
@@ -1112,7 +1150,7 @@ describe('queued messages preview (issue #29)', () => {
     controller.openSession('ses_a');
     await settle(setup);
 
-    setup.mockInput.pressKey('RETURN', { meta: true });
+    setup.mockInput.pressKey('F6');
     await settle(setup);
 
     expect(controller.state.notice?.text).toContain('busy');
@@ -1122,7 +1160,7 @@ describe('queued messages preview (issue #29)', () => {
     ]);
     const frame = setup.captureCharFrame();
     expect(frame).toContain('first follow-up');
-    expect(frame).toContain('ctrl+enter to steer now');
+    expect(frame).toContain('f6 to steer now');
     controller.dispose();
   });
 
@@ -1147,7 +1185,7 @@ describe('queued messages preview (issue #29)', () => {
     controller.openSession('ses_b');
     await settle(setup);
     const frame = setup.captureCharFrame();
-    expect(frame).not.toContain('ctrl+enter to steer now');
+    expect(frame).not.toContain('f6 to steer now');
     expect(frame).not.toContain('first follow-up');
     controller.dispose();
   });
@@ -1177,7 +1215,7 @@ describe('queued messages preview (issue #29)', () => {
     await settle(setup);
 
     const frame = setup.captureCharFrame();
-    expect(frame).not.toContain('ctrl+enter to steer now');
+    expect(frame).not.toContain('f6 to steer now');
     expect(frame).toContain('first follow-up');
     controller.dispose();
   });

@@ -67,7 +67,8 @@ Print mode is always explicit: giving a prompt never silently turns it on.
 | `Ctrl+G` | Edit the prompt in `$EDITOR` |
 | Paste an image or image path | Attach it (PNG, JPEG, GIF, WebP, AVIF, PDF) |
 | `Backspace` (empty prompt) | Remove the newest attachment |
-| `Ctrl+J` / `Ctrl+Enter` (or `Alt+Enter`) | Newline / steer the running agent |
+| `Ctrl+J` | Newline |
+| `F6` (or `Ctrl+Enter` / `Alt+Enter`) | Steer the running agent. `F6` always works; the modified Enter works only where the terminal reports modified Enter (e.g. kitty keyboard protocol) — Windows Terminal needs kitty support for those two |
 | `Ctrl+T` | Goal and task checklist |
 | `Ctrl+B` | Move running tools to the background |
 | `Ctrl+C` | Interrupt, clear, then exit |

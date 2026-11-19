@@ -41,14 +41,14 @@ export function QueuedPreview(props: {
               </text>
             </box>
             <Show when={item === hinted()}>
-              <text fg={props.theme.dim}>{'  └ Queued · ctrl+enter to steer now'}</text>
+              <text fg={props.theme.dim}>{'  └ Queued · f6 to steer now'}</text>
             </Show>
           </box>
         )}
       </For>
       <Show when={overflow() > 0}>
         <text fg={props.theme.dim}>
-          {`  └ … and ${overflow()} more queued${hintHidden() ? ' · ctrl+enter to steer the next now' : ''}`}
+          {`  └ … and ${overflow()} more queued${hintHidden() ? ' · f6 to steer the next now' : ''}`}
         </text>
       </Show>
     </box>

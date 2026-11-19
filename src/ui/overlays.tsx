@@ -44,10 +44,14 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
         <box {...frame('Keys · Esc to close')}>
           <For each={actionIDs}>
             {(action) => {
-              const binding = props.keymap.get(action);
+              const bindings = props.keymap.get(action);
+              const label =
+                bindings === undefined || bindings.length === 0
+                  ? 'unbound'
+                  : bindings.map(formatBinding).join(' / ');
               return (
                 <text fg={props.theme.text}>
-                  {(binding === undefined ? 'unbound' : formatBinding(binding)).padEnd(16)}
+                  {label.padEnd(16)}
                   <span style={{ fg: dim() }}>{action}</span>
                 </text>
               );

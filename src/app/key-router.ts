@@ -304,15 +304,6 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
         return edit(moveWordLeft(composer));
       case 'right':
         return edit(moveWordRight(composer));
-      case 'return':
-        // Empty composer: contextual send-now for the next queued follow-up (FIFO);
-        // with draft text, steer the draft as before.
-        if (composer.text === '') {
-          void controller.promoteNextQueued();
-          return true;
-        }
-        void controller.steer();
-        return true;
       default:
         return false;
     }
@@ -321,16 +312,6 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
     if (key.name === 'b' || key.name === 'left') return edit(moveWordLeft(composer));
     if (key.name === 'f' || key.name === 'right') return edit(moveWordRight(composer));
     if (key.name === 'backspace') return edit(deleteWordBackward(composer));
-    if (key.name === 'return') {
-      // Empty composer: contextual send-now for the next queued follow-up (FIFO);
-      // with draft text, steer the draft as before.
-      if (composer.text === '') {
-        void controller.promoteNextQueued();
-        return true;
-      }
-      void controller.steer();
-      return true;
-    }
   }
 
   switch (key.name) {

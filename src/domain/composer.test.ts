@@ -113,7 +113,7 @@ describe('keymap', () => {
     expect(parseBinding('ctrl+x a').ok).toBe(false);
     expect(parseBinding('hyper+a').ok).toBe(false);
   });
-  test('defaults map shift+tab to agent cycling and ctrl+enter to steer', () => {
+  test('defaults map shift+tab to agent cycling, and f6/alt+enter/ctrl+enter all steer', () => {
     const { keymap } = buildKeymap({});
     expect(actionFor(keymap, { name: 'tab', ctrl: false, alt: false, shift: true })).toBe(
       'agent.cycle',
@@ -124,6 +124,26 @@ describe('keymap', () => {
     expect(actionFor(keymap, { name: 'return', ctrl: true, alt: false, shift: false })).toBe(
       'composer.steer',
     );
+    // F6 is the always-works fallback for terminals that cannot report modified Enter.
+    expect(actionFor(keymap, { name: 'f6', ctrl: false, alt: false, shift: false })).toBe(
+      'composer.steer',
+    );
+    expect(actionFor(keymap, { name: 'return', ctrl: false, alt: true, shift: false })).toBe(
+      'composer.steer',
+    );
+  });
+  test('a steering override replaces the whole list', () => {
+    const { keymap, errors } = buildKeymap({ 'composer.steer': 'f4' });
+    expect(errors).toEqual([]);
+    expect(actionFor(keymap, { name: 'f4', ctrl: false, alt: false, shift: false })).toBe(
+      'composer.steer',
+    );
+    expect(
+      actionFor(keymap, { name: 'f6', ctrl: false, alt: false, shift: false }),
+    ).toBeUndefined();
+    expect(
+      actionFor(keymap, { name: 'return', ctrl: true, alt: false, shift: false }),
+    ).toBeUndefined();
   });
   test('duplicate and unknown overrides are reported and defaults kept', () => {
     const { keymap, errors } = buildKeymap({ 'model.pick': 'ctrl+o', bogus: 'f9' });
