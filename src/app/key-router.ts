@@ -182,16 +182,22 @@ function routeOverlay(controller: AppController, key: KeyInput): boolean {
       else if (isPrintable(key)) controller.setHistoryQuery(overlay.query + key.text);
       return true;
     case 'queue': {
-      // Server-qualified: selection and actions stay on the displayed host (#78).
+      // Server-qualified: selection and actions stay on the displayed host (#78, #88).
       const items = controller.currentView()?.queued ?? [];
-      const item = items[overlay.index];
+      // Clamp a stale index when an item is delivered/cancelled while the dialog is open,
+      // so selection never lands on a removed item or a wrong row (#88).
+      let index = overlay.index;
+      if (items.length === 0) index = 0;
+      else if (index < 0 || index >= items.length) index = items.length - 1;
+      if (index !== overlay.index) controller.setOverlay({ kind: 'queue', index });
+      const item = items[index];
       if (key.name === 'up' && items.length > 0) {
         controller.setOverlay({
           kind: 'queue',
-          index: (overlay.index - 1 + items.length) % items.length,
+          index: (index - 1 + items.length) % items.length,
         });
       } else if (key.name === 'down' && items.length > 0) {
-        controller.setOverlay({ kind: 'queue', index: (overlay.index + 1) % items.length });
+        controller.setOverlay({ kind: 'queue', index: (index + 1) % items.length });
       } else if (item !== undefined && (key.name === 'delete' || key.name === 'x')) {
         void controller.cancelQueued(item.id);
       } else if (item !== undefined && key.name === 's') {

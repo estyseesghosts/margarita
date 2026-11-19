@@ -2186,6 +2186,22 @@ function queuedBackend() {
   return backend;
 }
 
+const cancelFor = (backend: FakeBackend, inboxID: string) =>
+  backend.calls.filter((call) => call.name === 'cancelQueued' && call.args[1] === inboxID);
+const promoteFor = (backend: FakeBackend, inboxID: string) =>
+  backend.calls.filter((call) => call.name === 'promoteQueued' && call.args[1] === inboxID);
+
+function queueController(inbox: FakeBackend['inbox']) {
+  const backend = new FakeBackend();
+  backend.sessions = [fakeSession('ses_a')];
+  backend.messages = { ses_a: [] };
+  backend.active = new Set(['ses_a']);
+  backend.inboxSession = Object.fromEntries(inbox.map((item) => [item.id, 'ses_a']));
+  backend.inbox = inbox;
+  const controller = makeController(() => Promise.resolve([]), backend);
+  return { backend, controller };
+}
+
 describe('send-now targets the hinted queued item (issue #40)', () => {
   test('a pending steer item ahead of a queued one is skipped', async () => {
     const backend = queuedBackend();
@@ -2378,6 +2394,134 @@ describe(`Up recalls the newest queued follow-up (issue #30)`, () => {
 
     expect(controller.state.composer.text).toBe('second follow-up');
     controller.dispose();
+  });
+});
+
+describe('queue overlay keyboard selection matches visible user items (issue #88)', () => {
+  test('a compaction entry is not cancelable; user rows map one-to-one to Up/Down then x', async () => {
+    const { backend, controller } = queueController([
+      { id: 'in_c', kind: 'compaction', delivery: 'queue', text: 'compacting...', createdAt: 1 },
+      { id: 'in_a', kind: 'user', delivery: 'queue', text: 'userA', createdAt: 2 },
+      { id: 'in_b', kind: 'user', delivery: 'queue', text: 'userB', createdAt: 3 },
+    ]);
+    try {
+      await attach(controller, 'ses_a');
+      // currentView().queued filters compactions out: [userA, userB]
+      controller.setOverlay({ kind: 'queue', index: 0 });
+      pressKey(controller, { name: 'x' });
+      expect(cancelFor(backend, 'in_a')).toHaveLength(1);
+      expect(cancelFor(backend, 'in_b')).toHaveLength(0);
+      expect(promoteFor(backend, 'in_c')).toHaveLength(0);
+
+      // Second visible row operates on userB, never on the compaction.
+      pressKey(controller, { name: 'down' });
+      pressKey(controller, { name: 'x' });
+      expect(cancelFor(backend, 'in_b')).toHaveLength(1);
+      expect(cancelFor(backend, 'in_a')).toHaveLength(1);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('removing an item during selection cannot cancel or promote the wrong ID (#88)', async () => {
+    const { backend, controller } = queueController([
+      { id: 'in_a', kind: 'user', delivery: 'queue', text: 'userA', createdAt: 1 },
+      { id: 'in_b', kind: 'user', delivery: 'queue', text: 'userB', createdAt: 2 },
+      { id: 'in_c', kind: 'user', delivery: 'queue', text: 'userC', createdAt: 3 },
+    ]);
+    try {
+      await attach(controller, 'ses_a');
+      controller.setOverlay({ kind: 'queue', index: 2 }); // userC highlighted
+
+      // userB (the middle row) is delivered while the dialog is open: refresh the inbox
+      // from the backend, then the stale index clamps onto userC which is still visible.
+      backend.inbox = [backend.inbox[0]!, backend.inbox[2]!];
+      backend.inboxSession = { in_a: 'ses_a', in_c: 'ses_a' };
+      controller.openSession('ses_a');
+      await flush();
+      controller.setOverlay({ kind: 'queue', index: 2 }); // stale index for the new list
+      pressKey(controller, { name: 'x' });
+      expect(cancelFor(backend, 'in_c')).toHaveLength(1);
+      expect(cancelFor(backend, 'in_b')).toHaveLength(0);
+      expect(promoteFor(backend, 'in_b')).toHaveLength(0);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('an out-of-range stale index clamps to the last visible item (#88)', async () => {
+    const { backend, controller } = queueController([
+      { id: 'in_a', kind: 'user', delivery: 'queue', text: 'userA', createdAt: 1 },
+      { id: 'in_b', kind: 'user', delivery: 'queue', text: 'userB', createdAt: 2 },
+    ]);
+    try {
+      await attach(controller, 'ses_a');
+      controller.setOverlay({ kind: 'queue', index: 5 }); // far beyond the two rows
+      pressKey(controller, { name: 'x' });
+      // index clamps onto the last visible row (userB) instead of acting on nothing.
+      expect(cancelFor(backend, 'in_b')).toHaveLength(1);
+      expect(cancelFor(backend, 'in_a')).toHaveLength(0);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('an empty queue selects nothing and cancels/promotes nothing (#88)', async () => {
+    const { backend, controller } = queueController([]);
+    try {
+      await attach(controller, 'ses_a');
+      controller.setOverlay({ kind: 'queue', index: 0 });
+      pressKey(controller, { name: 'up' });
+      pressKey(controller, { name: 'down' });
+      pressKey(controller, { name: 'x' });
+      pressKey(controller, { name: 's' });
+      expect(cancelFor(backend, 'anything')).toHaveLength(0);
+      expect(promoteFor(backend, 'anything')).toHaveLength(0);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('remote queue acts only on the displayed host when session IDs collide (#88)', async () => {
+    const backendA = new FakeBackend();
+    backendA.serverID = 'local';
+    backendA.sessions = [{ ...fakeSession('ses_same'), directory: '/shared' }];
+    backendA.inboxSession = { in_a: 'ses_same' };
+    backendA.inbox = [{ id: 'in_a', kind: 'user', delivery: 'queue', text: 'userA', createdAt: 1 }];
+
+    const backendB = new FakeBackend();
+    backendB.serverID = 'srv_1';
+    backendB.sessions = [{ ...fakeSession('ses_same'), directory: '/shared' }];
+    backendB.inboxSession = { in_b: 'ses_same' };
+    backendB.inbox = [{ id: 'in_b', kind: 'user', delivery: 'queue', text: 'userB', createdAt: 2 }];
+
+    const controller = new AppController({
+      backend: backendA,
+      config: defaultConfig,
+      localState: emptyState,
+      platform: 'linux',
+      cwd: '/work/kohjoh',
+      version: '0.0.1',
+      now: () => 10_000,
+      saveLocalState: async () => {},
+      listFiles: () => Promise.resolve([]),
+      requestExit: () => {},
+      serverIDs: () => ['srv_1'],
+      backendFor: (serverID: string) => (serverID === 'srv_1' ? backendB : backendA),
+      serverInfo: () => ({ online: true }),
+    });
+    try {
+      await controller.bootstrap();
+      controller.openSession('ses_same'); // local host
+      await flush();
+      controller.setOverlay({ kind: 'queue', index: 0 });
+
+      pressKey(controller, { name: 'x' });
+      expect(cancelFor(backendA, 'in_a')).toHaveLength(1);
+      expect(cancelFor(backendB, 'in_b')).toHaveLength(0);
+    } finally {
+      controller.dispose();
+    }
   });
 });
 
