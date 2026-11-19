@@ -1659,7 +1659,13 @@ export class AppController {
       this.setState('overview', 'project', project);
       // Reload the newly selected project's persisted history so Up/Down and prompt
       // recording always target the viewed project, never the one just left (#107).
-      if (changed) this.loadHistoryFor(project.directory, project.serverID);
+      if (changed) {
+        this.loadHistoryFor(project.directory, project.serverID);
+        // A choice made on the previous host must not be carried into a session on this
+        // one: reset new-session defaults so they are scoped to the new catalog (#108).
+        this.setState('overview', 'agent', undefined);
+        this.setState('overview', 'model', undefined);
+      }
     }
   }
 
@@ -2489,12 +2495,25 @@ export class AppController {
     const originKey = this.routeKey(this.state.route);
     const originProject = this.currentProject();
     this.setState('admitting', true);
+    // Scope agent/model to the target project's catalog before creating: a choice made on
+    // another host must not be carried into a session here (issue #108). Wait for the
+    // correct scoped catalog and reject stale results after navigation.
+    if (!(await this.ensureCatalog(directory, serverID))) {
+      this.setState('admitting', false);
+      return undefined;
+    }
+    const scopedAgent =
+      agent !== undefined && this.state.agents.some((a) => a.id === agent) ? agent : undefined;
+    const scopedModel =
+      model !== undefined && this.state.models.some((m) => sameModel(m, model))
+        ? model
+        : this.state.defaultModel;
     let session: SessionSummary;
     try {
       session = await this.backendFor(serverID).createSession({
         directory,
-        ...(agent === undefined ? {} : { agent }),
-        ...(model === undefined ? {} : { model }),
+        ...(scopedAgent === undefined ? {} : { agent: scopedAgent }),
+        ...(scopedModel === undefined ? {} : { model: scopedModel }),
       });
       this.debugLog.write('action', { action: 'create-session', ok: true });
     } catch (error) {

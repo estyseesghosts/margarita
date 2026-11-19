@@ -189,6 +189,88 @@ function selectRowForDirectory(controller: AppController, directory: string): vo
   }
 }
 
+const catalogAgentA = { id: 'agent-a', name: 'agent-a', mode: 'primary' as const, hidden: false };
+const catalogAgentB = { id: 'agent-b', name: 'agent-b', mode: 'primary' as const, hidden: false };
+const catalogAgentC = { id: 'agent-c', name: 'agent-c', mode: 'primary' as const, hidden: false };
+const catalogModelA = {
+  providerID: 'p',
+  modelID: 'model-a',
+  name: 'model-a',
+  enabled: true,
+  variants: [],
+};
+const catalogModelB = {
+  providerID: 'p',
+  modelID: 'model-b',
+  name: 'model-b',
+  enabled: true,
+  variants: [],
+};
+const catalogModelC = {
+  providerID: 'p',
+  modelID: 'model-c',
+  name: 'model-c',
+  enabled: true,
+  variants: [],
+};
+
+/** Multi-host controller: A (local) serves /proj-a and /proj-c; B (srv_1) serves /proj-b. */
+function catalogController() {
+  const backendA = new FakeBackend();
+  const backendB = new FakeBackend();
+  backendB.serverID = 'srv_1';
+  // Per-directory catalogs: host A's /proj-a and /proj-c, host B's /proj-b are disjoint.
+  backendA.listAgents = async (directory?: string) => {
+    if (directory === '/proj-a') return [catalogAgentA];
+    if (directory === '/proj-c') return [catalogAgentC];
+    return [];
+  };
+  backendA.listModels = async (directory?: string) => {
+    if (directory === '/proj-a') return [catalogModelA];
+    if (directory === '/proj-c') return [catalogModelC];
+    return [];
+  };
+  backendA.defaultModel = async (directory?: string) => {
+    if (directory === '/proj-a') return catalogModelA;
+    if (directory === '/proj-c') return catalogModelC;
+    return undefined;
+  };
+  backendB.listAgents = async (directory?: string) =>
+    directory === '/proj-b' ? [catalogAgentB] : [];
+  backendB.listModels = async (directory?: string) =>
+    directory === '/proj-b' ? [catalogModelB] : [];
+  backendB.defaultModel = async (directory?: string) =>
+    directory === '/proj-b' ? catalogModelB : undefined;
+  backendA.sessions = [{ ...fakeSession('ses_a'), directory: '/proj-a' }];
+  backendA.sessions.push({ ...fakeSession('ses_c'), directory: '/proj-c' });
+  backendB.sessions = [{ ...fakeSession('ses_b'), serverID: 'srv_1', directory: '/proj-b' }];
+  const controller = new AppController({
+    backend: backendA,
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+    serverIDs: () => ['srv_1'],
+    backendFor: (serverID: string) => (serverID === 'srv_1' ? backendB : backendA),
+    serverInfo: () => ({ online: true }),
+  });
+  return {
+    controller,
+    backendA,
+    backendB,
+    agentA: catalogAgentA,
+    agentB: catalogAgentB,
+    modelA: catalogModelA,
+    modelB: catalogModelB,
+    modelC: catalogModelC,
+  };
+}
+
 function isPromptDraft(value: unknown): value is PromptDraft {
   return typeof value === 'object' && value !== null && 'text' in value && 'files' in value;
 }
@@ -1488,6 +1570,101 @@ describe('overview selection reloads project-scoped history (issue #107)', () =>
 
       expect(saved.value?.history['/proj-b']).toEqual(['B prompt', 'new B']);
       expect(saved.value?.history['/proj-a']).toEqual(['A prompt']);
+    } finally {
+      controller.dispose();
+    }
+  });
+});
+
+describe('createSession scopes agent/model to the target project (issue #108)', () => {
+  test("switching hosts resets defaults and never carries another host's agent/model into createSession", async () => {
+    const { controller, backendA, backendB, agentA, modelA, modelB } = catalogController();
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+
+      // Choose host A's agent/model while viewing its project, then switch to host B.
+      selectRowForDirectory(controller, '/proj-a');
+      await controller.loadCatalog('/proj-a', 'local');
+      controller.setNewSessionDefaults(agentA.id, modelA);
+      expect(controller.state.overview.agent).toBe('agent-a');
+      expect(controller.state.overview.model).toEqual(modelA);
+
+      selectRowForDirectory(controller, '/proj-b');
+      // Switching hosts resets new-session defaults to the server default.
+      expect(controller.state.overview.agent).toBeUndefined();
+      expect(controller.state.overview.model).toBeUndefined();
+
+      await controller.createSessionWithPrompt(
+        { serverID: 'srv_1', directory: '/proj-b' },
+        'prompt',
+      );
+      await flush();
+
+      const bCreate = backendB.calls.filter((call) => call.name === 'createSession');
+      expect(bCreate).toHaveLength(1);
+      // B-specific request: B's directory and default model, never A's agent-a/model-a.
+      expect(bCreate[0]!.args[0]).toEqual({ directory: '/proj-b', model: modelB });
+      expect(backendA.calls.filter((call) => call.name === 'createSession')).toHaveLength(0);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('same-host different-directory projects keep agent/model separate', async () => {
+    const { controller, backendA, agentA, modelA, modelC } = catalogController();
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+
+      selectRowForDirectory(controller, '/proj-a');
+      await controller.loadCatalog('/proj-a', 'local');
+      controller.setNewSessionDefaults(agentA.id, modelA);
+      expect(controller.state.overview.agent).toBe('agent-a');
+
+      selectRowForDirectory(controller, '/proj-c');
+      // Another directory on the same host also resets the defaults.
+      expect(controller.state.overview.agent).toBeUndefined();
+      expect(controller.state.overview.model).toBeUndefined();
+
+      await controller.createSessionWithPrompt(
+        { serverID: 'local', directory: '/proj-c' },
+        'prompt',
+      );
+      await flush();
+
+      const cCreate = backendA.calls.filter((call) => call.name === 'createSession');
+      expect(cCreate).toHaveLength(1);
+      expect(cCreate[0]!.args[0]).toEqual({ directory: '/proj-c', model: modelC });
+      // Host A's agent-a never leaks into /proj-c's create request.
+      expect(cCreate[0]!.args[0]).not.toHaveProperty('agent', agentA.id);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('an agent/model invalid for the target project is scoped to its catalog before creation', async () => {
+    const { controller, backendA, modelA, modelB } = catalogController();
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+
+      selectRowForDirectory(controller, '/proj-a');
+      await controller.loadCatalog('/proj-a', 'local');
+      // Set a model that belongs to host B while viewing host A's project.
+      controller.setNewSessionDefaults(undefined, modelB);
+      expect(controller.state.overview.model).toEqual(modelB);
+
+      await controller.createSessionWithPrompt(
+        { serverID: 'local', directory: '/proj-a' },
+        'prompt',
+      );
+      await flush();
+
+      const aCreate = backendA.calls.filter((call) => call.name === 'createSession');
+      expect(aCreate).toHaveLength(1);
+      // The invalid modelB is scoped to /proj-a's valid default (modelA), never sent as-is.
+      expect(aCreate[0]!.args[0]).toEqual({ directory: '/proj-a', model: modelA });
     } finally {
       controller.dispose();
     }
