@@ -86,12 +86,8 @@ export type TranscriptNode =
       key: string;
       summary: string;
       running: boolean;
-      /**
-       * One short, sanitized description of the call executing right now inside this
-       * group (`$ tail -8 log`, `lotus: get_issue`), shown beneath the collapsed row.
-       * Absent for historical groups: only a genuinely running/streaming call sets it.
-       */
-      live?: string;
+      /** The call executing right now inside this group, shown beneath the collapsed row. */
+      live?: LiveTool;
       tools: readonly ToolCall[];
       expanded: boolean;
     }
@@ -565,27 +561,58 @@ export function activeTool(tools: readonly ToolCall[]): ToolCall | undefined {
     .toSorted((left, right) => right.startedAt - left.startedAt)[0];
 }
 
+export type LiveTool = Readonly<{
+  /** Safe single-line label: `$ tail -8 file`, `lotus: get_issue`, `Reading src/a.ts`. */
+  text: string;
+  /** Wall start of this exact call, so a contextual hint times the call, not the turn. */
+  startedAt: number;
+  /** True only for a shell command, the one kind of call that can be backgrounded. */
+  shell: boolean;
+}>;
+
+/** A hint about a long-running call is meaningless before this much wall time. */
+export const backgroundHintAfterMs = 10_000;
+
 /**
- * Safe single-line label for an executing call: `$ tail -8 file` for shell, `lotus:
- * get_issue` for MCP, `Reading src/a.ts` for reads. Arguments are clipped to their first
- * line and sanitized; the caller clips to the terminal width.
+ * Safe single-line label for an executing call. Arguments are clipped to their first line
+ * and sanitized; the caller clips to the terminal width.
  */
 export function liveToolLine(
   tools: readonly ToolCall[],
   mcpServers: readonly string[] = [],
-): string | undefined {
+): LiveTool | undefined {
   const active = activeTool(tools);
   if (active === undefined) return undefined;
   const identity = toolIdentity(active.name, mcpServers);
-  if (identity.kind === 'mcp') return `${identity.server}: ${identity.tool}`;
+  const shell = classifyTool(active.name) === 'shell';
+  if (identity.kind === 'mcp')
+    return { text: `${identity.server}: ${identity.tool}`, startedAt: active.startedAt, shell };
   const category = classifyTool(active.name);
   const verb = identity.kind === 'builtin' ? activityLabels[category] : 'Calling';
   const target = liveArgumentKeys
     .map((key) => active.input[key])
     .find((value): value is string => typeof value === 'string' && value.trim() !== '');
   const firstLine = target?.split('\n')[0]?.trim();
-  if (firstLine === undefined || firstLine === '') return verb;
-  return category === 'shell' ? `$ ${firstLine}` : `${verb} ${firstLine}`;
+  const text =
+    firstLine === undefined || firstLine === ''
+      ? verb
+      : category === 'shell'
+        ? `$ ${firstLine}`
+        : `${verb} ${firstLine}`;
+  return { text, startedAt: active.startedAt, shell };
+}
+
+/**
+ * Whether the live call has been running strictly longer than the threshold. Only a shell
+ * call qualifies: the background action moves running tools, and the hint is contextual to
+ * the command the user is waiting on (issue #76).
+ */
+export function backgroundHint(
+  live: LiveTool | undefined,
+  nowMs: number,
+  thresholdMs: number = backgroundHintAfterMs,
+): boolean {
+  return live !== undefined && live.shell && nowMs - live.startedAt > thresholdMs;
 }
 
 const argumentKeys = ['filePath', 'path', 'pattern', 'command', 'url', 'query', 'description'];

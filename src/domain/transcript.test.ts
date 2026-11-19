@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { sanitizeTerminalText } from './sanitize-text.ts';
 import {
   type AssistantPart,
+  backgroundHint,
   describeTool,
   foldTranscript,
   formatToolTiming,
@@ -547,7 +548,9 @@ describe('live action beneath a collapsed group (issue #75)', () => {
     );
     const group = nodes[0];
     expect(group?.kind === 'tool-group' && group.expanded).toBe(false);
-    expect(group?.kind === 'tool-group' && group.live).toBe('$ tail -8 /var/log/platinum.log');
+    expect(group?.kind === 'tool-group' && group.live?.text).toBe(
+      '$ tail -8 /var/log/platinum.log',
+    );
   });
 
   test('an MCP call names its server and operation', () => {
@@ -555,7 +558,7 @@ describe('live action beneath a collapsed group (issue #75)', () => {
       [assistant([toolPart(runningTool('l', 'lotus_get_issue', { id: 4 }))])],
       { ...compact, mcpServers: ['lotus'] },
     );
-    expect(nodes[0]?.kind === 'tool-group' && nodes[0].live).toBe('lotus: get_issue');
+    expect(nodes[0]?.kind === 'tool-group' && nodes[0].live?.text).toBe('lotus: get_issue');
   });
 
   test('the live line follows the most recently started call, not the last seen', () => {
@@ -568,7 +571,7 @@ describe('live action beneath a collapsed group (issue #75)', () => {
       ],
       compact,
     );
-    expect(nodes[0]?.kind === 'tool-group' && nodes[0].live).toBe('$ bun test');
+    expect(nodes[0]?.kind === 'tool-group' && nodes[0].live?.text).toBe('$ bun test');
   });
 
   test('a finished call leaves no stale live line on historical groups', () => {
@@ -610,8 +613,82 @@ describe('live action beneath a collapsed group (issue #75)', () => {
       compact,
     );
     const live = nodes[0]?.kind === 'tool-group' ? nodes[0].live : undefined;
-    expect(live?.includes('\n')).toBe(false);
-    expect(live?.startsWith('$ echo ')).toBe(true);
+    expect(live?.text.includes('\n')).toBe(false);
+    expect(live?.text.startsWith('$ echo ')).toBe(true);
+  });
+});
+
+function hintRunning(
+  id: string,
+  name: string,
+  startedAt: number,
+  input: Record<string, unknown> = {},
+): ToolCall {
+  return { id, name, status: 'running', input, startedAt };
+}
+
+function liveOf(startedAt: number) {
+  const nodes = foldTranscript(
+    [assistant([toolPart(hintRunning('s', 'shell', startedAt, { command: 'bun test' }))])],
+    compact,
+  );
+  return nodes[0]?.kind === 'tool-group' ? nodes[0].live : undefined;
+}
+
+describe('background hint after a long running shell command (issue #76)', () => {
+  test('the hint appears only after strictly more than 10 seconds', () => {
+    expect(backgroundHint(liveOf(1000), 10_000)).toBe(false); // 9.0s
+    expect(backgroundHint(liveOf(1000), 10_999)).toBe(false); // 9.999s
+    expect(backgroundHint(liveOf(1000), 11_000)).toBe(false); // exactly 10.0s
+    expect(backgroundHint(liveOf(1000), 11_001)).toBe(true); // 10.001s
+  });
+
+  test('a long MCP, read or reasoning phase never inherits the shell hint', () => {
+    const mcpGroup = foldTranscript(
+      [assistant([toolPart(hintRunning('l', 'lotus_get_issue', 1))])],
+      { ...compact, mcpServers: ['lotus'] },
+    );
+    const mcpLive = mcpGroup[0]?.kind === 'tool-group' ? mcpGroup[0].live : undefined;
+    expect(backgroundHint(mcpLive, 60_000)).toBe(false);
+
+    const readGroup = foldTranscript(
+      [assistant([toolPart(hintRunning('r', 'read', 1, { path: 'src/a.ts' }))])],
+      compact,
+    );
+    const readLive = readGroup[0]?.kind === 'tool-group' ? readGroup[0].live : undefined;
+    expect(backgroundHint(readLive, 60_000)).toBe(false);
+  });
+
+  test('a completed shell call never earns the hint, however long it is shown', () => {
+    const nodes = foldTranscript(
+      [
+        assistant([
+          toolPart({
+            id: 's',
+            name: 'shell',
+            status: 'completed',
+            input: { command: 'bun test' },
+            startedAt: 1,
+            completedAt: 90_000,
+          }),
+        ]),
+      ],
+      compact,
+    );
+    const live = nodes[0]?.kind === 'tool-group' ? nodes[0].live : undefined;
+    expect(live).toBeUndefined();
+    expect(backgroundHint(live, 90_000)).toBe(false);
+  });
+
+  test('the live call carries its own start, so the hint times the call not the turn', () => {
+    const nodes = foldTranscript(
+      [assistant([toolPart(hintRunning('s', 'shell', 42_000, { command: 'tail -f log' }))])],
+      compact,
+    );
+    const live = nodes[0]?.kind === 'tool-group' ? nodes[0].live : undefined;
+    expect(live?.startedAt).toBe(42_000);
+    // A long turn (e.g. 60s of reads) followed by a fresh shell call shows no hint.
+    expect(backgroundHint(live, 45_000)).toBe(false);
   });
 });
 

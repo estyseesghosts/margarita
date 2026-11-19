@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import { parseKeypress } from '@opentui/core';
 
-import { actionFor, buildKeymap } from '../domain/keymap.ts';
+import { actionFor, actionHint, buildKeymap } from '../domain/keymap.ts';
 import { toKeyInput } from './app.tsx';
 
 /**
@@ -44,5 +44,22 @@ describe('Windows Terminal key chains (issue #73)', () => {
   test('F6 steers with or without the kitty protocol', () => {
     expect(steeredBy('\u001b[17~', true)).toBe('composer.steer');
     expect(steeredBy('\u001b[17~', false)).toBe('composer.steer');
+  });
+});
+
+describe('background hint label follows the effective binding (issue #76)', () => {
+  test('the default tools.background binding reads Ctrl+B', () => {
+    expect(actionHint(buildKeymap({}).keymap, 'tools.background')).toBe('Ctrl+B');
+  });
+
+  test('a remapped binding is advertised, and an unbound action never is', () => {
+    expect(actionHint(buildKeymap({ 'tools.background': 'f8' }).keymap, 'tools.background')).toBe(
+      'F8',
+    );
+    expect(
+      actionHint(buildKeymap({ 'tools.background': 'alt+b' }).keymap, 'tools.background'),
+    ).toBe('Alt+B');
+    // No binding ⇒ no hint text; the UI then never advertises the action.
+    expect(actionHint(new Map(), 'tools.background')).toBeUndefined();
   });
 });

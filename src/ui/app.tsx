@@ -20,6 +20,8 @@ export type AppProps = Readonly<{
   animate: boolean;
   ascii: boolean;
   env: NodeJS.ProcessEnv;
+  /** How often the 10s background hint threshold is re-checked (default 1s). */
+  hintTickMs?: number;
 }>;
 
 /** Structural subset of a terminal key event; KeyEvent satisfies this. */
@@ -101,12 +103,14 @@ export function App(props: AppProps) {
           {(route: Accessor<{ kind: 'conversation'; serverID: string; sessionID: string }>) => (
             <Transcript
               controller={controller}
+              keymap={props.keymap}
               sessionID={route().sessionID}
               serverID={route().serverID}
               theme={props.theme}
               width={width()}
               animate={props.animate}
               ascii={props.ascii}
+              hintTickMs={props.hintTickMs}
               onScrollHandle={(handle) => {
                 scrollTranscript = handle;
               }}

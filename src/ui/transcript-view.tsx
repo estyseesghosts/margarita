@@ -22,6 +22,7 @@ import type { PatchLine } from '../domain/diff.ts';
 import { clampDiffPatch, diffCounts, editDiff, isEditLike, toolPath } from '../domain/edit-diff.ts';
 import { type ExecutionMarker, executionMarkers } from '../domain/execution-segment.ts';
 import type { FormRequest } from '../domain/form.ts';
+import { actionHint, type Keymap } from '../domain/keymap.ts';
 import { formatModelRef, type ModelSelection } from '../domain/model-ref.ts';
 import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
 import { sessionKey } from '../domain/server-identity.ts';
@@ -29,9 +30,11 @@ import { assertNever } from '../domain/session.ts';
 import { stickyPrompt, truncatePrompt } from '../domain/sticky-prompt.ts';
 import { type ThrobberFacts } from '../domain/throbber.ts';
 import {
+  backgroundHint,
   describeTool,
   foldTranscript,
   formatToolTiming,
+  type LiveTool,
   type ToolCall,
   type TranscriptNode,
   windowNodes,
@@ -44,12 +47,15 @@ import { Throbber } from './throbber-view.tsx';
 
 export type TranscriptProps = Readonly<{
   controller: AppController;
+  keymap: Keymap;
   sessionID: string;
   serverID: string;
   theme: Theme;
   width: number;
   animate: boolean;
   ascii: boolean;
+  /** How often the 10s background hint threshold is re-checked (default 1s). */
+  hintTickMs?: number | undefined;
   /** Receives the scroll function for key routing while this transcript is mounted. */
   onScrollHandle?: (scroll: ((move: ScrollMove) => void) | undefined) => void;
 }>;
@@ -60,8 +66,17 @@ type NodeOf<K extends TranscriptNode['kind']> = Extract<TranscriptNode, { kind: 
 
 export function Transcript(props: TranscriptProps) {
   const state = props.controller.state;
+  const backgroundKey = actionHint(props.keymap, 'tools.background');
   const sessionKeyValue = () =>
     sessionKey({ serverID: props.serverID, sessionID: props.sessionID });
+  // The hint threshold is 10s, so a 2s tick keeps it accurate without transcript-speed
+  // redraws, and the timer only asks while a call is actually running.
+  const [hintNow, setHintNow] = createSignal(props.controller.now());
+  const hintTimer = setInterval(() => {
+    if (state.running[sessionKeyValue()] !== true) return;
+    setHintNow(props.controller.now());
+  }, props.hintTickMs ?? 1000);
+  onCleanup(() => clearInterval(hintTimer));
   const transcript = () => state.transcripts[sessionKeyValue()];
   const nodes = createMemo(() => {
     const messages = transcript()?.messages ?? [];
@@ -207,6 +222,8 @@ export function Transcript(props: TranscriptProps) {
                   animate={props.animate}
                   ascii={props.ascii}
                   mcpServers={state.mcpServers}
+                  now={hintNow()}
+                  backgroundKey={backgroundKey}
                 />
               </box>
             </>
@@ -326,6 +343,9 @@ function NodeView(props: {
   animate: boolean;
   ascii: boolean;
   mcpServers: readonly string[];
+  now: number;
+  /** Label of the user's effective `tools.background` binding, absent when unbound. */
+  backgroundKey: string | undefined;
 }) {
   const theme = () => props.theme;
   return (
@@ -397,10 +417,19 @@ function NodeView(props: {
             </text>
             {/* One continuously updated action, visible while the group is collapsed. */}
             <Show when={node().live}>
-              {(live: Accessor<string>) => (
-                <text fg={theme().dim}>
-                  {`    └ ${truncateToWidth(sanitizeText(live()), Math.max(8, props.width - 6))}`}
-                </text>
+              {(live: Accessor<LiveTool>) => (
+                <>
+                  <text fg={theme().dim}>
+                    {`    └ ${truncateToWidth(sanitizeText(live().text), Math.max(8, props.width - 6))}`}
+                  </text>
+                  <Show
+                    when={backgroundHint(live(), props.now) && props.backgroundKey !== undefined}
+                  >
+                    <text fg={theme().dim}>
+                      {`      └ ${props.backgroundKey} to move to background`}
+                    </text>
+                  </Show>
+                </>
               )}
             </Show>
             <Show when={node().expanded}>

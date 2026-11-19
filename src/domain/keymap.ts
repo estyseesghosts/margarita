@@ -111,6 +111,41 @@ export function formatBinding(binding: KeyBinding): string {
   return [...parts.filter((part) => part !== ''), binding.key].join('+');
 }
 
+/** Human key label for hints and docs: `Ctrl+B`, `Shift+Tab`, `F6`. */
+export function bindingLabel(binding: KeyBinding): string {
+  const named: Readonly<Record<string, string>> = {
+    escape: 'Esc',
+    enter: 'Enter',
+    backspace: 'Backspace',
+    delete: 'Delete',
+    tab: 'Tab',
+    pageup: 'PageUp',
+    pagedown: 'PageDown',
+    home: 'Home',
+    end: 'End',
+    up: 'Up',
+    down: 'Down',
+    left: 'Left',
+    right: 'Right',
+  };
+  const modifiers = [
+    binding.ctrl ? 'Ctrl' : '',
+    binding.alt ? 'Alt' : '',
+    binding.shift ? 'Shift' : '',
+  ].filter((part) => part !== '');
+  const key = named[binding.key] ?? binding.key.toUpperCase();
+  return [...modifiers, key].join('+');
+}
+
+/**
+ * The first usable label for an action, or undefined when it is unbound (or bound only to
+ * keys a hint cannot describe). Never advertises an action the user cannot press.
+ */
+export function actionHint(keymap: Keymap, action: ActionID): string | undefined {
+  const binding = keymap.get(action)?.[0];
+  return binding === undefined ? undefined : bindingLabel(binding);
+}
+
 export type Keymap = ReadonlyMap<ActionID, readonly KeyBinding[]>;
 
 export type KeymapBuild = Readonly<{ keymap: Keymap; errors: readonly string[] }>;

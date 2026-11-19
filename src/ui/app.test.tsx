@@ -26,7 +26,10 @@ afterEach(() => {
   current = undefined;
 });
 
-async function mount(backend: FakeBackend, options: { kittyKeyboard?: boolean } = {}) {
+async function mount(
+  backend: FakeBackend,
+  options: { kittyKeyboard?: boolean; now?: () => number; hintTickMs?: number } = {},
+) {
   const controller = new AppController({
     backend,
     config: defaultConfig,
@@ -34,7 +37,7 @@ async function mount(backend: FakeBackend, options: { kittyKeyboard?: boolean } 
     platform: 'linux',
     cwd: '/work/kohjoh',
     version: '0.0.1',
-    now: () => 10_000,
+    now: options.now ?? (() => 10_000),
     saveLocalState: async () => {},
     listFiles: async () => [],
     requestExit: () => {},
@@ -49,6 +52,7 @@ async function mount(backend: FakeBackend, options: { kittyKeyboard?: boolean } 
         animate: false,
         ascii: false,
         env: {},
+        ...(options.hintTickMs === undefined ? {} : { hintTickMs: options.hintTickMs }),
       }),
     options.kittyKeyboard === undefined
       ? { width: 80, height: 24 }
@@ -1493,6 +1497,58 @@ describe('live action beneath a collapsed group (issue #75)', () => {
     expect(frame).toContain('└ lotus: get_issue');
     // It is not the historical group that shows a fake action: the running one only.
     expect(frame).not.toContain('└ $ bun run');
+    controller.dispose();
+  });
+
+  test('the background hint appears under a shell call only after 10 seconds (issue #76)', async () => {
+    let clock = 5_000;
+    const backend = backendWithSession();
+    const model = { providerID: 'opencode', modelID: 'longcat' };
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'run the suite', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'mA',
+          createdAt: 2,
+          agent: 'build',
+          model,
+          parts: [
+            { kind: 'text', text: 'Starting.' },
+            {
+              kind: 'tool',
+              tool: {
+                id: 's',
+                name: 'shell',
+                status: 'running',
+                input: { command: 'bun test' },
+                startedAt: 4_000,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    backend.active = new Set(['ses_a']);
+    const { controller, setup } = await mount(backend, {
+      now: () => clock,
+      hintTickMs: 20,
+    });
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    // 1s elapsed: the command is named, but there is no hint yet.
+    let frame = setup.captureCharFrame();
+    expect(frame).toContain('└ $ bun test');
+    expect(frame).not.toContain('Ctrl+B to move to background');
+
+    // Past 10s: the hint appears directly beneath the command.
+    clock = 14_100;
+    await Bun.sleep(50);
+    await setup.renderOnce();
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('└ $ bun test');
+    expect(frame).toContain('Ctrl+B to move to background');
     controller.dispose();
   });
 });

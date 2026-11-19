@@ -70,7 +70,7 @@ Print mode is always explicit: giving a prompt never silently turns it on.
 | `Ctrl+J` | Newline |
 | `F6` (or `Ctrl+Enter` / `Alt+Enter`) | Steer the running agent. `F6` always works; the modified Enter works only where the terminal reports modified Enter (e.g. kitty keyboard protocol) — Windows Terminal needs kitty support for those two |
 | `Ctrl+T` | Goal and task checklist |
-| `Ctrl+B` | Move running tools to the background |
+| `Ctrl+B` | Move running tools to the background (the command row shows this hint after 10s) |
 | `Ctrl+C` | Interrupt, clear, then exit |
 | `F1` | Help |
 
