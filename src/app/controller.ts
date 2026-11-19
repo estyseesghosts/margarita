@@ -97,6 +97,7 @@ import {
   localServerID,
   parseSessionKey,
   projectKey,
+  type ProjectRef,
   sessionKey,
   type SessionRef,
 } from '../domain/server-identity.ts';
@@ -282,6 +283,19 @@ export class AppController {
   private activeServerID(): string {
     const route = this.state.route;
     return route.kind === 'overview' ? this.serverID : route.serverID;
+  }
+
+  /**
+   * The project the composer operates on, with its owning server. Overview selection
+   * always travels as (server, directory) so a new session can never be created on the
+   * wrong host with a remote path.
+   */
+  currentProject(): ProjectRef {
+    const route = this.state.route;
+    if (route.kind === 'new') return { serverID: route.serverID, directory: route.directory };
+    const session = this.currentSession();
+    if (session !== undefined) return { serverID: session.serverID, directory: session.directory };
+    return this.state.overview.project;
   }
 
   /** Backend for user actions and loads on the current route. Fails closed by server. */
@@ -1030,21 +1044,27 @@ export class AppController {
     );
   }
 
-  private async refreshSummary(sessionID: string): Promise<void> {
+  private async refreshSummary(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): Promise<void> {
     try {
-      const session = await this.backend.getSession(sessionID);
+      const session = await this.backendFor(serverID).getSession(sessionID);
       // reconcile replaces the stored summary wholesale: absent `revert` is removed again.
-      this.setState('sessions', this.sessionKeyOf(sessionID), reconcile(session));
-      this.reconcileStagedRevert(sessionID);
+      this.setState('sessions', this.keyFor(serverID, sessionID), reconcile(session));
+      this.reconcileStagedRevert(sessionID, serverID);
     } catch (error) {
       if (error instanceof BackendError && error.kind === 'not-found') return;
       throw error;
     }
   }
 
-  private async refreshInbox(sessionID: string): Promise<void> {
-    const items = await this.backend.listInbox(sessionID);
-    this.setState('inbox', this.sessionKeyOf(sessionID), items);
+  private async refreshInbox(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): Promise<void> {
+    const items = await this.backendFor(serverID).listInbox(sessionID);
+    this.setState('inbox', this.keyFor(serverID, sessionID), items);
   }
 
   private async refreshInputRequests(
@@ -1086,9 +1106,13 @@ export class AppController {
     void this.track('transcript', run);
   }
 
-  private async fetchLatest(sessionID: string): Promise<void> {
-    const page = await this.backend.listMessages(sessionID, transcriptPageSize);
-    const existing = this.state.transcripts[this.sessionKeyOf(sessionID)];
+  private async fetchLatest(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): Promise<void> {
+    const key = this.keyFor(serverID, sessionID);
+    const page = await this.backendFor(serverID).listMessages(sessionID, transcriptPageSize);
+    const existing = this.state.transcripts[key];
     const merged = mergeLatest(existing?.messages ?? [], page.messages);
     // Cached messages older than this page keep their own cursor; otherwise the page's
     // cursor is the way further back (an empty placeholder transcript has none).
@@ -1097,7 +1121,7 @@ export class AppController {
     this.setState(
       'transcripts',
       produce((transcripts) => {
-        transcripts[sessionID] = {
+        transcripts[key] = {
           messages: merged,
           loading: false,
           stale: false,
@@ -1105,7 +1129,7 @@ export class AppController {
         };
       }),
     );
-    this.touchTranscript(sessionID);
+    this.touchTranscript(key);
   }
 
   async loadOlder(sessionID: string): Promise<void> {
@@ -1179,12 +1203,15 @@ export class AppController {
     );
   }
 
-  private async loadConversation(sessionID: string): Promise<void> {
+  private async loadConversation(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): Promise<void> {
     await Promise.all([
-      this.fetchLatest(sessionID),
-      this.refreshInbox(sessionID),
-      this.refreshInputRequests(sessionID),
-      this.refreshSummary(sessionID),
+      this.fetchLatest(sessionID, serverID),
+      this.refreshInbox(sessionID, serverID),
+      this.refreshInputRequests(sessionID, serverID),
+      this.refreshSummary(sessionID, serverID),
       this.refreshNativeGoal(sessionID),
     ]);
   }
@@ -1195,7 +1222,7 @@ export class AppController {
   openSession(sessionID: string, serverID: string = this.serverID): void {
     this.debugLog.write('route', { kind: 'conversation', serverID, sessionID });
     this.saveDraft();
-    const transcript = this.state.transcripts[this.sessionKeyOf(sessionID)];
+    const transcript = this.state.transcripts[this.keyFor(serverID, sessionID)];
     batch(() => {
       this.setState('route', { kind: 'conversation', serverID, sessionID });
       this.setState('overlay', { kind: 'none' });
@@ -1217,7 +1244,7 @@ export class AppController {
       this.loadHistoryFor(directory, serverID);
       this.refreshCatalogIfStale(directory, serverID);
     }
-    void this.track('attach', this.loadConversation(sessionID));
+    void this.track('attach', this.loadConversation(sessionID, serverID));
     void this.loadGoal(sessionID);
   }
 
@@ -1233,7 +1260,7 @@ export class AppController {
       this.setState('overlay', { kind: 'none' });
       this.setState('completion', undefined);
       this.setState('focusedGroup', undefined);
-      this.setState('overview', 'directory', directory);
+      this.setState('overview', 'project', { serverID, directory });
       this.restoreDraft(`new:${this.projectKeyOf(directory, serverID)}`);
     });
     this.loadHistoryFor(directory, serverID);
@@ -1247,7 +1274,7 @@ export class AppController {
   openOverview(): void {
     this.debugLog.write('route', { kind: 'overview' });
     this.saveDraft();
-    const directory = this.currentDirectory();
+    const project = this.currentProject();
     batch(() => {
       this.setState('route', { kind: 'overview' });
       this.setState('overlay', { kind: 'none' });
@@ -1255,7 +1282,7 @@ export class AppController {
       this.setState('focusedGroup', undefined);
       this.writeComposer(this.state.drafts['overview'] ?? emptyComposer);
       this.setState('attachments', [...(this.state.draftAttachments['overview'] ?? [])]);
-      this.setState('overview', 'directory', directory);
+      this.setState('overview', 'project', project);
       const first = this.overviewRows()[0];
       if (first === undefined) {
         this.setState('overview', 'focus', 'composer');
@@ -1264,7 +1291,10 @@ export class AppController {
         this.selectRow(first);
       }
     });
-    this.loadHistoryFor(this.state.overview.directory);
+    this.loadHistoryFor(
+      this.state.overview.project.directory,
+      this.state.overview.project.serverID,
+    );
   }
 
   /**
@@ -1309,13 +1339,18 @@ export class AppController {
   private selectRow(row: OverviewRow): void {
     this.setState('overview', 'focus', 'list');
     this.setState('overview', 'selectedRow', row.key);
-    const directory =
+    const project =
       row.kind === 'session'
-        ? row.session.directory
+        ? { serverID: row.session.serverID, directory: row.session.directory }
         : row.kind === 'toggle'
-          ? this.groups().find((group) => group.key === row.groupKey)?.directory
-          : undefined; // loadmore keeps the current directory
-    if (directory !== undefined) this.setState('overview', 'directory', directory);
+          ? (() => {
+              const group = this.groups().find((entry) => entry.key === row.groupKey);
+              return group === undefined
+                ? undefined
+                : { serverID: group.serverID, directory: group.directory };
+            })()
+          : undefined; // loadmore keeps the current project
+    if (project !== undefined) this.setState('overview', 'project', project);
   }
 
   selectedOverviewRow(): OverviewRow | undefined {
@@ -1479,7 +1514,7 @@ export class AppController {
       void this.loadMoreSessions();
       return;
     }
-    this.openSession(row.session.id);
+    this.openSession(row.session.id, row.session.serverID);
   }
 
   toggleOverviewGroup(groupKey: string): void {
@@ -1758,7 +1793,7 @@ export class AppController {
         this.showNotice('Start a session before running commands.', 'warn');
         return;
       }
-      await this.createSessionWithPrompt(this.currentDirectory(), text);
+      await this.createSessionWithPrompt(this.currentProject(), text);
       return;
     }
     const sessionID = this.state.route.sessionID;
@@ -1977,17 +2012,18 @@ export class AppController {
     );
   }
 
-  /** Creates a session in `directory`, sends the first prompt, then attaches. */
+  /** Creates a session in `project`, sends the first prompt, then attaches. */
   async createSessionWithPrompt(
-    directory: string,
+    project: ProjectRef,
     text: string | undefined,
   ): Promise<string | undefined> {
     const agent = this.state.overview.agent;
     const model = this.state.overview.model;
+    const { serverID, directory } = project;
     this.setState('admitting', true);
     let session: SessionSummary;
     try {
-      session = await this.backend.createSession({
+      session = await this.backendFor(serverID).createSession({
         directory,
         ...(agent === undefined ? {} : { agent }),
         ...(model === undefined ? {} : { model }),
@@ -2004,17 +2040,21 @@ export class AppController {
       return undefined;
     }
     this.setState('admitting', false);
-    this.setState('sessions', this.sessionKeyOf(session.id), session);
+    const sessionServerID = session.serverID ?? serverID;
+    this.setState('sessions', this.keyFor(sessionServerID, session.id), {
+      ...session,
+      serverID: sessionServerID,
+    });
     if (text !== undefined) {
       this.clearComposer(text);
-      this.openSession(session.id);
+      this.openSession(session.id, sessionServerID);
       this.writeComposer(composerFrom(text));
       const sentAttachments = [...this.state.attachments];
       const sent = await this.admit(
         text,
         directory,
         async () => {
-          await this.backend.prompt(session.id, {
+          await this.backendFor(sessionServerID).prompt(session.id, {
             text,
             files: await this.promptFiles(text, directory, sentAttachments),
           });
@@ -2025,7 +2065,7 @@ export class AppController {
       if (!sent)
         this.showNotice(`Session ${session.id} was created but the prompt was not sent.`, 'error');
     } else {
-      this.openSession(session.id);
+      this.openSession(session.id, sessionServerID);
     }
     return session.id;
   }
@@ -2135,7 +2175,7 @@ export class AppController {
         this.openOverview();
         return;
       case 'new':
-        this.startNewSession(this.currentDirectory());
+        this.startNewSession(this.currentDirectory(), this.currentProject().serverID);
         return;
       case 'agent':
         if (args === '') await this.cycleAgent(1);
@@ -3250,8 +3290,7 @@ export class AppController {
   }
 
   currentDirectory(): string {
-    if (this.state.route.kind === 'new') return this.state.route.directory;
-    return this.currentSession()?.directory ?? this.state.overview.directory;
+    return this.currentProject().directory;
   }
 
   describeModel(model: ModelSelection | undefined): string {
@@ -3502,18 +3541,22 @@ export class AppController {
     if (session === undefined) return;
     try {
       const forked = await this.backend.forkSession(session.id);
-      this.setState('sessions', this.sessionKeyOf(forked.id), forked);
-      const doc = this.state.goals[this.sessionKeyOf(session.id)];
+      const forkServerID = forked.serverID ?? session.serverID;
+      this.setState('sessions', this.keyFor(forkServerID, forked.id), {
+        ...forked,
+        serverID: forkServerID,
+      });
+      const doc = this.state.goals[this.keyFor(session.serverID, session.id)];
       if (doc !== undefined) {
         // Copy, never alias: the fork gets its own sidecar file.
         const copy = forkGoalPlan(doc, forked.id);
         this.setState(
           'goals',
-          this.sessionKeyOf(forked.id),
+          this.keyFor(forkServerID, forked.id),
           await this.goalStore.save(copy).catch(() => copy),
         );
       }
-      this.openSession(forked.id);
+      this.openSession(forked.id, forkServerID);
       this.showNotice('Forked into a new session', 'dim');
     } catch (error) {
       this.showNotice(`Fork failed: ${errorText(error)}`, 'error');
@@ -3526,8 +3569,8 @@ export class AppController {
    * or drops a dialog whose staged revert vanished. A dialog the user is actively
    * confirming/cancelling (`busy`) is left alone.
    */
-  private reconcileStagedRevert(sessionID: string): void {
-    const session = this.state.sessions[this.sessionKeyOf(sessionID)];
+  private reconcileStagedRevert(sessionID: string, serverID: string = this.activeServerID()): void {
+    const session = this.state.sessions[this.keyFor(serverID, sessionID)];
     const overlay = this.state.overlay;
     const staged = session?.revert;
     if (staged !== undefined) {

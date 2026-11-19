@@ -397,8 +397,8 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     controller.openSession(existingSessionID);
     if (prompt !== undefined) await controller.sendToSession(existingSessionID, prompt);
   } else if ((target.kind === 'new' || target.kind === 'continue') && cwd !== '') {
-    if (prompt === undefined) controller.startNewSession(cwd);
-    else await controller.createSessionWithPrompt(cwd, prompt);
+    if (prompt === undefined) controller.startNewSession(cwd, serverID);
+    else await controller.createSessionWithPrompt({ serverID, directory: cwd }, prompt);
   } else {
     controller.openOverview();
   }

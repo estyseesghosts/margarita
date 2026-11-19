@@ -12,6 +12,8 @@ import type { CatalogModel } from '../domain/model-resolution.ts';
 import type { NativeGoalState } from '../domain/native-goal.ts';
 import type { PromptHistory } from '../domain/prompt-history.ts';
 import { createHistory } from '../domain/prompt-history.ts';
+import type { ProjectRef } from '../domain/server-identity.ts';
+import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
 
@@ -148,7 +150,8 @@ export type AppState = {
     selectedRow?: string;
     /** Project groups showing every session instead of the collapsed few. */
     expanded: Record<string, true>;
-    directory: string;
+    /** Owning project for the next session started from the composer. */
+    project: ProjectRef;
     agent?: string;
     model?: ModelSelection;
   };
@@ -204,7 +207,12 @@ export function initialState(directory: string): AppState {
     draftAttachments: {},
     stashAttachments: [],
     admitting: false,
-    overview: { focus: 'composer', tab: 'all', directory, expanded: {} },
+    overview: {
+      focus: 'composer',
+      tab: 'all',
+      project: { serverID: localServerID, directory },
+      expanded: {},
+    },
     openedAt: {},
     history: createHistory([]),
     recentModels: [],

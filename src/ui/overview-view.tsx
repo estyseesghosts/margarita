@@ -152,7 +152,7 @@ export function Overview(props: {
         <text fg={props.theme.dim}>All sessions loaded.</text>
       </Show>
       <text fg={props.theme.dim} marginTop={1}>
-        {`New session in: ${directoryName(state.overview.directory)}`}
+        {`New session in: ${directoryName(state.overview.project.directory)}`}
       </text>
     </scrollbox>
   );

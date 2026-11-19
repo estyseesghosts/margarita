@@ -4,8 +4,10 @@ import { FakeBackend } from '../../test/fake-backend.ts';
 import { defaultConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
 import { composerFrom } from '../domain/composer.ts';
+import { buildKeymap } from '../domain/keymap.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import { AppController } from './controller.ts';
+import { routeKey } from './key-router.ts';
 
 function session(id: string, serverID: string, directory: string): SessionSummary {
   return {
@@ -22,6 +24,8 @@ function session(id: string, serverID: string, directory: string): SessionSummar
 function harness() {
   const local = new FakeBackend();
   const remote = new FakeBackend();
+  local.serverID = 'local';
+  remote.serverID = 'srv_1';
   local.sessions = [session('ses_a', 'local', '/work/lotus')];
   remote.sessions = [session('ses_a', 'srv_1', '/work/lotus')];
   const controller = new AppController({
@@ -174,5 +178,95 @@ describe('per-server @file completion', () => {
     expect(routed.state.completion?.items.map((item) => item.insert)).toEqual(['@local-file.ts ']);
     expect(localScans).toBeGreaterThan(0);
     routed.dispose();
+  });
+});
+
+const keymapServices = { openEditor: () => {}, redraw: () => {}, scroll: () => {} };
+
+function routeKeyNew(
+  controller: AppController,
+  name: string,
+  mods: { ctrl?: boolean; alt?: boolean; shift?: boolean } = {},
+) {
+  const { keymap } = buildKeymap({});
+  routeKey(
+    controller,
+    keymap,
+    { name, ctrl: mods.ctrl ?? false, alt: mods.alt ?? false, shift: mods.shift ?? false },
+    keymapServices,
+  );
+}
+
+function userMessage(id: string, text: string) {
+  return { kind: 'user', id, createdAt: 1, text, attachments: [] } as const;
+}
+
+describe('overview identity (issue #62)', () => {
+  test('Enter on a remote row opens that server and its transcript, never the launch one', async () => {
+    const { controller, local, remote } = harness();
+    local.messages = { ses_a: [userMessage('m_local', 'from local')] };
+    remote.messages = { ses_a: [userMessage('m_remote', 'from remote')] };
+    await controller.bootstrap();
+    controller.openOverview();
+
+    const remoteRow = controller
+      .overviewRows()
+      .find((row) => row.kind === 'session' && row.session.serverID === 'srv_1');
+    expect(remoteRow?.kind).toBe('session');
+    if (remoteRow === undefined) throw new Error('missing remote row');
+
+    for (
+      let step = 0;
+      step < 10 && controller.state.overview.selectedRow !== remoteRow.key;
+      step += 1
+    ) {
+      routeKeyNew(controller, 'down');
+    }
+    expect(controller.state.overview.selectedRow).toBe(remoteRow.key);
+
+    routeKeyNew(controller, 'return');
+    for (let round = 0; round < 10; round += 1) await Bun.sleep(0);
+
+    expect(controller.state.route).toEqual({
+      kind: 'conversation',
+      serverID: 'srv_1',
+      sessionID: 'ses_a',
+    });
+    expect(
+      controller.state.transcripts['server:srv_1/session:ses_a']?.messages.map((m) => m.id),
+    ).toEqual(['m_remote']);
+    // The launch backend was asked for nothing about the remote session.
+    expect(local.calls.filter((call) => call.name === 'listMessages')).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('selecting a remote project and typing creates the session on that server only', async () => {
+    const { controller, local, remote } = harness();
+    await controller.bootstrap();
+    controller.openOverview();
+
+    const remoteRow = controller
+      .overviewRows()
+      .find((row) => row.kind === 'session' && row.session.serverID === 'srv_1');
+    if (remoteRow === undefined) throw new Error('missing remote row');
+    for (
+      let step = 0;
+      step < 10 && controller.state.overview.selectedRow !== remoteRow.key;
+      step += 1
+    ) {
+      routeKeyNew(controller, 'down');
+    }
+
+    controller.setComposer(composerFrom('build the thing'));
+    await controller.submit();
+
+    expect(remote.calls.filter((call) => call.name === 'createSession')).toHaveLength(1);
+    expect(local.calls.filter((call) => call.name === 'createSession')).toHaveLength(0);
+    expect(remote.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    expect(local.calls.filter((call) => call.name === 'prompt')).toHaveLength(0);
+    const route = controller.state.route;
+    expect(route.kind).toBe('conversation');
+    if (route.kind === 'conversation') expect(route.serverID).toBe('srv_1');
+    controller.dispose();
   });
 });

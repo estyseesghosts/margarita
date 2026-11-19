@@ -23,6 +23,8 @@ import type { TranscriptMessage } from '../src/domain/transcript.ts';
 
 /** In-memory backend for UI and controller tests. Records every mutating call. */
 export class FakeBackend implements Backend {
+  /** Server identity stamped onto created sessions, like the production backend. */
+  serverID = 'local';
   readonly baseUrl = 'http://fake';
   sessions: SessionSummary[] = [];
   messages: Record<string, TranscriptMessage[]> = {};
@@ -70,7 +72,7 @@ export class FakeBackend implements Backend {
     this.calls.push({ name: 'createSession', args: [args] });
     const session: SessionSummary = {
       id: `ses_${this.sessions.length + 1}`,
-      serverID: 'local',
+      serverID: this.serverID,
       projectID: 'p',
       directory: args.directory,
       createdAt: 1,

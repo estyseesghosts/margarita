@@ -22,7 +22,7 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
   const after = () => (parts().at === '\n' ? `\n${parts().after}` : parts().after);
   const placeholder = () =>
     state.route.kind === 'overview'
-      ? `New session in ${directoryName(state.overview.directory)}`
+      ? `New session in ${directoryName(state.overview.project.directory)}`
       : state.route.kind === 'new'
         ? `New session in ${directoryName(state.route.directory)} · ← overview`
         : '← overview · Shift+Tab agent · Ctrl+O details';

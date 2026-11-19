@@ -1142,7 +1142,10 @@ describe('prompt history across project switches (issue #4)', () => {
     const controller = makeController(() => Promise.resolve([]), backend);
     await controller.bootstrap();
 
-    const id = await controller.createSessionWithPrompt('/work/kohjoh', 'prompt recorded in A');
+    const id = await controller.createSessionWithPrompt(
+      { serverID: 'local', directory: '/work/kohjoh' },
+      'prompt recorded in A',
+    );
     expect(id).toBeDefined();
     expect(controller.historyUp()).toBe(true);
     expect(controller.state.composer.text).toBe('prompt recorded in A');
@@ -1176,7 +1179,10 @@ describe('prompt history across project switches (issue #4)', () => {
       });
 
     const first = make(emptyState);
-    await first.createSessionWithPrompt('/work/kohjoh', 'persisted prompt');
+    await first.createSessionWithPrompt(
+      { serverID: 'local', directory: '/work/kohjoh' },
+      'persisted prompt',
+    );
     expect(saved.value?.history['/work/kohjoh']).toEqual(['persisted prompt']);
     first.dispose();
 
