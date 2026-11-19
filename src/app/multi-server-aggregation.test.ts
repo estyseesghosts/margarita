@@ -134,6 +134,128 @@ describe('cross-server aggregation', () => {
   });
 });
 
+function catalogHarness() {
+  const local = new FakeBackend();
+  const remote = new FakeBackend();
+  local.serverID = 'local';
+  remote.serverID = 'srv_1';
+  local.sessions = [session('ses_l', 'local', '/work/alpha')];
+  remote.sessions = [session('ses_r', 'srv_1', '/srv/beta')];
+  local.agents = [
+    { id: 'a-local', name: 'Local', mode: 'primary', hidden: false },
+    { id: 'a-shared', name: 'Shared', mode: 'primary', hidden: false },
+  ];
+  remote.agents = [{ id: 'a-remote', name: 'Remote', mode: 'primary', hidden: false }];
+  local.models = [
+    { providerID: 'p', modelID: 'm-local', name: 'Local', enabled: true, variants: [] },
+  ];
+  remote.models = [
+    { providerID: 'p', modelID: 'm-remote', name: 'Remote', enabled: true, variants: [] },
+  ];
+  const controller = new AppController({
+    backend: local,
+    backendFor: (serverID: string) => (serverID === 'srv_1' ? remote : local),
+    serverIDs: () => ['local', 'srv_1'],
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/alpha',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+  });
+  return { controller, local, remote };
+}
+
+describe('overview catalog actions follow the selected project (issue #79)', () => {
+  test('overview catalog actions resolve against the selected host, not the launch host', async () => {
+    const { controller, local, remote } = catalogHarness();
+    await controller.bootstrap();
+    await controller.loadSessions();
+
+    // Select B's project row in the overview.
+    controller.openSession('ses_r', 'srv_1');
+    controller.openOverview();
+    expect(controller.state.overview.project.serverID).toBe('srv_1');
+    expect(controller.state.overview.project.directory).toBe('/srv/beta');
+    await controller.loadCatalog('/srv/beta', 'srv_1');
+
+    // Agent cycling sees only B's catalog.
+    await controller.cycleAgent(1);
+    expect(controller.state.overview.agent).toBe('a-remote');
+
+    // The model picker offers only B's models.
+    await controller.openModelPicker();
+    expect(controller.modelChoices('').map((choice) => choice.modelID)).toEqual(['m-remote']);
+
+    // F2's recent-model path and --model resolution validate against B too.
+    controller.setOverlay({ kind: 'none' });
+    controller.setComposer(composerFrom('/model p/m-local'));
+    await controller.submit();
+    expect(controller.state.overview.model).toBeUndefined();
+    expect(controller.state.notice?.text).toContain('m-local');
+
+    // A new session from B's overview row gets B's valid selection.
+    controller.setOverlay({ kind: 'none' });
+    controller.setComposer(composerFrom('/model p/m-remote'));
+    await controller.submit();
+    expect(controller.state.overview.model).toEqual({ providerID: 'p', modelID: 'm-remote' });
+    await controller.createSessionWithPrompt(
+      { serverID: 'srv_1', directory: '/srv/beta' },
+      'start here',
+    );
+    expect(remote.calls.filter((call) => call.name === 'createSession')).toHaveLength(1);
+    expect(local.calls.filter((call) => call.name === 'createSession')).toHaveLength(0);
+    const created = remote.calls.find((call) => call.name === 'createSession')?.args[0];
+    expect(created).toMatchObject({ model: { providerID: 'p', modelID: 'm-remote' } });
+
+    controller.dispose();
+  });
+
+  test('switching projects while a slow catalog RPC runs never uses the stale catalog', async () => {
+    const { controller, remote } = catalogHarness();
+    await controller.bootstrap();
+    await controller.loadSessions();
+    controller.openSession('ses_l', 'local');
+    controller.openOverview();
+    await controller.loadCatalog('/work/alpha', 'local');
+    expect(controller.catalogFresh('/work/alpha', 'local')).toBe(true);
+
+    // B's catalog RPC hangs while the user moves back to A's project.
+    let releaseRemote: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseRemote = resolve;
+    });
+    const realAgents = remote.listAgents.bind(remote);
+    remote.listAgents = async () => {
+      await gate;
+      return realAgents();
+    };
+
+    controller.openSession('ses_r', 'srv_1');
+    controller.openOverview();
+    expect(controller.state.overview.project.serverID).toBe('srv_1');
+    const slowCatalog = controller.loadCatalog('/srv/beta', 'srv_1');
+
+    controller.openSession('ses_l', 'local');
+    controller.openOverview();
+    expect(controller.state.overview.project.serverID).toBe('local');
+
+    releaseRemote?.();
+    await slowCatalog;
+
+    // The late B response must not have replaced A's usable catalog.
+    expect(controller.state.catalogServerID).toBe('local');
+    expect(controller.state.agents.map((agent) => agent.id)).toContain('a-local');
+    expect(controller.state.agents.map((agent) => agent.id)).not.toContain('a-remote');
+    await controller.cycleAgent(1);
+    expect(controller.state.overview.agent).toBe('a-local');
+    controller.dispose();
+  });
+});
+
 describe('per-server @file completion', () => {
   test('the selected server decides local files vs remote file search', async () => {
     const { local, remote } = harness();
@@ -160,6 +282,8 @@ describe('per-server @file completion', () => {
       requestExit: () => {},
     });
     routed.state.sessions['server:srv_1/session:ses_r'] = remote.sessions[0]!;
+    routed.state.sessions['ses_a'] = local.sessions[0]!;
+    await routed.loadSessions();
     routed.openSession('ses_r', 'srv_1');
     routed.setComposer(composerFrom('@remote'));
     for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
@@ -172,9 +296,34 @@ describe('per-server @file completion', () => {
     expect(remote.calls.some((call) => call.name === 'findProjectFiles')).toBe(true);
     expect(localScans).toBe(0);
 
+    // The overview opens on the selected remote project and stays remote (issue #79).
+    routed.openOverview();
+    routed.setComposer(composerFrom('@remote'));
+    for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
+    expect(routed.state.overview.project.serverID).toBe('srv_1');
+    expect(routed.state.completion?.items.map((item) => item.insert)).toEqual([
+      '@remote-file.ts ',
+      '@remote-other.ts ',
+    ]);
+    expect(localScans).toBe(0);
+
+    // Opening the selected remote session's overview keeps the remote project (issue #79).
+    routed.openOverview();
+    routed.setComposer(composerFrom('@remote'));
+    for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
+    expect(routed.state.overview.project.serverID).toBe('srv_1');
+    expect(routed.state.completion?.items.map((item) => item.insert)).toEqual([
+      '@remote-file.ts ',
+      '@remote-other.ts ',
+    ]);
+    expect(localScans).toBe(0);
+
+    // Selecting the local project in the overview makes completion local again.
+    routed.openSession('ses_a', 'local');
     routed.openOverview();
     routed.setComposer(composerFrom('@local'));
     for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
+    expect(routed.state.overview.project.serverID).toBe('local');
     expect(routed.state.completion?.items.map((item) => item.insert)).toEqual(['@local-file.ts ']);
     expect(localScans).toBeGreaterThan(0);
     routed.dispose();

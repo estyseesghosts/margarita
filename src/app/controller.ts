@@ -324,10 +324,15 @@ export class AppController {
     return serverID === this.serverID && this.deps.remoteFilesystem === true;
   }
 
-  /** Server of the current route; overview/new default to the launch server. */
+  /**
+   * Server of the current route. `new` is explicit; `overview` follows the selected
+   * project row, so catalog/model/agent actions there resolve against the host the user
+   * actually picked, not the launch server (issue #79).
+   */
   private activeServerID(): string {
     const route = this.state.route;
-    return route.kind === 'overview' ? this.serverID : route.serverID;
+    if (route.kind === 'overview') return this.state.overview.project.serverID;
+    return route.serverID;
   }
 
   /**
@@ -1484,12 +1489,23 @@ export class AppController {
       this.writeComposer(this.state.drafts['overview'] ?? emptyComposer);
       this.setState('attachments', [...(this.state.draftAttachments['overview'] ?? [])]);
       this.setState('overview', 'project', project);
-      const first = this.overviewRows()[0];
-      if (first === undefined) {
+      // Keep the selection on the project we came from instead of jumping to whatever
+      // group sorts first; any other host's first row would silently retarget the
+      // composer and its catalog actions (issue #79).
+      const rows = this.overviewRows();
+      const inProject = rows.find(
+        (row) =>
+          row.kind === 'session' &&
+          row.session.serverID === project.serverID &&
+          directoryKey(row.session.directory, this.platformFor(row.session.serverID)) ===
+            directoryKey(project.directory, this.platformFor(project.serverID)),
+      );
+      const target = inProject ?? rows[0];
+      if (target === undefined) {
         this.setState('overview', 'focus', 'composer');
         this.setState('overview', 'selectedRow', undefined);
       } else {
-        this.selectRow(first);
+        this.selectRow(target);
       }
     });
     this.loadHistoryFor(
