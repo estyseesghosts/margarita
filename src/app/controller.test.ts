@@ -125,6 +125,33 @@ function remoteController(remoteFiles: string[], directory: string, cwd: string)
   return { backend, controller };
 }
 
+/** Two-host controller: a local active session plus an idle remote session on srv_1. */
+function multiServerController() {
+  const local = new FakeBackend();
+  const remote = new FakeBackend();
+  remote.serverID = 'srv_1';
+  local.sessions = [{ ...fakeSession('ses_local'), directory: '/work/kohjoh' }];
+  remote.sessions = [{ ...fakeSession('ses_remote'), directory: '/remote/proj' }];
+  // The local session is active so it lists under the "active" tab; the remote one is idle.
+  local.active.add('ses_local');
+  const controller = new AppController({
+    backend: local,
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+    serverIDs: () => ['srv_1'],
+    backendFor: (serverID: string) => (serverID === 'srv_1' ? remote : local),
+    serverInfo: () => ({ online: true }),
+  });
+  return { controller, local, remote };
+}
+
 function isPromptDraft(value: unknown): value is PromptDraft {
   return typeof value === 'object' && value !== null && 'text' in value && 'files' in value;
 }
@@ -1285,6 +1312,78 @@ describe('createSession does not steal focus or mutate another draft (issue #113
       ).toEqual(['shot.png']);
       expect(controller.state.notice?.text).toContain('was created but the prompt was not sent');
       expect(controller.state.notice?.tone).toBe('error');
+    } finally {
+      controller.dispose();
+    }
+  });
+});
+
+describe('openOverview preserves the originating project (issue #106)', () => {
+  test('keeps the originating project when the active tab excludes its sessions', async () => {
+    const { controller } = multiServerController();
+    try {
+      await controller.bootstrap();
+
+      // Viewing a remote idle session.
+      controller.openSession('ses_remote', 'srv_1');
+      await flush();
+      expect(controller.state.route.kind).toBe('conversation');
+
+      // Open the overview: the originating (remote) project becomes the composer target.
+      controller.openOverview();
+      expect(controller.state.overview.project).toEqual({
+        serverID: 'srv_1',
+        directory: '/remote/proj',
+      });
+      expect(controller.state.overview.selectedRow).toBeDefined();
+
+      // Switch to the "active" tab: the remote idle session falls out of the list,
+      // leaving only the local active session.
+      controller.setOverviewTab('active');
+      const rows = controller.overviewRows();
+      expect(rows.some((row) => row.kind === 'session')).toBe(true);
+      expect(rows.every((row) => row.kind !== 'session' || row.session.serverID !== 'srv_1')).toBe(
+        true,
+      );
+
+      // Return to overview: the remote project must remain the composer target and
+      // nothing unrelated may be selected.
+      controller.openOverview();
+      expect(controller.state.overview.project).toEqual({
+        serverID: 'srv_1',
+        directory: '/remote/proj',
+      });
+      expect(controller.state.overview.focus).toBe('composer');
+      expect(controller.state.overview.selectedRow).toBeUndefined();
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('submitting a prompt creates the session on the original host/directory, not rows[0]', async () => {
+    const { controller, local, remote } = multiServerController();
+    try {
+      await controller.bootstrap();
+      controller.openSession('ses_remote', 'srv_1');
+      await flush();
+      controller.openOverview();
+      controller.setOverviewTab('active');
+      controller.openOverview();
+
+      // The composer is focused on the preserved originating project.
+      expect(controller.state.overview.project).toEqual({
+        serverID: 'srv_1',
+        directory: '/remote/proj',
+      });
+
+      controller.setComposer(composerFrom('build the thing'));
+      await controller.submit();
+
+      const creations = remote.calls.filter((call) => call.name === 'createSession');
+      expect(creations).toHaveLength(1);
+      expect(creations[0]!.args[0]).toEqual({ directory: '/remote/proj' });
+      // No session was created on the local host (the rows[0] fallback target).
+      expect(local.calls.filter((call) => call.name === 'createSession')).toHaveLength(0);
     } finally {
       controller.dispose();
     }

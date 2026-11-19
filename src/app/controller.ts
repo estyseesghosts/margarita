@@ -1580,12 +1580,15 @@ export class AppController {
           directoryKey(row.session.directory, this.platformFor(row.session.serverID)) ===
             directoryKey(project.directory, this.platformFor(project.serverID)),
       );
-      const target = inProject ?? rows[0];
-      if (target === undefined) {
+      // Preserve the originating project when the active filter excludes its sessions.
+      // Do not fall back to rows[0]: selectRow() would silently retarget overview.project
+      // (and the composer) to a different host/directory (issue #106). With no matching
+      // row, keep the composer focused on the originating project and select nothing.
+      if (inProject === undefined) {
         this.setState('overview', 'focus', 'composer');
         this.setState('overview', 'selectedRow', undefined);
       } else {
-        this.selectRow(target);
+        this.selectRow(inProject);
       }
     });
     this.loadHistoryFor(
