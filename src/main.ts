@@ -142,6 +142,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
       }
       connection = remote.connection;
       serverID = profile.serverID;
+      remoteFilesystem = true;
       const resolved = resolveWorkingDirectory({
         cwd: options.cwd,
         remote: true,
@@ -153,6 +154,20 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
         return exitCodes.usage;
       }
       cwd = resolved.directory;
+      backend = createBackend(connection, {
+        serverID,
+        toolOutputChars: configLoad.config.transcript.toolOutputChars,
+      });
+      // The launch host's own path style comes from its saved profile (recorded from
+      // authenticated server metadata when it was paired); never assume the frontend OS
+      // for a remote host (issue #84).
+      launchConnection = {
+        serverID,
+        connection,
+        backend,
+        remoteFilesystem,
+        ...(profile.platform === undefined ? {} : { platform: profile.platform }),
+      };
     } else {
       connection = await connect({
         ...(options.server === undefined ? {} : { server: options.server }),
@@ -164,9 +179,10 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
         onStarting: () => process.stderr.write('Starting OpenCode service…\n'),
       });
       serverID = serverIDForConnection(connection);
+      remoteFilesystem = connection.origin === 'remote';
       const resolved = resolveWorkingDirectory({
         cwd: options.cwd,
-        remote: connection.origin === 'remote',
+        remote: remoteFilesystem,
         localCwd,
         platform,
       });
@@ -175,13 +191,19 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
         return exitCodes.usage;
       }
       cwd = resolved.directory;
+      backend = createBackend(connection, {
+        serverID,
+        toolOutputChars: configLoad.config.transcript.toolOutputChars,
+      });
+      // A local launch host uses the frontend's own path style.
+      launchConnection = {
+        serverID,
+        connection,
+        backend,
+        remoteFilesystem,
+        platform,
+      };
     }
-    backend = createBackend(connection, {
-      serverID,
-      toolOutputChars: configLoad.config.transcript.toolOutputChars,
-    });
-    remoteFilesystem = connection.origin === 'remote';
-    launchConnection = { serverID, connection, backend, remoteFilesystem };
     // Policy: --server/--remote select the primary host, they never narrow the overview.
     // A discovered local service is registered alongside the explicit host and all paired
     // profiles stay available, so identical project names are always distinguishable.

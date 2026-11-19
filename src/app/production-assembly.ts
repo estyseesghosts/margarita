@@ -33,7 +33,7 @@ export type AssemblyConnection = Readonly<{
   connection: Connection;
   backend: Backend;
   remoteFilesystem?: boolean;
-  /** The server's own path style; the launch connection defaults to this machine's. */
+  /** The server's own path style; the launch connection records its own (never assumed to be the frontend OS). */
   platform?: NodeJS.Platform;
 }>;
 
@@ -119,9 +119,13 @@ export async function createProductionAssembly(
   const launchServerID = launch.serverID;
   const launchBackend = launch.backend;
   const servers = new ServerConnectionManager();
+  // The launch host is local only when it shares this machine's filesystem; a --remote
+  // launch connection must not inherit the frontend OS.
+  const launchIsLocal = input.remoteFilesystem !== true;
   for (const registration of input.connections) {
     const platform =
-      registration.platform ?? (registration === launch ? input.platform : undefined);
+      registration.platform ??
+      (registration === launch && launchIsLocal ? input.platform : undefined);
     servers.add({
       serverID: registration.serverID,
       ...(registration.label === undefined ? {} : { label: registration.label }),

@@ -628,14 +628,21 @@ export class AppController {
   }
 
   /**
-   * The owning server's path style. Launch server: this process. Paired servers: what the
-   * server advertised at pair time (authenticated metadata). Unknown (legacy profiles):
-   * case-preserving POSIX — never the frontend's OS, so distinct directories on a case-
-   * sensitive server are never silently merged by a Windows frontend.
+   * The owning server's path style. The launch server uses what the server advertised at
+   * pair time (or what its saved profile recorded); the frontend's own OS applies only to
+   * an actually-local launch host. Paired servers: their advertised platform. Unknown
+   * (legacy profiles): case-preserving POSIX — never the frontend's OS, so distinct
+   * directories on a case-sensitive server are never silently merged by a Windows
+   * frontend.
    */
   platformFor(serverID: string): NodeJS.Platform {
-    if (serverID === this.serverID) return this.deps.platform;
-    return this.deps.platformFor?.(serverID) ?? 'linux';
+    const advertised = this.deps.platformFor?.(serverID);
+    if (advertised !== undefined) return advertised;
+    // The frontend's own OS is meaningful only for the local host it runs on.
+    if (serverID === this.serverID && this.deps.remoteFilesystem !== true)
+      return this.deps.platform;
+    // Remote launch/paired server with no recorded platform: case-preserving POSIX.
+    return 'linux';
   }
 
   /**

@@ -12,6 +12,7 @@ import { defaultConfig } from '../src/config/config.ts';
 import { memoryCredentialStore } from '../src/config/credentials.ts';
 import { emptyState } from '../src/config/local-state.ts';
 import { composerFrom } from '../src/domain/composer.ts';
+import { directoryKey } from '../src/domain/path-identity.ts';
 import type { TranscriptMessage } from '../src/domain/transcript.ts';
 import { FakeBackend } from './fake-backend.ts';
 
@@ -296,6 +297,64 @@ describe('production composition collisions (issue #72)', () => {
     expect(fixture.local.calls.filter((call) => call.name === 'createSession')).toHaveLength(0);
     expect(controller.state.attachments).toEqual([]);
 
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
+});
+
+describe('remote launch path style (issue #84)', () => {
+  test('a remote launch host does not inherit the frontend OS', async () => {
+    const fixture = await compositionFixture();
+    // Windows frontend, remote launch: connection carries no platform.
+    const assembly = await createProductionAssembly({
+      ...fixture.input({
+        platform: 'win32',
+        remoteFilesystem: true,
+        connections: [
+          {
+            serverID: 'local',
+            connection: { baseUrl: 'http://launch.test:4096', headers: {}, origin: 'remote' },
+            backend: fixture.local,
+            remoteFilesystem: true,
+          },
+        ],
+      }),
+    });
+    expect(assembly.controller.platformFor('local')).toBe('linux');
+    expect(directoryKey('/srv/App', 'linux')).not.toBe(directoryKey('/srv/app', 'linux'));
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
+
+  test('a remote launch host keeps the platform recorded in its profile', async () => {
+    const fixture = await compositionFixture();
+    const assembly = await createProductionAssembly({
+      ...fixture.input({
+        platform: 'linux',
+        remoteFilesystem: true,
+        connections: [
+          {
+            serverID: 'local',
+            connection: { baseUrl: 'http://launch.test:4096', headers: {}, origin: 'remote' },
+            backend: fixture.local,
+            remoteFilesystem: true,
+            platform: 'win32',
+          },
+        ],
+      }),
+    });
+    expect(assembly.controller.platformFor('local')).toBe('win32');
+    expect(directoryKey('C:\\Users\\u\\proj', 'win32')).toBe(
+      directoryKey('c:\\USERS\\u\\PROJ', 'win32'),
+    );
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
+
+  test('a local launch host still uses the frontend OS', async () => {
+    const fixture = await compositionFixture();
+    const assembly = await createProductionAssembly(fixture.input({ platform: 'win32' }));
+    expect(assembly.controller.platformFor('local')).toBe('win32');
     assembly.controller.dispose();
     await assembly.servers.dispose();
   });

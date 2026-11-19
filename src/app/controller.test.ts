@@ -11,6 +11,7 @@ import { emptyState } from '../config/local-state.ts';
 import { composerFrom } from '../domain/composer.ts';
 import { buildKeymap } from '../domain/keymap.ts';
 import type { GoalQueryFailure, NativeGoal } from '../domain/native-goal.ts';
+import { directoryKey } from '../domain/path-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { ToolCall, TranscriptMessage } from '../domain/transcript.ts';
 import { AppController } from './controller.ts';
@@ -2463,6 +2464,79 @@ describe('server management commands', () => {
     controller.setComposer(composerFrom('/servers'));
     await controller.submit();
     expect(backend.calls).toEqual([]);
+    controller.dispose();
+  });
+});
+
+function platformController({
+  platform = 'win32',
+  remoteFilesystem = false,
+  platformFor,
+}: {
+  platform?: NodeJS.Platform;
+  remoteFilesystem?: boolean;
+  platformFor?: (serverID: string) => NodeJS.Platform | undefined;
+} = {}) {
+  return new AppController({
+    backend: new FakeBackend(),
+    config: defaultConfig,
+    localState: emptyState,
+    platform,
+    cwd: '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    remoteFilesystem,
+    requestExit: () => {},
+    ...(platformFor === undefined ? {} : { platformFor }),
+  });
+}
+
+describe('platform style is the owning server’s, not the frontend’s (issue #84)', () => {
+  test('a local launch host uses the frontend OS', () => {
+    const controller = platformController({ platform: 'win32', remoteFilesystem: false });
+    expect(controller.platformFor('local')).toBe('win32');
+    controller.dispose();
+  });
+
+  test('a remote launch host without a recorded platform degrades to POSIX, not the frontend OS', () => {
+    const controller = platformController({ platform: 'win32', remoteFilesystem: true });
+    expect(controller.platformFor('local')).toBe('linux');
+    controller.dispose();
+  });
+
+  test('a remote launch host with a recorded win32 profile uses win32', () => {
+    const controller = platformController({
+      platform: 'linux',
+      remoteFilesystem: true,
+      platformFor: () => 'win32',
+    });
+    expect(controller.platformFor('local')).toBe('win32');
+    controller.dispose();
+  });
+
+  test('a remote launch host with a recorded linux profile keeps /srv/App and /srv/app distinct', () => {
+    const controller = platformController({
+      platform: 'win32',
+      remoteFilesystem: true,
+      platformFor: () => 'linux',
+    });
+    expect(controller.platformFor('local')).toBe('linux');
+    expect(directoryKey('/srv/App', controller.platformFor('local'))).not.toBe(
+      directoryKey('/srv/app', controller.platformFor('local')),
+    );
+    controller.dispose();
+  });
+
+  test('a paired server keeps its advertised platform while the launch host keeps its own', () => {
+    const controller = platformController({
+      platform: 'win32',
+      remoteFilesystem: false,
+      platformFor: (serverID) => (serverID === 'srv_1' ? 'linux' : undefined),
+    });
+    expect(controller.platformFor('local')).toBe('win32');
+    expect(controller.platformFor('srv_1')).toBe('linux');
     controller.dispose();
   });
 });
