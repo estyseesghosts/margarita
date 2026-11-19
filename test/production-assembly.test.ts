@@ -535,3 +535,238 @@ describe('stream reconnect through the production wiring (issue #63)', () => {
     await assembly.servers.dispose();
   });
 });
+
+// ---------------------------------------------------------- issue #66
+
+type ThreeFixture = Readonly<{
+  directory: string;
+  serversFile: string;
+  credentials: ReturnType<typeof memoryCredentialStore>;
+  local: FakeBackend;
+  bravo: FakeBackend;
+  charlie: FakeBackend;
+  createBackend: NonNullable<ProductionAssemblyInput['createBackend']>;
+}>;
+
+/**
+ * Three hosts: the launch server (A, paginated), a paired "bravo" (B), a paired "charlie" (C).
+ * Both remotes start healthy so a bootstrap can populate the cache; hooks flip them down later.
+ */
+async function threeServerFixture(): Promise<ThreeFixture> {
+  const directory = await mkdtemp(join(tmpdir(), 'margarita-three-'));
+  const serversFile = join(directory, 'servers.json');
+  await writeFile(
+    serversFile,
+    JSON.stringify({
+      schemaVersion: 1,
+      profiles: [
+        {
+          serverID: 'srv_b',
+          shortname: 'bravo',
+          baseUrl: 'http://bravo.test:4096',
+          auth: 'bearer',
+        },
+        {
+          serverID: 'srv_c',
+          shortname: 'charlie',
+          baseUrl: 'http://charlie.test:4096',
+          auth: 'bearer',
+        },
+      ],
+    }),
+  );
+  const credentials = memoryCredentialStore();
+  await credentials.set('srv_b', 'tok_b');
+  await credentials.set('srv_c', 'tok_c');
+  const local = new FakeBackend();
+  local.serverID = 'local';
+  local.listSessionsHook = async (query) => {
+    if (query.cursor === 'cursor-2') {
+      return { sessions: [summaryFor('local', 'ses_a_2', 2)] };
+    }
+    return { sessions: [summaryFor('local', 'ses_a_1', 1)], nextCursor: 'cursor-2' };
+  };
+  const bravo = new FakeBackend();
+  bravo.serverID = 'srv_b';
+  bravo.sessions = [summaryFor('srv_b', 'ses_b', 4)];
+  const charlie = new FakeBackend();
+  charlie.serverID = 'srv_c';
+  charlie.sessions = [summaryFor('srv_c', 'ses_c', 5)];
+  const fakes = new Map([
+    ['srv_b', bravo],
+    ['srv_c', charlie],
+  ]);
+  const createBackend: NonNullable<ProductionAssemblyInput['createBackend']> = (
+    _connection,
+    options,
+  ) => fakes.get(options?.serverID ?? '') ?? new FakeBackend();
+  return { directory, serversFile, credentials, local, bravo, charlie, createBackend };
+}
+
+function threeServerInput(
+  fixture: ThreeFixture,
+  overrides: Partial<ProductionAssemblyInput> = {},
+): ProductionAssemblyInput {
+  return {
+    config: defaultConfig,
+    platform: 'linux',
+    cwd: '/work/lotus',
+    version: '0.0.1',
+    paths: {
+      stateFile: join(fixture.directory, 'state.json'),
+      serversFile: fixture.serversFile,
+      stateDir: fixture.directory,
+    },
+    env: {},
+    credentials: fixture.credentials,
+    connections: [
+      {
+        serverID: 'local',
+        connection: remoteConnection('http://launch.test:4096'),
+        backend: fixture.local,
+        remoteFilesystem: false,
+      },
+    ],
+    profiles: {
+      schemaVersion: 1,
+      profiles: [
+        {
+          serverID: 'srv_b',
+          shortname: 'bravo',
+          baseUrl: 'http://bravo.test:4096',
+          auth: 'bearer',
+        },
+        {
+          serverID: 'srv_c',
+          shortname: 'charlie',
+          baseUrl: 'http://charlie.test:4096',
+          auth: 'bearer',
+        },
+      ],
+    },
+    localState: emptyState,
+    createBackend: fixture.createBackend,
+    requestExit: () => {},
+    ...overrides,
+  };
+}
+
+const bKey = 'server:srv_b/session:ses_b';
+const cKey = 'server:srv_c/session:ses_c';
+const bKey2 = 'server:srv_b/session:ses_b2';
+
+describe('three-server failure isolation (issue #66)', () => {
+  test('bootstrap and load-more succeed for A; B/C keep cache and report grey dots', async () => {
+    const fixture = await threeServerFixture();
+    const assembly = await createProductionAssembly(threeServerInput(fixture));
+    const { controller } = assembly;
+    await controller.bootstrap();
+
+    // Bootstrap: A's first page plus B/C from the healthy pass, all present and online.
+    expect(controller.state.sessions['ses_a_1']).toBeDefined();
+    expect(controller.state.sessions[bKey]).toBeDefined();
+    expect(controller.state.sessions[cKey]).toBeDefined();
+    expect(assembly.servers.get('srv_b')?.state).toBe('online');
+    expect(assembly.servers.get('srv_c')?.state).toBe('online');
+    expect(assembly.servers.get('srv_b')?.label).toBe('bravo');
+    expect(assembly.servers.get('srv_c')?.label).toBe('charlie');
+
+    // B dies hard (ECONNREFUSED); C rejects the token.
+    fixture.bravo.listSessionsHook = async () => {
+      throw new BackendError('transport', 'listSessions', 'connect ECONNREFUSED');
+    };
+    fixture.charlie.listSessionsHook = async () => {
+      throw new BackendError('unauthorized', 'listSessions', 'token rejected');
+    };
+
+    await controller.loadSessions();
+
+    // A is unaffected; B/C keep their last-known rows and go grey.
+    expect(controller.state.sessions['ses_a_1']).toBeDefined();
+    expect(controller.state.sessions[bKey]).toBeDefined();
+    expect(controller.state.sessions[cKey]).toBeDefined();
+    expect(controller.state.serverPages['local']?.loading).toBe(false);
+    expect(controller.state.serverPages['local']?.error).toBeUndefined();
+    expect(controller.state.serverPages['srv_b']?.loading).toBe(false);
+    expect(controller.state.serverPages['srv_c']?.loading).toBe(false);
+    expect(controller.state.serverPages['srv_b']?.error).toContain('ECONNREFUSED');
+    expect(assembly.servers.get('srv_b')?.state).toBe('offline');
+    expect(assembly.servers.get('srv_c')?.state).toBe('unauthorized');
+    expect(assembly.servers.get('local')?.state).toBe('online');
+    const bRow = controller.state.sessions[bKey];
+    if (bRow === undefined) throw new Error('bravo row dropped from the overview');
+    const cRow = controller.state.sessions[cKey];
+    if (cRow === undefined) throw new Error('charlie row dropped from the overview');
+    expect(controller.statusOf(bRow)).toBe('unknown');
+    expect(controller.statusOf(cRow)).toBe('unknown');
+
+    // Load-more: A merges its second page; B/C stay cached with the same failures.
+    await controller.loadMoreSessions();
+    expect(controller.state.sessions['ses_a_2']).toBeDefined();
+    expect(controller.state.serverPages['local']?.complete).toBe(true);
+    expect(controller.state.sessions[bKey]).toBeDefined();
+    expect(controller.state.sessions[cKey]).toBeDefined();
+    expect(assembly.servers.get('srv_b')?.state).toBe('offline');
+    expect(assembly.servers.get('srv_c')?.state).toBe('unauthorized');
+
+    // B recovers: its page refreshes; A and C do not change.
+    delete fixture.bravo.listSessionsHook;
+    fixture.bravo.sessions = [summaryFor('srv_b', 'ses_b', 9), summaryFor('srv_b', 'ses_b2', 8)];
+    const a2Before = controller.state.sessions['ses_a_2'];
+    if (a2Before === undefined) throw new Error('ses_a_2 missing before recovery');
+    await controller.loadSessions();
+    expect(assembly.servers.get('srv_b')?.state).toBe('online');
+    expect(controller.state.sessions[bKey2]).toBeDefined();
+    const bRecovered = controller.state.sessions[bKey];
+    if (bRecovered === undefined) throw new Error('bravo row missing after recovery');
+    expect(controller.statusOf(bRecovered)).toBe('idle');
+    expect(controller.state.sessions['ses_a_2']?.updatedAt).toBe(a2Before.updatedAt);
+    expect(controller.state.serverPages['local']?.complete).toBe(true);
+    expect(assembly.servers.get('srv_c')?.state).toBe('unauthorized');
+    const cRecovered = controller.state.sessions[cKey];
+    if (cRecovered === undefined) throw new Error('charlie row missing after recovery');
+    expect(controller.statusOf(cRecovered)).toBe('unknown');
+
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
+
+  test('a server removed mid-reload can never reappear', async () => {
+    const fixture = await threeServerFixture();
+    const assembly = await createProductionAssembly(threeServerInput(fixture));
+    const { controller } = assembly;
+    await controller.bootstrap();
+    expect(controller.state.sessions[bKey]).toBeDefined();
+
+    // B's listing hangs; A and C answer instantly.
+    let releaseBravo: (() => void) | undefined;
+    fixture.bravo.listSessionsHook = () =>
+      new Promise((resolve) => {
+        releaseBravo = () => resolve({ sessions: fixture.bravo.sessions });
+      });
+
+    const pending = controller.loadSessions();
+    controller.setComposer(composerFrom('/unpair bravo'));
+    await controller.submit();
+    releaseBravo?.();
+    await pending;
+    await flush();
+
+    // B is gone from the manager, the overview, the profile file and the keychain —
+    // and its in-flight refresh was discarded, not applied.
+    expect(assembly.servers.get('srv_b')).toBeUndefined();
+    expect(Object.keys(controller.state.sessions).filter((key) => key.includes('srv_b'))).toEqual(
+      [],
+    );
+    const disk = await loadServerProfiles(fixture.serversFile);
+    expect(disk.profiles.profiles.map((profile) => profile.serverID)).toEqual(['srv_c']);
+    expect(await fixture.credentials.get('srv_b')).toBeUndefined();
+    // A and C are unaffected by the removal.
+    expect(controller.state.sessions['ses_a_1']).toBeDefined();
+    expect(controller.state.sessions[cKey]).toBeDefined();
+    expect(assembly.servers.get('srv_c')?.state).toBe('online');
+
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
+});

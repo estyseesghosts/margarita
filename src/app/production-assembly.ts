@@ -57,6 +57,8 @@ export type ProductionAssemblyInput = Readonly<{
   now?: () => number;
   goalStore?: GoalStore;
   debugLog?: DebugLog;
+  /** Reports host health to the manager so the overview dots reflect reality. */
+  applyHealth?: (serverID: string, result: { ok: true } | { ok: false; error: unknown }) => void;
   /** Test hooks; production callers leave these unset. */
   listFiles?: (root: string) => Promise<string[]>;
   saveLocalState?: (state: LocalState) => Promise<SaveResult | void>;
@@ -250,6 +252,7 @@ export async function createProductionAssembly(
       if (managed === undefined) return undefined;
       return { label: managed.label, online: managed.state === 'online' };
     },
+    setServerHealth: (targetID, result) => servers.applyHealth(targetID, result),
     debugLog,
   });
 

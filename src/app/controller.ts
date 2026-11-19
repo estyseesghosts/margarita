@@ -179,6 +179,11 @@ export type ControllerDeps = Readonly<{
   serverAdmin?: ServerAdmin;
   /** Display metadata for grouping: shortname and whether a server is currently online. */
   serverInfo?: (serverID: string) => { label?: string; online: boolean } | undefined;
+  /** Reports one host's API/reconnect health; the manager maps it to online/offline/unauthorized. */
+  setServerHealth?: (
+    serverID: string,
+    result: { ok: true } | { ok: false; error: unknown },
+  ) => void;
   /** Every server to aggregate in the overview; defaults to the launch server only. */
   serverIDs?: () => readonly string[];
   /** Opt-in diagnostics sink (--debug-log); defaults to a silent no-op. */
@@ -561,11 +566,13 @@ export class AppController {
     // cached rows and records the error, healthy servers update normally.
     const results = await Promise.all(
       servers.map(async (targetID) => {
+        const epoch = this.nextRefreshEpoch(targetID);
         try {
           return {
             ok: true as const,
             error: undefined as string | undefined,
-            ...(await this.loadServerSessions(targetID)),
+            cause: undefined as unknown,
+            ...(await this.loadServerSessions(targetID, epoch)),
           };
         } catch (error) {
           this.debugLog.write('load-sessions-failed', {
@@ -575,8 +582,10 @@ export class AppController {
           if (targetID === this.serverID) this.launchLoadError = error;
           return {
             serverID: targetID,
+            epoch,
             ok: false as const,
             error: error instanceof Error ? error.message : 'Could not reach the server',
+            cause: error,
             fresh: {},
             active: new Set<string>(),
             cursor: undefined as string | undefined,
@@ -584,7 +593,20 @@ export class AppController {
         }
       }),
     );
-    const healthy = new Set(results.filter((result) => result.ok).map((result) => result.serverID));
+    // Only the freshest refresh for a still-registered host is applied; anything older or
+    // whose server was removed mid-flight is dropped wholesale so it cannot resurrect rows.
+    const registered = new Set(this.serverIDs());
+    const applied = results.filter(
+      (result) =>
+        registered.has(result.serverID) && this.isRefreshCurrent(result.serverID, result.epoch),
+    );
+    for (const result of applied) {
+      this.deps.setServerHealth?.(
+        result.serverID,
+        result.ok ? { ok: true } : { ok: false, error: result.cause },
+      );
+    }
+    const healthy = new Set(applied.filter((result) => result.ok).map((result) => result.serverID));
     const fresh: Record<string, SessionSummary> = {};
     const running: Record<string, true> = {};
     const pages: Record<
@@ -592,7 +614,7 @@ export class AppController {
       { cursor?: string; complete: boolean; loading: boolean; error?: string }
     > = {};
     const activeByServer = new Map<string, Set<string>>();
-    for (const result of results) {
+    for (const result of applied) {
       Object.assign(fresh, result.fresh);
       for (const id of result.active) running[this.keyFor(result.serverID, id)] = true;
       const previous = this.state.serverPages[result.serverID];
@@ -628,11 +650,11 @@ export class AppController {
         this.setState('serverPages', pages);
         this.setState(
           'sessionsComplete',
-          results.every((result) => result.ok && result.cursor === undefined),
+          applied.every((result) => result.ok && result.cursor === undefined),
         );
         this.setState(
           'sessionsCursor',
-          results.find((result) => result.cursor !== undefined)?.cursor,
+          applied.find((result) => result.cursor !== undefined)?.cursor,
         );
       } else {
         // A single-server resync updates that host's page only; the rest keep their state.
@@ -647,7 +669,7 @@ export class AppController {
         );
       }
       this.setState('sessionsLoading', false);
-      this.setState('sessionsError', results.find((result) => !result.ok)?.error);
+      this.setState('sessionsError', applied.find((result) => !result.ok)?.error);
       this.setState('running', (current) => ({ ...current, ...running }));
     });
     // Running sessions are the ones that can be blocked on input right now.
@@ -662,12 +684,30 @@ export class AppController {
     );
   }
 
-  private async loadServerSessions(serverID: string): Promise<{
+  /** Per-host refresh epochs: a host whose load starts a newer refresh retires the older. */
+  private readonly refreshEpoch = new Map<string, number>();
+
+  private nextRefreshEpoch(serverID: string): number {
+    const next = (this.refreshEpoch.get(serverID) ?? 0) + 1;
+    this.refreshEpoch.set(serverID, next);
+    return next;
+  }
+
+  private isRefreshCurrent(serverID: string, epoch: number): boolean {
+    return this.refreshEpoch.get(serverID) === epoch;
+  }
+
+  private async loadServerSessions(
+    serverID: string,
+    epoch?: number,
+  ): Promise<{
     serverID: string;
+    epoch: number;
     fresh: Record<string, SessionSummary>;
     active: Set<string>;
     cursor?: string;
   }> {
+    const effectiveEpoch = epoch ?? this.nextRefreshEpoch(serverID);
     const backend = this.backendFor(serverID);
     const loaded: SessionSummary[] = [];
     let cursor: string | undefined;
@@ -686,6 +726,7 @@ export class AppController {
         loaded.map((session) => [this.keyFor(serverID, session.id), session]),
       ),
       active,
+      epoch: effectiveEpoch,
       ...(cursor === undefined ? {} : { cursor }),
     };
   }
@@ -772,26 +813,52 @@ export class AppController {
     }
     const results = await Promise.all(
       servers.map(async (serverID) => {
-        const backend = this.backendFor(serverID);
+        const epoch = this.nextRefreshEpoch(serverID);
+        let backend;
+        try {
+          backend = this.backendFor(serverID);
+        } catch (error) {
+          return {
+            serverID,
+            epoch,
+            ok: false as const,
+            error: error instanceof Error ? error.message : 'Unknown server',
+            cause: error,
+          };
+        }
         const cursor = this.state.serverPages[serverID]?.cursor;
         try {
           const [page, active] = await Promise.all([
             backend.listSessions(cursor === undefined ? {} : { cursor }),
             backend.activeSessionIDs(),
           ]);
-          return { serverID, page, active };
+          return { serverID, epoch, ok: true as const, page, active };
         } catch (error) {
           return {
             serverID,
+            epoch,
+            ok: false as const,
             error: error instanceof Error ? error.message : 'Unknown error loading sessions',
+            cause: error,
           };
         }
       }),
     );
+    const registered = new Set(this.serverIDs());
+    const applied = results.filter(
+      (result) =>
+        registered.has(result.serverID) && this.isRefreshCurrent(result.serverID, result.epoch),
+    );
+    for (const result of applied) {
+      this.deps.setServerHealth?.(
+        result.serverID,
+        result.ok ? { ok: true } : { ok: false, error: result.cause },
+      );
+    }
     batch(() => {
       let anyError: string | undefined;
-      for (const result of results) {
-        if ('error' in result) {
+      for (const result of applied) {
+        if (!result.ok) {
           anyError = result.error;
           this.setState('serverPages', result.serverID, (current) => ({
             ...(current ?? { complete: false }),
