@@ -69,6 +69,12 @@ export type TranscriptMessage =
 
 export type ToolCategory = 'read' | 'search' | 'edit' | 'shell' | 'web' | 'delegate' | 'other';
 
+/** The display/identity facts the transcript fold needs to recognize calls. */
+export type ToolIdentityHints = Readonly<{
+  /** Configured MCP servers; their flattened namespaces identify MCP calls. */
+  mcpServers?: readonly string[];
+}>;
+
 export type TranscriptNode =
   | { kind: 'user'; key: string; text: string; attachments: readonly string[] }
   | { kind: 'text'; key: string; text: string }
@@ -104,6 +110,11 @@ export type FoldOptions = Readonly<{
   /** Tool IDs whose oversized inline diff the user expanded; see `clampDiffPatch`. */
   expandedDiffs?: ReadonlySet<string>;
   /**
+   * Configured MCP servers. Their flattened tool namespaces (`<server>_<tool>`, the same
+   * registry form OpenCode v2 uses) let a call keep its server identity in group summaries.
+   */
+  mcpServers?: readonly string[];
+  /**
    * Execution markers keyed by the message id the marker is emitted after (the segment's
    * total extent: its idle message, or its last message while running).
    */
@@ -132,26 +143,63 @@ const categoryByName: Readonly<Record<string, ToolCategory>> = {
   fetch: 'web',
   task: 'delegate',
   agent: 'delegate',
+  subagent: 'delegate',
 };
+
+const builtinCategories = new Set(Object.keys(categoryByName));
+
+/**
+ * What one call is. Built-ins are matched by name. OpenCode v2 registers MCP tools as
+ * `<normalizedName(server)>_<normalizedName(tool)>`, so a configured server's flattened
+ * prefix recovers the server; a call matching no configured server stays honestly
+ * external instead of being attributed to one (issue #74).
+ */
+export type ToolIdentity =
+  | Readonly<{ kind: 'builtin'; category: ToolCategory }>
+  | Readonly<{ kind: 'mcp'; server: string; tool: string }>
+  | Readonly<{ kind: 'external' }>;
+
+/** The flattened registry namespace for an MCP server name (upstream `normalizedName`). */
+export function mcpNamespace(server: string): string {
+  return server.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+/** The longest matching configured server prefix wins; servers `a` and `a_b` stay distinct. */
+export function toolIdentity(name: string, mcpServers: readonly string[] = []): ToolIdentity {
+  const builtin = categoryByName[name.toLowerCase()];
+  if (builtin !== undefined) return { kind: 'builtin', category: builtin };
+  const matched = mcpServers
+    .map((server) => ({ server, prefix: `${mcpNamespace(server)}_` }))
+    .filter((entry) => entry.prefix.length > 1 && name.startsWith(entry.prefix))
+    .toSorted((left, right) => right.prefix.length - left.prefix.length)[0];
+  if (matched === undefined) return { kind: 'external' };
+  return { kind: 'mcp', server: matched.server, tool: name.slice(matched.prefix.length) };
+}
 
 export function classifyTool(name: string): ToolCategory {
   return categoryByName[name.toLowerCase()] ?? 'other';
 }
 
 /**
- * Only quiet inspection/shell/edit calls fold; anything mutating the user's focus (user
- * messages, failures) does not. Edits fold too: the diffs stay recoverable in the group.
+ * Every call that visibly happened folds into the activity group, MCP calls included. A
+ * call to a server that is not configured still folds, so its summary can say it was an
+ * external tool. Anything mutating the user's focus (failures) never folds, so a failed
+ * MCP call keeps its error visible (issue #74).
  */
-function isFoldable(tool: ToolCall): boolean {
+function isFoldable(tool: ToolCall, mcpServers: readonly string[]): boolean {
   if (tool.status === 'error') return false;
-  const category = classifyTool(tool.name);
-  return (
-    category === 'read' ||
-    category === 'search' ||
-    category === 'web' ||
-    category === 'shell' ||
-    category === 'edit'
-  );
+  if (builtinCategories.has(tool.name.toLowerCase())) {
+    const category = classifyTool(tool.name);
+    return (
+      category === 'read' ||
+      category === 'search' ||
+      category === 'web' ||
+      category === 'shell' ||
+      category === 'edit'
+    );
+  }
+  // Any non-builtin call is activity: MCP when its server is known, external otherwise.
+  return toolIdentity(tool.name, mcpServers).kind !== 'builtin';
 }
 
 export function groupKey(tools: readonly ToolCall[]): string {
@@ -284,7 +332,7 @@ function mergeAdjacentGroups(nodes: TranscriptNode[], options: FoldOptions): Tra
       merged.push({
         kind: 'tool-group',
         key,
-        summary: summarizeTools(tools),
+        summary: summarizeTools(tools, options.mcpServers),
         running: run.some((group) => group.running),
         tools,
         expanded: run.some((group) => group.expanded) || options.expandedGroups.has(key),
@@ -328,7 +376,7 @@ function foldAssistant(
     out.push({
       kind: 'tool-group',
       key,
-      summary: summarizeTools(tools),
+      summary: summarizeTools(tools, options.mcpServers),
       running: tools.some((tool) => tool.status === 'running' || tool.status === 'streaming'),
       tools,
       expanded: options.expandedGroups.has(key),
@@ -367,7 +415,7 @@ function foldAssistant(
   message.parts.forEach((part, index) => {
     switch (part.kind) {
       case 'tool':
-        if (isFoldable(part.tool)) {
+        if (isFoldable(part.tool, options.mcpServers ?? [])) {
           pending.push(part.tool);
           return;
         }
@@ -441,33 +489,63 @@ const verbs: Readonly<Record<ToolCategory, (count: number) => string>> = {
   other: (count) => `Ran ${count} other ${count === 1 ? 'tool' : 'tools'}`,
 };
 
-/** `Read 3 files, searched for 2 patterns, ran 1 shell command`, derived from data only. */
-export function summarizeTools(tools: readonly ToolCall[]): string {
-  const counts = new Map<ToolCategory, number>();
+function callVerb(count: number, server: string | undefined): string {
+  const times = `${count} ${count === 1 ? 'time' : 'times'}`;
+  // A known server keeps its name; unknown external tools are never attributed to one.
+  if (server === undefined) return `Called ${count} external ${count === 1 ? 'tool' : 'tools'}`;
+  return `Called ${server} ${times}`;
+}
+
+/**
+ * `Read 3 files, called lotus 4 times, ran 2 shell commands`, derived from data only.
+ * MCP calls are counted per server; calls to a server that is not configured fall back to
+ * a truthful external count instead of borrowing another server's name (issue #74).
+ */
+export function summarizeTools(
+  tools: readonly ToolCall[],
+  mcpServers: readonly string[] = [],
+): string {
+  // One ordered bucket list, in first-appearance order: the reference layout reads
+  // "Reading 2 files, calling lotus 4 times, running 2 shell commands".
+  const counts = new Map<string, { phrase: (count: number) => string; count: number }>();
   for (const tool of tools) {
-    const category = classifyTool(tool.name);
-    counts.set(category, (counts.get(category) ?? 0) + 1);
+    const identity = toolIdentity(tool.name, mcpServers);
+    const key =
+      identity.kind === 'builtin'
+        ? `builtin:${identity.category}`
+        : identity.kind === 'mcp'
+          ? `mcp:${identity.server}`
+          : 'external';
+    const phrase =
+      identity.kind === 'builtin'
+        ? verbs[identity.category]
+        : (count: number) => callVerb(count, identity.kind === 'mcp' ? identity.server : undefined);
+    const bucket = counts.get(key);
+    if (bucket === undefined) counts.set(key, { phrase, count: 1 });
+    else bucket.count += 1;
   }
-  return [...counts.entries()]
-    .map(([category, count], index) => {
-      const phrase = verbs[category](count);
-      return index === 0 ? phrase : phrase.charAt(0).toLowerCase() + phrase.slice(1);
-    })
+  return [...counts.values()]
+    .map((bucket) => bucket.phrase(bucket.count))
+    .map((phrase, index) =>
+      index === 0 ? phrase : phrase.charAt(0).toLowerCase() + phrase.slice(1),
+    )
     .join(', ');
 }
 
 const argumentKeys = ['filePath', 'path', 'pattern', 'command', 'url', 'query', 'description'];
 
-/** Short one-line description of a call: `read src/app.ts`, `bash bun test`. */
-export function describeTool(tool: ToolCall): string {
+/** Short one-line description of a call: `read src/app.ts`, `bash bun test`, `lotus: get_issue`. */
+export function describeTool(tool: ToolCall, mcpServers: readonly string[] = []): string {
+  const identity = toolIdentity(tool.name, mcpServers);
+  const name = identity.kind === 'mcp' ? `${identity.server}: ${identity.tool}` : tool.name;
   for (const key of argumentKeys) {
     const value = tool.input[key];
     if (typeof value === 'string' && value.trim() !== '') {
       const firstLine = value.split('\n')[0] ?? value;
-      return `${tool.name} ${firstLine}`;
+      return `${name} ${firstLine}`;
     }
   }
-  return tool.name;
+  return name;
 }
 
 /** Nodes rendered per step; older ones stay folded behind "earlier messages" until paged to. */

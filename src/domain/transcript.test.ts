@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { sanitizeTerminalText } from './sanitize-text.ts';
 import {
   type AssistantPart,
+  describeTool,
   foldTranscript,
   formatToolTiming,
   groupKey,
@@ -400,6 +401,120 @@ describe('grouped activity (issue #23)', () => {
     const nodes = foldTranscript(runFixture(), compact);
     const failed = nodes[1];
     expect(failed?.kind === 'tool' && failed.tool.error).toBe('exit 1');
+  });
+});
+
+const withMcp = (servers: readonly string[]) => ({
+  ...compact,
+  mcpServers: servers,
+});
+const mcp = (
+  id: string,
+  name: string,
+  status: ToolCall['status'] = 'completed',
+): AssistantPart => ({
+  kind: 'tool',
+  tool: {
+    id,
+    name,
+    status,
+    input: { issue: '7' },
+    startedAt: 0,
+    ...(status === 'error' ? { error: 'rate limited' } : {}),
+  },
+});
+function summaryOf(nodes: TranscriptNode[]): string | undefined {
+  const group = nodes.find((node) => node.kind === 'tool-group');
+  return group?.kind === 'tool-group' ? group.summary : undefined;
+}
+
+describe('MCP activity in compact groups (issue #74)', () => {
+  test('a mixed fixture names reads, MCP calls and shell commands together', () => {
+    const parts: AssistantPart[] = [
+      tool('r1', 'read'),
+      tool('r2', 'read'),
+      ...Array.from({ length: 4 }, (_, index) => mcp(`l${index}`, 'lotus_get_issue')),
+      tool('s1', 'bash'),
+      tool('s2', 'bash'),
+    ];
+    const nodes = foldTranscript([assistant(parts)], withMcp(['lotus']));
+    expect(kinds(nodes)).toEqual(['group(8)']);
+    expect(summaryOf(nodes)).toBe('Read 2 files, called lotus 4 times, ran 2 shell commands');
+    // No MCP call was mislabeled as a shell command, and every call stays recoverable.
+    const group = nodes[0];
+    expect(group?.kind === 'tool-group' && group.tools.map((entry) => entry.id)).toEqual([
+      'r1',
+      'r2',
+      'l0',
+      'l1',
+      'l2',
+      'l3',
+      's1',
+      's2',
+    ]);
+  });
+
+  test('two MCP servers stay distinguishable and single calls read singular', () => {
+    const nodes = foldTranscript(
+      [
+        assistant([
+          mcp('l1', 'lotus_get_issue'),
+          mcp('s1', 'sentry_list_issues'),
+          mcp('s2', 'sentry_list_issues'),
+        ]),
+      ],
+      withMcp(['lotus', 'sentry']),
+    );
+    expect(summaryOf(nodes)).toBe('Called lotus 1 time, called sentry 2 times');
+  });
+
+  test('an unrecognized tool is external, never attributed to a configured server', () => {
+    const nodes = foldTranscript([assistant([mcp('x1', 'mystery_do_thing')])], withMcp(['lotus']));
+    expect(kinds(nodes)).toEqual(['group(1)']);
+    const summary = foldTranscript(
+      [assistant([tool('r1', 'read'), mcp('x1', 'mystery_do_thing')])],
+      withMcp(['lotus']),
+    );
+    expect(summaryOf(summary)).toBe('Read 1 file, called 1 external tool');
+  });
+
+  test('servers with a shared prefix cannot steal each other’s calls', () => {
+    const nodes = foldTranscript(
+      [assistant([mcp('a1', 'a_do'), mcp('b1', 'a_b_do'), mcp('b2', 'a_b_run')])],
+      withMcp(['a', 'a_b']),
+    );
+    expect(summaryOf(nodes)).toBe('Called a 1 time, called a_b 2 times');
+  });
+
+  test('a failed MCP call stays visible instead of folding into success counts', () => {
+    const nodes = foldTranscript(
+      [assistant([mcp('l1', 'lotus_get_issue'), mcp('l2', 'lotus_get_issue', 'error')])],
+      withMcp(['lotus']),
+    );
+    // The successful call forms a one-call group; the failure is its own visible row.
+    expect(kinds(nodes)).toEqual(['group(1)', 'tool']);
+    const failed = nodes[1];
+    expect(failed?.kind === 'tool' && failed.tool.status).toBe('error');
+    expect(failed?.kind === 'tool' && failed.expanded).toBe(true);
+  });
+
+  test('running MCP calls stay in the group, and expanded rows name the server', () => {
+    const parts = [mcp('l1', 'lotus_get_issue', 'running'), mcp('l2', 'lotus_get_issue')];
+    const nodes = foldTranscript([assistant(parts)], withMcp(['lotus']));
+    expect(nodes[0]?.kind === 'tool-group' && nodes[0].running).toBe(true);
+    expect(summaryOf(nodes)).toBe('Called lotus 2 times');
+  });
+
+  test('MCP calls are shown individually in detailed mode with server identity', () => {
+    const nodes = foldTranscript([assistant([mcp('l1', 'lotus_get_issue')])], {
+      ...detailed,
+      mcpServers: ['lotus'],
+    });
+    expect(nodes.map((node) => node.kind)).toEqual(['tool']);
+    const call = nodes[0];
+    expect(call?.kind === 'tool' ? describeTool(call.tool, ['lotus']) : undefined).toBe(
+      'lotus: get_issue',
+    );
   });
 });
 

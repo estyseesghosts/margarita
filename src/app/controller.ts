@@ -487,11 +487,12 @@ export class AppController {
     this.setState('catalogError', undefined);
     const backend = this.backendFor(serverID);
     try {
-      const [agents, models, fallback, commands] = await Promise.all([
+      const [agents, models, fallback, commands, mcp] = await Promise.all([
         backend.listAgents(directory),
         backend.listModels(directory),
         backend.defaultModel(directory),
         backend.listCommands(directory).catch(() => []),
+        backend.listMcpServers().catch(() => []),
       ]);
       // Reject a late response from a server/project the user has already left.
       if (generation !== this.catalogGeneration || this.catalogScope(directory, serverID) !== scope)
@@ -503,6 +504,7 @@ export class AppController {
         this.setState('models', models);
         this.setState('defaultModel', fallback);
         this.setState('serverCommands', commands);
+        this.setState('mcpServers', mcp);
         this.setState('catalogLoading', false);
       });
     } catch (error) {
@@ -513,6 +515,7 @@ export class AppController {
         this.setState('models', []);
         this.setState('defaultModel', undefined);
         this.setState('serverCommands', []);
+        this.setState('mcpServers', []);
         this.setState('catalogLoading', false);
         this.setState('catalogError', errorText(error));
       });
@@ -3490,6 +3493,7 @@ export class AppController {
       detailed: this.state.detailed,
       expandedGroups: expanded.groups,
       expandedDiffs: expanded.diffs,
+      mcpServers: this.state.mcpServers,
     });
   }
 

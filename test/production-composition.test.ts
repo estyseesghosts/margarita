@@ -193,6 +193,8 @@ describe('production composition collisions (issue #72)', () => {
 
   test('the model catalog follows the attached host and model IDs stay identical', async () => {
     const fixture = await compositionFixture();
+    fixture.local.mcpServers = ['lotus'];
+    fixture.bravo.mcpServers = ['sentry'];
     const assembly = await createProductionAssembly(fixture.input());
     const { controller } = assembly;
     await controller.bootstrap();
@@ -201,11 +203,14 @@ describe('production composition collisions (issue #72)', () => {
     await flush();
     expect(controller.state.models.map((model) => model.name)).toEqual(['local-model']);
     expect(controller.state.models[0]?.modelID).toBe('model_dup');
+    // MCP identity is part of the catalog, not the launch host's alone (issue #74).
+    expect(controller.state.mcpServers).toEqual(['lotus']);
 
     controller.openSession('ses_same', 'srv_b');
     await flush();
     expect(controller.state.models.map((model) => model.name)).toEqual(['remote-model']);
     expect(controller.state.models[0]?.modelID).toBe('model_dup');
+    expect(controller.state.mcpServers).toEqual(['sentry']);
 
     assembly.controller.dispose();
     await assembly.servers.dispose();

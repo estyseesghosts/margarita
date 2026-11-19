@@ -329,6 +329,11 @@ export class FakeBackend implements Backend {
   async listCommands(): Promise<ServerCommand[]> {
     return this.serverCommands.map((command) => ({ ...command }));
   }
+  /** Configurable MCP server names returned by listMcpServers. */
+  mcpServers: string[] = [];
+  async listMcpServers(): Promise<string[]> {
+    return [...this.mcpServers];
+  }
   /** Configurable server-side file index: match is a lowercase substring test. */
   async findProjectFiles(directory: string, query: string): Promise<string[]> {
     this.calls.push({ name: 'findProjectFiles', args: [directory, query] });

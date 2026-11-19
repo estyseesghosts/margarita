@@ -114,6 +114,8 @@ export type AppState = {
   models: CatalogModel[];
   defaultModel?: ModelSelection;
   serverCommands: ServerCommand[];
+  /** Names of the MCP servers the owning host exposes; empty when it offers none. */
+  mcpServers: string[];
   /**
    * Canonical directory key the agents/models/commands above belong to, and whether a
    * fetch is in flight or failed. Consumers must not use another project's catalog.
@@ -196,6 +198,7 @@ export function initialState(directory: string, serverID: string = localServerID
     agents: [],
     models: [],
     serverCommands: [],
+    mcpServers: [],
     catalogLoading: false,
     detailed: false,
     transcriptWindow: {},

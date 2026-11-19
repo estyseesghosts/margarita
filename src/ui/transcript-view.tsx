@@ -76,6 +76,7 @@ export function Transcript(props: TranscriptProps) {
       detailed: state.detailed,
       expandedGroups: expanded.groups,
       expandedDiffs: expanded.diffs,
+      mcpServers: state.mcpServers,
       markers,
     });
   });
@@ -205,6 +206,7 @@ export function Transcript(props: TranscriptProps) {
                   focused={isNodeFocused(node(), state.focusedGroup)}
                   animate={props.animate}
                   ascii={props.ascii}
+                  mcpServers={state.mcpServers}
                 />
               </box>
             </>
@@ -323,6 +325,7 @@ function NodeView(props: {
   focused: boolean;
   animate: boolean;
   ascii: boolean;
+  mcpServers: readonly string[];
 }) {
   const theme = () => props.theme;
   return (
@@ -380,6 +383,7 @@ function NodeView(props: {
             syntax={props.syntax}
             width={props.width}
             focused={props.focused}
+            mcpServers={props.mcpServers}
           />
         )}
       </Match>
@@ -402,6 +406,7 @@ function NodeView(props: {
                     syntax={props.syntax}
                     width={props.width}
                     focused={false}
+                    mcpServers={props.mcpServers}
                   />
                 )}
               </For>
@@ -530,6 +535,7 @@ function ToolView(props: {
   syntax: SyntaxStyle;
   width: number;
   focused: boolean;
+  mcpServers: readonly string[];
 }) {
   const edit = createMemo(() => (props.tool.status === 'error' ? undefined : editDiff(props.tool)));
   // A completed edit-like call with no usable patch must say so instead of degrading to a
@@ -563,10 +569,10 @@ function ToolView(props: {
         <text fg={props.theme.text}>
           {sanitizeText(
             edit() !== undefined
-              ? `${props.tool.name === 'write' ? 'Write' : 'Update'}(${describeTool(props.tool).slice(props.tool.name.length + 1)})`
+              ? `${props.tool.name === 'write' ? 'Write' : 'Update'}(${describeTool(props.tool, props.mcpServers).slice(props.tool.name.length + 1)})`
               : unavailable() !== undefined
                 ? `Changed(${unavailable()})`
-                : describeTool(props.tool),
+                : describeTool(props.tool, props.mcpServers),
           )}
         </text>
         <Show when={props.detailed}>
