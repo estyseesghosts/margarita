@@ -2349,6 +2349,149 @@ describe('image paste and attachments (issue #42)', () => {
   });
 });
 
+describe('paste stays on its originating route (issue #87)', () => {
+  test('a path paste delayed mid-read lands only in the originating session', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'marg-paste-'));
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a'), fakeSession('ses_b')];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    try {
+      const path = join(directory, 'shot.png').replaceAll('\\', '/');
+      await writeFile(path, pngBytes);
+      await attach(controller, 'ses_a');
+
+      // Fire the paste without awaiting: it suspends on the first file read.
+      const pastePromise = controller.pasteBytes(asBytes(path));
+
+      // Switch to another session while the read is in flight.
+      controller.openSession('ses_b');
+      await flush();
+      await pastePromise;
+
+      // Only the originating draft received the attachment.
+      expect(controller.state.composer.text).toBe('');
+      expect(controller.state.attachments).toEqual([]);
+      expect((controller.state.draftAttachments['ses_a'] ?? []).map((entry) => entry.name)).toEqual(
+        ['shot.png'],
+      );
+      controller.dispose();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('multiline text switched mid-paste lands only in the originating draft', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a'), fakeSession('ses_b')];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+
+    const pastePromise = controller.pasteBytes(asBytes('line one\nline two'));
+
+    controller.openSession('ses_b');
+    await flush();
+    await pastePromise;
+
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.attachments).toEqual([]);
+    expect(controller.state.drafts['ses_a']?.text).toBe('line one\nline two');
+    controller.dispose();
+  });
+
+  test('a paste started in the overview survives a move to a new session', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.openOverview();
+    await flush();
+
+    const pastePromise = controller.pasteBytes(asBytes('overview text'));
+
+    controller.startNewSession('/work/elsewhere');
+    await flush();
+    await pastePromise;
+
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.attachments).toEqual([]);
+    expect(controller.state.drafts['overview']?.text).toBe('overview text');
+    controller.dispose();
+  });
+
+  test('multiple pasted files are stashed together as one group in the origin draft', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'marg-paste-multi-'));
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a'), fakeSession('ses_b')];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    try {
+      const one = join(directory, 'one.png').replaceAll('\\', '/');
+      const two = join(directory, 'two.png').replaceAll('\\', '/');
+      await writeFile(one, pngBytes);
+      await writeFile(two, pngBytes);
+      await attach(controller, 'ses_a');
+
+      const pastePromise = controller.pasteBytes(asBytes(`${one} ${two}`));
+
+      controller.openSession('ses_b');
+      await flush();
+      await pastePromise;
+
+      expect(controller.state.attachments).toEqual([]);
+      expect((controller.state.draftAttachments['ses_a'] ?? []).map((entry) => entry.name)).toEqual(
+        ['one.png', 'two.png'],
+      );
+      controller.dispose();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('a read failure reports an error, attaches nothing, and leaves other routes alone', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'marg-paste-big-'));
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a'), fakeSession('ses_b')];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    try {
+      const tooBig = join(directory, 'huge.png').replaceAll('\\', '/');
+      await writeFile(tooBig, new Uint8Array(20 * 1024 * 1024 + 1));
+      await attach(controller, 'ses_a');
+
+      const pastePromise = controller.pasteBytes(asBytes(tooBig));
+
+      controller.openSession('ses_b');
+      await flush();
+      await pastePromise;
+
+      expect(controller.state.attachments).toEqual([]);
+      expect((controller.state.draftAttachments['ses_a'] ?? []).length).toBe(0);
+      expect(controller.state.notice?.text).toContain('larger than 20 MB');
+      expect(controller.state.notice?.tone).toBe('warn');
+      controller.dispose();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('a paste that resolves while an overlay is open does not change another route', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a'), fakeSession('ses_b')];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await attach(controller, 'ses_a');
+
+    controller.setOverlay({ kind: 'help' });
+    const pastePromise = controller.pasteBytes(asBytes('help text'));
+
+    controller.openSession('ses_b');
+    await flush();
+    await pastePromise;
+
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.attachments).toEqual([]);
+    expect(controller.state.drafts['ses_a']?.text).toBe('help text');
+    controller.dispose();
+  });
+});
+
 function adminHarness() {
   const calls: string[] = [];
   const listings = [

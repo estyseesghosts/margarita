@@ -267,6 +267,9 @@ export class AppController {
   /** In-flight saves, serialized per controller. */
   private saveChain: Promise<void> = Promise.resolve();
   private saveError: string | undefined;
+  /** In-flight pastes, serialized in arrival order so a route switch mid-paste cannot
+   * interleave two paste transactions. */
+  private pasteChain: Promise<void> = Promise.resolve();
   private readonly goalStore: GoalStore;
   /** Identity of the server this controller talks to; part of every session key. */
   readonly serverID: string;
@@ -1693,19 +1696,79 @@ export class AppController {
    * into placeholder characters.
    */
   async pasteBytes(bytes: Uint8Array): Promise<void> {
-    const text = decodePastedText(bytes);
-    if (text !== undefined) {
-      if (await this.attachPastedPaths(text)) return;
-      this.activateOverviewComposer(text);
+    // Serialize paste transactions in arrival order. The originating route is captured
+    // synchronously here (before `run` is deferred onto the microtask queue) so a route
+    // switch while files are read cannot retarget the paste (issue #87).
+    if (this.disposed) return;
+    const originKey = this.routeKey(this.state.route);
+
+    const run = async (): Promise<void> => {
+      if (this.disposed) return;
+
+      const text = decodePastedText(bytes);
+      if (text !== undefined) {
+        const consumed = await this.attachPastedPaths(text, originKey);
+        if (consumed) return;
+        this.insertPastedText(text, originKey);
+        return;
+      }
+
+      const mime = detectAttachmentMime(bytes);
+      if (mime === undefined) {
+        this.showNotice('Pasted data is not text or a supported image.', 'warn');
+        return;
+      }
+      const name = `clipboard.${mime.split('/').at(-1) ?? 'bin'}`;
+      this.attachImage(bytes, mime, name);
+    };
+    this.pasteChain = this.pasteChain.then(run).catch(() => undefined);
+    await this.pasteChain;
+  }
+
+  /** True when no route or overlay change has occurred since `originKey` was captured. */
+  private pasteStillCurrent(originKey: string): boolean {
+    return (
+      !this.disposed &&
+      this.routeKey(this.state.route) === originKey &&
+      this.state.overlay.kind === 'none'
+    );
+  }
+
+  /**
+   * Inserts pasted text into the originating route. If the route changed while the paste was
+   * in flight, the text is stashed into the originating draft instead of another route's
+   * composer.
+   */
+  private insertPastedText(text: string, originKey: string): void {
+    if (!this.pasteStillCurrent(originKey)) {
+      this.stashPasteText(originKey, text);
       return;
     }
-    const mime = detectAttachmentMime(bytes);
-    if (mime === undefined) {
-      this.showNotice('Pasted data is not text or a supported image.', 'warn');
-      return;
-    }
-    const name = `clipboard.${mime.split('/').at(-1) ?? 'bin'}`;
-    this.attachImage(bytes, mime, name);
+    this.activateOverviewComposer(text);
+  }
+
+  /** Stashes already-read attachments into the originating draft when the route changed. */
+  private stashPaste(originKey: string, added: readonly Attachment[]): void {
+    const current = this.state.draftAttachments[originKey] ?? [];
+    batch(() => {
+      this.setState('draftAttachments', originKey, [...current, ...added]);
+    });
+    this.showNotice(
+      `Paste stashed: the route changed while reading ${added.length} file(s); they await in the originating draft.`,
+      'warn',
+    );
+  }
+
+  /** Stashes pasted text into the originating draft when the route changed. */
+  private stashPasteText(originKey: string, text: string): void {
+    const draft = this.state.drafts[originKey] ?? emptyComposer;
+    batch(() => {
+      this.setState('drafts', originKey, insertText(draft, text));
+    });
+    this.showNotice(
+      'Paste stashed: the route changed before the text landed; it awaits in the originating draft.',
+      'warn',
+    );
   }
 
   /** Attaches an image from any source that already decoded it (tests, future clipboards). */
@@ -1750,7 +1813,7 @@ export class AppController {
    * supported file. Anything else falls through to normal text insertion, so pasting a
    * sentence or a code path never silently swallows it.
    */
-  private async attachPastedPaths(text: string): Promise<boolean> {
+  private async attachPastedPaths(text: string, originKey: string): Promise<boolean> {
     const trimmed = text.trim();
     if (trimmed === '') return false;
     const paths = splitPastedPaths(trimmed, this.deps.platform);
@@ -1766,6 +1829,12 @@ export class AppController {
       added.push(result.attachment);
     }
     if (added.length === 0) return false;
+    if (!this.pasteStillCurrent(originKey)) {
+      // A route or overlay change while reading: stash the whole group into the
+      // originating draft and leave the current route untouched.
+      this.stashPaste(originKey, added);
+      return true;
+    }
     this.addAttachments(
       added,
       added.length === 1
