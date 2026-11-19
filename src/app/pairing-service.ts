@@ -45,7 +45,7 @@ function profileFor(input: {
   serverID: string;
   shortname: string;
   baseUrl: string;
-  auth: 'bearer' | 'basic';
+  auth: 'none' | 'bearer' | 'basic';
 }) {
   return {
     serverID: input.serverID,
@@ -78,7 +78,10 @@ export async function pairServer(
       `That server is already registered as "${existing}". Rename or remove it before pairing again.`,
     );
   }
-  if (deps.credentials.kind === 'unavailable') {
+  // Pairing an anonymous server persists no secret, so it does not need the credential
+  // store; authenticated modes fail visibly instead of pairing something unusable.
+  const needsCredentialStore = request.code !== '' || deps.password !== undefined;
+  if (needsCredentialStore && deps.credentials.kind === 'unavailable') {
     throw new PairingError(
       `Secure credential storage is unavailable (${deps.credentials.description}). Re-pair once it is available, or use --server with MARGARITA_SERVER_PASSWORD.`,
     );
@@ -86,8 +89,8 @@ export async function pairServer(
 
   const serverID = `srv_${(deps.generateID ?? randomUUID)()}`;
   let connection: Connection;
-  let credential: string;
-  let auth: 'bearer' | 'basic';
+  let credential: string | undefined;
+  let auth: 'none' | 'bearer' | 'basic';
   let platform: NodeJS.Platform | undefined;
   if (request.code !== '') {
     auth = 'bearer';
@@ -105,27 +108,49 @@ export async function pairServer(
     };
     credential = redeemed.token;
   } else {
-    auth = 'basic';
     const policy = checkServerUrl(baseUrl, {
       hasPassword: deps.password !== undefined,
       allowInsecureHttp: deps.allowInsecureHttp === true,
     });
     const normalized = policy.toString().replace(/\/$/, '');
-    const headers =
-      deps.password === undefined ? {} : { authorization: basicAuthHeader(deps.password) };
-    const info = await serverInfo(normalized, headers.authorization ?? '', {
-      ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
-      ...(deps.allowInsecureHttp === undefined
-        ? {}
-        : { allowInsecureHttp: deps.allowInsecureHttp }),
-    });
-    platform = info.platform;
-    connection = { baseUrl: normalized, headers, origin: 'remote' };
-    credential = deps.password ?? '';
+    if (deps.password !== undefined) {
+      auth = 'basic';
+      // Wrong credentials fail here, before anything is persisted — never at restart.
+      const info = await serverInfo(normalized, basicAuthHeader(deps.password), {
+        ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+        ...(deps.allowInsecureHttp === undefined
+          ? {}
+          : { allowInsecureHttp: deps.allowInsecureHttp }),
+        unauthorizedText:
+          'The server rejected those credentials. Check MARGARITA_SERVER_PASSWORD and pair again.',
+      });
+      platform = info.platform;
+      connection = {
+        baseUrl: normalized,
+        headers: { authorization: basicAuthHeader(deps.password) },
+        origin: 'remote',
+      };
+      credential = deps.password;
+    } else {
+      auth = 'none';
+      // Anonymous servers: prove a read-only call succeeds without any Authorization
+      // header, then pair reconnectably — no credential store involved.
+      const info = await serverInfo(normalized, undefined, {
+        ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+        ...(deps.allowInsecureHttp === undefined
+          ? {}
+          : { allowInsecureHttp: deps.allowInsecureHttp }),
+        unauthorizedText:
+          'The server requires credentials. Set MARGARITA_SERVER_PASSWORD and pair again.',
+      });
+      platform = info.platform;
+      connection = { baseUrl: normalized, headers: {}, origin: 'remote' };
+      credential = undefined;
+    }
   }
 
   // Persist the secret first: a profile must never advertise a server Margarita cannot reach.
-  if (credential !== '') await deps.credentials.set(serverID, credential);
+  if (credential !== undefined) await deps.credentials.set(serverID, credential);
   const backend = (deps.createBackend ?? createBackend)(connection, {
     serverID,
     ...(deps.toolOutputChars === undefined ? {} : { toolOutputChars: deps.toolOutputChars }),
@@ -157,7 +182,7 @@ export async function pairServer(
     deps.servers.setState(serverID, 'online');
     return { serverID, shortname: profile.shortname, baseUrl: connection.baseUrl };
   } catch (error) {
-    await deps.credentials.delete(serverID).catch(() => {});
+    if (credential !== undefined) await deps.credentials.delete(serverID).catch(() => {});
     throw error;
   }
 }

@@ -15,6 +15,7 @@ import {
   createProductionAssembly,
   wireServerStream,
 } from './app/production-assembly.ts';
+import { remoteConnectionFor } from './app/remote-connection.ts';
 import { type CliOptions, helpText, parseArgs } from './cli/args.ts';
 import { exitCodes, runPrint } from './cli/print.ts';
 import { resolveWorkingDirectory } from './cli/target.ts';
@@ -134,23 +135,12 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
         process.stderr.write(`marg: unknown server "${alias}". Use /servers or pair it first.\n`);
         return exitCodes.notFound;
       }
-      const secret = await credentials.get(profile.serverID).catch(() => undefined);
-      if (secret === undefined) {
-        process.stderr.write(
-          `marg: no saved credential for "${profile.shortname}". Re-pair it or set MARGARITA_SERVER_PASSWORD.\\n`,
-        );
+      const remote = await remoteConnectionFor(profile, credentials);
+      if (!remote.ok) {
+        process.stderr.write(`marg: ${remote.message}\n`);
         return exitCodes.unauthorized;
       }
-      connection = {
-        baseUrl: profile.baseUrl,
-        headers: {
-          authorization:
-            profile.auth === 'basic'
-              ? `Basic ${Buffer.from(`opencode:${secret}`).toString('base64')}`
-              : `Bearer ${secret}`,
-        },
-        origin: 'remote',
-      };
+      connection = remote.connection;
       serverID = profile.serverID;
       const resolved = resolveWorkingDirectory({
         cwd: options.cwd,

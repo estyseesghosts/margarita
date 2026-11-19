@@ -25,6 +25,8 @@ export type RedeemOptions = Readonly<{
   fetch?: PairingFetch;
   /** Explicit opt-in to send a token over plain HTTP to a non-loopback host. */
   allowInsecureHttp?: boolean;
+  /** Failure text for HTTP 401/403; pairing-token errors default to the redemption wording. */
+  unauthorizedText?: string;
 }>;
 
 function isLoopback(hostname: string): boolean {
@@ -45,7 +47,11 @@ function assertSecureTransport(url: URL, allowInsecureHttp: boolean): void {
 }
 
 /** Rejects anything but a single-hop JSON response: redirects are never followed. */
-async function jsonResponse(response: Response, operation: string): Promise<unknown> {
+async function jsonResponse(
+  response: Response,
+  operation: string,
+  unauthorizedText = 'The pairing code is expired, already used, or unauthorized.',
+): Promise<unknown> {
   if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
     throw new PairingError(`${operation} was redirected; refusing to follow it.`);
   }
@@ -56,7 +62,7 @@ async function jsonResponse(response: Response, operation: string): Promise<unkn
   if (!response.ok) {
     const kind =
       response.status === 401 || response.status === 403
-        ? 'The pairing code is expired, already used, or unauthorized.'
+        ? unauthorizedText
         : response.status === 404 || response.status === 410
           ? 'The pairing code is no longer valid.'
           : `The server refused the request (HTTP ${response.status}).`;
@@ -86,17 +92,26 @@ function platformFromInfo(raw: Record<string, unknown>): NodeJS.Platform | undef
 
 export async function serverInfo(
   baseUrl: string,
-  authorization: string,
+  /** Full Authorization header value; omit the argument entirely for anonymous servers. */
+  authorization?: string,
   options: RedeemOptions = {},
 ): Promise<{ version: string; hostname?: string; platform?: NodeJS.Platform }> {
   const fetchImpl = options.fetch ?? fetch;
   const url = new URL(apiUrl(baseUrl, 'api/info'));
   assertSecureTransport(url, options.allowInsecureHttp === true);
-  const response = await fetchImpl(url.toString(), {
-    headers: { accept: 'application/json', authorization },
-    redirect: 'error',
-  });
-  const raw = await jsonResponse(response, 'server.info');
+  let response: Response;
+  try {
+    response = await fetchImpl(url.toString(), {
+      headers: {
+        accept: 'application/json',
+        ...(authorization === undefined ? {} : { authorization }),
+      },
+      redirect: 'error',
+    });
+  } catch (cause) {
+    throw new PairingError('Could not reach the server.', { cause });
+  }
+  const raw = await jsonResponse(response, 'server.info', options.unauthorizedText);
   if (!isRecord(raw) || typeof raw['version'] !== 'string') {
     throw new PairingError('The server did not report its version.');
   }

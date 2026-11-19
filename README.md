@@ -112,8 +112,15 @@ Or point at a URL you already know (no one-time code):
 /pair --url https://host.example --as buildbox
 ```
 
-Manual pairing asks for the password through the secure credential flow, not the composer
-history. `MARGARITA_SERVER_PASSWORD` still works for a direct `--server` connection.
+Manual pairing does not prompt inside the composer. Set `MARGARITA_SERVER_PASSWORD` to pair a
+password-protected server — the password is verified against the server before anything is
+saved, and a rejected password persists nothing. Leave it unset to pair an **anonymous**
+server: margarita checks the API with no Authorization header and stores an `auth: none`
+profile with no credential at all. Anonymous hosts restore on restart with no stored secret
+involved. Authenticated profiles that lose their secret fail visibly (`--remote` says
+exactly what to re-pair) and never fall back to anonymous access. Profiles paired before
+this change that carry no secret paired as Basic stay Basic — re-pair them once to replace
+the unusable profile, anonymous or not.
 
 Servers behind a path-prefixed reverse proxy are supported: point `/pair` at
 `https://host.example/opencode/auth/connect/<code>` (or `/pair --url https://host.example/opencode --as buildbox`)

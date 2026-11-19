@@ -139,18 +139,24 @@ export async function createProductionAssembly(
   // Restore every persisted paired server alongside the launch connection. Missing or
   // unreadable credentials never abort startup; they register as `unauthorized` with no
   // headers, so the overview can show the host without ever issuing a request.
+  // `auth: 'none'` profiles restore anonymously: no stored secret exists by design and
+  // none is requested — a launch-time health check proves the host is reachable.
   const launchBase = baseOfUrl(launch.connection.baseUrl);
   for (const profile of profiles.profiles) {
     if (servers.get(profile.serverID) !== undefined) continue;
     if (baseOfUrl(profile.baseUrl) === launchBase) continue;
-    const secret = await input.credentials.get(profile.serverID).catch(() => undefined);
+    const anonymous = profile.auth === 'none';
+    const secret = anonymous
+      ? undefined
+      : await input.credentials.get(profile.serverID).catch(() => undefined);
     const auth = profile.auth ?? 'bearer';
     const headers =
-      secret === undefined
+      anonymous || secret === undefined
         ? {}
         : auth === 'basic'
           ? { authorization: `Basic ${Buffer.from(`opencode:${secret}`).toString('base64')}` }
           : { authorization: `Bearer ${secret}` };
+    const authorized = anonymous || secret !== undefined;
     const connection: Connection = { baseUrl: profile.baseUrl, headers, origin: 'remote' };
     const restored = (input.createBackend ?? createBackend)(connection, {
       serverID: profile.serverID,
@@ -164,10 +170,10 @@ export async function createProductionAssembly(
       remoteFilesystem: true,
       ...(profile.platform === undefined ? {} : { platform: profile.platform }),
     });
-    servers.setState(profile.serverID, secret === undefined ? 'unauthorized' : 'connecting');
+    servers.setState(profile.serverID, authorized ? 'connecting' : 'unauthorized');
     debugLog.write('server-restored', {
       serverID: profile.serverID,
-      authorized: secret !== undefined,
+      authorized,
     });
   }
 

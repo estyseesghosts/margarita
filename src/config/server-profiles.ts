@@ -12,8 +12,8 @@ export type ServerProfile = Readonly<{
   baseUrl: string;
   /** Additional addresses/aliases that refer to the same server. */
   aliases?: readonly string[];
-  /** How the stored credential is sent; a scheme, never the secret itself. */
-  auth?: 'bearer' | 'basic';
+  /** How the stored credential is sent; a scheme, never the secret itself. 'none' = anonymous. */
+  auth?: 'none' | 'bearer' | 'basic';
   /** Free-form non-secret metadata advertised by the server. */
   metadata?: Readonly<Record<string, string>>;
   /**
@@ -40,7 +40,8 @@ export type ProfileInput = Readonly<{
   shortname: string;
   baseUrl: string;
   aliases?: readonly string[];
-  auth?: 'bearer' | 'basic';
+  /** 'none' pairs without a credential; basic/bearer require a stored secret. */
+  auth?: 'none' | 'bearer' | 'basic';
   metadata?: Readonly<Record<string, string>>;
   platform?: NodeJS.Platform;
 }>;
@@ -206,7 +207,9 @@ export function parseServerProfiles(raw: unknown): ServerProfiles {
         serverID,
         shortname,
         baseUrl,
-        ...(entry['auth'] === 'basic' || entry['auth'] === 'bearer' ? { auth: entry['auth'] } : {}),
+        ...(entry['auth'] === 'basic' || entry['auth'] === 'bearer' || entry['auth'] === 'none'
+          ? { auth: entry['auth'] }
+          : {}),
         ...(Array.isArray(entry['aliases'])
           ? {
               aliases: entry['aliases'].filter(
