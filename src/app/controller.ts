@@ -226,7 +226,7 @@ export class AppController {
   constructor(private readonly deps: ControllerDeps) {
     this.serverID = deps.serverID ?? localServerID;
     this.debugLog = deps.debugLog ?? noDebugLog;
-    const [state, setState] = createStore<AppState>(initialState(deps.cwd));
+    const [state, setState] = createStore<AppState>(initialState(deps.cwd, this.serverID));
     this.state = state;
     this.setState = setState;
     this.persisted = deps.localState;
@@ -303,24 +303,6 @@ export class AppController {
     return this.backendFor(this.activeServerID());
   }
 
-  /**
-   * Canonical key for a session. Prefers the launch server (the common case); when that key
-   * is absent, resolves a cached session with this ID so sessions on other servers still map
-   * to their own state instead of colliding with a local one.
-   */
-  sessionKeyOf(sessionID: string): string {
-    const own = sessionKey({ serverID: this.serverID, sessionID });
-    if (this.state.sessions[own] !== undefined) return own;
-    for (const summary of Object.values(this.state.sessions)) {
-      if (summary.id === sessionID) return sessionKey({ serverID: summary.serverID, sessionID });
-    }
-    return own;
-  }
-
-  private refOf(sessionID: string): SessionRef {
-    return { serverID: this.serverID, sessionID };
-  }
-
   /** Canonical project key for a directory on this server. */
   projectKeyOf(directory: string, serverID: string = this.serverID): string {
     return projectKey({ serverID, directory }, this.deps.platform);
@@ -328,15 +310,16 @@ export class AppController {
 
   // ---------------------------------------------------------------- selectors
 
-  executionOf(sessionID: string): Execution {
-    const permissions = this.state.permissions[this.sessionKeyOf(sessionID)] ?? [];
+  executionOf(sessionID: string, serverID: string = this.activeServerID()): Execution {
+    const key = this.keyFor(serverID, sessionID);
+    const permissions = this.state.permissions[key] ?? [];
     return projectExecution({
       connected: this.state.stream !== 'reconnecting',
-      loaded: this.state.sessions[this.sessionKeyOf(sessionID)] !== undefined,
-      running: this.state.running[this.sessionKeyOf(sessionID)] === true,
-      outcome: this.state.sessions[this.sessionKeyOf(sessionID)]?.outcome,
+      loaded: this.state.sessions[key] !== undefined,
+      running: this.state.running[key] === true,
+      outcome: this.state.sessions[key]?.outcome,
       permissionIDs: permissions.map((permission) => permission.id),
-      formCount: (this.state.forms[this.sessionKeyOf(sessionID)] ?? []).length,
+      formCount: (this.state.forms[key] ?? []).length,
     });
   }
 
@@ -344,7 +327,7 @@ export class AppController {
   statusOf(session: SessionSummary): SessionStatus {
     return classifySessionStatus({
       online: this.deps.serverInfo?.(session.serverID)?.online ?? true,
-      execution: this.executionOf(session.id),
+      execution: this.executionOf(session.id, session.serverID),
       archived: session.archived,
     });
   }
@@ -352,7 +335,7 @@ export class AppController {
   currentSession(): SessionSummary | undefined {
     const route = this.state.route;
     return route.kind === 'conversation'
-      ? this.state.sessions[this.sessionKeyOf(route.sessionID)]
+      ? this.state.sessions[this.keyFor(route.serverID, route.sessionID)]
       : undefined;
   }
 
@@ -397,7 +380,10 @@ export class AppController {
 
   /** Most recent use: server activity or this frontend opening the session. */
   lastUsed(session: SessionSummary): number {
-    return Math.max(session.updatedAt, this.state.openedAt[this.sessionKeyOf(session.id)] ?? 0);
+    return Math.max(
+      session.updatedAt,
+      this.state.openedAt[this.keyFor(session.serverID, session.id)] ?? 0,
+    );
   }
 
   /** Flattened selectable overview rows in display order, for keyboard navigation. */
@@ -714,7 +700,10 @@ export class AppController {
       await Promise.all(
         refs.slice(start, start + reconcileConcurrency).map(async (ref) => {
           try {
-            found[sessionKey(ref)] = await this.backendFor(ref.serverID).getSession(ref.sessionID);
+            found[sessionKey(ref)] = {
+              ...(await this.backendFor(ref.serverID).getSession(ref.sessionID)),
+              serverID: ref.serverID,
+            };
           } catch (error) {
             if (error instanceof BackendError && error.kind === 'not-found') deleted.push(ref);
             // Any other failure proves nothing: keep the row.
@@ -728,6 +717,7 @@ export class AppController {
   /** Drops every cached trace of a session the server no longer has. */
   private forgetSession(sessionID: string, serverID: string = this.activeServerID()): void {
     const key = this.keyFor(serverID, sessionID);
+    const expansionPrefix = `${key} `;
     this.setState(
       produce((state) => {
         delete state.sessions[key];
@@ -739,8 +729,17 @@ export class AppController {
         delete state.nativeGoals[key];
         delete state.awaitingSteer[key];
         delete state.running[key];
+        delete state.openedAt[key];
+        delete state.transcriptWindow[key];
+        for (const expansionKey of Object.keys(state.expandedGroups)) {
+          if (expansionKey.startsWith(expansionPrefix)) delete state.expandedGroups[expansionKey];
+        }
+        for (const expansionKey of Object.keys(state.expandedDiffs)) {
+          if (expansionKey.startsWith(expansionPrefix)) delete state.expandedDiffs[expansionKey];
+        }
       }),
     );
+    this.transcriptOrder = this.transcriptOrder.filter((entry) => entry !== key);
     this.goalVersions.delete(key);
     const route = this.state.route;
     if (
@@ -1097,7 +1096,12 @@ export class AppController {
     try {
       const session = await this.backendFor(serverID).getSession(sessionID);
       // reconcile replaces the stored summary wholesale: absent `revert` is removed again.
-      this.setState('sessions', this.keyFor(serverID, sessionID), reconcile(session));
+      // Never lose the server stamp: a backend that omits it must not orphan the row.
+      this.setState(
+        'sessions',
+        this.keyFor(serverID, sessionID),
+        reconcile({ ...session, serverID }),
+      );
       this.reconcileStagedRevert(sessionID, serverID);
     } catch (error) {
       if (error instanceof BackendError && error.kind === 'not-found') return;
@@ -1179,12 +1183,13 @@ export class AppController {
     this.touchTranscript(key);
   }
 
-  async loadOlder(sessionID: string): Promise<void> {
-    const transcript = this.state.transcripts[this.sessionKeyOf(sessionID)];
+  async loadOlder(sessionID: string, serverID: string = this.activeServerID()): Promise<void> {
+    const key = this.keyFor(serverID, sessionID);
+    const transcript = this.state.transcripts[key];
     if (transcript?.olderCursor === undefined || transcript.loading) return;
-    this.setState('transcripts', this.sessionKeyOf(sessionID), 'loading', true);
+    this.setState('transcripts', key, 'loading', true);
     try {
-      const page = await this.backend.listMessages(
+      const page = await this.backendFor(serverID).listMessages(
         sessionID,
         transcriptPageSize,
         transcript.olderCursor,
@@ -1194,7 +1199,7 @@ export class AppController {
       // Replace via produce: a merging setter would keep a stale cursor after the last page.
       this.setState(
         'transcripts',
-        sessionID,
+        key,
         produce((current) => {
           current.messages = [...older, ...current.messages];
           current.loading = false;
@@ -1203,49 +1208,54 @@ export class AppController {
         }),
       );
     } catch (error) {
-      this.setState('transcripts', this.sessionKeyOf(sessionID), 'loading', false);
+      this.setState('transcripts', key, 'loading', false);
       throw error;
     }
   }
 
   /** Rendered node limit for a session's transcript. */
-  transcriptWindow(sessionID: string): number {
-    return this.state.transcriptWindow[this.sessionKeyOf(sessionID)] ?? transcriptWindowStep;
+  transcriptWindow(sessionID: string, serverID: string = this.activeServerID()): number {
+    return this.state.transcriptWindow[this.keyFor(serverID, sessionID)] ?? transcriptWindowStep;
   }
 
   /**
    * Paging past the top: first un-hide already loaded nodes, then fetch the next older
    * page from the server. Returns false when there is nothing earlier.
    */
-  revealEarlier(sessionID: string, hiddenNodes: number): boolean {
+  revealEarlier(
+    sessionID: string,
+    hiddenNodes: number,
+    serverID: string = this.activeServerID(),
+  ): boolean {
+    const key = this.keyFor(serverID, sessionID);
     if (hiddenNodes > 0) {
       this.setState(
         'transcriptWindow',
-        sessionID,
-        this.transcriptWindow(sessionID) + transcriptWindowStep,
+        key,
+        this.transcriptWindow(sessionID, serverID) + transcriptWindowStep,
       );
       return true;
     }
-    const transcript = this.state.transcripts[this.sessionKeyOf(sessionID)];
+    const transcript = this.state.transcripts[key];
     if (transcript?.olderCursor === undefined) return false;
     this.setState(
       'transcriptWindow',
-      sessionID,
-      this.transcriptWindow(sessionID) + transcriptWindowStep,
+      key,
+      this.transcriptWindow(sessionID, serverID) + transcriptWindowStep,
     );
-    void this.track('history', this.loadOlder(sessionID));
+    void this.track('history', this.loadOlder(sessionID, serverID));
     return true;
   }
 
   /** Bounded LRU of cached transcripts; detached sessions keep summaries only. */
-  private touchTranscript(sessionID: string): void {
-    this.transcriptOrder = [sessionID, ...this.transcriptOrder.filter((id) => id !== sessionID)];
+  private touchTranscript(key: string): void {
+    this.transcriptOrder = [key, ...this.transcriptOrder.filter((entry) => entry !== key)];
     const evicted = this.transcriptOrder.slice(transcriptCacheLimit);
     this.transcriptOrder = this.transcriptOrder.slice(0, transcriptCacheLimit);
     if (evicted.length === 0) return;
     this.setState(
       produce((state) => {
-        for (const id of evicted) delete state.transcripts[id];
+        for (const entry of evicted) delete state.transcripts[entry];
       }),
     );
   }
@@ -1843,8 +1853,10 @@ export class AppController {
       await this.createSessionWithPrompt(this.currentProject(), text);
       return;
     }
+    const routeServerID = this.state.route.serverID;
     const sessionID = this.state.route.sessionID;
-    const directory = this.state.sessions[this.sessionKeyOf(sessionID)]?.directory ?? this.deps.cwd;
+    const directory =
+      this.state.sessions[this.keyFor(routeServerID, sessionID)]?.directory ?? this.deps.cwd;
     const commandNotice =
       'The request may or may not have been delivered (connection problem); check for its effects before resending.';
     const isPromptDelivery = parsed.kind === 'prompt';
@@ -1861,7 +1873,7 @@ export class AppController {
             await this.backend.runCommand(sessionID, parsed.name, parsed.args);
             return;
           case 'prompt': {
-            const running = this.state.running[this.sessionKeyOf(sessionID)] === true;
+            const running = this.state.running[this.keyFor(routeServerID, sessionID)] === true;
             const delivery =
               deliveryOverride ?? (running ? this.deps.config.input.enterWhileRunning : undefined);
             await this.backend.prompt(sessionID, {
@@ -2170,7 +2182,8 @@ export class AppController {
 
   /** Stores a fetched/resolved summary before it is attached or prompted. */
   private storeSessionSummary(session: SessionSummary): void {
-    this.setState('sessions', this.sessionKeyOf(session.id), session);
+    const serverID = session.serverID ?? this.serverID;
+    this.setState('sessions', this.keyFor(serverID, session.id), { ...session, serverID });
   }
 
   /**
@@ -2178,7 +2191,8 @@ export class AppController {
    * open or prompt it. Returns the summary, or undefined when the server cannot find it.
    */
   async ensureSession(sessionID: string): Promise<SessionSummary | undefined> {
-    const known = this.state.sessions[this.sessionKeyOf(sessionID)];
+    const active = this.activeServerID();
+    const known = this.state.sessions[this.keyFor(active, sessionID)];
     if (known !== undefined) return known;
     try {
       const session = await this.backend.getSession(sessionID);
@@ -2193,9 +2207,11 @@ export class AppController {
   async sendToSession(sessionID: string, text: string): Promise<boolean> {
     // Ensure the stored summary is authoritative before interpreting file mentions.
     await this.ensureSession(sessionID);
-    const directory = this.state.sessions[this.sessionKeyOf(sessionID)]?.directory ?? this.deps.cwd;
+    const active = this.activeServerID();
+    const activeKey = this.keyFor(active, sessionID);
+    const directory = this.state.sessions[activeKey]?.directory ?? this.deps.cwd;
     this.writeComposer(composerFrom(text));
-    const running = this.state.running[this.sessionKeyOf(sessionID)] === true;
+    const running = this.state.running[activeKey] === true;
     const sentAttachments = [...this.state.attachments];
     return this.admit(
       text,
@@ -2455,6 +2471,13 @@ export class AppController {
     }
   }
 
+  /** True when a key belongs to `serverID`'s qualified namespace (expansion keys). */
+  private ownsKey(key: string, serverID: string): boolean {
+    return serverID === localServerID
+      ? !key.startsWith('server:')
+      : key.startsWith(`server:${encodeURIComponent(serverID)}/session:`);
+  }
+
   /** Drops every cached frontend record for one server without touching other servers. */
   private forgetServer(serverID: string): void {
     this.setState(
@@ -2480,6 +2503,13 @@ export class AppController {
         ]) {
           for (const key of Object.keys(map)) {
             if (parseSessionKey(key).serverID === serverID) delete map[key];
+          }
+        }
+        // Qualified expansion entries are `<server-qualified session key> <node key>`; match
+        // them by the session-key prefix of this host only.
+        for (const map of [state.expandedGroups, state.expandedDiffs]) {
+          for (const key of Object.keys(map)) {
+            if (this.ownsKey(key, serverID)) delete map[key];
           }
         }
       }),
@@ -2514,10 +2544,13 @@ export class AppController {
       return;
     }
     // Optimistic footer update, confirmed by the summary refetch.
-    this.setState('sessions', this.sessionKeyOf(session.id), { ...session, agent: agentID });
+    this.setState('sessions', this.keyFor(session.serverID, session.id), {
+      ...session,
+      agent: agentID,
+    });
     try {
       await this.backend.switchAgent(session.id, agentID);
-      if (this.state.running[this.sessionKeyOf(session.id)] === true)
+      if (this.state.running[this.keyFor(session.serverID, session.id)] === true)
         this.showNotice(`Agent: ${agentID} (next turn)`, 'dim');
     } catch (error) {
       this.showNotice(errorText(error), 'error');
@@ -2611,7 +2644,7 @@ export class AppController {
       this.setState('overview', 'model', model);
       return;
     }
-    this.setState('sessions', this.sessionKeyOf(session.id), { ...session, model });
+    this.setState('sessions', this.keyFor(session.serverID, session.id), { ...session, model });
     try {
       await this.backend.switchModel(session.id, model);
     } catch (error) {
@@ -2662,7 +2695,7 @@ export class AppController {
       const interrupted = await this.backend.interrupt(session.id);
       this.debugLog.write('action', { action: 'interrupt', ok: interrupted });
       this.showNotice(interrupted ? 'Interrupted' : 'Nothing was running', 'dim');
-      if (interrupted) await this.captureInterruptSteerIntent(session.id);
+      if (interrupted) await this.captureInterruptSteerIntent(session.id, session.serverID);
     } catch (error) {
       this.debugLog.write('action', {
         action: 'interrupt',
@@ -2676,7 +2709,10 @@ export class AppController {
   /** Ctrl+B: running tool calls continue in the background; the turn keeps going. */
   async backgroundTools(): Promise<void> {
     const session = this.currentSession();
-    if (session === undefined || this.state.running[this.sessionKeyOf(session.id)] !== true) {
+    if (
+      session === undefined ||
+      this.state.running[this.keyFor(session.serverID, session.id)] !== true
+    ) {
       this.showNotice('Nothing running to background.', 'dim');
       return;
     }
@@ -2707,7 +2743,7 @@ export class AppController {
         pages.unshift(page.messages);
         cursor = page.olderCursor;
       } while (cursor !== undefined);
-      const goal = this.state.goals[this.sessionKeyOf(session.id)];
+      const goal = this.state.goals[this.keyFor(session.serverID, session.id)];
       const log = {
         format: 'margarita.chatlog.v1',
         exportedAt: new Date(this.deps.now()).toISOString(),
@@ -2742,7 +2778,7 @@ export class AppController {
       return;
     }
     // A pending compaction is already in the inbox; requesting again would be a no-op.
-    const pending = (this.state.inbox[this.sessionKeyOf(session.id)] ?? []).some(
+    const pending = (this.state.inbox[this.keyFor(session.serverID, session.id)] ?? []).some(
       (item) => item.kind === 'compaction',
     );
     if (pending) {
@@ -2761,7 +2797,10 @@ export class AppController {
 
   isRunning(): boolean {
     const session = this.currentSession();
-    return session !== undefined && this.state.running[this.sessionKeyOf(session.id)] === true;
+    return (
+      session !== undefined &&
+      this.state.running[this.keyFor(session.serverID, session.id)] === true
+    );
   }
 
   /** Ctrl+C / Ctrl+D on an empty, idle composer: first press arms, second exits. */
@@ -2778,7 +2817,7 @@ export class AppController {
     const session = this.currentSession();
     if (session === undefined) return;
     const sessionID = session.id;
-    const item = (this.state.inbox[this.sessionKeyOf(sessionID)] ?? []).find(
+    const item = (this.state.inbox[this.keyFor(session.serverID, sessionID)] ?? []).find(
       (entry) => entry.id === inboxID,
     );
     try {
@@ -2846,8 +2885,9 @@ export class AppController {
       this.historyUp();
       return;
     }
+    const routeServerID = this.state.route.serverID;
     const sessionID = this.state.route.sessionID;
-    const items = this.state.inbox[this.sessionKeyOf(sessionID)] ?? [];
+    const items = this.state.inbox[this.keyFor(routeServerID, sessionID)] ?? [];
     for (let index = items.length - 1; index >= 0; index -= 1) {
       const item = items[index];
       if (item?.kind === 'user') {
@@ -2883,8 +2923,9 @@ export class AppController {
       await this.steer();
       return;
     }
+    const routeServerID = this.state.route.serverID;
     const sessionID = this.state.route.sessionID;
-    const next = nextQueuedUser(this.state.inbox[this.sessionKeyOf(sessionID)] ?? []);
+    const next = nextQueuedUser(this.state.inbox[this.keyFor(routeServerID, sessionID)] ?? []);
     if (next === undefined) {
       await this.steer();
       return;
@@ -3009,16 +3050,19 @@ export class AppController {
    * active goal with reason 'Stopped by the user'; record that as a frontend-only intent
    * so the user's next follow-up reactivates the same goal without /goal resume.
    */
-  private async captureInterruptSteerIntent(sessionID: string): Promise<void> {
-    const goal = await this.refreshNativeGoal(sessionID);
+  private async captureInterruptSteerIntent(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): Promise<void> {
+    const goal = await this.refreshNativeGoal(sessionID, serverID);
     // The plugin's pause event may not have landed yet, so a still-active goal also
     // qualifies; the resume re-reads and re-checks it before acting.
     const stoppedByUser = goal?.status === 'paused' && goal.reason === stoppedByUserReason;
     if (goal !== null && (stoppedByUser || goal.status === 'active')) {
-      this.setState('awaitingSteer', this.sessionKeyOf(sessionID), goal.id);
+      this.setState('awaitingSteer', this.keyFor(serverID, sessionID), goal.id);
       return;
     }
-    this.clearSteerIntent(sessionID);
+    this.clearSteerIntent(sessionID, serverID);
   }
 
   /**
@@ -3027,11 +3071,14 @@ export class AppController {
    * from idle instead of racing it. The goal is re-read first: only the same goal, still
    * paused by the interrupt, is resumed, so another client's pause, clear or replacement wins.
    */
-  private async maybeResumeInterruptedGoal(sessionID: string): Promise<void> {
-    const intent = this.state.awaitingSteer[this.sessionKeyOf(sessionID)];
+  private async maybeResumeInterruptedGoal(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): Promise<void> {
+    const intent = this.state.awaitingSteer[this.keyFor(serverID, sessionID)];
     if (intent === undefined) return;
-    const goal = await this.refreshNativeGoal(sessionID);
-    this.clearSteerIntent(sessionID);
+    const goal = await this.refreshNativeGoal(sessionID, serverID);
+    this.clearSteerIntent(sessionID, serverID);
     if (goal?.id !== intent || goal.status !== 'paused' || goal.reason !== stoppedByUserReason) {
       return;
     }
@@ -3048,7 +3095,7 @@ export class AppController {
   pendingPermission() {
     const session = this.currentSession();
     if (session === undefined) return undefined;
-    return (this.state.permissions[this.sessionKeyOf(session.id)] ?? [])[0];
+    return (this.state.permissions[this.keyFor(session.serverID, session.id)] ?? [])[0];
   }
 
   permissionChoices(): PermissionDecision[] {
@@ -3097,7 +3144,9 @@ export class AppController {
     }
     const range: DiffRange = {};
     if (scope === 'turn') {
-      const from = turnStart(this.state.transcripts[this.sessionKeyOf(session.id)]?.messages ?? []);
+      const from = turnStart(
+        this.state.transcripts[this.keyFor(session.serverID, session.id)]?.messages ?? [],
+      );
       if (from === undefined) {
         this.showNotice('No turn yet; showing the whole session.', 'dim');
         await this.openDiff('session');
@@ -3165,7 +3214,7 @@ export class AppController {
   pendingForm(): FormRequest | undefined {
     const session = this.currentSession();
     if (session === undefined) return undefined;
-    return (this.state.forms[this.sessionKeyOf(session.id)] ?? [])[0];
+    return (this.state.forms[this.keyFor(session.serverID, session.id)] ?? [])[0];
   }
 
   openForm(): void {
@@ -3182,7 +3231,7 @@ export class AppController {
   openFormRequest(): FormRequest | undefined {
     const overlay = this.state.overlay;
     if (overlay.kind !== 'form') return undefined;
-    return (this.state.forms[this.sessionKeyOf(overlay.sessionID)] ?? []).find(
+    return (this.state.forms[this.keyFor(this.activeServerID(), overlay.sessionID)] ?? []).find(
       (form) => form.id === overlay.editor.formID,
     );
   }
@@ -3240,11 +3289,44 @@ export class AppController {
     this.setState('detailed', !this.state.detailed);
   }
 
+  /**
+   * Expansion state for the attached conversation, re-keyed per render. Expansion entries are
+   * stored qualified (`<session key> <node key>`) so two hosts with identical session and
+   * tool IDs never share them.
+   */
+  private expansionPrefix(): string | undefined {
+    const route = this.state.route;
+    return route.kind === 'conversation'
+      ? `${this.keyFor(route.serverID, route.sessionID)} `
+      : undefined;
+  }
+
+  expandedSets(): { groups: Set<string>; diffs: Set<string> } {
+    const prefix = this.expansionPrefix();
+    if (prefix === undefined) return { groups: new Set(), diffs: new Set() };
+    const strip = (key: string): string => key.slice(prefix.length);
+    return {
+      groups: new Set(
+        Object.keys(this.state.expandedGroups)
+          .filter((key) => key.startsWith(prefix))
+          .map(strip),
+      ),
+      diffs: new Set(
+        Object.keys(this.state.expandedDiffs)
+          .filter((key) => key.startsWith(prefix))
+          .map(strip),
+      ),
+    };
+  }
+
   toggleGroup(key: string): void {
+    const prefix = this.expansionPrefix();
+    if (prefix === undefined) return;
+    const qualified = `${prefix}${key}`;
     this.setState(
       produce((state) => {
-        if (state.expandedGroups[key] === true) delete state.expandedGroups[key];
-        else state.expandedGroups[key] = true;
+        if (state.expandedGroups[qualified] === true) delete state.expandedGroups[qualified];
+        else state.expandedGroups[qualified] = true;
       }),
     );
   }
@@ -3252,12 +3334,14 @@ export class AppController {
   /** Folded nodes for the attached conversation; empty elsewhere. */
   private conversationNodes(): TranscriptNode[] {
     if (this.state.route.kind !== 'conversation') return [];
-    const target = this.state.route.sessionID;
-    const messages = this.state.transcripts[this.sessionKeyOf(target)]?.messages ?? [];
+    const route = this.state.route;
+    const target = route.sessionID;
+    const messages = this.state.transcripts[this.keyFor(route.serverID, target)]?.messages ?? [];
+    const expanded = this.expandedSets();
     return foldTranscript(messages, {
       detailed: this.state.detailed,
-      expandedGroups: new Set(Object.keys(this.state.expandedGroups)),
-      expandedDiffs: new Set(Object.keys(this.state.expandedDiffs)),
+      expandedGroups: expanded.groups,
+      expandedDiffs: expanded.diffs,
     });
   }
 
@@ -3313,10 +3397,13 @@ export class AppController {
   }
 
   toggleDiffExpanded(id: string): void {
+    const prefix = this.expansionPrefix();
+    if (prefix === undefined) return;
+    const qualified = `${prefix}${id}`;
     this.setState(
       produce((state) => {
-        if (state.expandedDiffs[id] === true) delete state.expandedDiffs[id];
-        else state.expandedDiffs[id] = true;
+        if (state.expandedDiffs[qualified] === true) delete state.expandedDiffs[qualified];
+        else state.expandedDiffs[qualified] = true;
       }),
     );
   }
@@ -3396,20 +3483,26 @@ export class AppController {
     return new Date(this.deps.now()).toISOString();
   }
 
-  goalOf(sessionID: string): GoalPlanV1 | undefined {
-    return this.state.goals[this.sessionKeyOf(sessionID)];
+  goalOf(sessionID: string, serverID: string = this.activeServerID()): GoalPlanV1 | undefined {
+    return this.state.goals[this.keyFor(serverID, sessionID)];
   }
 
   /** The attached session's plan progress, for the footer and overview. */
-  planProgress(sessionID: string): { done: number; total: number } | undefined {
-    const plan = this.state.goals[this.sessionKeyOf(sessionID)]?.plan;
+  planProgress(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): { done: number; total: number } | undefined {
+    const plan = this.state.goals[this.keyFor(serverID, sessionID)]?.plan;
     return plan === undefined || plan.tasks.length === 0 ? undefined : progress(plan);
   }
 
-  private async loadGoal(sessionID: string): Promise<void> {
+  private async loadGoal(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): Promise<void> {
     try {
-      const doc = await this.goalStore.load(this.refOf(sessionID));
-      if (doc !== undefined) this.setState('goals', this.sessionKeyOf(sessionID), doc);
+      const doc = await this.goalStore.load({ serverID, sessionID });
+      if (doc !== undefined) this.setState('goals', this.keyFor(serverID, sessionID), doc);
     } catch (error) {
       this.showNotice(`Goal file unreadable: ${errorText(error)}`, 'warn');
     }
@@ -3429,16 +3522,18 @@ export class AppController {
   private async changeGoal(
     change: (doc: GoalPlanV1) => GoalPlanV1,
     notice?: string,
-    sessionID = this.currentSession()?.id,
   ): Promise<GoalPlanV1 | undefined> {
-    if (sessionID === undefined) {
+    const current = this.currentSession();
+    if (current === undefined) {
       this.showNotice('Open a session first.', 'warn');
       return undefined;
     }
-    const session = this.state.sessions[this.sessionKeyOf(sessionID)];
+    const serverID = current.serverID;
+    const sessionID = current.id;
+    const key = this.keyFor(serverID, sessionID);
+    const session = this.state.sessions[key];
     const base =
-      this.state.goals[this.sessionKeyOf(sessionID)] ??
-      emptyGoalPlan(this.serverID, sessionID, session?.projectID ?? '');
+      this.state.goals[key] ?? emptyGoalPlan(serverID, sessionID, session?.projectID ?? '');
     let saved: GoalPlanV1;
     try {
       saved = await this.goalStore.save(change(base));
@@ -3455,7 +3550,7 @@ export class AppController {
         return undefined;
       }
     }
-    this.setState('goals', this.sessionKeyOf(sessionID), saved);
+    this.setState('goals', key, saved);
     if (notice !== undefined) this.showNotice(notice, 'dim');
     return saved;
   }
@@ -3470,7 +3565,7 @@ export class AppController {
         return;
       case 'propose': {
         // A visible, ordinary prompt; the reply is only a proposal until adopted.
-        const goal = this.state.goals[this.sessionKeyOf(session.id)]?.goal?.title;
+        const goal = this.state.goals[this.keyFor(session.serverID, session.id)]?.goal?.title;
         const text = `Propose a short numbered plan${goal === undefined ? '' : ` for this goal: ${goal}`}. Reply with the numbered steps only; do not start working yet.`;
         this.writeComposer(composerFrom(text));
         await this.submit();
@@ -3513,19 +3608,27 @@ export class AppController {
   }
 
   async acceptPlan(): Promise<void> {
-    const id = this.currentSession()?.id;
-    if (id === undefined || this.state.goals[this.sessionKeyOf(id)]?.proposal === undefined) return;
+    const current = this.currentSession();
+    if (
+      current === undefined ||
+      this.state.goals[this.keyFor(current.serverID, current.id)]?.proposal === undefined
+    )
+      return;
     await this.changeGoal((doc) => acceptProposal(doc, this.isoNow()), 'Plan accepted');
   }
 
   async rejectPlan(): Promise<void> {
-    const id = this.currentSession()?.id;
-    if (id === undefined || this.state.goals[this.sessionKeyOf(id)]?.proposal === undefined) return;
+    const current = this.currentSession();
+    if (
+      current === undefined ||
+      this.state.goals[this.keyFor(current.serverID, current.id)]?.proposal === undefined
+    )
+      return;
     await this.changeGoal(rejectProposal, 'Proposal rejected; plan unchanged');
   }
 
-  private latestAssistantText(sessionID: string): string {
-    const messages = this.state.transcripts[this.sessionKeyOf(sessionID)]?.messages ?? [];
+  private latestAssistantText(sessionID: string, serverID: string = this.activeServerID()): string {
+    const messages = this.state.transcripts[this.keyFor(serverID, sessionID)]?.messages ?? [];
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index];
       if (message?.kind !== 'assistant') continue;
@@ -3538,8 +3641,11 @@ export class AppController {
     return '';
   }
 
-  private latestAssistantID(sessionID: string): string | undefined {
-    const messages = this.state.transcripts[this.sessionKeyOf(sessionID)]?.messages ?? [];
+  private latestAssistantID(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): string | undefined {
+    const messages = this.state.transcripts[this.keyFor(serverID, sessionID)]?.messages ?? [];
     return messages.findLast((message) => message.kind === 'assistant')?.id;
   }
 
@@ -3548,7 +3654,7 @@ export class AppController {
     const overlay = this.state.overlay;
     const session = this.currentSession();
     if (overlay.kind !== 'tasks' || session === undefined) return;
-    const doc = this.state.goals[this.sessionKeyOf(session.id)];
+    const doc = this.state.goals[this.keyFor(session.serverID, session.id)];
     const tasks = (doc?.proposal ?? doc?.plan)?.tasks ?? [];
     const task = tasks[overlay.index];
     const count = tasks.length;
@@ -3593,7 +3699,7 @@ export class AppController {
     try {
       await this.backend.renameSession(session.id, title);
       // The server's session event carries the authoritative title; reflect it now too.
-      this.setState('sessions', this.sessionKeyOf(session.id), { ...session, title });
+      this.setState('sessions', this.keyFor(session.serverID, session.id), { ...session, title });
       this.showNotice(`Renamed to ${title}`, 'dim');
     } catch (error) {
       this.showNotice(`Rename failed: ${errorText(error)}`, 'error');
@@ -3661,7 +3767,7 @@ export class AppController {
     const session = this.requireSession();
     if (session === undefined) return;
     const messageID = turnStart(
-      this.state.transcripts[this.sessionKeyOf(session.id)]?.messages ?? [],
+      this.state.transcripts[this.keyFor(session.serverID, session.id)]?.messages ?? [],
     );
     if (messageID === undefined) {
       this.showNotice('Nothing to revert yet.', 'warn');

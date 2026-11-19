@@ -24,6 +24,7 @@ import { type ExecutionMarker, executionMarkers } from '../domain/execution-segm
 import type { FormRequest } from '../domain/form.ts';
 import { formatModelRef, type ModelSelection } from '../domain/model-ref.ts';
 import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
+import { sessionKey } from '../domain/server-identity.ts';
 import { assertNever } from '../domain/session.ts';
 import { stickyPrompt, truncatePrompt } from '../domain/sticky-prompt.ts';
 import { type ThrobberFacts } from '../domain/throbber.ts';
@@ -44,6 +45,7 @@ import { Throbber } from './throbber-view.tsx';
 export type TranscriptProps = Readonly<{
   controller: AppController;
   sessionID: string;
+  serverID: string;
   theme: Theme;
   width: number;
   animate: boolean;
@@ -58,29 +60,32 @@ type NodeOf<K extends TranscriptNode['kind']> = Extract<TranscriptNode, { kind: 
 
 export function Transcript(props: TranscriptProps) {
   const state = props.controller.state;
-  const transcript = () => state.transcripts[props.sessionID];
+  const sessionKeyValue = () =>
+    sessionKey({ serverID: props.serverID, sessionID: props.sessionID });
+  const transcript = () => state.transcripts[sessionKeyValue()];
   const nodes = createMemo(() => {
     const messages = transcript()?.messages ?? [];
     const markers = new Map(
-      executionMarkers(messages, state.running[props.sessionID] === true).map((marker) => [
+      executionMarkers(messages, state.running[sessionKeyValue()] === true).map((marker) => [
         marker.afterMessageId,
         marker,
       ]),
     );
+    const expanded = props.controller.expandedSets();
     return foldTranscript(messages, {
       detailed: state.detailed,
-      expandedGroups: new Set(Object.keys(state.expandedGroups)),
-      expandedDiffs: new Set(Object.keys(state.expandedDiffs)),
+      expandedGroups: expanded.groups,
+      expandedDiffs: expanded.diffs,
       markers,
     });
   });
   const windowed = createMemo(() =>
-    windowNodes(nodes(), props.controller.transcriptWindow(props.sessionID)),
+    windowNodes(nodes(), props.controller.transcriptWindow(props.sessionID, props.serverID)),
   );
   // Server-confirmed pending user follow-ups, FIFO (server order) — rendered in the
   // activity region right above the running task marker, never inside the composer.
   const queued = createMemo(() =>
-    (state.inbox[props.sessionID] ?? []).filter((item) => item.kind === 'user'),
+    (state.inbox[sessionKeyValue()] ?? []).filter((item) => item.kind === 'user'),
   );
   const hasRunningMarker = createMemo(() =>
     nodes().some((node) => node.kind === 'execution' && node.segment.phase === 'running'),
@@ -123,7 +128,8 @@ export function Transcript(props: TranscriptProps) {
         // At the top: reveal earlier nodes while keeping the current first node in place.
         const first = windowed().visible[0];
         const keep = first === undefined ? undefined : box.findDescendantById(nodeID(first.key));
-        if (!props.controller.revealEarlier(props.sessionID, windowed().hidden)) return;
+        if (!props.controller.revealEarlier(props.sessionID, windowed().hidden, props.serverID))
+          return;
         if (keep !== undefined) {
           const release = box.anchor(keep);
           setTimeout(release, 2000);
@@ -166,9 +172,9 @@ export function Transcript(props: TranscriptProps) {
           controller={props.controller}
           theme={props.theme}
           width={props.width}
-          agent={state.sessions[props.sessionID]?.agent}
-          model={state.sessions[props.sessionID]?.model}
-          directory={state.sessions[props.sessionID]?.directory}
+          agent={state.sessions[sessionKeyValue()]?.agent}
+          model={state.sessions[sessionKeyValue()]?.model}
+          directory={state.sessions[sessionKeyValue()]?.directory}
         />
         <Show when={windowed().hidden > 0 || transcript()?.olderCursor !== undefined}>
           <text fg={props.theme.dim}>

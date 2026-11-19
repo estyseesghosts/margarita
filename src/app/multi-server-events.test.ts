@@ -322,3 +322,119 @@ describe('server identity through SSE events (issue #63)', () => {
     controller.dispose();
   });
 });
+
+describe('qualified state keys (issue #64)', () => {
+  test('interleaved A/B traffic, then delete only B: A survives whole, with no raw keys', async () => {
+    const { controller, local, remote } = harness();
+    // Different transcripts, goals, permissions, forms and running state per host.
+    remote.permissions = [];
+    remote.forms = [];
+    local.messages = { [sessionID]: [userMessage('m_local', 'A text')] };
+    remote.messages = { [sessionID]: [userMessage('m_remote', 'B text')] };
+    local.active = new Set([sessionID]);
+    remote.active = new Set([sessionID]);
+
+    await controller.bootstrap();
+
+    // Open both repeatedly, alternating.
+    for (const serverID of [localID, remoteID, localID, remoteID] as const) {
+      controller.openSession(sessionID, serverID);
+      await flush();
+    }
+    expect(controller.state.transcripts[sessionID]?.messages.map((message) => message.id)).toEqual([
+      'm_local',
+    ]);
+    expect(controller.state.transcripts[remoteKey]?.messages.map((message) => message.id)).toEqual([
+      'm_remote',
+    ]);
+    // Statuses classify independently per host.
+    const localSummary = controller.state.sessions[sessionID];
+    const remoteSummary = controller.state.sessions[remoteKey];
+    if (localSummary === undefined || remoteSummary === undefined)
+      throw new Error('expected both summaries to be cached');
+    expect(controller.statusOf(localSummary)).toBe('needs-input');
+    expect(controller.statusOf(remoteSummary)).toBe('working');
+
+    // Interleave events from both hosts.
+    controller.onEvents(remoteID, [{ kind: 'execution', sessionID, state: 'started' }], false);
+    controller.onEvents(localID, [{ kind: 'input-requests-changed', sessionID }], false);
+    controller.onEvents(localID, [{ kind: 'execution', sessionID, state: 'succeeded' }], false);
+    controller.onEvents(remoteID, [{ kind: 'transcript-changed', sessionID }], false);
+    controller.onEvents(localID, [{ kind: 'session-changed', sessionID }], false);
+    await Bun.sleep(200);
+    await flush();
+
+    expect(controller.state.running[remoteKey]).toBe(true);
+    expect(controller.state.running[sessionID]).not.toBe(true);
+
+    // Attach A and delete only B.
+    controller.openSession(sessionID, localID);
+    await flush();
+    controller.onEvents(remoteID, [{ kind: 'session-deleted', sessionID }], false);
+    await flush();
+
+    // A keeps every trace: row, transcript, goal, permission, form, route.
+    expect(controller.state.route).toEqual({ kind: 'conversation', serverID: localID, sessionID });
+    expect(controller.state.sessions[sessionID]).toBeDefined();
+    expect(controller.state.transcripts[sessionID]?.messages.map((message) => message.id)).toEqual([
+      'm_local',
+    ]);
+    expect(controller.state.nativeGoals[sessionID]).toMatchObject({
+      status: 'verified',
+      goal: { id: 'goal_local' },
+    });
+    expect(controller.state.permissions[sessionID]?.map((prompt) => prompt.action)).toEqual([
+      'local-act',
+    ]);
+    expect(controller.state.forms[sessionID]).toHaveLength(1);
+
+    // B left nothing behind in any state map.
+    expect(controller.state.sessions[remoteKey]).toBeUndefined();
+    expect(controller.state.transcripts[remoteKey]).toBeUndefined();
+    expect(controller.state.nativeGoals[remoteKey]).toBeUndefined();
+    expect(controller.state.permissions[remoteKey]).toBeUndefined();
+    expect(controller.state.forms[remoteKey]).toBeUndefined();
+    expect(controller.state.running[remoteKey]).toBeUndefined();
+    expect(controller.state.openedAt[remoteKey]).toBeUndefined();
+    expect(controller.state.inbox[remoteKey]).toBeUndefined();
+    expect(controller.state.awaitingSteer[remoteKey]).toBeUndefined();
+
+    // No orphan raw-key entries anywhere: only A's bare key carries the ID now.
+    const qualifying = (map: Record<string, unknown>) =>
+      Object.keys(map)
+        .filter((key) => key.includes(sessionID))
+        .toSorted();
+    expect(qualifying(controller.state.sessions)).toEqual([sessionID]);
+    expect(qualifying(controller.state.transcripts)).toEqual([sessionID]);
+    expect(qualifying(controller.state.nativeGoals)).toEqual([sessionID]);
+    expect(qualifying(controller.state.permissions)).toEqual([sessionID]);
+    expect(qualifying(controller.state.forms)).toEqual([sessionID]);
+    expect(qualifying(controller.state.inbox)).toEqual([sessionID]);
+    controller.dispose();
+  });
+
+  test('remote transcript pages, goals and expansion never fall back to bare keys', async () => {
+    const { controller, remote } = harness();
+    remote.messages = { [sessionID]: [userMessage('m_remote', 'B text')] };
+    await controller.bootstrap();
+
+    controller.openSession(sessionID, remoteID);
+    await flush();
+
+    // Every byte of remote state lives under the qualified key.
+    expect(controller.state.transcripts[sessionID]).toBeUndefined();
+    expect(controller.state.transcripts[remoteKey]?.messages[0]?.id).toBe('m_remote');
+    controller.toggleGroup('group:t9');
+    expect(Object.keys(controller.state.expandedGroups)).toEqual([`${remoteKey} group:t9`]);
+    controller.toggleGroup('group:t9');
+    expect(controller.state.expandedGroups[`${remoteKey} group:t9`]).toBeUndefined();
+
+    // Opening the same ID on the local side never sees the remote bytes.
+    controller.openSession(sessionID, localID);
+    await flush();
+    expect(controller.state.transcripts[sessionID]?.messages.map((m) => m.id)).not.toContain(
+      'm_remote',
+    );
+    controller.dispose();
+  });
+});

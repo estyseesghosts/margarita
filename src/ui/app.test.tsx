@@ -950,13 +950,13 @@ describe('oversized inline diff clamping (issue 27)', () => {
 
     setup.mockInput.pressEnter();
     await settle(setup);
-    expect(controller.state.expandedDiffs['w1']).toBe(true);
+    expect(controller.state.expandedDiffs['ses_a w1']).toBe(true);
     expect(setup.captureCharFrame()).not.toContain('more lines · Enter to expand');
     expect(controller.state.composer.text).toBe(''); // not a submit, not a draft
 
     setup.mockInput.pressEnter();
     await settle(setup);
-    expect(controller.state.expandedDiffs['w1']).toBeUndefined();
+    expect(controller.state.expandedDiffs['ses_a w1']).toBeUndefined();
     expect(setup.captureCharFrame()).toContain('… 127 more lines · Enter to expand');
   });
 
@@ -1228,7 +1228,7 @@ describe('inline diff stability (issue #26)', () => {
     await settle(setup);
     setup.mockInput.pressEnter();
     await settle(setup);
-    expect(controller.state.expandedDiffs['w1']).toBe(true);
+    expect(controller.state.expandedDiffs['ses_a w1']).toBe(true);
 
     // Warm up: lay out and paint the expanded diff.
     await settle(setup);

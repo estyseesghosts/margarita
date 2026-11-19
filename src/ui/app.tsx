@@ -86,6 +86,7 @@ export function App(props: AppProps) {
             <Transcript
               controller={controller}
               sessionID={route().sessionID}
+              serverID={route().serverID}
               theme={props.theme}
               width={width()}
               animate={props.animate}

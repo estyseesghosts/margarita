@@ -171,9 +171,9 @@ function SessionLine(props: {
   id: string;
   ascii?: boolean | undefined;
 }) {
-  const execution = () => props.controller.executionOf(props.session.id);
+  const execution = () => props.controller.executionOf(props.session.id, props.session.serverID);
   const tasks = () => {
-    const count = props.controller.planProgress(props.session.id);
+    const count = props.controller.planProgress(props.session.id, props.session.serverID);
     return count === undefined ? '' : ` · ${count.done}/${count.total} tasks`;
   };
   const status = () =>

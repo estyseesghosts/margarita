@@ -970,12 +970,12 @@ describe('oversized inline diff focus', () => {
     expect(controller.state.focusedGroup).toBe('diff:d1');
 
     expect(controller.toggleFocusedGroup()).toBe(true);
-    expect(controller.state.expandedDiffs['d1']).toBe(true);
-    expect(controller.state.expandedGroups['group:t1']).toBeUndefined();
-    expect(controller.state.expandedGroups['group:t4']).toBeUndefined();
+    expect(controller.state.expandedDiffs['ses_a d1']).toBe(true);
+    expect(controller.state.expandedGroups['ses_a group:t1']).toBeUndefined();
+    expect(controller.state.expandedGroups['ses_a group:t4']).toBeUndefined();
 
     expect(controller.toggleFocusedGroup()).toBe(true);
-    expect(controller.state.expandedDiffs['d1']).toBeUndefined();
+    expect(controller.state.expandedDiffs['ses_a d1']).toBeUndefined();
     controller.dispose();
   });
 
@@ -997,7 +997,7 @@ describe('oversized inline diff focus', () => {
       services,
     );
     await flush();
-    expect(controller.state.expandedDiffs['d1']).toBe(true);
+    expect(controller.state.expandedDiffs['ses_a d1']).toBe(true);
     expect(controller.state.composer.text).toBe('');
 
     routeKey(
@@ -1007,7 +1007,7 @@ describe('oversized inline diff focus', () => {
       services,
     );
     await flush();
-    expect(controller.state.expandedDiffs['d1']).toBeUndefined();
+    expect(controller.state.expandedDiffs['ses_a d1']).toBeUndefined();
     controller.dispose();
   });
 
@@ -1056,7 +1056,7 @@ describe('tool-group focus', () => {
     await attach(controller, 'ses_a');
     controller.moveGroupFocus(1);
     controller.toggleFocusedGroup();
-    expect(controller.state.expandedGroups['group:t1']).toBe(true);
+    expect(controller.state.expandedGroups['ses_a group:t1']).toBe(true);
 
     controller.openSession('ses_b');
     await flush();
@@ -1109,7 +1109,7 @@ describe('tool-group focus', () => {
     const consumed = routeKey(controller, keymap, enter, services);
 
     expect(consumed).toBe(true);
-    expect(controller.state.expandedGroups['group:t1']).toBe(true);
+    expect(controller.state.expandedGroups['ses_a group:t1']).toBe(true);
     expect(controller.state.composer.text).toBe(''); // not submitted / not stashed
 
     // Escape clears the selection again.

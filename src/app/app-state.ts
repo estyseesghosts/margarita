@@ -176,7 +176,7 @@ export type AppState = {
   >;
 };
 
-export function initialState(directory: string): AppState {
+export function initialState(directory: string, serverID: string = localServerID): AppState {
   return {
     stream: 'connecting',
     route: { kind: 'overview' },
@@ -210,7 +210,7 @@ export function initialState(directory: string): AppState {
     overview: {
       focus: 'composer',
       tab: 'all',
-      project: { serverID: localServerID, directory },
+      project: { serverID, directory },
       expanded: {},
     },
     openedAt: {},

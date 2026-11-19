@@ -30,6 +30,7 @@ function twoSessions(): FakeBackend {
   ];
   backend.sessions = ['ses_a', 'ses_b'].map((id, index) => ({
     id,
+    serverID: 'local',
     projectID: 'p',
     directory: '/work/kohjoh',
     title: `Session ${id}`,
