@@ -1199,6 +1199,98 @@ describe('prompt history across project switches (issue #4)', () => {
   });
 });
 
+describe('createSession does not steal focus or mutate another draft (issue #113)', () => {
+  test('a delayed createSession leaves the navigated-to route foreground and unchanged', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    const created = deferred<SessionSummary>();
+    backend.createSessionHook = () => created.promise;
+    const controller = makeController(() => Promise.resolve([]), backend);
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      controller.attachImage(pngBytes, 'image/png', 'shot.png');
+
+      const promise = controller.createSessionWithPrompt(
+        { serverID: 'local', directory: '/work/kohjoh' },
+        'B prompt',
+      );
+
+      controller.openSession('ses_a');
+      await flush();
+      controller.setComposer(composerFrom('B prompt'));
+      controller.attachImage(pngBytes, 'image/png', 'a.png');
+      await flush();
+
+      created.resolve({ ...fakeSession('ses_b'), directory: '/work/kohjoh' });
+      await promise;
+
+      expect(controller.state.route).toEqual({
+        kind: 'conversation',
+        serverID: 'local',
+        sessionID: 'ses_a',
+      });
+      expect(controller.state.composer.text).toBe('B prompt');
+      expect(controller.state.attachments.map((attachment) => attachment.name)).toEqual(['a.png']);
+
+      const prompts = backend.calls.filter((call) => call.name === 'prompt');
+      expect(prompts).toHaveLength(1);
+      const [prompt] = prompts;
+      expect(prompt).toBeDefined();
+      expect(prompt!.args[0]).toBe('ses_b');
+      const draft = prompt!.args[1];
+      if (!isPromptDraft(draft)) throw new Error('prompt missing');
+      expect(draft.text).toBe('B prompt');
+      expect(draft.files.map((file) => file.name)).toEqual(['shot.png']);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('prompt rejection parks the prompt in the new session draft and leaves the current route alone', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.promptError = new Error('server unreachable');
+    const created = deferred<SessionSummary>();
+    backend.createSessionHook = () => created.promise;
+    const controller = makeController(() => Promise.resolve([]), backend);
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      controller.attachImage(pngBytes, 'image/png', 'shot.png');
+
+      const promise = controller.createSessionWithPrompt(
+        { serverID: 'local', directory: '/work/kohjoh' },
+        'B prompt',
+      );
+
+      controller.openSession('ses_a');
+      await flush();
+      controller.setComposer(composerFrom('A draft'));
+      await flush();
+
+      created.resolve({ ...fakeSession('ses_b'), directory: '/work/kohjoh' });
+      await promise;
+
+      expect(controller.state.route).toEqual({
+        kind: 'conversation',
+        serverID: 'local',
+        sessionID: 'ses_a',
+      });
+      expect(controller.state.composer.text).toBe('A draft');
+      expect(controller.state.attachments).toEqual([]);
+      expect((controller.state.drafts['ses_b'] ?? {}).text).toBe('B prompt');
+      expect(
+        (controller.state.draftAttachments['ses_b'] ?? []).map((attachment) => attachment.name),
+      ).toEqual(['shot.png']);
+      expect(controller.state.notice?.text).toContain('was created but the prompt was not sent');
+      expect(controller.state.notice?.tone).toBe('error');
+    } finally {
+      controller.dispose();
+    }
+  });
+});
+
 async function submitCommand(controller: AppController, text: string): Promise<void> {
   controller.setComposer(composerFrom(text));
   await controller.submit();

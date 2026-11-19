@@ -2463,6 +2463,11 @@ export class AppController {
     // session restores its own (empty) draft, so reading the composer back afterwards
     // silently dropped the user's prompt and attachments (issue #77).
     const attachments = [...this.state.attachments];
+    // Remember where the user was when the request started: if they navigate away while
+    // createSession is in flight, the completion must not steal focus or overwrite the
+    // route they are viewing (issue #113).
+    const originKey = this.routeKey(this.state.route);
+    const originProject = this.currentProject();
     this.setState('admitting', true);
     let session: SessionSummary;
     try {
@@ -2492,12 +2497,18 @@ export class AppController {
       this.openSession(session.id, sessionServerID);
       return session.id;
     }
-    // Empty the route we are leaving (its draft must not keep a copy of the sent prompt),
-    // then restore the envelope into the created session until the server acknowledges it.
-    this.clearComposer(text, attachments);
-    this.openSession(session.id, sessionServerID);
-    this.writeComposer(composerFrom(text));
-    this.setState('attachments', [...attachments]);
+    const stillOrigin =
+      this.routeKey(this.state.route) === originKey &&
+      originProject.serverID === project.serverID &&
+      originProject.directory === project.directory;
+    if (stillOrigin) {
+      // Empty the route we are leaving (its draft must not keep a copy of the sent prompt),
+      // then restore the envelope into the created session until the server acknowledges it.
+      this.clearComposer(text, attachments);
+      this.openSession(session.id, sessionServerID);
+      this.writeComposer(composerFrom(text));
+      this.setState('attachments', [...attachments]);
+    }
     const sent = await this.admit(
       { serverID: sessionServerID, sessionID: session.id },
       text,
@@ -2511,9 +2522,32 @@ export class AppController {
       undefined,
       attachments,
     );
-    if (!sent)
+    if (!sent) {
+      // Prompt delivery failed or was ambiguous: park the unsent text and files in the
+      // created session's draft so they can be recovered, and report against the new
+      // session without touching the route the user is viewing.
+      this.stashPromptDraft(sessionServerID, session.id, text, attachments);
       this.showNotice(`Session ${session.id} was created but the prompt was not sent.`, 'error');
+    }
     return session.id;
+  }
+
+  /** Parks unsent prompt text and attachments in the created session's draft for recovery. */
+  private stashPromptDraft(
+    serverID: string,
+    sessionID: string,
+    text: string,
+    attachments: readonly Attachment[],
+  ): void {
+    const key = this.keyFor(serverID, sessionID);
+    const draft = this.state.drafts[key] ?? emptyComposer;
+    batch(() => {
+      this.setState('drafts', key, insertText(draft, text));
+      this.setState('draftAttachments', key, [
+        ...(this.state.draftAttachments[key] ?? []),
+        ...attachments,
+      ]);
+    });
   }
 
   /**
