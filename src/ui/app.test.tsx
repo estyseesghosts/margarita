@@ -1553,10 +1553,128 @@ describe('live action beneath a collapsed group (issue #75)', () => {
   });
 });
 
-function hexOf(color: { toInts(): readonly [number, number, number, number] }): string {
-  const [r, g, b] = color.toInts();
-  return `#${[r, g, b].map((value) => Math.round(value).toString(16).padStart(2, '0')).join('')}`;
+/** Two hosts, both owning `ses_same`, with different queued counts and goal readings. */
+async function mountColliding() {
+  const local = new FakeBackend();
+  local.serverID = 'local';
+  local.sessions = [
+    {
+      id: 'ses_same',
+      serverID: 'local',
+      projectID: 'p',
+      directory: '/work/kohjoh',
+      title: 'Local',
+      createdAt: 1,
+      updatedAt: 5,
+      archived: false,
+    },
+  ];
+  local.inbox = [
+    { id: 'in_a', kind: 'user', delivery: 'queue', text: 'local queued', createdAt: 1 },
+  ];
+  local.inboxSession = { in_a: 'ses_same' };
+  const remote = new FakeBackend();
+  remote.serverID = 'srv_b';
+  remote.sessions = [
+    {
+      id: 'ses_same',
+      serverID: 'srv_b',
+      projectID: 'p',
+      directory: '/srv/app',
+      title: 'Remote',
+      createdAt: 1,
+      updatedAt: 9,
+      archived: false,
+    },
+  ];
+  remote.inbox = [
+    { id: 'in_b1', kind: 'user', delivery: 'queue', text: 'remote one', createdAt: 2 },
+    { id: 'in_b2', kind: 'user', delivery: 'queue', text: 'remote two', createdAt: 3 },
+  ];
+  remote.inboxSession = { in_b1: 'ses_same', in_b2: 'ses_same' };
+  const backends = new Map([
+    ['local', local],
+    ['srv_b', remote],
+  ]);
+  const controller = new AppController({
+    backend: local,
+    backendFor: (serverID: string) => backends.get(serverID),
+    serverIDs: () => ['local', 'srv_b'],
+    serverInfo: (serverID: string) =>
+      serverID === 'local' ? undefined : { label: 'bravo', online: true },
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: async () => [],
+    requestExit: () => {},
+  });
+  await controller.bootstrap();
+  const setup = await testRender(
+    () =>
+      App({
+        controller,
+        keymap: buildKeymap({}).keymap,
+        theme: pickTheme({}),
+        animate: false,
+        ascii: false,
+        env: {},
+      }),
+    { width: 90, height: 30 },
+  );
+  current = setup;
+  await setup.renderOnce();
+  return { controller, setup };
 }
+
+describe('server-qualified views in the UI (issue #78)', () => {
+  test('the footer queued count follows the selected host', async () => {
+    const { controller, setup } = await mountColliding();
+    controller.openSession('ses_same', 'local');
+    await settle(setup);
+    let frame = setup.captureCharFrame();
+    expect(frame).toContain('1 queued');
+
+    controller.openSession('ses_same', 'srv_b');
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    // A bare-id lookup would show A's count here.
+    expect(frame).toContain('2 queued');
+
+    controller.dispose();
+  });
+
+  test('the queue dialog lists only the displayed host and steers there', async () => {
+    const { controller, setup } = await mountColliding();
+    controller.openSession('ses_same', 'srv_b');
+    await settle(setup);
+    controller.setOverlay({ kind: 'queue', index: 0 });
+    await settle(setup);
+
+    let frame = setup.captureCharFrame();
+    expect(frame).toContain('remote one');
+    expect(frame).toContain('remote two');
+    expect(frame).not.toContain('local queued');
+
+    // Cancelling from here addresses the remote host only.
+    await controller.cancelQueued('in_b2');
+    await settle(setup);
+    const remote = controller.state.inbox['server:srv_b/session:ses_same'];
+    expect(remote?.map((item) => item.id)).toEqual(['in_b1']);
+
+    // Switching host changes what the dialog would show, and A's queue is intact.
+    controller.openSession('ses_same', 'local');
+    await settle(setup);
+    expect(controller.state.inbox['ses_same']?.map((item) => item.id)).toEqual(['in_a']);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('local queued');
+    expect(frame).not.toContain('remote one');
+    controller.dispose();
+  });
+});
 
 async function mountProjects(
   options: {
@@ -1664,6 +1782,11 @@ async function mountProjects(
   current = setup;
   await setup.renderOnce();
   return { controller, setup };
+}
+
+function hexOf(color: { toInts(): readonly [number, number, number, number] }): string {
+  const [r, g, b] = color.toInts();
+  return `#${[r, g, b].map((value) => Math.round(value).toString(16).padStart(2, '0')).join('')}`;
 }
 
 function spanDump(setup: Setup) {

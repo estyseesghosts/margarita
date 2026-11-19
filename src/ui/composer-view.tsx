@@ -83,8 +83,9 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
 export function Footer(props: { controller: AppController; theme: Theme; width: number }) {
   const state = props.controller.state;
   const line = () => {
-    const session = props.controller.currentSession();
-    if (session === undefined) {
+    // One server-qualified view; never reconstruct identity from a bare session id (#78).
+    const view = props.controller.currentView();
+    if (view === undefined) {
       return formatFooter(
         {
           ...(state.overview.agent === undefined ? {} : { agent: state.overview.agent }),
@@ -96,16 +97,16 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
         props.width - 2,
       );
     }
-    const inbox = (state.inbox[session.id] ?? []).filter((item) => item.kind === 'user');
-    const badge = goalBadge(state.nativeGoals[session.id], state.awaitingSteer[session.id]);
+    const session = view.session;
+    const badge = goalBadge(view.nativeGoal, view.awaitingSteer);
     return formatFooter(
       {
-        ...(session.agent === undefined ? {} : { agent: session.agent }),
-        ...(session.model === undefined ? {} : { model: session.model }),
-        state: executionLabel(props.controller.executionOf(session.id)),
-        ...(session.tokens === undefined ? {} : { tokens: session.tokens }),
-        ...(session.cost === undefined ? {} : { cost: session.cost }),
-        queued: inbox.length,
+        ...(session?.agent === undefined ? {} : { agent: session.agent }),
+        ...(session?.model === undefined ? {} : { model: session.model }),
+        state: executionLabel(view.execution),
+        ...(session?.tokens === undefined ? {} : { tokens: session.tokens }),
+        ...(session?.cost === undefined ? {} : { cost: session.cost }),
+        queued: view.queued.length,
         stale: state.stream !== 'live',
         ...(badge === '' ? {} : { goal: badge }),
       },

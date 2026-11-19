@@ -117,6 +117,21 @@ async function flush(): Promise<void> {
 
 const remoteKey = `server:${remoteID}/session:${sessionID}`;
 
+/** Both hosts own `ses_same`; each gets its own queued item under its own key. */
+function viewHarness() {
+  const { controller, local, remote } = harness();
+  local.inbox = [
+    { id: 'in_same', kind: 'user', delivery: 'queue', text: 'local queued', createdAt: 1 },
+  ];
+  local.inboxSession = { in_same: sessionID };
+  remote.inbox = [
+    { id: 'in_same', kind: 'user', delivery: 'queue', text: 'remote queued', createdAt: 2 },
+    { id: 'in_extra', kind: 'user', delivery: 'queue', text: 'remote extra', createdAt: 3 },
+  ];
+  remote.inboxSession = { in_same: sessionID, in_extra: sessionID };
+  return { controller, local, remote };
+}
+
 describe('server identity through SSE events (issue #63)', () => {
   test('B-only events while A is selected never touch A’s rows, transcript or badge', async () => {
     const { controller, local, remote, counters } = harness();
@@ -435,6 +450,66 @@ describe('qualified state keys (issue #64)', () => {
     expect(controller.state.transcripts[sessionID]?.messages.map((m) => m.id)).not.toContain(
       'm_remote',
     );
+    controller.dispose();
+  });
+});
+
+describe('server-qualified conversation views (issue #78)', () => {
+  test('queue, goal, steer intent and execution differ per host for a colliding id', async () => {
+    const { controller } = viewHarness();
+    await controller.bootstrap();
+
+    controller.openSession(sessionID, localID);
+    await flush();
+    const localView = controller.currentView();
+    expect(localView?.serverID).toBe(localID);
+    expect(localView?.key).toBe(sessionID);
+    expect(localView?.queued.map((item) => item.text)).toEqual(['local queued']);
+    expect(localView?.nativeGoal?.status).toBe('verified');
+
+    controller.openSession(sessionID, remoteID);
+    await flush();
+    const remoteView = controller.currentView();
+    expect(remoteView?.serverID).toBe(remoteID);
+    expect(remoteView?.key).toBe(remoteKey);
+    expect(remoteView?.queued.map((item) => item.text)).toEqual(['remote queued', 'remote extra']);
+    // The goal reading follows the selected host, not the launch one.
+    const remoteGoal = remoteView?.nativeGoal;
+    expect(remoteGoal?.status === 'verified' ? remoteGoal.goal.id : undefined).toBe('goal_remote');
+
+    // Switching back restores A's view verbatim: no cross-host bleed.
+    controller.openSession(sessionID, localID);
+    await flush();
+    expect(controller.currentView()?.queued.map((item) => item.text)).toEqual(['local queued']);
+    const localGoal = controller.currentView()?.nativeGoal;
+    expect(localGoal?.status === 'verified' ? localGoal.goal.id : undefined).toBe('goal_local');
+
+    controller.dispose();
+  });
+
+  test('queue cancellation and steering address only the displayed host', async () => {
+    const { controller, local, remote } = viewHarness();
+    await controller.bootstrap();
+    // Both hosts carry the SAME inbox item ID, so a bare-id lookup would be ambiguous.
+    controller.openSession(sessionID, localID);
+    await flush();
+    controller.openSession(sessionID, remoteID);
+    await flush();
+
+    await controller.cancelQueued('in_same');
+    expect(remote.calls.filter((call) => call.name === 'cancelQueued')).toHaveLength(1);
+    expect(local.calls.filter((call) => call.name === 'cancelQueued')).toHaveLength(0);
+    // Neither host's queue leaked: A keeps its item, B's was consumed by the cancel.
+    expect(controller.state.inbox[sessionID]?.map((item) => item.id)).toEqual(['in_same']);
+    expect(controller.state.inbox[remoteKey]?.map((item) => item.id)).toEqual(['in_extra']);
+
+    await controller.promoteQueued('in_extra');
+    expect(remote.calls.filter((call) => call.name === 'changeDelivery')).toHaveLength(1);
+    expect(local.calls.filter((call) => call.name === 'changeDelivery')).toHaveLength(0);
+
+    // An item that belongs to the other host is never acted on from here.
+    await controller.promoteQueued('not_queued_here');
+    expect(remote.calls.filter((call) => call.name === 'changeDelivery')).toHaveLength(1);
     controller.dispose();
   });
 });

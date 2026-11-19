@@ -182,8 +182,8 @@ function routeOverlay(controller: AppController, key: KeyInput): boolean {
       else if (isPrintable(key)) controller.setHistoryQuery(overlay.query + key.text);
       return true;
     case 'queue': {
-      const session = controller.currentSession();
-      const items = session === undefined ? [] : (controller.state.inbox[session.id] ?? []);
+      // Server-qualified: selection and actions stay on the displayed host (#78).
+      const items = controller.currentView()?.queued ?? [];
       const item = items[overlay.index];
       if (key.name === 'up' && items.length > 0) {
         controller.setOverlay({

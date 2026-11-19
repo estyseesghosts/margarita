@@ -11,6 +11,7 @@ import {
   type DiffRange,
   type PermissionDecision,
   type PromptFile,
+  type QueuedInput,
 } from '../adapter/backend.ts';
 import type { StreamStatus } from '../adapter/event-pump.ts';
 import { nextQueuedUser } from '../adapter/wire-mapping.ts';
@@ -141,6 +142,23 @@ export type ServerListing = Readonly<{
   baseUrl: string;
   state: string;
   active: boolean;
+}>;
+
+/**
+ * Everything presentation code needs about the attached conversation, already resolved
+ * through its server-qualified key. Nothing here is keyed by a bare session ID.
+ */
+export type ConversationView = Readonly<{
+  serverID: string;
+  sessionID: string;
+  /** `sessionKey({serverID, sessionID})`: the key every per-session map uses. */
+  key: string;
+  session?: SessionSummary;
+  /** Pending user follow-ups; compactions share the inbox but are not listed here. */
+  queued: readonly QueuedInput[];
+  nativeGoal: NativeGoalState | undefined;
+  awaitingSteer: string | undefined;
+  execution: Execution;
 }>;
 
 export type ServerAdmin = Readonly<{
@@ -364,6 +382,29 @@ export class AppController {
     return route.kind === 'conversation'
       ? this.state.sessions[this.keyFor(route.serverID, route.sessionID)]
       : undefined;
+  }
+
+  /**
+   * Everything the attached conversation exposes to presentation code, read through the
+   * one server-qualified key. Views and key handlers must use this instead of rebuilding
+   * identity from `session.id`: two hosts can both own `ses_same`, and a bare ID would
+   * show the other host's queue/goal/execution state (issue #78).
+   */
+  currentView(): ConversationView | undefined {
+    const route = this.state.route;
+    if (route.kind !== 'conversation') return undefined;
+    const session = this.state.sessions[this.keyFor(route.serverID, route.sessionID)];
+    const key = this.keyFor(route.serverID, route.sessionID);
+    return {
+      serverID: route.serverID,
+      sessionID: route.sessionID,
+      key,
+      ...(session === undefined ? {} : { session }),
+      queued: (this.state.inbox[key] ?? []).filter((item) => item.kind === 'user'),
+      nativeGoal: this.state.nativeGoals[key],
+      awaitingSteer: this.state.awaitingSteer[key],
+      execution: this.executionOf(route.sessionID, route.serverID),
+    };
   }
 
   /** Counts for the tab bar, based on the same classifier as the dot. */
@@ -2965,14 +3006,15 @@ export class AppController {
   }
 
   async cancelQueued(inboxID: string): Promise<void> {
-    const session = this.currentSession();
-    if (session === undefined) return;
-    const sessionID = session.id;
-    const item = (this.state.inbox[this.keyFor(session.serverID, sessionID)] ?? []).find(
-      (entry) => entry.id === inboxID,
-    );
+    const view = this.currentView();
+    if (view === undefined) return;
+    const { serverID, sessionID, key } = view;
+    // The item must belong to the session the queue dialog is showing (issue #78); a stale
+    // index from another host's queue can never cancel here.
+    const item = (this.state.inbox[key] ?? []).find((entry) => entry.id === inboxID);
+    if (item === undefined) return;
     try {
-      await this.backend.cancelQueued(sessionID, inboxID);
+      await this.backendFor(serverID).cancelQueued(sessionID, inboxID);
     } catch (error) {
       // The most likely race: the server delivered the item between our listing and the cancel.
       if (
@@ -2983,14 +3025,15 @@ export class AppController {
       } else {
         this.showNotice(errorText(error), 'error');
       }
-      await this.refreshInbox(sessionID);
+      await this.refreshInbox(sessionID, serverID);
       return;
     }
-    await this.refreshInbox(sessionID);
-    if (item === undefined) return;
+    await this.refreshInbox(sessionID, serverID);
     // Restore the full text into the composer, never into a different session's composer.
     const sameSession =
-      this.state.route.kind === 'conversation' && this.state.route.sessionID === sessionID;
+      this.state.route.kind === 'conversation' &&
+      this.state.route.serverID === serverID &&
+      this.state.route.sessionID === sessionID;
     if (
       sameSession &&
       this.state.composer.text === '' &&
@@ -3050,17 +3093,20 @@ export class AppController {
   }
 
   async promoteQueued(inboxID: string): Promise<void> {
-    const session = this.currentSession();
-    if (session === undefined) return;
+    const view = this.currentView();
+    if (view === undefined) return;
+    const { serverID, sessionID, key } = view;
+    // Steer only the item the shown session actually owns (#78).
+    if (!(this.state.inbox[key] ?? []).some((entry) => entry.id === inboxID)) return;
     try {
-      await this.backend.changeDelivery(session.id, inboxID, 'steer');
+      await this.backendFor(serverID).changeDelivery(sessionID, inboxID, 'steer');
     } catch (error) {
       this.showNotice(errorText(error), 'error');
-      await this.refreshInbox(session.id);
+      await this.refreshInbox(sessionID, serverID);
       return;
     }
-    await this.refreshInbox(session.id);
-    await this.maybeResumeInterruptedGoal(session.id);
+    await this.refreshInbox(sessionID, serverID);
+    await this.maybeResumeInterruptedGoal(sessionID, serverID);
   }
 
   /**
@@ -3234,11 +3280,12 @@ export class AppController {
       return;
     }
     try {
-      await this.backend.runCommand(sessionID, 'goal', 'resume');
+      // The goal belongs to this session's host, never to whatever route is active now.
+      await this.backendFor(serverID).runCommand(sessionID, 'goal', 'resume');
     } catch (error) {
       this.showNotice(`Could not resume the goal: ${errorText(error)}`, 'error');
     }
-    await this.refreshNativeGoal(sessionID);
+    await this.refreshNativeGoal(sessionID, serverID);
   }
 
   // ---------------------------------------------------------------- permissions

@@ -433,8 +433,8 @@ function TasksDialog(props: {
   frame: (title: string) => Record<string, unknown>;
 }) {
   const doc = () => {
-    const session = props.controller.currentSession();
-    return session === undefined ? undefined : props.controller.goalOf(session.id);
+    const view = props.controller.currentView();
+    return view === undefined ? undefined : props.controller.goalOf(view.sessionID, view.serverID);
   };
   const shown = () => doc()?.proposal ?? doc()?.plan;
   const proposal = () => doc()?.proposal !== undefined;
@@ -443,10 +443,12 @@ function TasksDialog(props: {
     const count = progress(shown());
     return `Tasks ${count.done}/${count.total} · Space state · b blocked · x cancel · e evidence`;
   };
-  const session = () => props.controller.currentSession();
+  const session = () => props.controller.currentView();
   const nativeGoal = () => {
-    const current = session();
-    return current === undefined ? undefined : props.controller.nativeGoalStateOf(current.id);
+    const view = session();
+    return view === undefined
+      ? undefined
+      : props.controller.nativeGoalStateOf(view.sessionID, view.serverID);
   };
   const nativeGoalObject = () => {
     const known = nativeGoal();
@@ -530,8 +532,6 @@ function TasksDialog(props: {
 }
 
 function queuedItems(controller: AppController) {
-  const session = controller.currentSession();
-  if (session === undefined) return [];
-  // Pending compactions share the inbox but are not user prompts; they are not cancellable here.
-  return (controller.state.inbox[session.id] ?? []).filter((item) => item.kind === 'user');
+  // Server-qualified: a colliding session id on another host must never leak its queue.
+  return controller.currentView()?.queued ?? [];
 }
