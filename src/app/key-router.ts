@@ -368,9 +368,7 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
       return true;
     }
     case 'escape':
-      controller.clearGroupFocus();
-      if (state.exitArmed || state.notice !== undefined) controller.clearNotice();
-      return true;
+      return controller.handleEscapeKey();
     case 'tab':
       return true;
     default:

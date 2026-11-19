@@ -171,6 +171,11 @@ export type AppState = {
   recentModels: ModelSelection[];
   /** Pending confirmation for Ctrl+C / Ctrl+D exit. */
   exitArmed: boolean;
+  /**
+   * Awaiting rewind confirmation after Esc Esc on an empty, idle composer. No files are
+   * mutated until the user confirms; the actual rewind is separate work (issue #102).
+   */
+  rewindPending: boolean;
   /** False while more session pages exist than were loaded; the overview says so. */
   sessionsComplete: boolean;
   /** Cursor for the next older page of sessions; absent once the server has no more. */
@@ -228,6 +233,7 @@ export function initialState(directory: string, serverID: string = localServerID
     history: createHistory([]),
     recentModels: [],
     exitArmed: false,
+    rewindPending: false,
     sessionsComplete: false,
     sessionsLoading: false,
     serverPages: {},

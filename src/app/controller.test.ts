@@ -30,6 +30,7 @@ function deferred<T>() {
 function makeController(
   listFiles: (root: string) => Promise<string[]>,
   backend: FakeBackend = new FakeBackend(),
+  now: () => number = () => 10_000,
 ) {
   return new AppController({
     backend,
@@ -38,7 +39,7 @@ function makeController(
     platform: 'linux',
     cwd: '/work/kohjoh',
     version: '0.0.1',
-    now: () => 10_000,
+    now,
     saveLocalState: async () => {},
     listFiles,
     requestExit: () => {},
@@ -2571,6 +2572,168 @@ describe('server routing', () => {
       serverID: 'srv_1',
       sessionID: 'ses_a',
     });
+    controller.dispose();
+  });
+});
+
+function escKey() {
+  return { name: 'escape', ctrl: false, alt: false, shift: false };
+}
+
+describe('escape key handling (issue #90)', () => {
+  const services = { openEditor: () => {}, redraw: () => {}, scroll: () => {} };
+
+  test('Esc while running interrupts once and preserves an empty draft', async () => {
+    const { backend, controller } = conversationFixture();
+    await attach(controller, 'ses_a');
+    controller.onEvents(
+      'local',
+      [{ kind: 'execution', sessionID: 'ses_a', state: 'started' }],
+      false,
+    );
+    controller.setComposer(composerFrom(''));
+
+    const { keymap } = buildKeymap({});
+    expect(routeKey(controller, keymap, escKey(), services)).toBe(true);
+    await flush();
+
+    expect(backend.calls.filter((call) => call.name === 'interrupt')).toHaveLength(1);
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.notice?.text).toContain('Interrupted');
+    controller.dispose();
+  });
+
+  test('Esc while running interrupts once and preserves a nonempty draft', async () => {
+    const { backend, controller } = conversationFixture();
+    await attach(controller, 'ses_a');
+    controller.onEvents(
+      'local',
+      [{ kind: 'execution', sessionID: 'ses_a', state: 'started' }],
+      false,
+    );
+    controller.setComposer(composerFrom('my draft'));
+
+    const { keymap } = buildKeymap({});
+    routeKey(controller, keymap, escKey(), services);
+    await flush();
+
+    expect(backend.calls.filter((call) => call.name === 'interrupt')).toHaveLength(1);
+    expect(controller.state.composer.text).toBe('my draft');
+    controller.dispose();
+  });
+
+  test('Idle Esc does not interrupt and preserves the draft', async () => {
+    const { backend, controller } = conversationFixture();
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom('my draft'));
+
+    const { keymap } = buildKeymap({});
+    routeKey(controller, keymap, escKey(), services);
+    await flush();
+
+    expect(backend.calls.filter((call) => call.name === 'interrupt')).toHaveLength(0);
+    expect(controller.state.composer.text).toBe('my draft');
+    controller.dispose();
+  });
+
+  test('Double-Esc on an idle nonempty draft clears it with safe restore', async () => {
+    const { backend, controller } = conversationFixture();
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom('my draft'));
+
+    const { keymap } = buildKeymap({});
+    routeKey(controller, keymap, escKey(), services);
+    routeKey(controller, keymap, escKey(), services);
+    await flush();
+
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.stash).toBe('my draft');
+    expect(controller.state.notice?.text).toContain('stashed');
+    expect(backend.calls.filter((call) => call.name === 'interrupt')).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('Double-Esc on an idle empty composer enters rewind selection without mutating files', async () => {
+    const { backend, controller } = conversationFixture();
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom(''));
+
+    const { keymap } = buildKeymap({});
+    routeKey(controller, keymap, escKey(), services);
+    routeKey(controller, keymap, escKey(), services);
+    await flush();
+
+    expect(controller.state.rewindPending).toBe(true);
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.notice?.text).toContain('Rewind selection');
+    expect(backend.calls.filter((call) => call.name === 'interrupt')).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('A second Esc outside the double-tap window is a single tap, not rewind/clear', async () => {
+    let now = 10_000;
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    const controller = makeController(
+      () => Promise.resolve([]),
+      backend,
+      () => now,
+    );
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom('my draft'));
+
+    const { keymap } = buildKeymap({});
+    routeKey(controller, keymap, escKey(), services);
+    now = 10_500; // past the 400 ms double-tap window
+    routeKey(controller, keymap, escKey(), services);
+    await flush();
+
+    expect(controller.state.rewindPending).toBe(false);
+    expect(controller.state.stash).toBeUndefined();
+    expect(controller.state.composer.text).toBe('my draft');
+    expect(backend.calls.filter((call) => call.name === 'interrupt')).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('Esc while an overlay is open closes the overlay and never interrupts', async () => {
+    const { backend, controller } = conversationFixture();
+    await attach(controller, 'ses_a');
+    controller.onEvents(
+      'local',
+      [{ kind: 'execution', sessionID: 'ses_a', state: 'started' }],
+      false,
+    );
+    controller.setOverlay({ kind: 'help' });
+
+    const { keymap } = buildKeymap({});
+    routeKey(controller, keymap, escKey(), services);
+    await flush();
+
+    expect(controller.state.overlay.kind).toBe('none');
+    expect(backend.calls.filter((call) => call.name === 'interrupt')).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('Esc while a permission card is pending rejects it and never interrupts', async () => {
+    const { backend, controller } = conversationFixture();
+    await attach(controller, 'ses_a');
+    controller.onEvents(
+      'local',
+      [{ kind: 'execution', sessionID: 'ses_a', state: 'started' }],
+      false,
+    );
+    backend.permissions = [
+      { id: 'p1', sessionID: 'ses_a', action: 'run shell', resources: [], save: [] },
+    ];
+    controller.onEvents('local', [{ kind: 'input-requests-changed', sessionID: 'ses_a' }], false);
+    await flush();
+    expect(controller.pendingPermission()).toBeDefined();
+
+    const { keymap } = buildKeymap({});
+    routeKey(controller, keymap, escKey(), services);
+    await flush();
+
+    expect(backend.calls.filter((call) => call.name === 'interrupt')).toHaveLength(0);
     controller.dispose();
   });
 });

@@ -235,6 +235,9 @@ export class AppController {
   private readonly setState: SetStoreFunction<AppState>;
   private noticeCounter = 0;
   private noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Timestamp (ms, from `deps.now`) of the most recent idle Escape tap, for double-tap detection. */
+  private escapeAt: number | undefined;
+  private escapeTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly transcriptInFlight = new Map<string, Promise<void>>();
   private readonly transcriptDirty = new Set<string>();
   private readonly summaryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -268,6 +271,9 @@ export class AppController {
   /** Identity of the server this controller talks to; part of every session key. */
   readonly serverID: string;
 
+  /** Maximum gap (ms, measured with `deps.now`) between two Escape taps for a double-tap. */
+  private static readonly ESCAPE_DOUBLE_TAP_MS = 400;
+
   constructor(private readonly deps: ControllerDeps) {
     this.serverID = deps.serverID ?? localServerID;
     this.debugLog = deps.debugLog ?? noDebugLog;
@@ -283,6 +289,7 @@ export class AppController {
   dispose(): void {
     this.disposed = true;
     if (this.noticeTimer !== undefined) clearTimeout(this.noticeTimer);
+    this.resetEscapeTimer();
     for (const timer of this.summaryTimers.values()) clearTimeout(timer);
     this.summaryTimers.clear();
   }
@@ -3798,6 +3805,69 @@ export class AppController {
 
   clearNotice(): void {
     this.setState('notice', undefined);
+  }
+
+  /**
+   * Escape handling with contextual priority:
+   * - While a run is active and no higher-priority control owns Esc, one Esc interrupts the
+   *   owning server and preserves the composer draft.
+   * - While idle, a single Esc cancels selection/notice and arms a double-tap window; a
+   *   second Esc within the window enters rewind selection (empty composer) or clears the
+   *   draft with safe restore (nonempty draft). Repeat Esc never submits or exits.
+   */
+  handleEscapeKey(): boolean {
+    const state = this.state;
+    // While a run is active and no higher-priority control owns Esc, one Esc interrupts the
+    // owning server; the composer draft is preserved.
+    if (this.isRunning()) {
+      this.resetEscapeDoubleTap();
+      void this.interrupt();
+      return true;
+    }
+    // Idle: a second Esc within the double-tap window triggers rewind/clear.
+    const now = this.deps.now();
+    if (this.escapeAt !== undefined && now - this.escapeAt <= AppController.ESCAPE_DOUBLE_TAP_MS) {
+      this.resetEscapeDoubleTap();
+      if (state.composer.text === '') {
+        this.enterRewindSelection();
+      } else {
+        // Clear the draft with a safe restore path: Ctrl+S brings it back.
+        this.toggleStash();
+      }
+      return true;
+    }
+    // First tap of a potential double-tap: arm the window, then cancel selection/notice.
+    this.armEscapeDoubleTap(now);
+    this.clearGroupFocus();
+    if (state.exitArmed || state.notice !== undefined) this.clearNotice();
+    return true;
+  }
+
+  private armEscapeDoubleTap(now: number): void {
+    this.escapeAt = now;
+    this.resetEscapeTimer();
+    this.escapeTimer = setTimeout(() => {
+      this.escapeTimer = undefined;
+      this.escapeAt = undefined;
+    }, AppController.ESCAPE_DOUBLE_TAP_MS);
+  }
+
+  private resetEscapeDoubleTap(): void {
+    this.escapeAt = undefined;
+    this.resetEscapeTimer();
+  }
+
+  private resetEscapeTimer(): void {
+    if (this.escapeTimer !== undefined) {
+      clearTimeout(this.escapeTimer);
+      this.escapeTimer = undefined;
+    }
+  }
+
+  /** Enter rewind selection without mutating files; confirmation is separate work (#102). */
+  private enterRewindSelection(): void {
+    this.setState('rewindPending', true);
+    this.showNotice('Rewind selection — confirm to discard working changes', 'dim');
   }
 
   currentDirectory(): string {

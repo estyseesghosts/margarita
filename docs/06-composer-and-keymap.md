@@ -48,8 +48,8 @@ The mapping is deliberately not an exact Claude clone. `Shift+Tab` must never fl
 | Composer | `Ctrl+P` / `Ctrl+N` | Previous/next history unless completion owns keys |
 | Composer | `Ctrl+C` | Interrupt executing session; else clear draft; then confirm exit |
 | Composer | `Ctrl+D` | Delete char if nonempty; otherwise guarded exit |
-| Composer | `Esc` | Close suggestion, dialog, shell mode, or cancel selection (in that order) |
-| Composer | `Esc Esc` | Rewind dialog only when composer empty and session idle; else clear prompt with safe restore |
+| Composer | `Esc` | Close suggestion, dialog, shell mode, or cancel selection; while a run is active and no higher-priority control owns Esc, interrupts the session once, preserving the draft |
+| Composer | `Esc Esc` | Enter rewind selection only when composer empty and session idle; else clear prompt with safe restore |
 | Composer | `/` at start | Slash command completion |
 | Composer | `@` | File/agent reference completion |
 | Composer | `!` at start | User shell mode |
