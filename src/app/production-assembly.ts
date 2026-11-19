@@ -205,9 +205,13 @@ export async function createProductionAssembly(
       }));
     },
     unpair: async (targetID) => {
-      // Credential first: if the secret cannot be removed, nothing else changes and the
-      // failure is surfaced instead of reporting a half-finished unpair as done.
-      await input.credentials.delete(targetID);
+      // An `auth: none` profile has no secret by design, so the credential store is never
+      // consulted: a machine without a working keyring must still be able to forget an
+      // anonymous host (issue #81). Authenticated profiles delete the secret first, so a
+      // failure to remove it surfaces instead of reporting a half-finished unpair as done.
+      const anonymous =
+        profiles.profiles.find((profile) => profile.serverID === targetID)?.auth === 'none';
+      if (!anonymous) await input.credentials.delete(targetID);
       keepFresh(await removeServerProfile(input.paths.serversFile, targetID));
       await servers.remove(targetID);
     },

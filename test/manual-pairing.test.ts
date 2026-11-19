@@ -11,7 +11,7 @@ import {
 } from '../src/app/production-assembly.ts';
 import { remoteConnectionFor } from '../src/app/remote-connection.ts';
 import { defaultConfig } from '../src/config/config.ts';
-import { memoryCredentialStore } from '../src/config/credentials.ts';
+import { memoryCredentialStore, unavailableCredentialStore } from '../src/config/credentials.ts';
 import { emptyState } from '../src/config/local-state.ts';
 import { emptyServerProfiles, loadServerProfiles } from '../src/config/server-profiles.ts';
 import { composerFrom } from '../src/domain/composer.ts';
@@ -358,5 +358,111 @@ describe('--remote connection for a paired alias (issue #71)', () => {
     const result = await remoteConnectionFor({ ...baseProfile }, memoryCredentialStore());
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe('missing-credential');
+  });
+});
+
+describe('anonymous profiles never depend on a credential store (issue #81)', () => {
+  /** A machine with no usable keyring: every store call fails, like a locked Secret Service. */
+  const locked = unavailableCredentialStore('no keyring on this host');
+
+  test('pairing works with no credential store and needs no secret anywhere', async () => {
+    const fixture = await baseFixture();
+    const assembly = await createProductionAssembly(
+      fixture.input({
+        env: {},
+        credentials: locked,
+        generateID: () => 'anon',
+        pairingFetch: () =>
+          Promise.resolve(jsonResponse({ version: '2.3.0', hostname: 'buildbox' })),
+      }),
+    );
+    await assembly.controller.bootstrap();
+    assembly.controller.setComposer(
+      composerFrom('/pair --url https://anon.test:4096 --as buildbox'),
+    );
+    await assembly.controller.submit();
+    await flush();
+
+    expect(assembly.controller.state.notice?.tone).not.toBe('error');
+    const persisted = await loadServerProfiles(fixture.serversFile);
+    expect(persisted.profiles.profiles).toMatchObject([
+      { serverID: 'srv_anon', shortname: 'buildbox', auth: 'none' },
+    ]);
+    assembly.controller.dispose();
+    await assembly.servers.dispose();
+  });
+
+  test('an anonymous profile can be unpaired on a machine with no credential store', async () => {
+    const fixture = await baseFixture();
+    const first = await createProductionAssembly(
+      fixture.input({
+        env: {},
+        credentials: locked,
+        generateID: () => 'anon',
+        pairingFetch: () =>
+          Promise.resolve(jsonResponse({ version: '2.3.0', hostname: 'buildbox' })),
+      }),
+    );
+    await first.controller.bootstrap();
+    first.controller.setComposer(composerFrom('/pair --url https://anon.test:4096 --as buildbox'));
+    await first.controller.submit();
+    await flush();
+    const paired = await loadServerProfiles(fixture.serversFile);
+    first.controller.dispose();
+    await first.servers.dispose();
+
+    // Restart on the same keyring-less machine, then forget the anonymous host entirely.
+    fixture.connections.length = 0;
+    const second = await createProductionAssembly(
+      fixture.input({ profiles: paired.profiles, credentials: locked }),
+    );
+    await second.controller.bootstrap();
+    second.controller.setComposer(composerFrom('/unpair buildbox'));
+    await second.controller.submit();
+    await flush();
+
+    // No store was consulted, so the durable removal succeeded and nothing is left behind.
+    expect(second.controller.state.notice?.tone).toBe('dim');
+    expect(second.controller.state.notice?.text).toContain('Unpaired buildbox');
+    expect((await loadServerProfiles(fixture.serversFile)).profiles.profiles).toEqual([]);
+    expect(second.servers.get('srv_anon')).toBeUndefined();
+    second.controller.dispose();
+    await second.servers.dispose();
+  });
+
+  test('an authenticated profile still fails visibly when its store is unusable', async () => {
+    const fixture = await baseFixture();
+    const first = await createProductionAssembly(
+      fixture.input({
+        env: { MARGARITA_SERVER_PASSWORD: 's3cret' },
+        generateID: () => 'basic',
+        pairingFetch: basicInfo,
+      }),
+    );
+    await first.controller.bootstrap();
+    first.controller.setComposer(composerFrom('/pair --url https://basic.test:4096 --as basicbox'));
+    await first.controller.submit();
+    await flush();
+    const paired = await loadServerProfiles(fixture.serversFile);
+    expect(paired.profiles.profiles[0]?.auth).toBe('basic');
+    first.controller.dispose();
+    await first.servers.dispose();
+
+    // The secret cannot be removed from a locked store: keep the profile and say why, rather
+    // than reporting a half-finished unpair as done.
+    fixture.connections.length = 0;
+    const second = await createProductionAssembly(
+      fixture.input({ profiles: paired.profiles, credentials: locked }),
+    );
+    await second.controller.bootstrap();
+    second.controller.setComposer(composerFrom('/unpair basicbox'));
+    await second.controller.submit();
+    await flush();
+
+    expect(second.controller.state.notice?.tone).toBe('error');
+    expect(second.controller.state.notice?.text).toContain('credential storage is unavailable');
+    expect((await loadServerProfiles(fixture.serversFile)).profiles.profiles).toHaveLength(1);
+    second.controller.dispose();
+    await second.servers.dispose();
   });
 });
