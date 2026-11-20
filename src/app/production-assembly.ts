@@ -15,6 +15,7 @@ import {
   renameServerProfile,
   type ServerProfiles,
 } from '../config/server-profiles.ts';
+import { osc52Clipboard } from '../domain/osc52.ts';
 import { AppController, type ServerAdmin, type ServerListing } from './controller.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { pairServer } from './pairing-service.ts';
@@ -238,6 +239,17 @@ export async function createProductionAssembly(
       input.listFiles === undefined ? listProjectFiles(root) : input.listFiles(root),
     ...(input.remoteFilesystem === undefined ? {} : { remoteFilesystem: input.remoteFilesystem }),
     requestExit: input.requestExit,
+    // OSC 52 only when a real terminal can receive it; otherwise save an explicit local file
+    // so the user always gets the exact bytes and a visible path (#105). Never a network hop.
+    copyText: async (text) => {
+      if (input.env['TERM'] !== 'dumb' && process.stdout.isTTY) {
+        process.stdout.write(osc52Clipboard(text));
+        return { method: 'clipboard' };
+      }
+      const path = join(input.cwd, `marg-copy-${Date.now()}.txt`);
+      await Bun.write(path, text);
+      return { method: 'file', path };
+    },
     goalStore:
       input.goalStore ??
       fileGoalStore(join(input.paths.stateDir, 'goals'), () => new Date().toISOString()),

@@ -35,6 +35,7 @@ export type Overlay =
   | { kind: 'queue'; index: number }
   | { kind: 'model-picker'; query: string; index: number }
   | { kind: 'agent-picker'; query: string; index: number }
+  | { kind: 'copy-picker'; query: string; index: number }
   | { kind: 'history-search'; query: string; before: number }
   | { kind: 'servers'; index: number }
   | { kind: 'unpair-confirm'; serverID: string; label: string }

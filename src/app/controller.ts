@@ -38,6 +38,7 @@ import {
   insertText,
   restoreComposer,
 } from '../domain/composer.ts';
+import { type Copyable, copyableFromMessages } from '../domain/copyable.ts';
 import { type DiffScope, type FileDiff, patchLines, turnStart } from '../domain/diff.ts';
 import { hasOversizedDiff } from '../domain/edit-diff.ts';
 import { projectExecution } from '../domain/execution.ts';
@@ -197,6 +198,9 @@ export type ConversationView = Readonly<{
   execution: Execution;
 }>;
 
+/** Where a copy operation actually landed; the UI always reports this truthfully. */
+export type CopyResult = Readonly<{ method: 'clipboard' | 'file'; path?: string }>;
+
 export type ServerAdmin = Readonly<{
   list(): readonly ServerListing[];
   rename(serverID: string, label: string): Promise<readonly ServerListing[]>;
@@ -226,6 +230,11 @@ export type ControllerDeps = Readonly<{
   requestExit: () => void;
   /** Writes an exported file; defaults to Bun.write. */
   writeFile?: (path: string, text: string) => Promise<void>;
+  /**
+   * Copies exact text to the terminal clipboard (OSC52). The default writes a local file so
+   * copy always has an explicit, visible fallback when the terminal cannot receive OSC52.
+   */
+  copyText?: (text: string) => Promise<CopyResult>;
   /** Goal/plan sidecar storage; defaults to memory (tests). */
   goalStore?: GoalStore;
   /** Frontend-local pairing; implemented by main so the controller owns no network setup. */
@@ -3448,6 +3457,80 @@ export class AppController {
     const choice = choices[overlay.index];
     this.setOverlay({ kind: 'none' });
     if (choice !== undefined) await this.setAgent(choice.id);
+  }
+
+  // ---------------------------------------------------------------- copy picker (#105)
+
+  /** Messages of the attached conversation; empty outside a conversation route. */
+  private loadedMessages(): readonly TranscriptMessage[] {
+    if (this.state.route.kind !== 'conversation') return [];
+    const { serverID, sessionID } = this.state.route;
+    return this.state.transcripts[this.keyFor(serverID, sessionID)]?.messages ?? [];
+  }
+
+  /** Exact, UI-independent payloads from the viewed session's loaded transcript. */
+  copyChoices(query: string): Copyable[] {
+    const items = copyableFromMessages(this.loadedMessages());
+    const tokens = query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((token) => token !== '');
+    return tokens.length === 0
+      ? items
+      : items.filter((item) => tokens.every((token) => item.label.toLowerCase().includes(token)));
+  }
+
+  openCopyPicker(): void {
+    this.setOverlay({ kind: 'copy-picker', query: '', index: 0 });
+  }
+
+  setCopyPickerQuery(query: string): void {
+    this.setState('overlay', { kind: 'copy-picker', query, index: 0 });
+  }
+
+  selectCopyPickerIndex(index: number): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'copy-picker') return;
+    this.setState('overlay', { ...overlay, index });
+  }
+
+  moveCopyPicker(direction: -1 | 1): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'copy-picker') return;
+    const count = this.copyChoices(overlay.query).length;
+    if (count === 0) return;
+    this.setState('overlay', { ...overlay, index: (overlay.index + direction + count) % count });
+  }
+
+  async acceptCopyPicker(): Promise<void> {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'copy-picker') return;
+    const item = this.copyChoices(overlay.query)[overlay.index];
+    this.setOverlay({ kind: 'none' });
+    if (item === undefined) return;
+    try {
+      const result = await this.copyToDestination(item.text);
+      const suffix =
+        item.truncation === 'none'
+          ? ''
+          : ` (${item.truncation === 'server' ? 'server-truncated' : 'UI cap only'})`;
+      this.showNotice(
+        result.method === 'clipboard'
+          ? `Copied ${item.kind}${suffix} to clipboard.`
+          : `Clipboard unavailable; saved ${result.path ?? 'a file'}${suffix}.`,
+        'dim',
+      );
+    } catch (error) {
+      this.showNotice(`Copy failed: ${errorText(error)}`, 'error');
+    }
+  }
+
+  private async copyToDestination(text: string): Promise<CopyResult> {
+    if (this.deps.copyText !== undefined) return this.deps.copyText(text);
+    const path = resolve(this.deps.cwd, `marg-copy-${this.deps.now()}.txt`);
+    const write = this.deps.writeFile ?? (async (file, body) => void (await Bun.write(file, body)));
+    await write(path, text);
+    return { method: 'file', path };
   }
 
   async openModelPicker(): Promise<void> {

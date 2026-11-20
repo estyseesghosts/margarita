@@ -246,6 +246,41 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
           );
         }}
       </Match>
+      <Match when={state.overlay.kind === 'copy-picker' ? state.overlay : undefined}>
+        {(overlay: Accessor<Extract<Overlay, { kind: 'copy-picker' }>>) => {
+          const choices = () => props.controller.copyChoices(overlay().query);
+          const start = () => Math.max(0, overlay().index - visibleRows + 1);
+          return (
+            <box {...frame('Copy exact text · type to filter · Enter copy')}>
+              <text fg={props.theme.text}>{`> ${overlay().query}`}</text>
+              <Show
+                when={choices().length > 0}
+                fallback={
+                  <text fg={dim()}>No tool output, diff or code block in this session.</text>
+                }
+              >
+                <For each={choices().slice(start(), start() + visibleRows)}>
+                  {(item, index) => {
+                    const selected = () => start() + index() === overlay().index;
+                    return (
+                      <text
+                        fg={selected() ? props.theme.accent : props.theme.text}
+                        onMouseDown={() => {
+                          props.controller.selectCopyPickerIndex(start() + index());
+                          void props.controller.acceptCopyPicker();
+                        }}
+                      >
+                        {`${selected() ? '❯' : ' '} ${item.label}`}
+                      </text>
+                    );
+                  }}
+                </For>
+              </Show>
+              <text fg={dim()}>Unretained or server-truncated payloads are labelled above.</text>
+            </box>
+          );
+        }}
+      </Match>
       <Match when={state.overlay.kind === 'tasks' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'tasks' }>>) => (
           <TasksDialog

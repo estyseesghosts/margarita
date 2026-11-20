@@ -4288,6 +4288,62 @@ describe('escape key handling (issue #90)', () => {
   });
 });
 
+describe('copy picker (#105)', () => {
+  test('copies exact tool output bytes and reports the truncation boundary', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = {
+      ses_a: [
+        {
+          kind: 'assistant',
+          id: 'm1',
+          createdAt: 1,
+          agent: 'build',
+          model: { providerID: 'p', modelID: 'm' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 't1',
+                name: 'shell',
+                status: 'completed',
+                input: {},
+                startedAt: 0,
+                output: 'line one\nline two',
+                outputTruncated: 'frontend',
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const copied: string[] = [];
+    const controller = new AppController({
+      backend,
+      config: defaultConfig,
+      localState: emptyState,
+      platform: 'linux',
+      cwd: '/work/kohjoh',
+      version: '0.0.1',
+      now: () => 10_000,
+      saveLocalState: async () => {},
+      listFiles: () => Promise.resolve([]),
+      requestExit: () => {},
+      copyText: async (text) => {
+        copied.push(text);
+        return { method: 'clipboard' };
+      },
+    });
+    await attach(controller, 'ses_a');
+    controller.openCopyPicker();
+    expect(controller.copyChoices('').map((item) => item.kind)).toEqual(['output']);
+    await controller.acceptCopyPicker();
+    expect(copied).toEqual(['line one\nline two']);
+    expect(controller.state.notice?.text).toContain('UI cap');
+    controller.dispose();
+  });
+});
+
 function pickerBackend(): FakeBackend {
   const backend = new FakeBackend();
   backend.agents = [agentFor('zeta'), agentFor('build'), agentFor('review')];

@@ -93,6 +93,9 @@ function runAction(controller: AppController, action: ActionID, services: Router
     case 'transcript.details':
       controller.toggleDetails();
       return true;
+    case 'transcript.copy':
+      controller.openCopyPicker();
+      return true;
     case 'transcript.groupPrevious':
       controller.moveGroupFocus(-1);
       return true;
@@ -205,6 +208,13 @@ function routeOverlay(controller: AppController, keymap: Keymap, key: KeyInput):
       else if (key.name === 'return') void controller.acceptModelPicker();
       else if (key.name === 'backspace') controller.setModelPickerQuery(overlay.query.slice(0, -1));
       else if (isPrintable(key)) controller.setModelPickerQuery(overlay.query + key.text);
+      return true;
+    case 'copy-picker':
+      if (key.name === 'up') controller.moveCopyPicker(-1);
+      else if (key.name === 'down') controller.moveCopyPicker(1);
+      else if (key.name === 'return') void controller.acceptCopyPicker();
+      else if (key.name === 'backspace') controller.setCopyPickerQuery(overlay.query.slice(0, -1));
+      else if (isPrintable(key)) controller.setCopyPickerQuery(overlay.query + key.text);
       return true;
     case 'agent-picker':
       if (key.name === 'up') controller.moveAgentPicker(-1);
