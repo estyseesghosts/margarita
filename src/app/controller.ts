@@ -637,7 +637,9 @@ export class AppController {
     }
     try {
       await this.loadCatalog(directory, serverID);
-      return true;
+      // A competing navigation/catalog load may have superseded this response.
+      // Do not admit a prompt against another project's model catalog.
+      return this.catalogFresh(directory, serverID);
     } catch (error) {
       this.showNotice(`Could not load project catalog: ${errorText(error)}`, 'error');
       return false;
@@ -2538,10 +2540,27 @@ export class AppController {
     }
     const scopedAgent =
       agent !== undefined && this.state.agents.some((a) => a.id === agent) ? agent : undefined;
-    const scopedModel =
-      model !== undefined && this.state.models.some((m) => sameModel(m, model))
-        ? model
-        : this.state.defaultModel;
+    // A catalog model describes its available variants, not a selected variant:
+    // comparing it with sameModel() falsely rejects every explicit #variant.
+    // Never replace an explicit choice with a default: that could bill a different provider.
+    const scopedModel = model ?? this.state.defaultModel;
+    if (
+      scopedModel !== undefined &&
+      !this.state.models.some(
+        (available) =>
+          available.enabled &&
+          available.providerID === scopedModel.providerID &&
+          available.modelID === scopedModel.modelID &&
+          (scopedModel.variant === undefined || available.variants.includes(scopedModel.variant)),
+      )
+    ) {
+      this.setState('admitting', false);
+      this.showNotice(
+        `Model ${formatModelRef(scopedModel)} is unavailable for ${directory} on ${serverID}. No prompt sent.`,
+        'error',
+      );
+      return undefined;
+    }
     let session: SessionSummary;
     try {
       session = await this.backendFor(serverID).createSession({
@@ -2559,6 +2578,32 @@ export class AppController {
       this.setState('admitting', false);
       this.showNotice(errorText(error), 'error');
       return undefined;
+    }
+    if (model !== undefined) {
+      // V2 resolves a missing model at first prompt. Verify the server actually stored
+      // our explicit selection before admitting anything billable. Repair an ignored
+      // create-time selection once, and fail closed if it still does not match.
+      const backend = this.backendFor(serverID);
+      try {
+        let confirmed = await backend.getSession(session.id);
+        if (confirmed.model === undefined || !sameModel(confirmed.model, model)) {
+          await backend.switchModel(session.id, model);
+          confirmed = await backend.getSession(session.id);
+        }
+        if (confirmed.model === undefined || !sameModel(confirmed.model, model)) {
+          throw new Error(
+            `server reported ${confirmed.model === undefined ? 'no model' : formatModelRef(confirmed.model)}`,
+          );
+        }
+        session = confirmed;
+      } catch (error) {
+        this.setState('admitting', false);
+        this.showNotice(
+          `Session ${session.id} created, but model ${formatModelRef(model)} was not confirmed. Prompt not sent: ${errorText(error)}`,
+          'error',
+        );
+        return session.id;
+      }
     }
     this.setState('admitting', false);
     const sessionServerID = session.serverID ?? serverID;

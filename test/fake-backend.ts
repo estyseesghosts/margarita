@@ -91,6 +91,8 @@ export class FakeBackend implements Backend {
       createdAt: 1,
       updatedAt: 1,
       archived: false,
+      ...(args.agent === undefined ? {} : { agent: args.agent }),
+      ...(args.model === undefined ? {} : { model: args.model }),
     };
     this.sessions.push(session);
     return session;
@@ -313,6 +315,8 @@ export class FakeBackend implements Backend {
   }
   async switchModel(sessionID: string, model: ModelSelection): Promise<void> {
     this.calls.push({ name: 'switchModel', args: [sessionID, model] });
+    const index = this.sessions.findIndex((session) => session.id === sessionID);
+    if (index >= 0) this.sessions[index] = { ...this.sessions[index]!, model };
   }
   async listAgents(): Promise<AgentDescriptor[]> {
     if (this.listAgentsHook !== undefined) return this.listAgentsHook();
