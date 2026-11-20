@@ -79,6 +79,11 @@ export function Transcript(props: TranscriptProps) {
   }, props.hintTickMs ?? 1000);
   onCleanup(() => clearInterval(hintTimer));
   const transcript = () => state.transcripts[sessionKeyValue()];
+  const mcpServers = () =>
+    props.controller.mcpServersFor(
+      props.serverID,
+      state.sessions[sessionKeyValue()]?.directory ?? '',
+    );
   const nodes = createMemo(() => {
     const messages = transcript()?.messages ?? [];
     const markers = new Map(
@@ -92,7 +97,7 @@ export function Transcript(props: TranscriptProps) {
       detailed: state.detailed,
       expandedGroups: expanded.groups,
       expandedDiffs: expanded.diffs,
-      mcpServers: state.mcpServers,
+      mcpServers: mcpServers(),
       markers,
     });
   });
@@ -222,7 +227,7 @@ export function Transcript(props: TranscriptProps) {
                   focused={isNodeFocused(node(), state.focusedGroup)}
                   animate={props.animate}
                   ascii={props.ascii}
-                  mcpServers={state.mcpServers}
+                  mcpServers={mcpServers()}
                   now={hintNow()}
                   backgroundKey={backgroundKey}
                 />
@@ -309,7 +314,7 @@ export function WelcomePanel(props: WelcomeProps) {
       <Show when={wide()}>
         <box flexDirection="column" marginLeft={2} flexShrink={0}>
           <text fg={props.theme.dim}>← overview (empty prompt)</text>
-          <text fg={props.theme.dim}>Shift+Tab agent · Alt+P model</text>
+          <text fg={props.theme.dim}>Alt+P model</text>
           <text fg={props.theme.dim}>Ctrl+O details · F1 help</text>
         </box>
       </Show>

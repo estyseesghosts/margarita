@@ -1989,3 +1989,76 @@ describe('overview project titles and semantic dots (issue #68)', () => {
     expect(flat.some((span) => span.text.includes('bravo'))).toBe(true);
   });
 });
+
+test('help dismisses and retains typed and pasted input', async () => {
+  const { controller, setup } = await mount(backendWithSession());
+  controller.openSession('ses_a');
+  await settle(setup);
+  controller.setOverlay({ kind: 'help' });
+  await setup.mockInput.typeText('hello');
+  await settle(setup);
+  expect(controller.state.overlay.kind).toBe('none');
+  expect(controller.state.composer.text).toBe('hello');
+
+  controller.setOverlay({ kind: 'help' });
+  await setup.mockInput.pasteBracketedText('\nsecond line');
+  await settle(setup);
+  expect(controller.state.overlay.kind).toBe('none');
+  expect(controller.state.composer.text).toBe('hello\nsecond line');
+  controller.dispose();
+});
+
+test('Enter accepts a partial command before executing it', async () => {
+  const backend = backendWithSession();
+  const { controller, setup } = await mount(backend);
+  controller.openSession('ses_a');
+  await settle(setup);
+  await setup.mockInput.typeText('/comp');
+  setup.mockInput.pressEnter();
+  await settle(setup);
+  expect(controller.state.composer.text).toBe('/compact ');
+  expect(backend.calls.some((call) => call.name === 'compactSession')).toBe(false);
+  setup.mockInput.pressEnter();
+  await settle(setup);
+  expect(backend.calls.some((call) => call.name === 'compactSession')).toBe(true);
+  controller.dispose();
+});
+
+test('command completion honors the selected index and keeps exact local commands local', async () => {
+  const backend = backendWithSession();
+  backend.serverCommands = [{ name: 'compact' }, { name: 'compare' }];
+  const { controller, setup } = await mount(backend);
+  controller.openSession('ses_a');
+  await settle(setup);
+
+  await setup.mockInput.typeText('/comp');
+  expect(controller.state.completion?.items.map((item) => item.label)).toEqual([
+    '/compact',
+    '/compare',
+  ]);
+  setup.mockInput.pressArrow('down');
+  setup.mockInput.pressEnter();
+  await settle(setup);
+  expect(controller.state.composer.text).toBe('/compare ');
+  expect(backend.calls.some((call) => call.name === 'command')).toBe(false);
+
+  controller.setComposer(composerFrom('/compact'));
+  expect(controller.state.completion).toBeUndefined();
+  setup.mockInput.pressEnter();
+  await settle(setup);
+  expect(backend.calls.some((call) => call.name === 'compactSession')).toBe(true);
+  expect(backend.calls.some((call) => call.name === 'command')).toBe(false);
+  controller.dispose();
+});
+
+test('clicking the screen dismisses help', async () => {
+  const { controller, setup } = await mount(backendWithSession());
+  controller.openSession('ses_a');
+  await settle(setup);
+  controller.setOverlay({ kind: 'help' });
+  await setup.renderOnce();
+  await setup.mockMouse.click(1, 1);
+  await settle(setup);
+  expect(controller.state.overlay.kind).toBe('none');
+  controller.dispose();
+});

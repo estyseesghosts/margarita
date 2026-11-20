@@ -90,6 +90,7 @@ export function App(props: AppProps) {
   });
 
   usePaste((event) => {
+    if (state.overlay.kind === 'help') controller.closeOverlay();
     if (state.overlay.kind !== 'none') return;
     void controller.pasteBytes(event.bytes);
   });
@@ -97,7 +98,14 @@ export function App(props: AppProps) {
   const width = () => dimensions().width;
 
   return (
-    <box flexDirection="column" width="100%" height="100%">
+    <box
+      flexDirection="column"
+      width="100%"
+      height="100%"
+      onMouseDown={() => {
+        if (state.overlay.kind === 'help') controller.closeOverlay();
+      }}
+    >
       <Switch>
         <Match when={state.route.kind === 'conversation' ? state.route : undefined}>
           {(route: Accessor<{ kind: 'conversation'; serverID: string; sessionID: string }>) => (

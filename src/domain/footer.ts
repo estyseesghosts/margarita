@@ -38,13 +38,11 @@ export function formatFooter(facts: FooterFacts, width: number): string {
   const queued = facts.queued > 0 ? `${facts.queued} queued` : undefined;
 
   const candidates: (string | undefined)[][] = [
-    [`${agent} (shift+tab)`, model, facts.state, queued, facts.goal, tokensLong, cost],
     [agent, model, facts.state, queued, facts.goal, tokensLong, cost],
     [agent, model, facts.state, facts.goal, tokensShort, cost],
     [agent, variant, facts.state, facts.goal, tokensShort, cost],
     [agent, facts.goal, tokensShort, cost],
     [facts.goal, tokensShort, cost],
-    [`${agent} (shift+tab)`, model, facts.state, queued, tokensLong, cost],
     [agent, model, facts.state, queued, tokensLong, cost],
     [agent, model, facts.state, tokensShort, cost],
     [agent, variant, facts.state, tokensShort, cost],

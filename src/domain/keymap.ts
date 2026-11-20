@@ -166,7 +166,11 @@ export function buildKeymap(overrides: Readonly<Record<string, string>>): Keymap
     }
     keymap.set(action, bindings);
   }
-  for (const [action, spec] of Object.entries(overrides)) {
+  const defaults = new Map(keymap);
+  const requested = new Set<ActionID>();
+  for (const [action, spec] of Object.entries(overrides).toSorted(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
     if (!isActionID(action)) {
       errors.push(`unknown action "${action}"`);
       continue;
@@ -176,15 +180,31 @@ export function buildKeymap(overrides: Readonly<Record<string, string>>): Keymap
       errors.push(`${action}: ${parsed.error}`);
       continue;
     }
-    const clash = [...keymap.entries()].find(
-      ([other, bindings]) =>
-        other !== action && bindings.some((binding) => sameBinding(binding, parsed.binding)),
-    );
-    if (clash !== undefined) {
-      errors.push(`${action}: "${spec}" is already bound to ${clash[0]}`);
-      continue;
-    }
     keymap.set(action, [parsed.binding]);
+    requested.add(action);
+  }
+  // Restoring defaults can create further conflicts, so resolve until stable.
+  while (true) {
+    const rejected = new Set<ActionID>();
+    for (const [index, action] of actionIDs.entries()) {
+      for (const other of actionIDs.slice(index + 1)) {
+        const clash = keymap
+          .get(action)
+          ?.find((binding) =>
+            keymap.get(other)?.some((candidate) => sameBinding(binding, candidate)),
+          );
+        if (clash === undefined) continue;
+        errors.push(`${action} and ${other}: "${formatBinding(clash)}" is bound to both actions`);
+        if (requested.has(action)) rejected.add(action);
+        if (requested.has(other)) rejected.add(other);
+      }
+    }
+    if (rejected.size === 0) break;
+    for (const action of rejected) {
+      const bindings = defaults.get(action);
+      if (bindings !== undefined) keymap.set(action, bindings);
+      requested.delete(action);
+    }
   }
   return { keymap, errors };
 }

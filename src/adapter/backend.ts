@@ -112,7 +112,7 @@ export interface Backend {
   defaultModel(directory: string): Promise<ModelSelection | undefined>;
   listCommands(directory: string): Promise<ServerCommand[]>;
   /** Configured MCP servers (names only); identifies MCP tool calls in the transcript. */
-  listMcpServers(): Promise<string[]>;
+  listMcpServers(directory: string): Promise<string[]>;
   listPermissions(sessionID: string): Promise<PermissionPrompt[]>;
   listForms(sessionID: string): Promise<FormRequest[]>;
   replyForm(sessionID: string, formID: string, answer: Record<string, FormValue>): Promise<void>;
@@ -409,11 +409,10 @@ class OpenCodeBackend implements Backend {
       }));
   }
 
-  async listMcpServers(): Promise<string[]> {
+  async listMcpServers(directory: string): Promise<string[]> {
     // MCP availability is frontend-visible grouping metadata, not a session action: a
     // server that does not offer the route keeps its calls honestly external.
-    const result = await call('mcp.list', () => this.client.mcp.list()).catch(() => undefined);
-    if (result === undefined) return [];
+    const result = await call('mcp.list', () => this.client.mcp.list({ location: { directory } }));
     return result.data.map((entry) => entry.name).filter((name) => name !== '');
   }
 

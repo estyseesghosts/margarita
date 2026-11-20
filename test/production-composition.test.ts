@@ -205,13 +205,15 @@ describe('production composition collisions (issue #72)', () => {
     expect(controller.state.models.map((model) => model.name)).toEqual(['local-model']);
     expect(controller.state.models[0]?.modelID).toBe('model_dup');
     // MCP identity is part of the catalog, not the launch host's alone (issue #74).
-    expect(controller.state.mcpServers).toEqual(['lotus']);
+    const localDirectory = controller.currentDirectory();
+    expect(controller.mcpServersFor('local', localDirectory)).toEqual(['lotus']);
 
     controller.openSession('ses_same', 'srv_b');
     await flush();
     expect(controller.state.models.map((model) => model.name)).toEqual(['remote-model']);
     expect(controller.state.models[0]?.modelID).toBe('model_dup');
-    expect(controller.state.mcpServers).toEqual(['sentry']);
+    expect(controller.mcpServersFor('srv_b', controller.currentDirectory())).toEqual(['sentry']);
+    expect(controller.mcpServersFor('local', localDirectory)).toEqual(['lotus']);
 
     assembly.controller.dispose();
     await assembly.servers.dispose();

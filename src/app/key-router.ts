@@ -2,6 +2,7 @@ import {
   type Composer,
   deleteBackward,
   deleteForward,
+  deletePreviousWhitespaceUnit,
   deleteToLineEnd,
   deleteToLineStart,
   deleteWordBackward,
@@ -43,7 +44,11 @@ export function routeKey(
   services: RouterServices,
 ): boolean {
   const state = controller.state;
-  if (state.overlay.kind !== 'none') return routeOverlay(controller, key);
+  if (state.overlay.kind === 'help' && isPrintable(key)) {
+    controller.closeOverlay();
+    return routeKey(controller, keymap, key, services);
+  }
+  if (state.overlay.kind !== 'none') return routeOverlay(controller, keymap, key);
   if (state.route.kind === 'conversation' && controller.pendingPermission() !== undefined) {
     if (routePermission(controller, key)) return true;
   } else if (
@@ -130,8 +135,7 @@ function runAction(controller: AppController, action: ActionID, services: Router
       void controller.backgroundTools();
       return true;
     case 'tasks.toggle':
-      if (controller.currentSession() !== undefined)
-        controller.setOverlay({ kind: 'tasks', index: 0 });
+      controller.openTasks();
       return true;
     case 'help.show':
       controller.setOverlay({ kind: 'help' });
@@ -141,13 +145,13 @@ function runAction(controller: AppController, action: ActionID, services: Router
   }
 }
 
-function routeOverlay(controller: AppController, key: KeyInput): boolean {
+function routeOverlay(controller: AppController, keymap: Keymap, key: KeyInput): boolean {
   const overlay = controller.state.overlay;
   if (overlay.kind === 'diff' && !(key.ctrl && key.name === 'c')) {
     controller.diffKey(key);
     return true;
   }
-  if (overlay.kind === 'tasks' && key.ctrl && key.name === 't') {
+  if (overlay.kind === 'tasks' && actionFor(keymap, key) === 'tasks.toggle') {
     controller.closeOverlay();
     return true;
   }
@@ -176,7 +180,7 @@ function routeOverlay(controller: AppController, key: KeyInput): boolean {
       else if (isPrintable(key)) controller.setModelPickerQuery(overlay.query + key.text);
       return true;
     case 'history-search':
-      if (key.ctrl && key.name === 'r') controller.openHistorySearch();
+      if (actionFor(keymap, key) === 'history.search') controller.openHistorySearch();
       else if (key.name === 'return') controller.acceptHistorySearch();
       else if (key.name === 'backspace') controller.setHistoryQuery(overlay.query.slice(0, -1));
       else if (isPrintable(key)) controller.setHistoryQuery(overlay.query + key.text);
@@ -247,7 +251,7 @@ function routeCompletion(controller: AppController, key: KeyInput): boolean {
   else if (key.name === 'down') controller.moveCompletion(1);
   else if (key.name === 'tab' && !key.shift) controller.acceptCompletion();
   else if (key.name === 'escape') controller.dismissCompletion();
-  else if (key.name === 'return' && controller.state.completion?.kind === 'file') {
+  else if (key.name === 'return' && !key.shift && !key.ctrl && !key.alt) {
     controller.acceptCompletion();
   } else return false;
   return true;
@@ -294,6 +298,7 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
       case 'e':
         return edit(moveLineEnd(composer));
       case 'w':
+        return edit(deletePreviousWhitespaceUnit(composer));
       case 'backspace':
         return edit(deleteWordBackward(composer));
       case 'u':

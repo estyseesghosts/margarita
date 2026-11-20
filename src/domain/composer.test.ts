@@ -5,6 +5,7 @@ import {
   cursorPosition,
   deleteBackward,
   deleteForward,
+  deletePreviousWhitespaceUnit,
   deleteToLineEnd,
   deleteToLineStart,
   deleteWordBackward,
@@ -15,6 +16,7 @@ import {
   moveLineStart,
   moveVertical,
   moveWordLeft,
+  moveWordRight,
 } from './composer.ts';
 import { actionFor, buildKeymap, parseBinding } from './keymap.ts';
 import {
@@ -54,6 +56,32 @@ describe('composer editing', () => {
     expect(deleteWordBackward(composerFrom('fix the bug')).text).toBe('fix the ');
     expect(deleteToLineStart(composerFrom('a\nbc')).text).toBe('a\n');
     expect(deleteToLineEnd(moveLineStart(composerFrom('ab\ncd'))).text).toBe('ab\n');
+  });
+  test('word operations stay on grapheme boundaries across scripts and emoji', () => {
+    const text = 'e\u0301 🧑🏽‍💻 𐐀中 العربية/src';
+    const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+    const points = [
+      0,
+      ...Array.from(segmenter.segment(text), (part) => part.index + part.segment.length),
+    ];
+    for (const cursor of points) {
+      const composer = { text, cursor };
+      expect(points).toContain(moveWordLeft(composer).cursor);
+      expect(points).toContain(moveWordRight(composer).cursor);
+      const deleted = deleteWordBackward(composer);
+      expect(points).toContain(deleted.cursor);
+      expect(deleted.text.isWellFormed()).toBe(true);
+    }
+  });
+  test('whitespace deletion and word deletion use distinct boundaries', () => {
+    expect(deletePreviousWhitespaceUnit(composerFrom('run src/utils/file.ts')).text).toBe('run ');
+    expect(deleteWordBackward(composerFrom('run src/utils/file.ts')).text).toBe(
+      'run src/utils/file.',
+    );
+    expect(deletePreviousWhitespaceUnit(composerFrom('run --flag=value  ')).text).toBe('run ');
+    expect(deletePreviousWhitespaceUnit(composerFrom('one\ntwo')).text).toBe('one\n');
+    expect(deletePreviousWhitespaceUnit({ text: 'one\ntwo', cursor: 4 }).text).toBe('two');
+    expect(deletePreviousWhitespaceUnit({ text: 'abc', cursor: 0 }).text).toBe('abc');
   });
   test('cursor position reports line and column', () => {
     expect(cursorPosition(composerFrom('ab\ncde'))).toEqual({ line: 1, column: 3 });

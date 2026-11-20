@@ -38,7 +38,7 @@ export type Overlay =
   | { kind: 'servers'; index: number }
   | { kind: 'unpair-confirm'; serverID: string; label: string }
   | { kind: 'form'; sessionID: string; editor: FormEditor }
-  | { kind: 'tasks'; index: number }
+  | { kind: 'tasks'; index: number; target?: { serverID: string; sessionID: string } }
   | {
       kind: 'revert';
       /** Owning host: two servers can both own the same session ID. */
@@ -107,6 +107,7 @@ export type AppState = {
   awaitingSteer: Record<string, string>;
   /** Cancelled queued messages whose text could not be placed yet; restored with Ctrl+S. */
   recovered: {
+    serverID: string;
     sessionID: string;
     inboxID: string;
     text: string;
@@ -123,7 +124,8 @@ export type AppState = {
   defaultModel?: ModelSelection;
   serverCommands: ServerCommand[];
   /** Names of the MCP servers the owning host exposes; empty when it offers none. */
-  mcpServers: string[];
+  /** Confirmed MCP names indexed by host and canonical project directory. */
+  mcpCatalogs: Record<string, Record<string, string[]>>;
   /**
    * Canonical directory key the agents/models/commands above belong to, and whether a
    * fetch is in flight or failed. Consumers must not use another project's catalog.
@@ -148,9 +150,8 @@ export type AppState = {
   drafts: Record<string, Composer>;
   /** Attachments saved with each route's draft. */
   draftAttachments: Record<string, Attachment[]>;
-  stash?: string;
-  /** Attachments saved with the stashed draft. */
-  stashAttachments: Attachment[];
+  /** Stashed composer and attachments, scoped to their originating route. */
+  stashes: Record<string, { composer: Composer; attachments: Attachment[] } | undefined>;
   admitting: boolean;
   overview: {
     focus: 'list' | 'composer';
@@ -211,7 +212,7 @@ export function initialState(directory: string, serverID: string = localServerID
     agents: [],
     models: [],
     serverCommands: [],
-    mcpServers: [],
+    mcpCatalogs: {},
     catalogLoading: false,
     detailed: false,
     transcriptWindow: {},
@@ -221,7 +222,7 @@ export function initialState(directory: string, serverID: string = localServerID
     attachments: [],
     drafts: {},
     draftAttachments: {},
-    stashAttachments: [],
+    stashes: {},
     admitting: false,
     overview: {
       focus: 'composer',

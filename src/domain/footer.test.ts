@@ -13,10 +13,13 @@ const facts = {
 };
 
 describe('formatFooter', () => {
-  test('wide terminals show everything', () => {
-    expect(formatFooter(facts, 120)).toBe(
-      'build (shift+tab) · gpt-6.1-sol#high · working · 42k in · 5k out · $0.38',
-    );
+  test('the agent is shown without a shortcut at common terminal widths', () => {
+    expect(formatFooter(facts, 40)).toBe('build · high · working · 47k · $0.38');
+    for (const width of [80, 100, 120]) {
+      expect(formatFooter(facts, width)).toBe(
+        'build · gpt-6.1-sol#high · working · 42k in · 5k out · $0.38',
+      );
+    }
   });
   test('narrow terminals keep tokens and spend', () => {
     for (const width of [60, 40, 30, 20, 12]) {

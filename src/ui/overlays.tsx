@@ -13,7 +13,7 @@ import {
   visibleFields,
 } from '../domain/form.ts';
 import { type Goal, progress, type TaskState } from '../domain/goal-plan.ts';
-import { actionIDs, formatBinding, type Keymap } from '../domain/keymap.ts';
+import { actionHint, actionIDs, formatBinding, type Keymap } from '../domain/keymap.ts';
 import { formatModelRef } from '../domain/model-ref.ts';
 import type { NativeGoal } from '../domain/native-goal.ts';
 import type { SessionSummary, TokenUsage } from '../domain/session.ts';
@@ -175,7 +175,13 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
           const choices = () => props.controller.modelChoices(overlay().query);
           const start = () => Math.max(0, overlay().index - visibleRows + 1);
           return (
-            <box {...frame('Model · type to filter · Enter select')}>
+            <box
+              {...frame(
+                state.route.kind === 'conversation'
+                  ? 'Model · type to filter · Enter select'
+                  : 'Model for new sessions · type to filter · Enter select',
+              )}
+            >
               <text fg={props.theme.text}>{`> ${overlay().query}`}</text>
               <Show
                 when={choices().length > 0}
@@ -247,7 +253,11 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
       </Match>
       <Match when={state.overlay.kind === 'history-search' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'history-search' }>>) => (
-          <box {...frame('History search · Ctrl+R older · Enter use')}>
+          <box
+            {...frame(
+              `History search · ${actionHint(props.keymap, 'history.search') ?? ''} older · Enter use`,
+            )}
+          >
             <text fg={props.theme.text}>{`> ${overlay().query}`}</text>
             <text fg={dim()}>{props.controller.historySearchMatch() ?? 'no match'}</text>
           </box>
@@ -432,9 +442,12 @@ function TasksDialog(props: {
   index: number;
   frame: (title: string) => Record<string, unknown>;
 }) {
+  const session = () => props.controller.tasksSession();
   const doc = () => {
-    const view = props.controller.currentView();
-    return view === undefined ? undefined : props.controller.goalOf(view.sessionID, view.serverID);
+    const current = session();
+    return current === undefined
+      ? undefined
+      : props.controller.goalOf(current.id, current.serverID);
   };
   const shown = () => doc()?.proposal ?? doc()?.plan;
   const proposal = () => doc()?.proposal !== undefined;
@@ -443,12 +456,11 @@ function TasksDialog(props: {
     const count = progress(shown());
     return `Tasks ${count.done}/${count.total} · Space state · b blocked · x cancel · e evidence`;
   };
-  const session = () => props.controller.currentView();
   const nativeGoal = () => {
-    const view = session();
-    return view === undefined
+    const current = session();
+    return current === undefined
       ? undefined
-      : props.controller.nativeGoalStateOf(view.sessionID, view.serverID);
+      : props.controller.nativeGoalStateOf(current.id, current.serverID);
   };
   const nativeGoalObject = () => {
     const known = nativeGoal();
@@ -503,7 +515,11 @@ function TasksDialog(props: {
       <Show
         when={(shown()?.tasks.length ?? 0) > 0}
         fallback={
-          <text fg={props.theme.dim}>No plan. /plan step one; step two · or /plan propose</text>
+          <text fg={props.theme.dim}>
+            {session() === undefined
+              ? 'Select a session to view its tasks.'
+              : 'No plan. /plan step one; step two · or /plan propose'}
+          </text>
         }
       >
         <For each={shown()?.tasks ?? []}>

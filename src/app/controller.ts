@@ -31,7 +31,13 @@ import {
   splitPastedPaths,
 } from '../domain/attachment.ts';
 import type { BackendEvent } from '../domain/backend-event.ts';
-import { type Composer, composerFrom, emptyComposer, insertText } from '../domain/composer.ts';
+import {
+  type Composer,
+  composerFrom,
+  emptyComposer,
+  insertText,
+  restoreComposer,
+} from '../domain/composer.ts';
 import { type DiffScope, type FileDiff, patchLines, turnStart } from '../domain/diff.ts';
 import { hasOversizedDiff } from '../domain/edit-diff.ts';
 import { projectExecution } from '../domain/execution.ts';
@@ -247,6 +253,9 @@ export class AppController {
   /** Per-host stream status: the viewed conversation's footer must reflect its own host,
    *  not the launch server's badge (issue #109). */
   private readonly streamByServer = new Map<string, StreamStatus>();
+  private readonly modelSwitches = new Map<string, Promise<boolean>>();
+  private readonly failedModelSwitches = new Set<string>();
+  private readonly modelSwitchRevisions = new Map<string, number>();
   private readonly debugLog: DebugLog;
 
   /**
@@ -564,7 +573,7 @@ export class AppController {
         backend.listModels(directory),
         backend.defaultModel(directory),
         backend.listCommands(directory).catch(() => []),
-        backend.listMcpServers().catch(() => []),
+        backend.listMcpServers(directory).catch(() => undefined),
       ]);
       // Reject a late response from a server/project the user has already left.
       if (generation !== this.catalogGeneration || this.catalogScope(directory, serverID) !== scope)
@@ -576,7 +585,13 @@ export class AppController {
         this.setState('models', models);
         this.setState('defaultModel', fallback);
         this.setState('serverCommands', commands);
-        this.setState('mcpServers', mcp);
+        if (mcp !== undefined) {
+          const directoryID = directoryKey(directory, this.platformFor(serverID));
+          this.setState('mcpCatalogs', serverID, {
+            ...this.state.mcpCatalogs[serverID],
+            [directoryID]: mcp,
+          });
+        }
         this.setState('catalogLoading', false);
       });
     } catch (error) {
@@ -587,12 +602,17 @@ export class AppController {
         this.setState('models', []);
         this.setState('defaultModel', undefined);
         this.setState('serverCommands', []);
-        this.setState('mcpServers', []);
         this.setState('catalogLoading', false);
         this.setState('catalogError', errorText(error));
       });
       throw error;
     }
+  }
+
+  mcpServersFor(serverID: string, directory: string): string[] {
+    return (
+      this.state.mcpCatalogs[serverID]?.[directoryKey(directory, this.platformFor(serverID))] ?? []
+    );
   }
 
   /** True when the loaded catalog is exactly the one for `(server, directory)` and usable. */
@@ -1167,7 +1187,9 @@ export class AppController {
     }
     try {
       if (agent !== undefined) await this.backend.switchAgent(sessionID, agent);
-      if (model !== undefined) await this.backend.switchModel(sessionID, model);
+      if (model !== undefined && !(await this.switchSessionModel(session, model))) {
+        return { ok: false, message: 'The server did not confirm the requested model.' };
+      }
     } catch (error) {
       return { ok: false, message: `could not apply the requested selection: ${errorText(error)}` };
     }
@@ -1343,14 +1365,17 @@ export class AppController {
     sessionID: string,
     serverID: string = this.activeServerID(),
   ): Promise<void> {
+    const key = this.keyFor(serverID, sessionID);
+    const revision = this.modelSwitchRevisions.get(key);
     try {
       const session = await this.backendFor(serverID).getSession(sessionID);
+      if (this.modelSwitchRevisions.get(key) !== revision) return;
       // reconcile replaces the stored summary wholesale: absent `revert` is removed again.
       // Never lose the server stamp: a backend that omits it must not orphan the row.
       this.setState(
         'sessions',
-        this.keyFor(serverID, sessionID),
-        reconcile({ ...session, serverID }),
+        key,
+        reconcile(this.withConfirmedModel(key, { ...session, serverID })),
       );
       this.reconcileStagedRevert(sessionID, serverID);
     } catch (error) {
@@ -1955,20 +1980,21 @@ export class AppController {
     const { text, cursor } = this.state.composer;
     if (text.startsWith('/') && !/\s/.test(text)) {
       const directory = this.currentDirectory();
-      if (!this.catalogFresh(directory)) {
-        // Never suggest another project's commands; reload and show nothing until it lands.
+      const fresh = this.catalogFresh(directory);
+      if (!fresh) {
+        // Keep local commands available while the target catalog reloads.
         this.refreshCatalogIfStale(directory);
-        if (this.state.completion?.kind === 'command') this.setState('completion', undefined);
-        return;
       }
-      const items = completeCommand(text, this.state.serverCommands).map((item) => ({
+      const items = completeCommand(text, fresh ? this.state.serverCommands : []).map((item) => ({
         label: `/${item.name}`,
         detail: item.description,
         insert: `/${item.name} `,
       }));
       this.setState(
         'completion',
-        items.length === 0 ? undefined : { kind: 'command', items, index: 0, start: 0 },
+        items.length === 0 || (items.length === 1 && items[0]?.label === text)
+          ? undefined
+          : { kind: 'command', items, index: 0, start: 0 },
       );
       return;
     }
@@ -2093,31 +2119,38 @@ export class AppController {
   }
 
   toggleStash(): void {
-    const text = this.state.composer.text;
-    if (text !== '' || this.state.attachments.length > 0) {
+    const route = this.state.route;
+    const key =
+      route.kind === 'overview'
+        ? `overview:${this.projectKeyOf(this.currentDirectory(), this.activeServerID())}`
+        : this.routeKey(route);
+    const stash = this.state.stashes[key];
+    if (this.state.composer.text !== '' || this.state.attachments.length > 0) {
       batch(() => {
-        this.setState('stash', text);
-        this.setState('stashAttachments', [...this.state.attachments]);
+        this.setState('stashes', key, {
+          composer: { ...this.state.composer },
+          attachments: [...this.state.attachments],
+        });
         this.writeComposer(emptyComposer);
         this.setState('attachments', []);
       });
       this.showNotice('Draft stashed · Ctrl+S to restore', 'dim');
-    } else if (this.state.stash !== undefined || this.state.stashAttachments.length > 0) {
-      const stash = this.state.stash ?? '';
-      const attachments = this.state.stashAttachments;
+    } else if (stash !== undefined) {
       batch(() => {
-        this.writeComposer(stash === '' ? emptyComposer : composerFrom(stash));
-        this.setState('attachments', [...attachments]);
-        this.setState('stash', undefined);
-        this.setState('stashAttachments', []);
+        this.writeComposer(restoreComposer(stash.composer));
+        this.setState('attachments', [...stash.attachments]);
+        this.setState('stashes', key, undefined);
       });
-    } else if (this.state.recovered.length > 0) {
-      const [next, ...rest] = this.state.recovered;
+    } else {
+      const index = this.state.recovered.findIndex(
+        (item) => this.keyFor(item.serverID, item.sessionID) === key,
+      );
+      const next = this.state.recovered[index];
       if (next === undefined) return;
       batch(() => {
         this.writeComposer(composerFrom(next.text));
         this.setState('attachments', [...(next.attachments ?? [])]);
-        this.setState('recovered', rest);
+        this.setState('recovered', (items) => items.filter((_, itemIndex) => itemIndex !== index));
       });
     }
   }
@@ -2232,6 +2265,7 @@ export class AppController {
   /** Enter. Clears the composer only after the server accepted the input. */
   async submit(deliveryOverride?: Delivery): Promise<void> {
     if (this.state.admitting) return;
+    const routeAtSubmit = this.state.route;
     const text = this.state.composer.text;
     if (text.trim() === '' && this.state.attachments.length === 0) return;
     const localName = /^\/(\S+)/.exec(text.trimStart())?.[1];
@@ -2241,11 +2275,21 @@ export class AppController {
       // its catalog is broken; only server and plugin commands need the server catalog.
       if (!isLocal && !(await this.ensureCatalog(this.currentDirectory()))) return;
     }
+    if (this.state.route !== routeAtSubmit || this.state.composer.text !== text) return;
     const parsed = parseInput(
       text,
       new Set(this.state.serverCommands.map((command) => command.name)),
     );
     if (parsed.kind === 'local') {
+      if (
+        routeAtSubmit.kind === 'conversation' &&
+        (parsed.name === 'compact' ||
+          parsed.name === 'steer' ||
+          (parsed.name === 'plan' && parsed.args === 'propose')) &&
+        this.modelDispatchBlocked(routeAtSubmit.serverID, routeAtSubmit.sessionID)
+      ) {
+        return;
+      }
       this.clearComposer(text);
       await this.runLocalCommand(parsed.name, parsed.args);
       return;
@@ -2285,25 +2329,27 @@ export class AppController {
         switch (parsed.kind) {
           case 'shell':
             await backend.runShell(origin.sessionID, parsed.command);
-            return;
+            return true;
           case 'server':
             await backend.runCommand(origin.sessionID, parsed.name, parsed.args);
-            return;
+            return true;
           case 'prompt': {
             const running =
               this.state.running[this.keyFor(origin.serverID, origin.sessionID)] === true;
             const delivery =
               deliveryOverride ?? (running ? this.deps.config.input.enterWhileRunning : undefined);
+            const files = await this.promptFiles(text, directory, sentAttachments, origin.serverID);
+            if (this.modelDispatchBlocked(origin.serverID, origin.sessionID)) return false;
             await backend.prompt(origin.sessionID, {
               text,
-              files: await this.promptFiles(text, directory, sentAttachments, origin.serverID),
+              files,
               ...(delivery === undefined ? {} : { delivery }),
             });
             await this.refreshInbox(origin.sessionID, origin.serverID);
-            return;
+            return true;
           }
           default:
-            return;
+            return false;
         }
       },
       isPromptDelivery ? undefined : commandNotice,
@@ -2342,13 +2388,15 @@ export class AppController {
     origin: SessionRef,
     text: string,
     directory: string,
-    send: () => Promise<void>,
+    send: () => Promise<boolean>,
     transportNotice = 'Delivery unknown (connection problem). Check the transcript before resending.',
     sentAttachments: readonly Attachment[] = [],
   ): Promise<boolean> {
+    if (this.state.admitting || this.modelDispatchBlocked(origin.serverID, origin.sessionID))
+      return false;
     this.setState('admitting', true);
     try {
-      await send();
+      if (!(await send())) return false;
       this.debugLog.write('action', { action: 'submit', ok: true });
       if (text.trim() !== '') this.rememberPrompt(text, directory, origin.serverID);
       // Only clear the composer if we are still on the originating session: a route change
@@ -2632,10 +2680,13 @@ export class AppController {
       text,
       directory,
       async () => {
+        const files = await this.promptFiles(text, directory, attachments, sessionServerID);
+        if (this.modelDispatchBlocked(sessionServerID, session.id)) return false;
         await this.backendFor(sessionServerID).prompt(session.id, {
           text,
-          files: await this.promptFiles(text, directory, attachments, sessionServerID),
+          files,
         });
+        return true;
       },
       undefined,
       attachments,
@@ -2722,33 +2773,36 @@ export class AppController {
   /** Stores a fetched/resolved summary before it is attached or prompted. */
   private storeSessionSummary(session: SessionSummary): void {
     const serverID = session.serverID ?? this.serverID;
-    this.setState('sessions', this.keyFor(serverID, session.id), { ...session, serverID });
+    const key = this.keyFor(serverID, session.id);
+    this.setState('sessions', key, this.withConfirmedModel(key, { ...session, serverID }));
   }
 
   /**
    * Makes sure a session the user asked for (e.g. --resume <id>) is known before we
    * open or prompt it. Returns the summary, or undefined when the server cannot find it.
    */
-  async ensureSession(sessionID: string): Promise<SessionSummary | undefined> {
+  async ensureSession(
+    sessionID: string,
+    active = this.activeServerID(),
+  ): Promise<SessionSummary | undefined> {
     // The session may belong to any registered host, not just the one the route currently
     // shows: qualify by session ID across every server before picking a backend.
-    for (const serverID of this.serverIDs()) {
+    for (const serverID of [active, ...this.serverIDs().filter((id) => id !== active)]) {
       const known = this.state.sessions[this.keyFor(serverID, sessionID)];
       if (known !== undefined) {
         try {
-          const session = await this.backendFor(serverID).getSession(sessionID);
-          this.storeSessionSummary(session);
-          return session;
+          await this.refreshSummary(sessionID, serverID);
+          return this.state.sessions[this.keyFor(serverID, sessionID)] ?? known;
         } catch {
           return known;
         }
       }
     }
-    const active = this.activeServerID();
-    const known = this.state.sessions[this.keyFor(active, sessionID)];
-    if (known !== undefined) return known;
     try {
-      const session = await this.backendFor(active).getSession(sessionID);
+      const session = {
+        ...(await this.backendFor(active).getSession(sessionID)),
+        serverID: active,
+      };
       this.storeSessionSummary(session);
       return session;
     } catch (error) {
@@ -2758,36 +2812,31 @@ export class AppController {
   }
 
   async sendToSession(sessionID: string, text: string): Promise<boolean> {
-    // Ensure the stored summary is authoritative before interpreting file mentions.
-    await this.ensureSession(sessionID);
-    // Resolve the session's owning host. Prefer the route's server (the user opened the
-    // session there); fall back to any registered host that owns it, so a session opened
-    // on a remote host is never retargeted to the launch backend just because both hosts
-    // happen to reuse a session ID (issue #86).
-    let serverID = this.activeServerID();
-    if (this.state.sessions[this.keyFor(serverID, sessionID)] === undefined) {
-      for (const id of this.serverIDs()) {
-        if (this.state.sessions[this.keyFor(id, sessionID)] !== undefined) {
-          serverID = id;
-          break;
-        }
-      }
-    }
-    const activeKey = this.keyFor(serverID, sessionID);
-    const directory = this.state.sessions[activeKey]?.directory ?? this.deps.cwd;
-    this.writeComposer(composerFrom(text));
-    const running = this.state.running[activeKey] === true;
+    const route = this.state.route;
+    const composer = this.state.composer;
+    const originServerID = this.activeServerID();
     const sentAttachments = [...this.state.attachments];
+    const session = await this.ensureSession(sessionID, originServerID);
+    const serverID = session?.serverID ?? originServerID;
+    const activeKey = this.keyFor(serverID, sessionID);
+    const directory = session?.directory ?? this.deps.cwd;
+    if (this.state.route === route && this.state.composer === composer) {
+      this.writeComposer(composerFrom(text));
+    }
+    const running = this.state.running[activeKey] === true;
     return this.admit(
       { serverID, sessionID },
       text,
       directory,
       async () => {
+        const files = await this.promptFiles(text, directory, sentAttachments, serverID);
+        if (this.modelDispatchBlocked(serverID, sessionID)) return false;
         await this.backendFor(serverID).prompt(sessionID, {
           text,
-          files: await this.promptFiles(text, directory, sentAttachments, serverID),
+          files,
           ...(running ? { delivery: this.deps.config.input.enterWhileRunning } : {}),
         });
+        return true;
       },
       undefined,
       sentAttachments,
@@ -3057,6 +3106,7 @@ export class AppController {
   private forgetServer(serverID: string): void {
     this.setState(
       produce((state) => {
+        delete state.mcpCatalogs[serverID];
         for (const [key, summary] of Object.entries(state.sessions)) {
           if (summary.serverID === serverID) delete state.sessions[key];
         }
@@ -3134,7 +3184,7 @@ export class AppController {
   }
 
   async openModelPicker(): Promise<void> {
-    if (!(await this.ensureCatalog(this.currentDirectory()))) return;
+    if (!(await this.ensureCurrentModelCatalog())) return;
     this.setOverlay({ kind: 'model-picker', query: '', index: 0 });
   }
 
@@ -3178,7 +3228,7 @@ export class AppController {
   }
 
   private async setModelFromRef(ref: string): Promise<void> {
-    if (!(await this.ensureCatalog(this.currentDirectory()))) return;
+    if (!(await this.ensureCurrentModelCatalog())) return;
     const resolved = resolveModel({ model: ref }, this.state.models);
     if (resolved.kind === 'error') {
       this.showNotice(resolved.message, 'warn');
@@ -3188,7 +3238,7 @@ export class AppController {
   }
 
   private async setEffort(variant: string): Promise<void> {
-    if (!(await this.ensureCatalog(this.currentDirectory()))) return;
+    if (!(await this.ensureCurrentModelCatalog())) return;
     const current =
       this.currentSession()?.model ?? this.state.overview.model ?? this.state.defaultModel;
     if (current === undefined) {
@@ -3212,6 +3262,18 @@ export class AppController {
     await this.setModel({ providerID: current.providerID, modelID: current.modelID, variant });
   }
 
+  private async ensureCurrentModelCatalog(): Promise<boolean> {
+    const route = this.state.route;
+    const directory = this.currentDirectory();
+    const serverID = this.activeServerID();
+    return (
+      (await this.ensureCatalog(directory, serverID)) &&
+      this.routeKey(this.state.route) === this.routeKey(route) &&
+      this.currentDirectory() === directory &&
+      this.activeServerID() === serverID
+    );
+  }
+
   async setModel(model: ModelSelection): Promise<void> {
     this.rememberModel(model);
     const session = this.currentSession();
@@ -3219,18 +3281,80 @@ export class AppController {
       this.setState('overview', 'model', model);
       return;
     }
-    this.setState('sessions', this.keyFor(session.serverID, session.id), { ...session, model });
-    try {
-      await this.backend.switchModel(session.id, model);
-    } catch (error) {
-      this.showNotice(errorText(error), 'error');
+    await this.switchSessionModel(session, model);
+  }
+
+  private modelDispatchBlocked(serverID: string, sessionID: string): boolean {
+    const key = this.keyFor(serverID, sessionID);
+    if (this.modelSwitches.has(key)) {
+      this.showNotice(
+        'Model selection pending. Send again once the server confirms it.',
+        'dim',
+        false,
+      );
+      return true;
     }
-    await this.refreshSummary(session.id);
+    if (this.failedModelSwitches.has(key)) {
+      this.showNotice(
+        'Model selection is unconfirmed. Select a model again before sending.',
+        'error',
+        false,
+      );
+      return true;
+    }
+    return false;
+  }
+
+  private withConfirmedModel(key: string, session: SessionSummary): SessionSummary {
+    if (!this.modelSwitches.has(key) && !this.failedModelSwitches.has(key)) return session;
+    const { model: _unconfirmed, ...rest } = session;
+    const model = this.state.sessions[key]?.model;
+    return model === undefined ? rest : { ...rest, model };
+  }
+
+  private async switchSessionModel(
+    session: SessionSummary,
+    model: ModelSelection,
+  ): Promise<boolean> {
+    const key = this.keyFor(session.serverID, session.id);
+    const previous = this.modelSwitches.get(key);
+    this.modelSwitchRevisions.set(key, (this.modelSwitchRevisions.get(key) ?? 0) + 1);
+    this.showNotice(`Confirming ${formatModelRef(model)} with the server…`, 'dim', false);
+    const operation = (async (): Promise<boolean> => {
+      if (previous !== undefined) await previous;
+      try {
+        const backend = this.backendFor(session.serverID);
+        await backend.switchModel(session.id, model);
+        const confirmed = await backend.getSession(session.id);
+        if (confirmed.model === undefined || !sameModel(confirmed.model, model)) {
+          throw new Error('Server did not confirm the requested model');
+        }
+        this.setState('sessions', key, { ...confirmed, serverID: session.serverID });
+        this.failedModelSwitches.delete(key);
+        return true;
+      } catch (error) {
+        this.failedModelSwitches.add(key);
+        this.showNotice(
+          `Model selection failed: ${errorText(error)}. Select a model again before sending.`,
+          'error',
+          false,
+        );
+        return false;
+      }
+    })();
+    this.modelSwitches.set(key, operation);
+    const confirmed = await operation;
+    if (this.modelSwitches.get(key) === operation) {
+      this.modelSwitches.delete(key);
+      this.modelSwitchRevisions.set(key, (this.modelSwitchRevisions.get(key) ?? 0) + 1);
+      if (confirmed) this.showNotice(`Model confirmed: ${formatModelRef(model)}`, 'dim');
+    }
+    return confirmed;
   }
 
   /** F2: next recently used model still present in the catalog. */
   async nextRecentModel(): Promise<void> {
-    if (!(await this.ensureCatalog(this.currentDirectory()))) return;
+    if (!(await this.ensureCurrentModelCatalog())) return;
     const current = this.currentSession()?.model ?? this.state.overview.model;
     const available = this.state.recentModels.filter((recent) =>
       this.state.models.some(
@@ -3450,9 +3574,12 @@ export class AppController {
       return;
     }
     // Never clobber a draft the user typed during the cancel; park the recalled text instead.
-    if (this.state.stash === undefined && this.state.stashAttachments.length === 0) {
-      this.setState('stash', item.text);
-      this.setState('stashAttachments', [...(item.attachments ?? [])]);
+    const stashKey = this.keyFor(serverID, sessionID);
+    if (this.state.stashes[stashKey] === undefined) {
+      this.setState('stashes', stashKey, {
+        composer: composerFrom(item.text),
+        attachments: [...(item.attachments ?? [])],
+      });
       this.showNotice('Queued message parked · Ctrl+S to restore', 'dim');
       return;
     }
@@ -3460,6 +3587,7 @@ export class AppController {
     this.setState('recovered', (list) => [
       ...list,
       {
+        serverID,
         sessionID,
         inboxID,
         text: item.text,
@@ -3684,6 +3812,7 @@ export class AppController {
     if (goal?.id !== intent || goal.status !== 'paused' || goal.reason !== stoppedByUserReason) {
       return;
     }
+    if (this.modelDispatchBlocked(serverID, sessionID)) return;
     try {
       // The goal belongs to this session's host, never to whatever route is active now.
       await this.backendFor(serverID).runCommand(sessionID, 'goal', 'resume');
@@ -3951,7 +4080,10 @@ export class AppController {
       detailed: this.state.detailed,
       expandedGroups: expanded.groups,
       expandedDiffs: expanded.diffs,
-      mcpServers: this.state.mcpServers,
+      mcpServers: this.mcpServersFor(
+        route.serverID,
+        this.state.sessions[this.keyFor(route.serverID, target)]?.directory ?? '',
+      ),
     });
   }
 
@@ -4195,8 +4327,8 @@ export class AppController {
   private async changeGoal(
     change: (doc: GoalPlanV1) => GoalPlanV1,
     notice?: string,
+    current = this.currentSession(),
   ): Promise<GoalPlanV1 | undefined> {
-    const current = this.currentSession();
     if (current === undefined) {
       this.showNotice('Open a session first.', 'warn');
       return undefined;
@@ -4280,24 +4412,22 @@ export class AppController {
     }
   }
 
-  async acceptPlan(): Promise<void> {
-    const current = this.currentSession();
+  async acceptPlan(current = this.currentSession()): Promise<void> {
     if (
       current === undefined ||
       this.state.goals[this.keyFor(current.serverID, current.id)]?.proposal === undefined
     )
       return;
-    await this.changeGoal((doc) => acceptProposal(doc, this.isoNow()), 'Plan accepted');
+    await this.changeGoal((doc) => acceptProposal(doc, this.isoNow()), 'Plan accepted', current);
   }
 
-  async rejectPlan(): Promise<void> {
-    const current = this.currentSession();
+  async rejectPlan(current = this.currentSession()): Promise<void> {
     if (
       current === undefined ||
       this.state.goals[this.keyFor(current.serverID, current.id)]?.proposal === undefined
     )
       return;
-    await this.changeGoal(rejectProposal, 'Proposal rejected; plan unchanged');
+    await this.changeGoal(rejectProposal, 'Proposal rejected; plan unchanged', current);
   }
 
   private latestAssistantText(sessionID: string, serverID: string = this.activeServerID()): string {
@@ -4322,10 +4452,35 @@ export class AppController {
     return messages.findLast((message) => message.kind === 'assistant')?.id;
   }
 
-  /** Ctrl+T checklist keys: ↑↓ move, Space cycle, b blocked, x cancel, e evidence, a/r proposal. */
+  tasksSession(): SessionSummary | undefined {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'tasks') return undefined;
+    const target = overlay.target;
+    return target === undefined
+      ? this.currentSession()
+      : this.state.sessions[this.keyFor(target.serverID, target.sessionID)];
+  }
+
+  openTasks(): void {
+    const row = this.state.route.kind === 'overview' ? this.selectedOverviewRow() : undefined;
+    if (row?.kind !== 'session') {
+      this.setOverlay({ kind: 'tasks', index: 0 });
+      return;
+    }
+    const { id: sessionID, serverID } = row.session;
+    this.setOverlay({ kind: 'tasks', index: 0, target: { serverID, sessionID } });
+    void this.loadGoal(sessionID, serverID);
+    void this.refreshNativeGoal(sessionID, serverID);
+  }
+
+  /** Checklist keys: ↑↓ move, Space cycle, b blocked, x cancel, e evidence, a/r proposal. */
   tasksKey(key: { name: string; text?: string }): void {
     const overlay = this.state.overlay;
-    const session = this.currentSession();
+    const session = this.tasksSession();
+    if (key.name === 'escape' || key.name === 'q') {
+      this.closeOverlay();
+      return;
+    }
     if (overlay.kind !== 'tasks' || session === undefined) return;
     const doc = this.state.goals[this.keyFor(session.serverID, session.id)];
     const tasks = (doc?.proposal ?? doc?.plan)?.tasks ?? [];
@@ -4333,22 +4488,25 @@ export class AppController {
     const count = tasks.length;
     const now = this.isoNow();
     const set = (state: TaskState) =>
-      void this.changeGoal((current) => setTaskState(current, task?.id ?? '', state, now));
-    if (key.name === 'escape' || key.name === 'q') this.closeOverlay();
-    else if (key.name === 'up' && count > 0) {
-      this.setOverlay({ kind: 'tasks', index: (overlay.index - 1 + count) % count });
+      void this.changeGoal(
+        (current) => setTaskState(current, task?.id ?? '', state, now),
+        undefined,
+        session,
+      );
+    if (key.name === 'up' && count > 0) {
+      this.setOverlay({ ...overlay, index: (overlay.index - 1 + count) % count });
     } else if (key.name === 'down' && count > 0) {
-      this.setOverlay({ kind: 'tasks', index: (overlay.index + 1) % count });
+      this.setOverlay({ ...overlay, index: (overlay.index + 1) % count });
     } else if (doc?.proposal !== undefined) {
-      if (key.text === 'a') void this.acceptPlan();
-      else if (key.text === 'r') void this.rejectPlan();
+      if (key.text === 'a') void this.acceptPlan(session);
+      else if (key.text === 'r') void this.rejectPlan(session);
     } else if (task === undefined) {
       return;
     } else if (key.name === 'space' || key.text === ' ') set(nextTaskState(task.state));
     else if (key.text === 'b') set(task.state === 'blocked' ? 'todo' : 'blocked');
     else if (key.text === 'x') set(task.state === 'cancelled' ? 'todo' : 'cancelled');
     else if (key.text === 'e') {
-      const messageID = this.latestAssistantID(session.id);
+      const messageID = this.latestAssistantID(session.id, session.serverID);
       if (messageID === undefined) {
         this.showNotice('No agent message to link yet.', 'warn');
         return;
@@ -4356,6 +4514,7 @@ export class AppController {
       void this.changeGoal(
         (current) => addEvidence(current, task.id, { messageID }, now),
         'Linked the latest agent message as evidence',
+        session,
       );
     }
   }

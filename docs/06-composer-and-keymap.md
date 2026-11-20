@@ -75,6 +75,7 @@ Define handling precedence: `modal > IME > paste transaction > autocomplete > se
 
 - Undo/redo for editing, `Home/End`, `Ctrl+A/E`, word navigation `Alt+B/F`, deletion `Ctrl+W/U/K`, and yank/restore `Ctrl+Y` where terminals permit; these are *editing* conventions, not application chords.
 - Insert Unicode grapheme clusters atomically; never split surrogate pairs or combining sequences on Backspace.
+- `Ctrl+W` removes the preceding whitespace-delimited unit and any whitespace immediately before the cursor, including line breaks. `Ctrl+Backspace` and `Alt+Backspace` skip preceding non-word graphemes then remove a run of letters, numbers, and underscores. Word movement uses the same grapheme-safe word boundaries.
 - Multiline expands upward; footer stays fixed. Long paste becomes one undo transaction and one preserved attachment/text block; bracketed paste must maintain insertion order with subsequent keystrokes.
 - Prompt history stored per project; separate `!` shell history; nonempty drafts aren't overwritten on Up unexpectedly.
 - Pasting an image yields a chip; if clipboard access unsupported on WSL/SSH, use explicit `@/absolute/path` or attach-file command rather than pretending it pasted.

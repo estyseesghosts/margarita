@@ -49,6 +49,12 @@ export function composerFrom(text: string): Composer {
   return { text, cursor: text.length };
 }
 
+/** Restore a saved cursor within the text and on a grapheme boundary. */
+export function restoreComposer(composer: Composer): Composer {
+  const cursor = Math.max(0, Math.min(composer.text.length, composer.cursor));
+  return { text: composer.text, cursor: snap(composer.text, cursor) };
+}
+
 export function isBlank(composer: Composer): boolean {
   return composer.text.length === 0;
 }
@@ -129,19 +135,52 @@ function snap(text: string, index: number): number {
 const wordCharacter = /[\p{L}\p{N}_]/u;
 
 export function moveWordLeft(composer: Composer): Composer {
-  let index = composer.cursor;
   const { text } = composer;
-  while (index > 0 && !wordCharacter.test(text[index - 1] ?? '')) index -= 1;
-  while (index > 0 && wordCharacter.test(text[index - 1] ?? '')) index -= 1;
-  return { text, cursor: index };
+  const points = boundaries(text);
+  let position = points.indexOf(composer.cursor);
+  while (position > 0 && !wordCharacter.test(text.slice(points[position - 1], points[position]))) {
+    position -= 1;
+  }
+  while (position > 0 && wordCharacter.test(text.slice(points[position - 1], points[position]))) {
+    position -= 1;
+  }
+  return { text, cursor: points[position] ?? 0 };
 }
 
 export function moveWordRight(composer: Composer): Composer {
-  let index = composer.cursor;
   const { text } = composer;
-  while (index < text.length && !wordCharacter.test(text[index] ?? '')) index += 1;
-  while (index < text.length && wordCharacter.test(text[index] ?? '')) index += 1;
-  return { text, cursor: index };
+  const points = boundaries(text);
+  let position = points.indexOf(composer.cursor);
+  while (
+    position >= 0 &&
+    position < points.length - 1 &&
+    !wordCharacter.test(text.slice(points[position], points[position + 1]))
+  ) {
+    position += 1;
+  }
+  while (
+    position >= 0 &&
+    position < points.length - 1 &&
+    wordCharacter.test(text.slice(points[position], points[position + 1]))
+  ) {
+    position += 1;
+  }
+  return { text, cursor: points[position] ?? text.length };
+}
+
+/** Delete the preceding whitespace-delimited unit, including preceding whitespace. */
+export function deletePreviousWhitespaceUnit(composer: Composer): Composer {
+  const { text, cursor } = composer;
+  const points = boundaries(text);
+  let position = points.indexOf(cursor);
+  while (position > 0 && /^\s+$/u.test(text.slice(points[position - 1], points[position]))) {
+    position -= 1;
+  }
+  while (position > 0 && !/^\s+$/u.test(text.slice(points[position - 1], points[position]))) {
+    position -= 1;
+  }
+  const start = points[position] ?? 0;
+  return { text: text.slice(0, start) + text.slice(cursor), cursor: start };
 }
 
 export function deleteWordBackward(composer: Composer): Composer {

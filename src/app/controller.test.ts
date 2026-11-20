@@ -50,6 +50,29 @@ async function flush(): Promise<void> {
   for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
 }
 
+test('MCP catalogs retain confirmed project names through failures and late loads', async () => {
+  const backend = new FakeBackend();
+  const controller = makeController(async () => [], backend);
+  backend.mcpServers = ['lotus'];
+  await controller.loadCatalog('/one', 'local');
+  backend.mcpServers = ['sentry'];
+  await controller.loadCatalog('/two', 'local');
+  expect(controller.mcpServersFor('local', '/one')).toEqual(['lotus']);
+  expect(controller.mcpServersFor('local', '/two')).toEqual(['sentry']);
+  const pending = deferred<string[]>();
+  backend.listMcpServers = () => pending.promise;
+  const late = controller.loadCatalog('/one', 'local');
+  backend.listMcpServers = async () => {
+    throw new Error('offline');
+  };
+  await controller.loadCatalog('/two', 'local');
+  pending.resolve(['incorrect']);
+  await late;
+  expect(controller.mcpServersFor('local', '/one')).toEqual(['lotus']);
+  expect(controller.mcpServersFor('local', '/two')).toEqual(['sentry']);
+  controller.dispose();
+});
+
 describe('@file completion', () => {
   test('shows only the latest query when requests resolve out of order', async () => {
     const scan = deferred<string[]>();
@@ -742,8 +765,9 @@ describe('project-scoped catalogs (issue #2)', () => {
     await flush();
     controller.setComposer(composerFrom('/cmd-a'));
     expect(controller.state.completion).toBeUndefined();
-    controller.setComposer(composerFrom('/cmd-b'));
+    controller.setComposer(composerFrom('/cmd'));
     expect(controller.state.completion?.kind).toBe('command');
+    expect(controller.state.completion?.items.map((item) => item.label)).toEqual(['/cmd-b']);
     controller.dispose();
   });
 
@@ -1150,6 +1174,82 @@ function fakeSession(id: string): SessionSummary {
     archived: false,
   };
 }
+
+describe('verified existing-session model switches (#116)', () => {
+  const original = { providerID: 'p', modelID: 'original' };
+  const first = { providerID: 'p', modelID: 'first' };
+  const latest = { providerID: 'p', modelID: 'latest', variant: 'high' };
+
+  test('blocks prompt and compact dispatch while switches serialize', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [{ ...fakeSession('ses_a'), model: original }];
+    const controller = makeController(async () => [], backend);
+    const pause = deferred<void>();
+    const apply = backend.switchModel.bind(backend);
+    backend.switchModel = async (id, model) => {
+      if (model === first) await pause.promise;
+      await apply(id, model);
+    };
+    try {
+      await controller.bootstrap();
+      controller.openSession('ses_a');
+      const switching = controller.setModel(first);
+      const switchingAgain = controller.setModel(latest);
+      expect(controller.currentSession()?.model).toEqual(original);
+      controller.setComposer(composerFrom('/compact'));
+      await controller.submit();
+      expect(controller.state.composer.text).toBe('/compact');
+      controller.setComposer(composerFrom('billable prompt'));
+      await controller.submit();
+      expect(controller.state.composer.text).toBe('billable prompt');
+      expect(
+        backend.calls.some(({ name }) =>
+          ['switchModel', 'prompt', 'compactSession'].includes(name),
+        ),
+      ).toBe(false);
+      pause.resolve();
+      await Promise.all([switching, switchingAgain]);
+      expect(
+        backend.calls.filter(({ name }) => name === 'switchModel').map(({ args }) => args[1]),
+      ).toEqual([first, latest]);
+      expect(controller.currentSession()?.model).toEqual(latest);
+      await controller.submit();
+      expect(backend.calls.filter(({ name }) => name === 'prompt')).toHaveLength(1);
+    } finally {
+      pause.resolve();
+      controller.dispose();
+    }
+  });
+
+  test.each(['rejected', 'wrong variant'])(
+    'keeps the draft and blocks dispatch after a %s switch',
+    async (failure) => {
+      const backend = new FakeBackend();
+      backend.sessions = [{ ...fakeSession('ses_a'), model: original }];
+      const controller = makeController(async () => [], backend);
+      const apply = backend.switchModel.bind(backend);
+      backend.switchModel = async () => {
+        if (failure === 'rejected') throw new Error('rejected');
+      };
+      try {
+        await controller.bootstrap();
+        controller.openSession('ses_a');
+        await controller.setModel(latest);
+        expect(controller.currentSession()?.model).toEqual(original);
+        expect(await controller.sendToSession('ses_a', 'keep this')).toBe(false);
+        expect(controller.state.composer.text).toBe('keep this');
+        expect(controller.state.notice?.text).toContain('Select a model again');
+        expect(backend.calls.some(({ name }) => name === 'prompt')).toBe(false);
+        backend.switchModel = apply;
+        await controller.setModel(latest);
+        await controller.submit();
+        expect(backend.calls.some(({ name }) => name === 'prompt')).toBe(true);
+      } finally {
+        controller.dispose();
+      }
+    },
+  );
+});
 
 function fakeTool(id: string, name: string): ToolCall {
   return { id, name, status: 'completed', input: {}, startedAt: 1, completedAt: 2 };
@@ -2554,7 +2654,7 @@ describe(`Up recalls the newest queued follow-up (issue #30)`, () => {
 
     expect(controller.state.notice?.text).toContain('Already delivered');
     expect(controller.state.composer.text).toBe('');
-    expect(controller.state.stash).toBeUndefined();
+    expect(Object.values(controller.state.stashes).filter(Boolean)).toHaveLength(0);
     controller.dispose();
   });
 
@@ -2577,7 +2677,9 @@ describe(`Up recalls the newest queued follow-up (issue #30)`, () => {
     await flush();
 
     expect(controller.state.composer.text).toBe('');
-    expect(controller.state.stash).toBe('second follow-up');
+    expect(Object.values(controller.state.stashes).find(Boolean)?.composer.text).toBe(
+      'second follow-up',
+    );
     controller.dispose();
   });
 
@@ -2592,7 +2694,7 @@ describe(`Up recalls the newest queued follow-up (issue #30)`, () => {
     await flush();
 
     expect(controller.state.composer.text).toBe('another draft');
-    expect(controller.state.stash).toBe('typing now');
+    expect(Object.values(controller.state.stashes).find(Boolean)?.composer.text).toBe('typing now');
     expect(controller.state.recovered).toHaveLength(1);
     const recovered = controller.state.recovered[0]?.text ?? '';
     expect(recovered).not.toBe('');
@@ -2606,7 +2708,7 @@ describe(`Up recalls the newest queued follow-up (issue #30)`, () => {
     controller.dispose();
   });
 
-  test('a parked recalled message is restored with Ctrl+S', async () => {
+  test('Ctrl+S restores a parked message only on its source session', async () => {
     const backend = queuedBackend();
     const controller = makeController(() => Promise.resolve([]), backend);
     await attach(controller, 'ses_a');
@@ -2624,7 +2726,10 @@ describe(`Up recalls the newest queued follow-up (issue #30)`, () => {
     await recall;
 
     controller.toggleStash();
+    expect(controller.state.composer.text).toBe('');
 
+    controller.openSession('ses_a');
+    controller.toggleStash();
     expect(controller.state.composer.text).toBe('second follow-up');
     controller.dispose();
   });
@@ -3371,6 +3476,30 @@ describe('image paste and attachments (issue #42)', () => {
     controller.dispose();
   });
 
+  test('stashes preserve cursor and attachments independently across routes', async () => {
+    const controller = makeController(() => Promise.resolve([]), attachedBackend());
+    await attach(controller, 'ses_a');
+    const text = 'first\ne\u0301 tail';
+    const cursor = 'first\ne\u0301'.length;
+    controller.setComposer({ text, cursor });
+    controller.attachImage(pngBytes, 'image/png', 'shot.png');
+    controller.toggleStash();
+
+    controller.openOverview();
+    controller.attachImage(pngBytes, 'image/png', 'other.png');
+    controller.toggleStash();
+    controller.openSession('ses_a');
+    controller.toggleStash();
+    expect(controller.state.composer).toEqual({ text, cursor });
+    expect(controller.state.attachments.map((item) => item.name)).toEqual(['shot.png']);
+
+    controller.openOverview();
+    controller.toggleStash();
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.attachments.map((item) => item.name)).toEqual(['other.png']);
+    controller.dispose();
+  });
+
   test('the first prompt of a new session keeps its attachments (issue #77)', async () => {
     const backend = new FakeBackend();
     const controller = makeController(() => Promise.resolve([]), backend);
@@ -3922,7 +4051,7 @@ describe('escape key handling (issue #90)', () => {
     await flush();
 
     expect(controller.state.composer.text).toBe('');
-    expect(controller.state.stash).toBe('my draft');
+    expect(Object.values(controller.state.stashes).find(Boolean)?.composer.text).toBe('my draft');
     expect(controller.state.notice?.text).toContain('stashed');
     expect(backend.calls.filter((call) => call.name === 'interrupt')).toHaveLength(0);
     controller.dispose();
@@ -3964,7 +4093,7 @@ describe('escape key handling (issue #90)', () => {
     await flush();
 
     expect(controller.state.rewindPending).toBe(false);
-    expect(controller.state.stash).toBeUndefined();
+    expect(Object.values(controller.state.stashes).filter(Boolean)).toHaveLength(0);
     expect(controller.state.composer.text).toBe('my draft');
     expect(backend.calls.filter((call) => call.name === 'interrupt')).toHaveLength(0);
     controller.dispose();
