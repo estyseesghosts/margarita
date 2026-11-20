@@ -131,6 +131,7 @@ import {
 } from '../domain/server-path.ts';
 import { classifySessionStatus, type SessionStatus } from '../domain/session-status.ts';
 import type { Execution, SessionSummary } from '../domain/session.ts';
+import { type ShellJob, shellRunningInBackground } from '../domain/shell-job.ts';
 import {
   completeCommand,
   isLocalCommand,
@@ -1362,16 +1363,18 @@ export class AppController {
     });
   }
 
-  /** Drops every worker row owned by one host; local keys are unqualified, so parse them. */
+  /** Drops every job row owned by one host; local keys are unqualified, so parse them. */
   private clearWorkersForServer(serverID: string): void {
-    this.setState(
-      'workers',
-      produce((workers) => {
-        for (const key of Object.keys(workers)) {
-          if (parseSessionKey(key).serverID === serverID) delete workers[key];
-        }
-      }),
-    );
+    for (const field of ['workers', 'shellJobs'] as const) {
+      this.setState(
+        field,
+        produce((jobs) => {
+          for (const key of Object.keys(jobs)) {
+            if (parseSessionKey(key).serverID === serverID) delete jobs[key];
+          }
+        }),
+      );
+    }
   }
 
   /**
@@ -1437,6 +1440,7 @@ export class AppController {
         return;
       case 'session-deleted':
         this.setState('workers', this.keyFor(serverID, event.sessionID), []);
+        this.setState('shellJobs', this.keyFor(serverID, event.sessionID), []);
         this.forgetSession(event.sessionID, serverID);
         return;
       case 'usage':
@@ -1572,6 +1576,37 @@ export class AppController {
     this.setState('workers', key, jobs);
   }
 
+  /**
+   * Shell jobs are refreshed on the same server-authoritative path (#103). On an unsupported
+   * RPC the timed-out shell keeps its honest `timeout` label; no background state is invented.
+   */
+  private async refreshShellJobs(
+    sessionID: string,
+    serverID = this.activeServerID(),
+  ): Promise<void> {
+    const key = this.keyFor(serverID, sessionID);
+    let jobs: readonly ShellJob[] = [];
+    try {
+      jobs = await this.backendFor(serverID).listShellJobs(sessionID);
+    } catch {
+      jobs = [];
+    }
+    if (this.disposed) return;
+    this.setState('shellJobs', key, jobs);
+  }
+
+  /** True only when the server reports a running job for this timed-out shell. */
+  shellRunningInBackground(
+    shellID: string | undefined,
+    sessionID: string,
+    serverID = this.activeServerID(),
+  ): boolean {
+    return shellRunningInBackground(
+      this.state.shellJobs[this.keyFor(serverID, sessionID)],
+      shellID,
+    );
+  }
+
   /** Throttled canonical refetch: at most one request in flight per session. */
   private scheduleTranscript(sessionID: string, serverID: string = this.activeServerID()): void {
     const key = `${serverID} ${sessionID}`;
@@ -1583,6 +1618,7 @@ export class AppController {
       try {
         await this.fetchLatest(sessionID, serverID);
         await this.refreshWorkers(sessionID, serverID);
+        await this.refreshShellJobs(sessionID, serverID);
         await delay(80);
       } finally {
         this.transcriptInFlight.delete(key);
@@ -1707,6 +1743,7 @@ export class AppController {
     await Promise.all([
       this.fetchLatest(sessionID, serverID),
       this.refreshWorkers(sessionID, serverID),
+      this.refreshShellJobs(sessionID, serverID),
       this.refreshInbox(sessionID, serverID),
       this.refreshInputRequests(sessionID, serverID),
       this.refreshSummary(sessionID, serverID),

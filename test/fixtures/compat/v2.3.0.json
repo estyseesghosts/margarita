@@ -1,0 +1,48 @@
+{
+  "version": "v2.3.0",
+  "sdk": "2.3.0",
+  "notes": [
+    "Baseline. Background subagents and tool output truncation keep the same wire shape in 2.3.0-2.3.2.",
+    "A timed-out foreground shell is killed in this version; status 'timeout' is terminal."
+  ],
+  "events": [
+    { "type": "server.connected", "data": {} },
+    { "type": "session.created", "data": { "sessionID": "ses_a" } },
+    { "type": "session.text.delta", "data": { "sessionID": "ses_a", "delta": "working" } },
+    { "type": "session.tool.called", "data": { "sessionID": "ses_a", "tool": { "name": "read" } } },
+    { "type": "session.inbox.enqueued", "data": { "sessionID": "ses_a" } },
+    { "type": "session.inbox.delivered", "data": { "sessionID": "ses_a" } },
+    { "type": "permission.asked", "data": { "sessionID": "ses_a" } },
+    { "type": "form.created", "data": { "sessionID": "ses_a" } },
+    { "type": "rpc.opencode.goal.changed", "data": { "sessionID": "ses_a", "goal": null } },
+    { "type": "session.compaction.started", "data": { "sessionID": "ses_a" } },
+    { "type": "session.compaction.ended", "data": { "sessionID": "ses_a" } },
+    { "type": "session.compaction.failed", "data": { "sessionID": "ses_a" } }
+  ],
+  "shellMessages": [
+    {
+      "type": "shell",
+      "id": "msg_shell_1",
+      "shellID": "sh_1",
+      "command": "npm test",
+      "status": "timeout",
+      "exit": null,
+      "time": { "created": 1000, "completed": 6000 }
+    }
+  ],
+  "jobs": {
+    "shell": [],
+    "subagent": [
+      {
+        "kind": "subagent",
+        "id": "job_1",
+        "sessionID": "ses_a",
+        "childSessionID": "child_1",
+        "agent": "build",
+        "description": "review patch",
+        "status": "running",
+        "time": { "started": 2000 }
+      }
+    ]
+  }
+}

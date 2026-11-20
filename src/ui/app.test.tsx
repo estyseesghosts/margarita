@@ -2331,6 +2331,47 @@ test('clicking agent, model and context footer segments opens the right overlay 
   controller.dispose();
 });
 
+const timedOutShell: TranscriptMessage = {
+  kind: 'shell',
+  id: 'sh_msg',
+  shellID: 'sh_1',
+  createdAt: 1,
+  command: 'npm test',
+  status: 'timeout',
+};
+
+test('a timed-out shell alone stays plainly labelled, not invented as background (#103)', async () => {
+  const backend = backendWithSession();
+  backend.messages = { ses_a: [timedOutShell] };
+  const { controller, setup } = await mount(backend);
+  controller.openSession('ses_a');
+  await settle(setup);
+  expect(setup.captureCharFrame()).toContain('timeout');
+  expect(setup.captureCharFrame()).not.toContain('still running in background');
+  controller.dispose();
+});
+
+test('a timed-out shell shows background when the server reports a running job (#103)', async () => {
+  const backend = backendWithSession();
+  backend.messages = { ses_a: [timedOutShell] };
+  backend.shellJobs = {
+    ses_a: [
+      {
+        id: 'job_shell_1',
+        shellID: 'sh_1',
+        sessionID: 'ses_a',
+        status: 'running',
+        startedAt: 1,
+      },
+    ],
+  };
+  const { controller, setup } = await mount(backend);
+  controller.openSession('ses_a');
+  await settle(setup);
+  expect(setup.captureCharFrame()).toContain('timeout · still running in background');
+  controller.dispose();
+});
+
 test('/usage and a context click render the same analytics view (#124)', async () => {
   const backend = backendWithSession();
   const { controller, setup } = await mount(backend);

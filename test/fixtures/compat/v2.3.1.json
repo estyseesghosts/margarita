@@ -1,0 +1,48 @@
+{
+  "version": "v2.3.1",
+  "sdk": "2.3.0",
+  "notes": [
+    "Timed-out shells now move to the background instead of being killed; the shell message still says 'timeout', and experimental.job.list(kind='shell') reports the running job.",
+    "Compaction summaries are written in the background; the existing session.compaction.* events still fire, so no new event type is introduced.",
+    "No generated-wire-type change to events, shell/compaction messages, TokenUsage or jobs."
+  ],
+  "events": [
+    { "type": "server.connected", "data": {} },
+    { "type": "session.created", "data": { "sessionID": "ses_a" } },
+    { "type": "session.text.delta", "data": { "sessionID": "ses_a", "delta": "working" } },
+    { "type": "session.tool.called", "data": { "sessionID": "ses_a", "tool": { "name": "bash" } } },
+    { "type": "session.inbox.enqueued", "data": { "sessionID": "ses_a" } },
+    { "type": "session.inbox.delivery.changed", "data": { "sessionID": "ses_a" } },
+    { "type": "permission.asked", "data": { "sessionID": "ses_a" } },
+    { "type": "form.created", "data": { "sessionID": "ses_a" } },
+    { "type": "rpc.opencode.goal.changed", "data": { "sessionID": "ses_a", "goal": null } },
+    { "type": "session.compaction.started", "data": { "sessionID": "ses_a" } },
+    { "type": "session.compaction.ended", "data": { "sessionID": "ses_a" } },
+    { "type": "session.compaction.failed", "data": { "sessionID": "ses_a" } }
+  ],
+  "shellMessages": [
+    {
+      "type": "shell",
+      "id": "msg_shell_1",
+      "shellID": "sh_1",
+      "command": "npm test",
+      "status": "timeout",
+      "exit": null,
+      "time": { "created": 1000, "completed": 6000 }
+    }
+  ],
+  "jobs": {
+    "shell": [
+      {
+        "kind": "shell",
+        "id": "job_shell_1",
+        "sessionID": "ses_a",
+        "shellID": "sh_1",
+        "command": "npm test",
+        "status": "running",
+        "time": { "started": 1000 }
+      }
+    ],
+    "subagent": []
+  }
+}

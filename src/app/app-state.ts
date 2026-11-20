@@ -15,6 +15,7 @@ import { createHistory } from '../domain/prompt-history.ts';
 import type { ProjectRef } from '../domain/server-identity.ts';
 import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
+import type { ShellJob } from '../domain/shell-job.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
 import type { WorkerJob } from '../domain/worker.ts';
 
@@ -142,6 +143,8 @@ export type AppState = {
    * disconnect so a reattach cannot show a ghost running worker from a stale snapshot.
    */
   workers: Record<string, readonly WorkerJob[]>;
+  /** Server-confirmed shell jobs per session key; a timed-out shell can still be running. */
+  shellJobs: Record<string, readonly ShellJob[]>;
   inbox: Record<string, QueuedInput[]>;
   agents: AgentDescriptor[];
   models: CatalogModel[];
@@ -234,6 +237,7 @@ export function initialState(directory: string, serverID: string = localServerID
     transcripts: {},
     backgrounded: {},
     workers: {},
+    shellJobs: {},
     inbox: {},
     agents: [],
     models: [],

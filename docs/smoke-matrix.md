@@ -53,6 +53,21 @@ Run these under an actual terminal; where CI has no terminal, report the host as
 | A1 | Submit a prompt, switch routes before the response resolves, then switch back. | No cross-host side effects; the prompt lands on the host that owned the session when sent. | `test/production-assembly.test.ts`; `src/app/controller.test.ts` |
 | A2 | Reorder out-of-order responses from two servers with identical session IDs. | Each host's transcript/queue/inbox stays under its own server-qualified key. | `src/app/multi-server-events.test.ts` |
 
+## Server version compatibility (opt-in, disposable servers)
+
+The offline wire-shape audit and per-version/per-feature matrix run in CI via
+`test/compat-matrix.test.ts` (see [25-compatibility](25-compatibility.md)). Live verification of
+the v2.3.1 timed-out-shell and background-compaction behavior still needs disposable servers with
+a provider/model and is gated by `MARGARITA_LIVE=1`:
+
+| # | Trigger | Observe | Automated coverage |
+|---|---------|---------|-------------------|
+| C1 | On v2.3.1, time out a foreground shell with a long build. | The row stays `timeout` and, only while the server reports a running `kind:'shell'` job, shows `still running in background`; it is never falsely failed/finished. | `test/compat-matrix.test.ts` (fixture), `src/ui/app.test.tsx` |
+| C2 | On v2.3.1, let automatic background compaction finish, then send a prompt. | No stale spinner is left after `session.compaction.ended`; `/compact` still works and the context reading updates from the next step. | `test/compat-matrix.test.ts` (fixture), `src/domain/usage-analytics.test.ts` |
+| C3 | On v2.3.2, run a session with prompt caching and check `/usage`. | Token categories and context accounting keep the same shape; no invented context percentage. | `test/compat-matrix.test.ts` (fixture), `src/domain/usage-analytics.test.ts` |
+
+Never run these against the user's own service; use a disposable server with isolated storage.
+
 ## Release gate (CI)
 
 - `bun run verify` must be clean on Windows and Linux (`.github/workflows/verify.yml`).

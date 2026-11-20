@@ -52,6 +52,8 @@ export type TranscriptMessage =
   | {
       kind: 'shell';
       id: string;
+      /** Wire `shellID`; links the message to its background job (#103). */
+      shellID?: string;
       createdAt: number;
       command: string;
       status: 'running' | 'exited' | 'timeout' | 'killed';
@@ -99,6 +101,8 @@ export type TranscriptNode =
   | {
       kind: 'shell';
       key: string;
+      /** Wire `shellID`, used to confirm a timed-out shell is still running (#103). */
+      shellID?: string;
       command: string;
       status: string;
       exitCode?: number;
@@ -272,6 +276,7 @@ export function foldTranscript(
         out.push({
           kind: 'shell',
           key: message.id,
+          ...(message.shellID === undefined ? {} : { shellID: message.shellID }),
           command: message.command,
           status: message.status,
           ...(message.exitCode === undefined ? {} : { exitCode: message.exitCode }),

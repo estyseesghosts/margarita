@@ -261,6 +261,13 @@ export function Transcript(props: TranscriptProps) {
                   mcpServers={mcpServers()}
                   now={hintNow()}
                   backgroundKey={backgroundKey}
+                  backgroundShell={(shellID) =>
+                    props.controller.shellRunningInBackground(
+                      shellID,
+                      props.sessionID,
+                      props.serverID,
+                    )
+                  }
                 />
               </box>
             </>
@@ -397,6 +404,8 @@ function NodeView(props: {
   now: number;
   /** Label of the user's effective `tools.background` binding, absent when unbound. */
   backgroundKey: string | undefined;
+  /** True only when the server reports a running background job for this shell ID (#103). */
+  backgroundShell: (shellID: string | undefined) => boolean;
 }) {
   const theme = () => props.theme;
   return (
@@ -526,10 +535,14 @@ function NodeView(props: {
             <text fg={theme().text}>{`! ${sanitizeText(node().command)}`}</text>
             <text
               fg={
-                node().exitCode !== undefined && node().exitCode !== 0 ? theme().error : theme().dim
+                node().exitCode !== undefined && node().exitCode !== 0
+                  ? theme().error
+                  : node().status === 'timeout' && props.backgroundShell(node().shellID)
+                    ? theme().warn
+                    : theme().dim
               }
             >
-              {`  └ ${node().status}${node().exitCode === undefined ? '' : ` (exit ${node().exitCode})`}`}
+              {`  └ ${node().status}${node().exitCode === undefined ? '' : ` (exit ${node().exitCode})`}${node().status === 'timeout' && props.backgroundShell(node().shellID) ? ' · still running in background' : ''}`}
             </text>
             <Show when={node().output}>
               {(output: Accessor<string>) => (

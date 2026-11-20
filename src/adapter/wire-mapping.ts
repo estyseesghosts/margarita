@@ -21,6 +21,7 @@ import type { CatalogModel } from '../domain/model-resolution.ts';
 import { sanitizeTerminalText } from '../domain/sanitize-text.ts';
 import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary, StagedRevert } from '../domain/session.ts';
+import type { ShellJob } from '../domain/shell-job.ts';
 import type { AssistantPart, ToolCall, TranscriptMessage } from '../domain/transcript.ts';
 import type { WorkerJob, WorkerStatus } from '../domain/worker.ts';
 
@@ -336,6 +337,7 @@ export function toTranscriptMessage(
       return {
         kind: 'shell',
         id: message.id,
+        shellID: message.shellID,
         createdAt: message.time.created,
         command: sanitizeTerminalText(message.command),
         status: message.status,
@@ -537,6 +539,43 @@ export function toWorkerJob(raw: unknown): WorkerJob | undefined {
     childSessionID,
     agent: sanitizeTerminalText(agent),
     description: sanitizeTerminalText(description),
+    status,
+    startedAt,
+    ...(typeof title === 'string' && title !== '' ? { title: sanitizeTerminalText(title) } : {}),
+    ...(completedAt === undefined ? {} : { completedAt }),
+  };
+}
+
+/**
+ * Maps one `kind: 'shell'` job from `experimental.job.list`. v2.3.1 timed-out shells keep
+ * running in the background; this is the server's authoritative confirmation (#103).
+ */
+export function toShellJob(raw: unknown): ShellJob | undefined {
+  if (!isRecord(raw) || raw['kind'] !== 'shell') return undefined;
+  const id = raw['id'];
+  const shellID = raw['shellID'];
+  const sessionID = raw['sessionID'];
+  const status = raw['status'];
+  const time = raw['time'];
+  if (
+    typeof id !== 'string' ||
+    id === '' ||
+    typeof shellID !== 'string' ||
+    shellID === '' ||
+    typeof sessionID !== 'string' ||
+    !isWorkerStatus(status) ||
+    !isRecord(time)
+  ) {
+    return undefined;
+  }
+  const startedAt = finite(time['started']);
+  if (startedAt === undefined) return undefined;
+  const title = raw['title'];
+  const completedAt = finite(time['completed']);
+  return {
+    id,
+    shellID,
+    sessionID,
     status,
     startedAt,
     ...(typeof title === 'string' && title !== '' ? { title: sanitizeTerminalText(title) } : {}),

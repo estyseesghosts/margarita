@@ -196,5 +196,8 @@ The product spec and decisions live in [`docs/`](docs/) (start with [01-product-
 
 ## Status
 
-Early days: version **0.0.1**. It works against OpenCode v2.3.0, and some terminals (Windows Terminal, Ghostty, tmux)
-still want a manual look-over; see [checklists/release-candidate.md](checklists/release-candidate.md).
+Early days: version **0.0.1**. It works against OpenCode v2.3.0, and its wire contract is unchanged on
+v2.3.1 and v2.3.2 (the SDK stays pinned at `@opencode/client` 2.3.0); see
+[docs/25-compatibility](docs/25-compatibility.md) for the version matrix, the audited divergences and the
+opt-in live-test gap. Some terminals (Windows Terminal, Ghostty, tmux) still want a manual look-over;
+see [checklists/release-candidate.md](checklists/release-candidate.md).

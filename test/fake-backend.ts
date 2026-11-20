@@ -19,6 +19,7 @@ import type { ModelSelection } from '../src/domain/model-ref.ts';
 import type { CatalogModel } from '../src/domain/model-resolution.ts';
 import type { NativeGoal } from '../src/domain/native-goal.ts';
 import type { SessionSummary } from '../src/domain/session.ts';
+import type { ShellJob } from '../src/domain/shell-job.ts';
 import type { TranscriptMessage } from '../src/domain/transcript.ts';
 import type { WorkerJob } from '../src/domain/worker.ts';
 
@@ -31,6 +32,7 @@ export class FakeBackend implements Backend {
   messages: Record<string, TranscriptMessage[]> = {};
   /** Server-reported subagent jobs by parent session (#101). */
   jobs: Record<string, readonly WorkerJob[]> = {};
+  shellJobs: Record<string, readonly ShellJob[]> = {};
   active = new Set<string>();
   permissions: PermissionPrompt[] = [];
   forms: FormRequest[] = [];
@@ -108,6 +110,10 @@ export class FakeBackend implements Backend {
   async listSubagentJobs(sessionID: string): Promise<readonly WorkerJob[]> {
     this.calls.push({ name: 'listSubagentJobs', args: [sessionID] });
     return this.jobs[sessionID] ?? [];
+  }
+  async listShellJobs(sessionID: string): Promise<readonly ShellJob[]> {
+    this.calls.push({ name: 'listShellJobs', args: [sessionID] });
+    return this.shellJobs[sessionID] ?? [];
   }
   /** Newest-first pages like the server; the cursor is the index where the page ends. */
   async listMessages(sessionID: string, limit: number, cursor?: string): Promise<MessagePage> {
