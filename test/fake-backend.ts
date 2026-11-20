@@ -37,6 +37,8 @@ export class FakeBackend implements Backend {
   models: CatalogModel[] = [];
   /** Configurable server-side file index returned by findProjectFiles. */
   remoteFiles: string[] = [];
+  /** Configurable server-side directory index returned by findProjectDirectories. */
+  remoteDirectories: string[] = [];
   readonly calls: { name: string; args: unknown[] }[] = [];
 
   /** When set, listSessions delegates here (paged/failable listing tests). */
@@ -345,6 +347,13 @@ export class FakeBackend implements Backend {
     this.calls.push({ name: 'findProjectFiles', args: [directory, query] });
     const needle = query.toLowerCase().replaceAll('\\', '/');
     return this.remoteFiles.filter((path) => path.toLowerCase().includes(needle)).slice(0, 50);
+  }
+  async findProjectDirectories(directory: string, query: string): Promise<string[]> {
+    this.calls.push({ name: 'findProjectDirectories', args: [directory, query] });
+    const needle = query.toLowerCase().replaceAll('\\', '/');
+    return this.remoteDirectories
+      .filter((path) => path.toLowerCase().includes(needle))
+      .slice(0, 50);
   }
   async listPermissions(sessionID: string): Promise<PermissionPrompt[]> {
     return this.permissions.filter((permission) => permission.sessionID === sessionID);

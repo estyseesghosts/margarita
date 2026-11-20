@@ -100,6 +100,8 @@ export type PromptFile = Readonly<{
 export type PromptDraft = Readonly<{
   text: string;
   files: readonly PromptFile[];
+  /** Typed `@agent` references, sent as agent attachments (not file lookups). */
+  agents?: readonly { name: string; mention?: { start: number; end: number; text: string } }[];
   /** Omitted when idle; while running the server needs an explicit queue/steer choice. */
   delivery?: Delivery;
 }>;
@@ -124,6 +126,8 @@ export interface Backend {
   cancelQueued(sessionID: string, inboxID: string): Promise<void>;
   /** Server-side fuzzy file search scoped to `directory`; used for remote `@` mentions. */
   findProjectFiles(directory: string, query: string, limit: number): Promise<string[]>;
+  /** Directory counterpart of `findProjectFiles`, for remote `@dir` attachments. */
+  findProjectDirectories(directory: string, query: string, limit: number): Promise<string[]>;
   changeDelivery(sessionID: string, inboxID: string, delivery: Delivery): Promise<void>;
   prompt(sessionID: string, draft: PromptDraft): Promise<QueuedInput>;
   runCommand(sessionID: string, name: string, text: string): Promise<void>;
@@ -282,6 +286,19 @@ class OpenCodeBackend implements Backend {
     return result.data.map((entry) => entry.path);
   }
 
+  async findProjectDirectories(directory: string, query: string, limit: number): Promise<string[]> {
+    if (query.trim() === '') return [];
+    const result = await call('file.find', () =>
+      this.client.file.find({
+        query,
+        type: 'directory',
+        limit,
+        location: { directory },
+      }),
+    );
+    return result.data.map((entry) => entry.path);
+  }
+
   async listInbox(sessionID: string): Promise<QueuedInput[]> {
     const items = await call('session.inbox.list', () =>
       this.client.session.inbox.list({ sessionID }),
@@ -316,6 +333,9 @@ class OpenCodeBackend implements Backend {
                 ...(file.mention === undefined ? {} : { mention: file.mention }),
               })),
             }),
+        ...(draft.agents === undefined || draft.agents.length === 0
+          ? {}
+          : { agents: draft.agents.map((agent) => ({ ...agent })) }),
       }),
     );
     return toQueuedInput(admitted);

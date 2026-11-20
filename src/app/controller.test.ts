@@ -633,6 +633,75 @@ describe('remote @file resolution (issue #9)', () => {
   });
 });
 
+describe('directory and line-range attachments (#98)', () => {
+  test('a one-based range becomes start/end query parameters on the file URI', async () => {
+    const { backend, controller } = remoteController(
+      ['src/app.ts'],
+      '/srv/proj',
+      'C:\\Users\\me\\proj',
+    );
+    await controller.bootstrap();
+    await controller.sendToSession('ses_remote', 'read @src/app.ts#20-45');
+    expect(promptDraft(backend).files[0]?.uri).toBe('file:///srv/proj/src/app.ts?start=20&end=45');
+    expect(promptDraft(backend).files[0]?.mention?.text).toBe('@src/app.ts#20-45');
+    controller.dispose();
+  });
+
+  test('an invalid range never sends a malformed attachment', async () => {
+    const { backend, controller } = remoteController(
+      ['src/app.ts'],
+      '/srv/proj',
+      'C:\\Users\\me\\proj',
+    );
+    await controller.bootstrap();
+    await controller.sendToSession('ses_remote', 'read @src/app.ts#45-20');
+    expect(promptDraft(backend).files).toEqual([]);
+    expect(controller.state.notice?.text).toContain('Invalid line range');
+    controller.dispose();
+  });
+
+  test('a verified remote directory is attached through the server directory index', async () => {
+    const { backend, controller } = remoteController([], '/srv/proj', 'C:\\Users\\me\\proj');
+    backend.remoteDirectories = ['src'];
+    await controller.bootstrap();
+    await controller.sendToSession('ses_remote', 'inspect @src');
+    const draft = promptDraft(backend);
+    expect(draft.files[0]?.uri).toBe('file:///srv/proj/src');
+    expect(backend.calls.some((call) => call.name === 'findProjectDirectories')).toBe(true);
+    controller.dispose();
+  });
+});
+
+describe('typed agent attachments (#99)', () => {
+  test('a bare @agent mention is sent as an agent attachment, not a file lookup', async () => {
+    const backend = new FakeBackend();
+    backend.agents = [agentFor('reviewer')];
+    backend.sessions = [fakeSession('ses_a')];
+    const controller = makeController(async () => [], backend);
+    await controller.loadCatalog('/work/kohjoh', 'local');
+    await attach(controller, 'ses_a');
+    await controller.sendToSession('ses_a', 'ask @reviewer about this');
+    const draft = promptDraft(backend);
+    expect(draft.agents).toEqual([
+      { name: 'reviewer', mention: { start: 4, end: 13, text: '@reviewer' } },
+    ]);
+    expect(backend.calls.some((call) => call.name === 'findProjectFiles')).toBe(false);
+    controller.dispose();
+  });
+
+  test('agent completion is distinguished from files and scoped to the catalog', async () => {
+    const backend = new FakeBackend();
+    backend.agents = [agentFor('reviewer')];
+    const controller = makeController(async () => [], backend);
+    await controller.loadCatalog('/work/kohjoh', 'local');
+    controller.setComposer(composerFrom('@rev'));
+    await flush();
+    expect(controller.state.completion?.items.map((item) => item.label)).toEqual(['@reviewer']);
+    expect(controller.state.completion?.items[0]?.detail).toBe('agent');
+    controller.dispose();
+  });
+});
+
 function pagedSessions(count: number): SessionSummary[] {
   return Array.from({ length: count }, (_, index) => fakeSession(`s${index}`));
 }

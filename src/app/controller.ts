@@ -41,7 +41,13 @@ import {
 import { type DiffScope, type FileDiff, patchLines, turnStart } from '../domain/diff.ts';
 import { hasOversizedDiff } from '../domain/edit-diff.ts';
 import { projectExecution } from '../domain/execution.ts';
-import { activeMention, findFileMentions, rankPaths } from '../domain/file-reference.ts';
+import {
+  activeMention,
+  agentMentions,
+  findFileMentions,
+  rankPaths,
+  withLineRange,
+} from '../domain/file-reference.ts';
 import {
   buildAnswer,
   editorKey,
@@ -2108,7 +2114,7 @@ export class AppController {
     }
     const mention = activeMention(text, cursor);
     if (mention !== undefined) {
-      void this.track('files', this.completeFiles(mention.path, mention.start));
+      void this.track('files', this.completeMentions(mention.path, mention.start));
       return;
     }
     if (this.state.completion !== undefined) this.setState('completion', undefined);
@@ -2120,7 +2126,7 @@ export class AppController {
     this.completionGeneration += 1;
   }
 
-  private async completeFiles(partial: string, start: number): Promise<void> {
+  private async completeMentions(partial: string, start: number): Promise<void> {
     const request = ++this.completionRequest;
     const root = this.currentDirectory();
     // The selected route's server decides the filesystem, not the launch connection.
@@ -2144,12 +2150,24 @@ export class AppController {
     ) {
       return;
     }
+    // Agents complete bare `@name` mentions from this server's scoped catalog, visibly
+    // distinguished from files by their detail label (issue #99).
+    const agentItems =
+      partial === '' || /[\\/.]/.test(partial)
+        ? []
+        : this.state.agents
+            .filter((agent) => agent.id.toLowerCase().startsWith(partial.toLowerCase()))
+            .slice(0, 8)
+            .map((agent) => ({
+              label: `@${agent.id}`,
+              detail: 'agent',
+              insert: `@${agent.id} `,
+            }));
     // Remote results arrive ranked by the server's own fuzzy search; trust that order.
-    const items = (remote ? files.slice(0, 8) : rankPaths(files, partial, 8)).map((path) => ({
-      label: `@${path}`,
-      detail: '',
-      insert: `@${path} `,
-    }));
+    const fileItems = (remote ? files.slice(0, 8) : rankPaths(files, partial, 8))
+      .filter((path) => !agentItems.some((item) => item.label === `@${path}`))
+      .map((path) => ({ label: `@${path}`, detail: '', insert: `@${path} ` }));
+    const items = [...agentItems, ...fileItems];
     this.setState(
       'completion',
       items.length === 0 ? undefined : { kind: 'file', items, index: 0, start },
@@ -2456,11 +2474,17 @@ export class AppController {
               this.state.running[this.keyFor(origin.serverID, origin.sessionID)] === true;
             const delivery =
               deliveryOverride ?? (running ? this.deps.config.input.enterWhileRunning : undefined);
-            const files = await this.promptFiles(text, directory, sentAttachments, origin.serverID);
+            const { files, agents } = await this.promptFiles(
+              text,
+              directory,
+              sentAttachments,
+              origin.serverID,
+            );
             if (this.modelDispatchBlocked(origin.serverID, origin.sessionID)) return false;
             await backend.prompt(origin.sessionID, {
               text,
               files,
+              ...(agents.length === 0 ? {} : { agents }),
               ...(delivery === undefined ? {} : { delivery }),
             });
             await this.refreshInbox(origin.sessionID, origin.serverID);
@@ -2577,9 +2601,11 @@ export class AppController {
     text: string,
     directory: string,
     serverID: string = this.activeServerID(),
+    exclude?: ReadonlySet<number>,
   ): Promise<PromptFile[]> {
-    if (this.isRemoteServer(serverID)) return this.resolveRemoteFiles(text, directory, serverID);
-    return this.resolveLocalFiles(text, directory);
+    if (this.isRemoteServer(serverID))
+      return this.resolveRemoteFiles(text, directory, serverID, exclude);
+    return this.resolveLocalFiles(text, directory, exclude);
   }
 
   /**
@@ -2592,22 +2618,45 @@ export class AppController {
     directory: string,
     attachments: readonly Attachment[] = this.state.attachments,
     serverID: string = this.activeServerID(),
-  ): Promise<PromptFile[]> {
-    const mentioned = await this.resolveFiles(text, directory, serverID);
-    return [...mentioned, ...attachments.map((attachment) => attachmentPromptFile(attachment))];
+  ): Promise<{
+    files: PromptFile[];
+    agents: readonly { name: string; mention?: { start: number; end: number; text: string } }[];
+  }> {
+    const agentRefs = agentMentions(
+      findFileMentions(text),
+      new Set(this.state.agents.map((a) => a.id)),
+    );
+    const excluded = new Set(agentRefs.map((mention) => mention.start));
+    const mentioned = await this.resolveFiles(text, directory, serverID, excluded);
+    return {
+      files: [...mentioned, ...attachments.map((attachment) => attachmentPromptFile(attachment))],
+      agents: agentRefs.map((mention) => ({
+        name: mention.path,
+        mention: { start: mention.start, end: mention.end, text: mention.text },
+      })),
+    };
   }
 
-  private async resolveLocalFiles(text: string, directory: string): Promise<PromptFile[]> {
+  private async resolveLocalFiles(
+    text: string,
+    directory: string,
+    exclude?: ReadonlySet<number>,
+  ): Promise<PromptFile[]> {
     const files: PromptFile[] = [];
     const missing: string[] = [];
     for (const mention of findFileMentions(text)) {
+      if (exclude?.has(mention.start) === true) continue;
+      if (mention.rangeError !== undefined) {
+        missing.push(`${mention.text}: ${mention.rangeError}`);
+        continue;
+      }
       const path = isAbsolute(mention.path) ? mention.path : resolve(directory, mention.path);
       if (!(await Bun.file(path).exists())) {
         missing.push(mention.text);
         continue;
       }
       files.push({
-        uri: pathToFileURL(path).href,
+        uri: withLineRange(pathToFileURL(path).href, mention.range),
         name: mention.path,
         mention: { start: mention.start, end: mention.end, text: mention.text },
       });
@@ -2626,12 +2675,18 @@ export class AppController {
     text: string,
     directory: string,
     serverID: string = this.activeServerID(),
+    exclude?: ReadonlySet<number>,
   ): Promise<PromptFile[]> {
     const backend = this.backendFor(serverID);
     const shape = serverPathShape(directory);
     const files: PromptFile[] = [];
     const missing: string[] = [];
     for (const mention of findFileMentions(text)) {
+      if (exclude?.has(mention.start) === true) continue;
+      if (mention.rangeError !== undefined) {
+        missing.push(`${mention.text}: ${mention.rangeError}`);
+        continue;
+      }
       if (isServerAbsolutePath(mention.path) && serverPathShape(mention.path) !== shape) {
         missing.push(mention.text); // e.g. `C:\…` mentioned to a posix server
         continue;
@@ -2647,9 +2702,15 @@ export class AppController {
       let matched: string | undefined;
       try {
         // Exact path verified against the server's fuzzy search over the project; the base
-        // name as query guarantees the file appears in the hits when it exists.
-        const hits = await backend.findProjectFiles(directory, baseServerPath(relative), 100);
-        matched = hits.find((hit) => normalizeServerPath(hit, shape) === relative);
+        // name as query guarantees the entry appears in the hits when it exists. Try files
+        // first, then directories so `@src` can attach a folder when no file matches.
+        const query = baseServerPath(relative);
+        const fileHits = await backend.findProjectFiles(directory, query, 100);
+        matched = fileHits.find((hit) => normalizeServerPath(hit, shape) === relative);
+        if (matched === undefined) {
+          const dirHits = await backend.findProjectDirectories(directory, query, 100);
+          matched = dirHits.find((hit) => normalizeServerPath(hit, shape) === relative);
+        }
       } catch {
         matched = undefined;
       }
@@ -2662,7 +2723,7 @@ export class AppController {
         ? matched
         : joinServerPath(directory, matched);
       files.push({
-        uri: serverFileUri(canonical),
+        uri: withLineRange(serverFileUri(canonical), mention.range),
         name: mention.path,
         mention: { start: mention.start, end: mention.end, text: mention.text },
       });
@@ -2799,11 +2860,17 @@ export class AppController {
       text,
       directory,
       async () => {
-        const files = await this.promptFiles(text, directory, attachments, sessionServerID);
+        const { files, agents } = await this.promptFiles(
+          text,
+          directory,
+          attachments,
+          sessionServerID,
+        );
         if (this.modelDispatchBlocked(sessionServerID, session.id)) return false;
         await this.backendFor(sessionServerID).prompt(session.id, {
           text,
           files,
+          ...(agents.length === 0 ? {} : { agents }),
         });
         return true;
       },
@@ -2948,11 +3015,17 @@ export class AppController {
       text,
       directory,
       async () => {
-        const files = await this.promptFiles(text, directory, sentAttachments, serverID);
+        const { files, agents } = await this.promptFiles(
+          text,
+          directory,
+          sentAttachments,
+          serverID,
+        );
         if (this.modelDispatchBlocked(serverID, sessionID)) return false;
         await this.backendFor(serverID).prompt(sessionID, {
           text,
           files,
+          ...(agents.length === 0 ? {} : { agents }),
           ...(running ? { delivery: this.deps.config.input.enterWhileRunning } : {}),
         });
         return true;

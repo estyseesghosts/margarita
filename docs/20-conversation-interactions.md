@@ -21,7 +21,7 @@ Claude Code itself can deliver queued messages at tool boundaries; our guarantee
 
 ## Commands vs message text
 
-Typing `/model` opens UI picker, not a chat message. Typing `/goal` opens goal editor, without model token usage. `/plan propose` may explicitly ask model and then shows proposal. `!git status` is a user-run shell operation (requires validated shell API), not a model execution permission. `@file` completion inserts a typed attachment/reference where server API supports it. Clipboard paste of image inserts chip with stable local ID until prompt admitted.
+Typing `/model` opens UI picker, not a chat message. Typing `/goal` opens goal editor, without model token usage. `/plan propose` may explicitly ask model and then shows proposal. `!git status` is a user-run shell operation (requires validated shell API), not a model execution permission. `@file` completion inserts a typed attachment/reference where server API supports it. A one-based range suffix `@src/app.ts#20-45` is Margarita shorthand (not OpenCode syntax) and becomes a `file:` URI with `?start=20&end=45`; invalid ranges are reported and never sent. Bare `@name` references that match the current server's agent catalog are sent as agent attachments, while path-like mentions stay files. Clipboard paste of image inserts chip with stable local ID until prompt admitted.
 
 ## Background status and notifications
 
