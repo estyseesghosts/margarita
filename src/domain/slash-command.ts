@@ -10,6 +10,9 @@ export const localCommands = {
   transcript: 'Toggle detailed transcript',
   diff: 'Files changed: /diff (session) or /diff turn (since your last message)',
   usage: 'Show token and spend breakdown',
+  // Side questions are a desktop-only feature; the v2.3.x HTTP API has no equivalent.
+  // Recognized only so we can say so truthfully instead of reporting "unknown command".
+  btw: 'Side questions are not available over the OpenCode HTTP API',
   interrupt: 'Stop the running turn',
   queue: 'Show queued inputs',
   compact: 'Compact the conversation now: /compact',

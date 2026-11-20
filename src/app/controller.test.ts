@@ -73,6 +73,16 @@ test('MCP catalogs retain confirmed project names through failures and late load
   controller.dispose();
 });
 
+test('/btw reports the capability gap without sending anything (#100)', async () => {
+  const backend = new FakeBackend();
+  const controller = makeController(async () => [], backend);
+  await submitCommand(controller, '/btw why is the sky blue?');
+  expect(controller.state.notice?.text).toContain('desktop-only');
+  expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+  expect(backend.calls.some((call) => call.name === 'command')).toBe(false);
+  controller.dispose();
+});
+
 test('greeting is chosen once per route and stays stable (#128)', () => {
   const controller = makeController(async () => []);
   const first = controller.greetingFor('new:local:/work');

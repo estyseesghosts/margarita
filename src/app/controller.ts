@@ -2994,6 +2994,12 @@ export class AppController {
       case 'usage':
         this.setOverlay({ kind: 'usage' });
         return;
+      case 'btw':
+        this.showNotice(
+          'Side questions (/btw) are desktop-only; the OpenCode HTTP API has no equivalent endpoint. Nothing was sent.',
+          'warn',
+        );
+        return;
       case 'status':
         this.setOverlay({ kind: 'status' });
         return;
