@@ -4287,3 +4287,75 @@ describe('escape key handling (issue #90)', () => {
     controller.dispose();
   });
 });
+
+function pickerBackend(): FakeBackend {
+  const backend = new FakeBackend();
+  backend.agents = [agentFor('zeta'), agentFor('build'), agentFor('review')];
+  backend.sessions = [fakeSession('ses_a')];
+  return backend;
+}
+
+describe('agent picker and deterministic cycle (#123)', () => {
+  test('/agent opens the searchable picker; Enter selects via switchAgent', async () => {
+    const backend = pickerBackend();
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    await submitCommand(controller, '/agent');
+    expect(controller.state.overlay.kind).toBe('agent-picker');
+    expect(controller.agentChoices('').map((agent) => agent.id)).toEqual([
+      'build',
+      'review',
+      'zeta',
+    ]);
+
+    controller.setAgentPickerQuery('rev');
+    expect(controller.agentChoices('rev').map((agent) => agent.id)).toEqual(['review']);
+    await controller.acceptAgentPicker();
+    expect(controller.state.overlay.kind).toBe('none');
+    expect(backend.calls.find((call) => call.name === 'switchAgent')?.args).toEqual([
+      'ses_a',
+      'review',
+    ]);
+    controller.dispose();
+  });
+
+  test('the picker navigates in both directions without losing the draft', async () => {
+    const backend = pickerBackend();
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    await controller.openAgentPicker();
+    controller.setComposer(composerFrom('keep this draft'));
+    const overlay = controller.state.overlay;
+    if (overlay.kind !== 'agent-picker') throw new Error('agent picker did not open');
+    controller.moveAgentPicker(-1);
+    expect(controller.state.overlay).toMatchObject({ index: 2 });
+    controller.moveAgentPicker(1);
+    expect(controller.state.overlay).toMatchObject({ index: 0 });
+    expect(controller.state.composer.text).toBe('keep this draft');
+    controller.dispose();
+  });
+
+  test('Shift+Tab cycles the full deterministic set with shuffled backend results', async () => {
+    const backend = pickerBackend();
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    await controller.cycleAgent(1);
+    expect(backend.calls.find((call) => call.name === 'switchAgent')?.args[1]).toBe('review');
+    controller.dispose();
+  });
+
+  test('a rejected switch restores the previously confirmed agent', async () => {
+    const backend = pickerBackend();
+    backend.switchAgent = async () => {
+      throw new Error('denied');
+    };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    const before = controller.currentSession()?.agent;
+    await controller.openAgentPicker();
+    controller.setAgentPickerQuery('rev');
+    await controller.acceptAgentPicker();
+    expect(controller.currentSession()?.agent).toBe(before);
+    controller.dispose();
+  });
+});

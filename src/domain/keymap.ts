@@ -8,6 +8,7 @@
 export const actionIDs = [
   'agent.cycle',
   'agent.cyclePrevious',
+  'agent.pick',
   'model.pick',
   'model.recentNext',
   'transcript.details',
@@ -52,6 +53,7 @@ export type KeyPress = Readonly<{
 export const defaultBindings: Readonly<Record<ActionID, readonly string[]>> = {
   'agent.cycle': ['shift+tab'],
   'agent.cyclePrevious': ['alt+shift+tab'],
+  'agent.pick': ['f3'],
   'model.pick': ['alt+p'],
   'model.recentNext': ['f2'],
   'transcript.details': ['ctrl+o'],

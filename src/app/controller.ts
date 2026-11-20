@@ -19,7 +19,7 @@ import type { AppConfig } from '../config/config.ts';
 import { GoalConflictError, type GoalStore, memoryGoalStore } from '../config/goal-store.ts';
 import type { LocalState, SaveResult } from '../config/local-state.ts';
 import { mergeState } from '../config/local-state.ts';
-import { defaultAgent, nextAgent, selectableAgents } from '../domain/agent-cycle.ts';
+import { defaultAgent, filterAgents, nextAgent, selectableAgents } from '../domain/agent-cycle.ts';
 import {
   type Attachment,
   attachmentLimitBytes,
@@ -588,6 +588,8 @@ export class AppController {
   private catalogGeneration = 0;
   private catalogInFlight: Promise<void> | undefined;
   private catalogInFlightScope: string | undefined;
+  /** Deduplicates "agent unavailable" prompts across repeated catalog refreshes (#123). */
+  private unavailableAgentNotice: string | undefined;
 
   /** Catalog scope: server identity plus canonical directory, never directory alone. */
   private catalogScope(directory: string, serverID: string): string {
@@ -648,6 +650,22 @@ export class AppController {
         }
         this.setState('catalogLoading', false);
       });
+      // An agent that vanished or became hidden/disabled is never silently replaced. Keep
+      // the server-confirmed session agent and ask the user to choose a valid one (#123).
+      const current = this.currentSession();
+      if (
+        current !== undefined &&
+        current.serverID === serverID &&
+        !this.state.agents.some((agent) => agent.id === current.agent)
+      ) {
+        const notice = `Agent "${current.agent}" is no longer available. Choose a new agent with Shift+Tab or /agent.`;
+        if (this.unavailableAgentNotice !== notice) {
+          this.unavailableAgentNotice = notice;
+          this.showNotice(notice, 'warn');
+        }
+      } else {
+        this.unavailableAgentNotice = undefined;
+      }
     } catch (error) {
       if (generation !== this.catalogGeneration) return;
       // Never leave another project's or server's catalog usable after a failed reload.
@@ -3048,7 +3066,9 @@ export class AppController {
         this.startNewSession(this.currentDirectory(), this.currentProject().serverID);
         return;
       case 'agent':
-        if (args === '') await this.cycleAgent(1);
+        // `/agent` opens the searchable picker; Shift+Tab remains the quick cycle. Keep
+        // `/agent <id>` as exact selection for scripts and muscle memory (#123).
+        if (args === '') await this.openAgentPicker();
         else await this.setAgent(args);
         return;
       case 'model':
@@ -3348,6 +3368,9 @@ export class AppController {
     if (!(await this.ensureCatalog(this.currentDirectory()))) return;
     const session = this.currentSession();
     const current = session === undefined ? this.state.overview.agent : session.agent;
+    // `state.agents` is already the de-duplicated, deterministically ordered selectable set
+    // from `loadCatalog`. The server does not expose project/global/built-in provenance, so
+    // quick cycle safely uses that full set rather than a guessed project-only subset (#123).
     const next = nextAgent(this.state.agents, current, direction);
     if (next === undefined) {
       this.showNotice('No selectable agents on this server.', 'warn');
@@ -3366,19 +3389,65 @@ export class AppController {
       this.setState('overview', 'agent', agentID);
       return;
     }
-    // Optimistic footer update, confirmed by the summary refetch.
-    this.setState('sessions', this.keyFor(session.serverID, session.id), {
-      ...session,
-      agent: agentID,
-    });
+    // Optimistic footer update, confirmed by the summary refetch. If the server rejects the
+    // switch, restore the previously confirmed agent instead of leaving a local-only lie (#123).
+    const key = this.keyFor(session.serverID, session.id);
+    this.setState('sessions', key, { ...session, agent: agentID });
     try {
       await this.backend.switchAgent(session.id, agentID);
-      if (this.state.running[this.keyFor(session.serverID, session.id)] === true)
-        this.showNotice(`Agent: ${agentID} (next turn)`, 'dim');
+      if (this.state.running[key] === true) this.showNotice(`Agent: ${agentID} (next turn)`, 'dim');
     } catch (error) {
+      // Restore the whole pre-switch summary: `agent` is an optional property and the store
+      // cannot represent "absent" under exactOptionalPropertyTypes. `refreshSummary` below
+      // then reconciles with the server's confirmed state.
+      this.setState('sessions', key, session);
       this.showNotice(errorText(error), 'error');
     }
     await this.refreshSummary(session.id);
+  }
+
+  // ---------------------------------------------------------------- agent picker (#123)
+
+  async openAgentPicker(): Promise<void> {
+    if (!(await this.ensureCatalog(this.currentDirectory()))) return;
+    this.setOverlay({ kind: 'agent-picker', query: '', index: 0 });
+  }
+
+  /** Every selectable agent, filtered by query; the picker never narrows to a guessed scope. */
+  agentChoices(query: string) {
+    return filterAgents(this.state.agents, query);
+  }
+
+  /** The agent shown as current in the picker, for both sessions and new-session defaults. */
+  currentAgentID(): string | undefined {
+    return this.currentSession()?.agent ?? this.state.overview.agent;
+  }
+
+  setAgentPickerQuery(query: string): void {
+    this.setState('overlay', { kind: 'agent-picker', query, index: 0 });
+  }
+
+  selectAgentPickerIndex(index: number): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'agent-picker') return;
+    this.setState('overlay', { ...overlay, index });
+  }
+
+  moveAgentPicker(direction: -1 | 1): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'agent-picker') return;
+    const count = this.agentChoices(overlay.query).length;
+    if (count === 0) return;
+    this.setState('overlay', { ...overlay, index: (overlay.index + direction + count) % count });
+  }
+
+  async acceptAgentPicker(): Promise<void> {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'agent-picker') return;
+    const choices = this.agentChoices(overlay.query);
+    const choice = choices[overlay.index];
+    this.setOverlay({ kind: 'none' });
+    if (choice !== undefined) await this.setAgent(choice.id);
   }
 
   async openModelPicker(): Promise<void> {

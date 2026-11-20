@@ -81,6 +81,9 @@ function runAction(controller: AppController, action: ActionID, services: Router
     case 'agent.cyclePrevious':
       void controller.cycleAgent(-1);
       return true;
+    case 'agent.pick':
+      void controller.openAgentPicker();
+      return true;
     case 'model.pick':
       void controller.openModelPicker();
       return true;
@@ -202,6 +205,13 @@ function routeOverlay(controller: AppController, keymap: Keymap, key: KeyInput):
       else if (key.name === 'return') void controller.acceptModelPicker();
       else if (key.name === 'backspace') controller.setModelPickerQuery(overlay.query.slice(0, -1));
       else if (isPrintable(key)) controller.setModelPickerQuery(overlay.query + key.text);
+      return true;
+    case 'agent-picker':
+      if (key.name === 'up') controller.moveAgentPicker(-1);
+      else if (key.name === 'down') controller.moveAgentPicker(1);
+      else if (key.name === 'return') void controller.acceptAgentPicker();
+      else if (key.name === 'backspace') controller.setAgentPickerQuery(overlay.query.slice(0, -1));
+      else if (isPrintable(key)) controller.setAgentPickerQuery(overlay.query + key.text);
       return true;
     case 'history-search':
       if (actionFor(keymap, key) === 'history.search') controller.openHistorySearch();

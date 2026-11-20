@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 
-import { type AgentDescriptor, defaultAgent, nextAgent, selectableAgents } from './agent-cycle.ts';
+import {
+  type AgentDescriptor,
+  defaultAgent,
+  filterAgents,
+  nextAgent,
+  selectableAgents,
+} from './agent-cycle.ts';
 import { groupRows, groupSessions } from './overview-groups.ts';
 import { directoryKey, directoryName, isWithin } from './path-identity.ts';
 import type { SessionSummary } from './session.ts';
@@ -105,6 +111,29 @@ describe('agent cycle', () => {
   test('defaults to build, else first selectable', () => {
     expect(defaultAgent(ordered, 'build')?.id).toBe('build');
     expect(defaultAgent(ordered.slice(1), 'build')?.id).toBe('plan');
+  });
+  test('backend result order and duplicates cannot destabilize the cycle (#123)', () => {
+    const shuffled = [...agents]
+      .toReversed()
+      .concat([{ id: 'zeta', name: 'Zeta', mode: 'primary', hidden: false }]);
+    expect(selectableAgents(shuffled, ['build', 'plan']).map((agent) => agent.id)).toEqual([
+      'build',
+      'plan',
+      'alpha',
+      'zeta',
+    ]);
+  });
+  test('picker filters by id, name and description in stable order (#123)', () => {
+    const withDescriptions: AgentDescriptor[] = [
+      { id: 'build', name: 'Build', mode: 'primary', hidden: false, description: 'Write code' },
+      { id: 'review', name: 'Reviewer', mode: 'primary', hidden: false, description: 'Read code' },
+    ];
+    expect(filterAgents(withDescriptions, 'read').map((agent) => agent.id)).toEqual(['review']);
+    expect(filterAgents(withDescriptions, 'code').map((agent) => agent.id)).toEqual([
+      'build',
+      'review',
+    ]);
+    expect(filterAgents(withDescriptions, '')).toEqual(withDescriptions);
   });
 });
 

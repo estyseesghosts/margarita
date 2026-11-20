@@ -202,6 +202,50 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
           );
         }}
       </Match>
+      <Match when={state.overlay.kind === 'agent-picker' ? state.overlay : undefined}>
+        {(overlay: Accessor<Extract<Overlay, { kind: 'agent-picker' }>>) => {
+          const choices = () => props.controller.agentChoices(overlay().query);
+          const start = () => Math.max(0, overlay().index - visibleRows + 1);
+          const current = () => props.controller.currentAgentID();
+          return (
+            <box
+              {...frame(
+                state.route.kind === 'conversation'
+                  ? 'Agent · type to filter · Enter select'
+                  : 'Agent for new sessions · type to filter · Enter select',
+              )}
+            >
+              <text fg={props.theme.text}>{`> ${overlay().query}`}</text>
+              <Show
+                when={choices().length > 0}
+                fallback={<text fg={dim()}>No matching agents.</text>}
+              >
+                <For each={choices().slice(start(), start() + visibleRows)}>
+                  {(agent, index) => {
+                    const absolute = () => start() + index();
+                    const selected = () => absolute() === overlay().index;
+                    const active = () => agent.id === current();
+                    return (
+                      <text
+                        fg={selected() ? props.theme.accent : props.theme.text}
+                        onMouseDown={() => {
+                          props.controller.selectAgentPickerIndex(absolute());
+                          void props.controller.acceptAgentPicker();
+                        }}
+                      >
+                        {`${selected() ? '❯' : ' '} ${agent.id}`}
+                        <span style={{ fg: dim() }}>
+                          {`  ${active() ? '(current) ' : ''}${agent.description ?? ''}`}
+                        </span>
+                      </text>
+                    );
+                  }}
+                </For>
+              </Show>
+            </box>
+          );
+        }}
+      </Match>
       <Match when={state.overlay.kind === 'tasks' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'tasks' }>>) => (
           <TasksDialog

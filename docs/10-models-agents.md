@@ -2,11 +2,37 @@
 
 ## Agent behavior (intentional divergence from Claude Code)
 
-`Shift+Tab` cycles **OpenCode agents**, not permission modes. Newly created sessions start with **`build`** if present in `GET /api/agent`; fallback to the server default only if Build is unavailable, with an unobtrusive explanatory status. Initial list should include server-known `build` and `plan` (where configured) and any user-defined *primary/selectable* agents; exclude disabled, hidden and subagent-only entries unless shown in separate picker. OpenCode agents can be customized/disabled: [Agents docs](https://opencode.ai/docs/agents/). Server agent switch route: [`session.switchAgent`](https://opencode.ai/docs/api).
+`Shift+Tab` cycles **OpenCode agents**, not permission modes. Newly created sessions leave the
+agent unset unless the user picks one, so the **server's effective `default_agent`** (which may
+be `build`, `plan` or a custom project agent) wins; this respects OpenCode's directory-scoped
+config merging instead of hard-coding a frontend preference. The list includes every server-known
+primary/selectable agent — built-ins, global and project-local — and excludes disabled, hidden
+and subagent-only entries from both the cycle and the picker. OpenCode agents can be
+customized/disabled: [Agents docs](https://opencode.ai/docs/agents/). Server agent switch route:
+[`session.switchAgent`](https://opencode.ai/docs/api).
 
 Agent cycle is ordered by explicit config first (`build`, `plan`, then stable alphabetical custom agent IDs), not backend response ordering, and wraps around. `Shift+Tab` after a session reattach should use the actual selected agent from server, not frontend's remembered value. If agent switched while running, selection applies to **subsequent provider turns**; show a tiny `Agent: plan (next turn)` hint if not immediate. Do not interrupt execution implicitly.
 
-Custom agents later: abstract the UI around `AgentDescriptor` (`id`, `displayName`, `selectable`, `description`, `permissions`) without embedding assumptions that `build` and `plan` are eternal. A future default agent set may be bundled as optional configuration to OpenCode server. Until then reuse server agents; don't fork core prompts. [OpenCode agents configuration](https://opencode.ai/docs/agents/).
+Custom agents are supported through the searchable **F3 / `/agent` picker**, which lists every
+selectable agent returned by the server's location-scoped `agent.list` (built-ins, global and
+project-local, including nested IDs). Rows show the agent ID and description; the current
+agent is marked. `Shift+Tab` / `Alt+Shift+Tab` remain the quick cycle over the same
+de-duplicated, alphabetically stable set, so backend result ordering never changes the cycle.
+A server-rejected switch restores the previously confirmed agent, and an agent that disappears
+or becomes hidden/disabled is never silently replaced — the user is asked to pick another.
+
+**Provenance limitation (#123).** The pinned `@opencode/client@2.3.0` `AgentInfo` exposes
+`id`, `name`, `model`, `request`, `system`, `description`, `mode`, `hidden`, `color`, `steps`
+and `permissions` — **no source/scope field**. There is therefore no supported way for a
+terminal client to tell a project-defined agent from a global or built-in one, and guessing
+from IDs or reading config files on Margarita's own machine would be wrong for remote servers.
+Margarita deliberately cycles and offers the **full selectable catalog** instead of applying a
+project-only filter it cannot verify. If a future server API exposes provenance, the quick
+cycle can narrow to the project-defined set without changing the picker.
+
+New sessions leave `agent` unset when the user has not chosen one, so the **server's own
+`default_agent`** wins; an explicit choice or CLI flag overrides it. Existing sessions are
+never moved automatically. [OpenCode agents configuration](https://opencode.ai/docs/agents/).
 
 ## Provider and model selection
 

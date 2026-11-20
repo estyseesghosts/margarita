@@ -14,12 +14,34 @@ export function selectableAgents(
   agents: readonly AgentDescriptor[],
   preferredOrder: readonly string[],
 ): AgentDescriptor[] {
-  const selectable = agents.filter((agent) => !agent.hidden && agent.mode !== 'subagent');
-  const preferred = preferredOrder.flatMap((id) => selectable.filter((agent) => agent.id === id));
-  const rest = selectable
+  // Backend result order is not a contract. De-duplicate by ID and sort the remainder so
+  // cycling and the picker are stable across refreshes, hosts and catalog ordering (#123).
+  const byID = new Map<string, AgentDescriptor>();
+  for (const agent of agents) {
+    if (agent.hidden || agent.mode === 'subagent') continue;
+    if (!byID.has(agent.id)) byID.set(agent.id, agent);
+  }
+  const preferred = preferredOrder.flatMap((id) => {
+    const agent = byID.get(id);
+    return agent === undefined ? [] : [agent];
+  });
+  const rest = [...byID.values()]
     .filter((agent) => !preferredOrder.includes(agent.id))
     .toSorted((left, right) => left.id.localeCompare(right.id));
   return [...preferred, ...rest];
+}
+
+/** Picker rows matching all whitespace-separated query tokens, in stable cycle order. */
+export function filterAgents(agents: readonly AgentDescriptor[], query: string): AgentDescriptor[] {
+  const tokens = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token !== '');
+  if (tokens.length === 0) return [...agents];
+  return agents.filter((agent) => {
+    const haystack = `${agent.id} ${agent.name} ${agent.description ?? ''}`.toLowerCase();
+    return tokens.every((token) => haystack.includes(token));
+  });
 }
 
 /** Next agent after `current`, wrapping. Unknown current starts at the first agent. */
