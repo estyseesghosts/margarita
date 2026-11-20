@@ -29,6 +29,16 @@ function footerY(frame: string): number {
   return frame.split('\n').findIndex((line) => line.includes('$0.00'));
 }
 
+/** 0-indexed position of a footer segment's text, searched from the bottom of the frame. */
+function footerPoint(frame: string, needle: string): [number, number] {
+  const lines = frame.split('\n');
+  for (let y = lines.length - 1; y >= 0; y -= 1) {
+    const x = lines[y]!.indexOf(needle);
+    if (x >= 0 && lines[y]!.includes('·')) return [x, y];
+  }
+  throw new Error(`footer segment ${needle} not found:\n${frame}`);
+}
+
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let current: Setup | undefined;
 
@@ -2259,5 +2269,86 @@ test('rewind picker lists earlier prompts and shows file scope and honest limits
   expect(frame).toContain('Files only');
   expect(frame).toContain('no redo');
   expect(backend.calls.some((call) => call.name === 'stageRevert')).toBe(false);
+  controller.dispose();
+});
+
+test('clicking agent, model and context footer segments opens the right overlay (#124)', async () => {
+  const backend = backendWithSession();
+  backend.sessions = [
+    {
+      ...backend.sessions[0]!,
+      agent: 'agentX',
+      model: { providerID: 'opencode', modelID: 'longcat' },
+    },
+  ];
+  backend.models = [
+    { providerID: 'opencode', modelID: 'longcat', name: 'Longcat', enabled: true, variants: [] },
+  ];
+  backend.messages = {
+    ses_a: [
+      { kind: 'user', id: 'u1', createdAt: 1, text: 'why?', attachments: [] },
+      {
+        kind: 'assistant',
+        id: 'a1',
+        createdAt: 2,
+        completedAt: 3,
+        agent: 'agentX',
+        model: { providerID: 'opencode', modelID: 'longcat' },
+        parts: [],
+        usage: { input: 120, output: 30, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    ],
+  };
+  const { controller, setup } = await mount(backend);
+  controller.openSession('ses_a');
+  await settle(setup);
+
+  const clickFooter = async (needle: string) => {
+    const [x, y] = footerPoint(setup.captureCharFrame(), needle);
+    await setup.mockMouse.click(x, y);
+    await settle(setup);
+  };
+
+  await setup.mockInput.typeText('keep this draft');
+  await settle(setup);
+
+  await clickFooter('agentX');
+  expect(controller.state.overlay.kind).toBe('agent-picker');
+  expect(controller.state.composer.text).toBe('keep this draft');
+  controller.closeOverlay();
+  await settle(setup);
+
+  await clickFooter('longcat');
+  expect(controller.state.overlay.kind).toBe('model-picker');
+  expect(controller.state.composer.text).toBe('keep this draft');
+  controller.closeOverlay();
+  await settle(setup);
+
+  await clickFooter('ctx');
+  expect(controller.state.overlay.kind).toBe('usage');
+  expect(setup.captureCharFrame()).toContain('session analytics');
+  expect(controller.state.composer.text).toBe('keep this draft');
+  controller.dispose();
+});
+
+test('/usage and a context click render the same analytics view (#124)', async () => {
+  const backend = backendWithSession();
+  const { controller, setup } = await mount(backend);
+  controller.openSession('ses_a');
+  await settle(setup);
+
+  controller.setComposer(composerFrom('/usage'));
+  setup.mockInput.pressEnter();
+  await settle(setup);
+  const fromCommand = setup.captureCharFrame();
+  expect(fromCommand).toContain('session analytics');
+  expect(fromCommand).toContain('Lifetime server totals');
+  controller.closeOverlay();
+  await settle(setup);
+
+  controller.activateFooter('context');
+  await settle(setup);
+  expect(setup.captureCharFrame()).toContain('session analytics');
+  expect(setup.captureCharFrame()).toContain('Lifetime server totals');
   controller.dispose();
 });

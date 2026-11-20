@@ -17,14 +17,27 @@ export type FooterFacts = Readonly<{
    * Cumulative session tokens are NOT occupancy and must never be used here.
    */
   contextOccupancy?: number;
+  /** Active-context tokens from the latest step, shown without a percentage when no limit is known. */
+  contextTokens?: number;
 }>;
 
 export type FooterSegmentKind =
   'agent' | 'model' | 'state' | 'queued' | 'goal' | 'context' | 'tokens' | 'cost' | 'separator';
 
-export type FooterSegment = Readonly<{ text: string; kind: FooterSegmentKind }>;
+/** Stable identifiers for the three clickable footer controls (#124). */
+export type FooterAction = 'agent' | 'model' | 'context';
 
-type Part = Readonly<{ text: string; kind: Exclude<FooterSegmentKind, 'separator'> }>;
+export type FooterSegment = Readonly<{
+  text: string;
+  kind: FooterSegmentKind;
+  action?: FooterAction;
+}>;
+
+type Part = Readonly<{
+  text: string;
+  kind: Exclude<FooterSegmentKind, 'separator'>;
+  action?: FooterAction;
+}>;
 
 /** Single-line footer fields, degrading with width. Token figures are cumulative session usage. */
 function partsFor(facts: FooterFacts): (Part | undefined)[][] {
@@ -38,25 +51,38 @@ function partsFor(facts: FooterFacts): (Part | undefined)[][] {
       ? '—'
       : `${mark}${formatTokenCount(facts.tokens.input + facts.tokens.output)}`;
   const cost = `${mark}${formatCost(facts.cost)}`;
-  const agent: Part = { text: facts.agent ?? '—', kind: 'agent' };
+  const agent: Part = { text: facts.agent ?? '—', kind: 'agent', action: 'agent' };
   const model: Part = {
     text:
       facts.model === undefined
         ? 'default model'
         : `${facts.model.modelID}${facts.model.variant === undefined ? '' : `#${facts.model.variant}`}`,
     kind: 'model',
+    action: 'model',
   };
   const variant: Part | undefined =
-    facts.model?.variant === undefined ? undefined : { text: facts.model.variant, kind: 'model' };
+    facts.model?.variant === undefined
+      ? undefined
+      : { text: facts.model.variant, kind: 'model', action: 'model' };
   const state: Part = { text: facts.state, kind: 'state' };
   const queued: Part | undefined =
     facts.queued > 0 ? { text: `${facts.queued} queued`, kind: 'queued' } : undefined;
   const goal: Part | undefined =
     facts.goal === undefined || facts.goal === '' ? undefined : { text: facts.goal, kind: 'goal' };
   const context: Part | undefined =
-    facts.contextOccupancy === undefined
-      ? undefined
-      : { text: `${Math.round(facts.contextOccupancy)}% context`, kind: 'context' };
+    facts.contextOccupancy !== undefined
+      ? {
+          text: `${Math.round(facts.contextOccupancy)}% context`,
+          kind: 'context',
+          action: 'context',
+        }
+      : facts.contextTokens === undefined
+        ? undefined
+        : {
+            text: `${formatTokenCount(facts.contextTokens)} ctx`,
+            kind: 'context',
+            action: 'context',
+          };
   const tokensLongPart: Part = { text: tokensLong, kind: 'tokens' };
   const tokensShortPart: Part = { text: tokensShort, kind: 'tokens' };
   const costPart: Part = { text: cost, kind: 'cost' };

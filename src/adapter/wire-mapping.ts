@@ -101,12 +101,14 @@ export function toAgentDescriptor(agent: AgentInfo): AgentDescriptor {
 }
 
 export function toCatalogModel(model: ModelInfo): CatalogModel {
+  const contextLimit = finite(model.limit?.context);
   return {
     providerID: model.providerID,
     modelID: model.id,
     name: model.name,
     enabled: model.enabled,
     variants: model.variants.map((variant) => variant.id),
+    ...(contextLimit === undefined ? {} : { contextLimit }),
   };
 }
 
@@ -311,6 +313,9 @@ export function toTranscriptMessage(
       };
     case 'assistant': {
       const model = toModelSelection(message.model) ?? { providerID: '?', modelID: '?' };
+      // Keep the full per-step token categories for active-context accounting (#124) instead
+      // of discarding everything but reasoning, as the footer used to.
+      const usage = readTokens(message.tokens);
       return {
         kind: 'assistant',
         id: message.id,
@@ -320,6 +325,7 @@ export function toTranscriptMessage(
         parts: toAssistantParts(message, mapping),
         ...(message.time.completed === undefined ? {} : { completedAt: message.time.completed }),
         ...(message.tokens === undefined ? {} : { reasoningTokens: message.tokens.reasoning }),
+        ...(usage === undefined ? {} : { usage }),
         ...(message.error === undefined
           ? {}
           : { error: sanitizeTerminalText(message.error.message) }),

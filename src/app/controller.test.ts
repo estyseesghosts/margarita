@@ -4600,7 +4600,7 @@ describe('rewind prompt selection (#102)', () => {
   });
 
   test('rewind is refused while the session is running', async () => {
-    const { controller } = harness();
+    const { controller } = usageHarness();
     await attach(controller, 'ses_a');
     controller.onEvents(
       'local',
@@ -4621,6 +4621,95 @@ describe('rewind prompt selection (#102)', () => {
     expect(controller.state.rewindPending).toBe(false);
     expect(backend.calls.some((call) => call.name === 'stageRevert')).toBe(false);
     expect(backend.calls.some((call) => call.name === 'commitRevert')).toBe(false);
+    controller.dispose();
+  });
+});
+
+function usageHarness() {
+  const backend = new FakeBackend();
+  backend.sessions = [
+    {
+      ...fakeSession('ses_a'),
+      tokens: { input: 40_000, output: 5_000, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      cost: 0.5,
+    },
+  ];
+  backend.models = [
+    { providerID: 'opencode', modelID: 'longcat', name: 'Longcat', enabled: true, variants: [] },
+  ];
+  backend.messages = {
+    ses_a: [
+      { kind: 'user', id: 'u1', createdAt: 1, text: 'go', attachments: [] },
+      {
+        kind: 'assistant',
+        id: 'a1',
+        createdAt: 2,
+        completedAt: 3,
+        agent: 'build',
+        model: { providerID: 'opencode', modelID: 'longcat' },
+        parts: [
+          {
+            kind: 'tool',
+            tool: { id: 't1', name: 'read', status: 'completed', input: {}, startedAt: 2 },
+          },
+        ],
+        usage: { input: 120, output: 30, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    ],
+  };
+  const controller = makeController(async () => [], backend);
+  return { backend, controller };
+}
+
+describe('session usage analytics and footer actions (#124)', () => {
+  test('usageAnalytics is server-qualified and exposes context, lifetime and activity', async () => {
+    const { controller } = usageHarness();
+    await attach(controller, 'ses_a');
+    const analytics = controller.usageAnalytics();
+    expect(analytics.sessionID).toBe('ses_a');
+    expect(analytics.serverID).toBe('local');
+    expect(analytics.context.status).toBe('known');
+    expect(analytics.context.tokens).toBe(150);
+    expect(analytics.lifetime?.input).toBe(40_000);
+    expect(analytics.cost).toBe(0.5);
+    expect(analytics.toolCalls).toBe(1);
+    expect(analytics.toolCategories.read).toBe(1);
+    controller.dispose();
+  });
+
+  test('footer actions open the right overlay and are ignored behind a dialog', async () => {
+    const { controller } = usageHarness();
+    await attach(controller, 'ses_a');
+
+    controller.activateFooter('context');
+    expect(controller.state.overlay.kind).toBe('usage');
+    controller.closeOverlay();
+
+    controller.activateFooter('agent');
+    await flush();
+    expect(controller.state.overlay.kind).toBe('agent-picker');
+    controller.closeOverlay();
+
+    controller.activateFooter('model');
+    await flush();
+    expect(controller.state.overlay.kind).toBe('model-picker');
+    controller.closeOverlay();
+
+    // A dialog in front swallows footer clicks: no picker switch, no draft mutation.
+    controller.setComposer(composerFrom('keep me'));
+    controller.setOverlay({ kind: 'help' });
+    controller.activateFooter('agent');
+    expect(controller.state.overlay.kind).toBe('help');
+    expect(controller.state.composer.text).toBe('keep me');
+    controller.dispose();
+  });
+
+  test('/usage and a context click resolve to the same overlay', async () => {
+    const { controller } = usageHarness();
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom('/usage'));
+    await controller.submit();
+    expect(controller.state.overlay).toEqual({ kind: 'usage' });
     controller.dispose();
   });
 });

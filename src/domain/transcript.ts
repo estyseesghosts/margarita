@@ -1,7 +1,7 @@
 import type { ExecutionMarker } from './execution-segment.ts';
 import type { ModelSelection } from './model-ref.ts';
 import { sanitizeTerminalText } from './sanitize-text.ts';
-import { assertNever } from './session.ts';
+import { assertNever, type TokenUsage } from './session.ts';
 import { truncatePrompt } from './sticky-prompt.ts';
 import type { WorkerJob } from './worker.ts';
 
@@ -45,6 +45,8 @@ export type TranscriptMessage =
       model: ModelSelection;
       parts: readonly AssistantPart[];
       reasoningTokens?: number;
+      /** Full per-step usage reported by the server, used for active-context accounting (#124). */
+      usage?: TokenUsage;
       error?: string;
     }
   | {

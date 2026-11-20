@@ -5,7 +5,12 @@ import type { Completion, Notice } from '../app/app-state.ts';
 import type { AppController } from '../app/controller.ts';
 import { attachmentLabel } from '../domain/attachment.ts';
 import { contextSeverity } from '../domain/context-occupancy.ts';
-import { type FooterFacts, type FooterSegment, footerSegments } from '../domain/footer.ts';
+import {
+  type FooterAction,
+  type FooterFacts,
+  type FooterSegment,
+  footerSegments,
+} from '../domain/footer.ts';
 import { goalBadge } from '../domain/native-goal.ts';
 import { directoryName } from '../domain/path-identity.ts';
 import { executionLabel } from '../domain/session.ts';
@@ -94,6 +99,9 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
     }
     const session = view.session;
     const badge = goalBadge(view.nativeGoal, view.awaitingSteer);
+    // The context meter is the latest step's occupancy, never cumulative session tokens.
+    // While a compaction is pending there is no confirmed reading, so show no meter.
+    const context = props.controller.usageAnalytics().context;
     return {
       ...(session?.agent === undefined ? {} : { agent: session.agent }),
       ...(session?.model === undefined ? {} : { model: session.model }),
@@ -103,6 +111,12 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
       queued: view.queued.length,
       stale: view.stream !== 'live',
       ...(badge === '' ? {} : { goal: badge }),
+      ...(context.status !== 'known'
+        ? {}
+        : {
+            ...(context.occupancy === undefined ? {} : { contextOccupancy: context.occupancy }),
+            ...(context.tokens === undefined ? {} : { contextTokens: context.tokens }),
+          }),
     };
   };
   const segments = () => footerSegments(facts(), props.width - 2);
@@ -138,11 +152,23 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
           </text>
         )}
       </Show>
-      <text fg={props.theme.dim}>
+      <box flexDirection="row">
         <For each={segments()}>
-          {(segment) => <span style={{ fg: segmentColor(segment) }}>{segment.text}</span>}
+          {(segment) => {
+            const action: FooterAction | undefined = segment.action;
+            return (
+              <text
+                fg={segmentColor(segment)}
+                {...(action === undefined
+                  ? {}
+                  : { onMouseDown: () => props.controller.activateFooter(action) })}
+              >
+                {segment.text}
+              </text>
+            );
+          }}
         </For>
-      </text>
+      </box>
     </box>
   );
 }

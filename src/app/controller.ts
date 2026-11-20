@@ -49,6 +49,7 @@ import {
   rankPaths,
   withLineRange,
 } from '../domain/file-reference.ts';
+import { type FooterAction } from '../domain/footer.ts';
 import {
   buildAnswer,
   editorKey,
@@ -142,6 +143,7 @@ import {
   type TranscriptNode,
   transcriptWindowStep,
 } from '../domain/transcript.ts';
+import { projectUsage, type UsageAnalytics } from '../domain/usage-analytics.ts';
 import { type WorkerJob, type WorkerNode, workerNodes } from '../domain/worker.ts';
 import {
   type AppState,
@@ -494,6 +496,45 @@ export class AppController {
       stream: this.streamStatusOf(route.serverID),
       execution: this.executionOf(route.sessionID, route.serverID),
     };
+  }
+
+  /**
+   * One pure analytics projector feeds both the context meter in the footer and the `/usage`
+   * summary, so clicking context and typing `/usage` can never disagree (#124).
+   */
+  usageAnalytics(): UsageAnalytics {
+    const route = this.state.route;
+    const serverID = route.kind === 'conversation' ? route.serverID : this.serverID;
+    const sessionID = route.kind === 'conversation' ? route.sessionID : '';
+    const key = this.keyFor(serverID, sessionID);
+    const session = this.state.sessions[key];
+    const view = this.currentView();
+    return projectUsage({
+      serverID,
+      sessionID,
+      messages: this.state.transcripts[key]?.messages ?? [],
+      ...(session?.tokens === undefined ? {} : { tokens: session.tokens }),
+      ...(session?.cost === undefined ? {} : { cost: session.cost }),
+      catalog: this.state.models,
+      mcpServers: this.mcpServersFor(serverID, session?.directory ?? ''),
+      ...(session?.revert === undefined ? {} : { revertMessageID: session.revert.messageID }),
+      stale: view?.stream !== 'live',
+    });
+  }
+
+  openUsage(): void {
+    this.setOverlay({ kind: 'usage' });
+  }
+
+  /**
+   * Footer mouse action. Ignored when any overlay is in front, so a click can never bypass a
+   * permission/form dialog, submit a draft, or change agent/model until the picker confirms.
+   */
+  activateFooter(action: FooterAction): void {
+    if (this.state.overlay.kind !== 'none') return;
+    if (action === 'agent') void this.openAgentPicker();
+    else if (action === 'model') void this.openModelPicker();
+    else this.openUsage();
   }
 
   /** Counts for the tab bar, based on the same classifier as the dot. */
@@ -3135,7 +3176,7 @@ export class AppController {
         this.toggleDetails();
         return;
       case 'usage':
-        this.setOverlay({ kind: 'usage' });
+        this.openUsage();
         return;
       case 'btw':
         this.showNotice(

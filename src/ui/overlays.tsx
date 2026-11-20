@@ -24,6 +24,11 @@ import type { Theme } from './theme.ts';
 
 const visibleRows = 10;
 
+/** Percentage for compact analytics rows; `N/A` when there is no denominator. */
+function analyticsPercent(value: number | undefined): string {
+  return value === undefined ? 'N/A' : `${Math.round(value)}%`;
+}
+
 /** Focused dialogs drawn above the composer. They are overlays, never routes. */
 export function OverlayView(props: { controller: AppController; keymap: Keymap; theme: Theme }) {
   const state = props.controller.state;
@@ -38,6 +43,22 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
     flexShrink: 0,
   });
   const dim = () => props.theme.dim;
+
+  // One projector feeds the footer meter and this summary, so /usage and a context click
+  // always show the same numbers (#124).
+  const usage = () => props.controller.usageAnalytics();
+  const contextLine = (): string => {
+    const context = usage().context;
+    if (context.status === 'pending') return 'Current context  pending after compaction…';
+    if (context.status === 'unknown' || context.tokens === undefined) {
+      return 'Current context  unknown (no valid assistant step with usage)';
+    }
+    const tokens = `Current context  ${formatTokenCount(context.tokens)}`;
+    if (context.limit === undefined || context.occupancy === undefined) {
+      return `${tokens} · model limit unknown`;
+    }
+    return `${tokens} / ${formatTokenCount(context.limit)} (${Math.round(context.occupancy)}%)`;
+  };
 
   return (
     <Switch>
@@ -74,44 +95,53 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
         </box>
       </Match>
       <Match when={state.overlay.kind === 'usage'}>
-        <box {...frame('Usage · server-reported')}>
+        <box {...frame('Usage · session analytics')}>
+          <text fg={props.theme.text}>
+            {`Session  ${usage().sessionID || 'none'} · ${usage().serverID}${usage().stale ? ' · stale' : ''}`}
+          </text>
+          <text fg={props.theme.text}>{contextLine()}</text>
+          <Show when={usage().context.sinceCompaction !== undefined}>
+            <text fg={dim()}>
+              {`Since last compaction  ${formatTokenCount(usage().context.sinceCompaction ?? 0)} · compactions ${usage().completedCompactions}`}
+            </text>
+          </Show>
+          <Show when={usage().lastCompactionAt !== undefined}>
+            <text fg={dim()}>
+              {`Last compaction  ${new Date(usage().lastCompactionAt ?? 0).toISOString()}`}
+            </text>
+          </Show>
+          <text fg={props.theme.text}>{'Lifetime server totals (never reset on compaction)'}</text>
           <Show
-            when={props.controller.currentSession()}
-            fallback={<text fg={dim()}>Open a session to see its usage.</text>}
+            when={usage().lifetime}
+            fallback={<text fg={dim()}>Token totals not reported.</text>}
           >
-            {(session: Accessor<SessionSummary>) => (
+            {(tokens: Accessor<TokenUsage>) => (
               <>
-                <text fg={props.theme.text}>{`Session spend  ${formatCost(session().cost)}`}</text>
-                <Show
-                  when={session().tokens}
-                  fallback={<text fg={dim()}>Token usage not reported.</text>}
-                >
-                  {(tokens: Accessor<TokenUsage>) => (
-                    <>
-                      <text
-                        fg={props.theme.text}
-                      >{`Input          ${formatTokenCount(tokens().input)}`}</text>
-                      <text
-                        fg={props.theme.text}
-                      >{`Output         ${formatTokenCount(tokens().output)}`}</text>
-                      <text
-                        fg={props.theme.text}
-                      >{`Reasoning      ${formatTokenCount(tokens().reasoning)}`}</text>
-                      <text
-                        fg={props.theme.text}
-                      >{`Cache read     ${formatTokenCount(tokens().cacheRead)}`}</text>
-                      <text
-                        fg={props.theme.text}
-                      >{`Cache write    ${formatTokenCount(tokens().cacheWrite)}`}</text>
-                    </>
-                  )}
-                </Show>
-                <text
-                  fg={dim()}
-                >{`Model  ${props.controller.describeModel(session().model)}`}</text>
+                <text fg={dim()}>
+                  {`  input ${formatTokenCount(tokens().input)} · output ${formatTokenCount(tokens().output)} · reasoning ${formatTokenCount(tokens().reasoning)}`}
+                </text>
+                <text fg={dim()}>
+                  {`  cache read ${formatTokenCount(tokens().cacheRead)} · cache write ${formatTokenCount(tokens().cacheWrite)}`}
+                </text>
               </>
             )}
           </Show>
+          <text fg={props.theme.text}>
+            {`Session spend  ${usage().cost === undefined ? 'not reported' : formatCost(usage().cost)} · server-reported, not an invoice`}
+          </text>
+          <text fg={props.theme.text}>{'Activity · loaded messages only'}</text>
+          <text fg={dim()}>
+            {`  tool turns ${usage().toolUsingTurns}/${usage().completedAssistantTurns} (${analyticsPercent(usage().toolTurnPercent)} of turns) · tool calls ${usage().toolCalls}`}
+          </text>
+          <text fg={dim()}>
+            {`  read ${usage().toolCategories.read} · search ${usage().toolCategories.search} · edit ${usage().toolCategories.edit} · shell ${usage().toolCategories.shell} · web ${usage().toolCategories.web} · delegate ${usage().toolCategories.delegate} · MCP ${usage().toolCategories.mcp} · other ${usage().toolCategories.other}`}
+          </text>
+          <text fg={dim()}>
+            {`  completed ${usage().toolCompleted} · failed ${usage().toolFailed} · running ${usage().toolOther} · failure ${analyticsPercent(usage().toolFailurePercent)} of known outcomes`}
+          </text>
+          <text fg={dim()}>
+            {'Tool stats cover loaded messages only; context uses the step model limit.'}
+          </text>
         </box>
       </Match>
       <Match when={state.overlay.kind === 'status'}>

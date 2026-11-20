@@ -55,4 +55,19 @@ describe('footerSegments', () => {
     const withContext = footerSegments({ ...facts, contextOccupancy: 92 }, 120);
     expect(withContext.find((segment) => segment.kind === 'context')?.text).toBe('92% context');
   });
+
+  test('agent, model and context carry stable click actions (#124)', () => {
+    const segments = footerSegments({ ...facts, contextOccupancy: 92 }, 120);
+    expect(segments.find((segment) => segment.kind === 'agent')?.action).toBe('agent');
+    expect(segments.find((segment) => segment.kind === 'model')?.action).toBe('model');
+    expect(segments.find((segment) => segment.kind === 'context')?.action).toBe('context');
+    expect(segments.filter((segment) => segment.kind === 'state')[0]?.action).toBeUndefined();
+  });
+
+  test('a known token count without a limit shows numeric context, never a fake percent', () => {
+    const segments = footerSegments({ ...facts, contextTokens: 12_300 }, 120);
+    const context = segments.find((segment) => segment.kind === 'context');
+    expect(context?.text).toBe('12k ctx');
+    expect(context?.action).toBe('context');
+  });
 });

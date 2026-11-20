@@ -7,6 +7,8 @@ export type CatalogModel = Readonly<{
   name: string;
   enabled: boolean;
   variants: readonly string[];
+  /** Model context-window size from `limit.context`, when the server reports it (#124). */
+  contextLimit?: number;
 }>;
 
 export type ModelRequest = Readonly<{
