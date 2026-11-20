@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { formatFooter } from './footer.ts';
+import { footerSegments, formatFooter } from './footer.ts';
 
 const facts = {
   agent: 'build',
@@ -38,5 +38,21 @@ describe('formatFooter', () => {
   });
   test('queued inputs are shown when there is room', () => {
     expect(formatFooter({ ...facts, queued: 2 }, 120)).toContain('2 queued');
+  });
+});
+
+describe('footerSegments', () => {
+  test('segments reconstruct the formatted line and carry semantic kinds', () => {
+    const segments = footerSegments(facts, 120);
+    expect(segments.map((segment) => segment.text).join('')).toBe(formatFooter(facts, 120));
+    expect(segments.find((segment) => segment.kind === 'agent')?.text).toBe('build');
+    expect(segments.find((segment) => segment.kind === 'model')?.text).toBe('gpt-6.1-sol#high');
+    expect(segments.filter((segment) => segment.kind === 'separator').length).toBeGreaterThan(0);
+  });
+
+  test('context occupancy is a distinct segment only when supplied', () => {
+    expect(footerSegments(facts, 120).some((segment) => segment.kind === 'context')).toBe(false);
+    const withContext = footerSegments({ ...facts, contextOccupancy: 92 }, 120);
+    expect(withContext.find((segment) => segment.kind === 'context')?.text).toBe('92% context');
   });
 });

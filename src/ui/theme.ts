@@ -9,6 +9,10 @@ export type Theme = Readonly<{
   error: string;
   warn: string;
   success: string;
+  /** Semantic agent colours; the palette is for deterministic custom-agent IDs. */
+  agentBuild: string;
+  agentPlan: string;
+  agentPalette: readonly string[];
   border: string;
   selectionBg: string;
   addedBg: string;
@@ -25,6 +29,9 @@ const dark: Theme = {
   error: '#ff6b6b',
   warn: '#e5c07b',
   success: '#7fc77f',
+  agentBuild: '#5aa9e6',
+  agentPlan: '#b58ce8',
+  agentPalette: ['#e5a44a', '#6fd08c', '#e07b9a', '#7ab8c1'],
   border: '#5a5a5a',
   selectionBg: '#444466',
   addedBg: '#1f3a26',
@@ -42,6 +49,9 @@ const light: Theme = {
   error: '#b00020',
   warn: '#7a5200',
   success: '#2d6a2d',
+  agentBuild: '#005a9c',
+  agentPlan: '#6b2d8f',
+  agentPalette: ['#8a4b00', '#226b3a', '#9c2b52', '#005f6b'],
   border: '#9a9a9a',
   selectionBg: '#d0d8f0',
   addedBg: '#d6f0d6',
@@ -59,6 +69,9 @@ const highContrast: Theme = {
   error: '#ff5555',
   warn: '#ffff00',
   success: '#55ff55',
+  agentBuild: '#00ffff',
+  agentPlan: '#ff00ff',
+  agentPalette: ['#ffff00', '#55ff55', '#ff5555', '#00aaff'],
   border: '#ffffff',
   selectionBg: '#0000aa',
   addedBg: '#003300',
@@ -75,6 +88,9 @@ const plain: Theme = {
   error: '#ffffff',
   warn: '#ffffff',
   success: '#ffffff',
+  agentBuild: '#ffffff',
+  agentPlan: '#ffffff',
+  agentPalette: ['#ffffff'],
   border: '#ffffff',
   selectionBg: '#000000',
   addedBg: '#000000',
