@@ -1773,28 +1773,148 @@ describe('createSession scopes agent/model to the target project (issue #108)', 
     }
   });
 
-  test('an agent/model invalid for the target project is scoped to its catalog before creation', async () => {
-    const { controller, backendA, modelA, modelB } = catalogController();
+  test('a selected model from another host fails closed instead of charging the default', async () => {
+    const { controller, backendA, modelB } = catalogController();
     try {
       await controller.bootstrap();
       controller.openOverview();
 
       selectRowForDirectory(controller, '/proj-a');
       await controller.loadCatalog('/proj-a', 'local');
-      // Set a model that belongs to host B while viewing host A's project.
       controller.setNewSessionDefaults(undefined, modelB);
       expect(controller.state.overview.model).toEqual(modelB);
 
-      await controller.createSessionWithPrompt(
+      expect(
+        await controller.createSessionWithPrompt(
+          { serverID: 'local', directory: '/proj-a' },
+          'prompt',
+        ),
+      ).toBeUndefined();
+
+      expect(backendA.calls.some((call) => call.name === 'createSession')).toBe(false);
+      expect(backendA.calls.some((call) => call.name === 'prompt')).toBe(false);
+      expect(controller.state.notice?.text).toContain('No prompt sent');
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('Alt+P pins the chosen variant on a local new session instead of using the default', async () => {
+    const { controller, backendA, modelA } = catalogController();
+    backendA.listModels = async (directory?: string) =>
+      directory === '/proj-a' ? [{ ...modelA, variants: ['high', 'low'] }] : [];
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      selectRowForDirectory(controller, '/proj-a');
+      await controller.loadCatalog('/proj-a', 'local');
+
+      await controller.openModelPicker();
+      controller.setModelPickerQuery('model-a');
+      controller.moveModelPicker(1); // base model, then #high
+      await controller.acceptModelPicker();
+      const chosen = { providerID: 'p', modelID: 'model-a', variant: 'high' };
+      expect(controller.state.overview.model).toEqual(chosen);
+
+      const id = await controller.createSessionWithPrompt(
         { serverID: 'local', directory: '/proj-a' },
         'prompt',
       );
-      await flush();
+      expect(id).toBeDefined();
+      expect(backendA.calls.filter((call) => call.name === 'createSession')[0]?.args[0]).toEqual({
+        directory: '/proj-a',
+        model: chosen,
+      });
+      expect(backendA.sessions.find((session) => session.id === id)?.model).toEqual(chosen);
+      expect(backendA.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    } finally {
+      controller.dispose();
+    }
+  });
 
-      const aCreate = backendA.calls.filter((call) => call.name === 'createSession');
-      expect(aCreate).toHaveLength(1);
-      // The invalid modelB is scoped to /proj-a's valid default (modelA), never sent as-is.
-      expect(aCreate[0]!.args[0]).toEqual({ directory: '/proj-a', model: modelA });
+  test('/model pins a remote model variant on the owning server, not its default', async () => {
+    const { controller, backendA, backendB, modelB } = catalogController();
+    backendB.listModels = async (directory?: string) =>
+      directory === '/proj-b' ? [{ ...modelB, variants: ['high'] }] : [];
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      selectRowForDirectory(controller, '/proj-b');
+      await controller.loadCatalog('/proj-b', 'srv_1');
+
+      controller.setComposer(composerFrom('/model p/model-b#high'));
+      await controller.submit();
+      const chosen = { providerID: 'p', modelID: 'model-b', variant: 'high' };
+      expect(controller.state.overview.model).toEqual(chosen);
+
+      const id = await controller.createSessionWithPrompt(
+        { serverID: 'srv_1', directory: '/proj-b' },
+        'prompt',
+      );
+      expect(id).toBeDefined();
+      expect(backendB.calls.filter((call) => call.name === 'createSession')[0]?.args[0]).toEqual({
+        directory: '/proj-b',
+        model: chosen,
+      });
+      expect(backendB.sessions.find((session) => session.id === id)?.model).toEqual(chosen);
+      expect(backendB.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+      expect(backendA.calls.some((call) => call.name === 'createSession')).toBe(false);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('invalid variant is rejected without creating a billable session', async () => {
+    const { controller, backendA } = catalogController();
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      selectRowForDirectory(controller, '/proj-a');
+      await controller.loadCatalog('/proj-a', 'local');
+      controller.setNewSessionDefaults(undefined, {
+        providerID: 'p',
+        modelID: 'model-a',
+        variant: 'nonexistent',
+      });
+
+      expect(
+        await controller.createSessionWithPrompt(
+          { serverID: 'local', directory: '/proj-a' },
+          'prompt',
+        ),
+      ).toBeUndefined();
+      expect(backendA.calls.some((call) => call.name === 'createSession')).toBe(false);
+      expect(backendA.calls.some((call) => call.name === 'prompt')).toBe(false);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('server ignoring an explicit model switch must not receive the first prompt', async () => {
+    const { controller, backendA } = catalogController();
+    const wrongModel = { providerID: 'p', modelID: 'gpt-terra' };
+    backendA.createSessionHook = async (args) => {
+      const session = { ...fakeSession('ses_wrong'), directory: args.directory, model: wrongModel };
+      backendA.sessions.push(session);
+      return session;
+    };
+    // Simulate a successful but ineffective v2 switchModel call.
+    backendA.switchModel = async () => {};
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      selectRowForDirectory(controller, '/proj-a');
+      await controller.loadCatalog('/proj-a', 'local');
+      controller.setNewSessionDefaults(undefined, { providerID: 'p', modelID: 'model-a' });
+
+      const id = await controller.createSessionWithPrompt(
+        { serverID: 'local', directory: '/proj-a' },
+        'unsent prompt',
+      );
+      expect(id).toBe('ses_wrong');
+      expect(backendA.calls.some((call) => call.name === 'prompt')).toBe(false);
+      expect(controller.state.notice?.text).toContain('Prompt not sent');
+      expect(controller.state.composer.text).toBe('');
     } finally {
       controller.dispose();
     }
