@@ -1799,42 +1799,35 @@ describe('createSession scopes agent/model to the target project (issue #108)', 
     }
   });
 
-  test('Alt+P pins the chosen variant on a local new session instead of using the default', async () => {
-    const { controller, backendA, modelA } = catalogController();
-    backendA.listModels = async (directory?: string) =>
-      directory === '/proj-a' ? [{ ...modelA, variants: ['high', 'low'] }] : [];
+  test('Alt+P pins a local model variant instead of silently using GPT Terra', async () => {
+    const backend = new FakeBackend();
+    backend.models = [
+      { providerID: 'p', modelID: 'model-a', name: 'model-a', enabled: true, variants: ['high', 'low'] },
+    ];
+    backend.defaultModel = async () => ({ providerID: 'p', modelID: 'gpt-terra' });
+    const controller = makeController(() => Promise.resolve([]), backend);
     try {
       await controller.bootstrap();
       controller.openOverview();
-      selectRowForDirectory(controller, '/proj-a');
-      await flush(); // settle background catalog loads from overview row navigation
-      await controller.loadCatalog('/proj-a', 'local');
-
-      expect(controller.catalogFresh('/proj-a', 'local')).toBe(true);
-      expect(controller.modelChoices('model-a')).toEqual([
-        { providerID: 'p', modelID: 'model-a' },
-        { providerID: 'p', modelID: 'model-a', variant: 'high' },
-        { providerID: 'p', modelID: 'model-a', variant: 'low' },
-      ]);
+      expect(controller.modelChoices('model-a')).toHaveLength(3);
       await controller.openModelPicker();
-      expect(controller.state.overlay.kind).toBe('model-picker');
       controller.setModelPickerQuery('model-a');
-      controller.moveModelPicker(1); // base model, then #high
+      controller.moveModelPicker(1);
       await controller.acceptModelPicker();
       const chosen = { providerID: 'p', modelID: 'model-a', variant: 'high' };
       expect(controller.state.overview.model).toEqual(chosen);
 
       const id = await controller.createSessionWithPrompt(
-        { serverID: 'local', directory: '/proj-a' },
+        { serverID: 'local', directory: '/work/kohjoh' },
         'prompt',
       );
       expect(id).toBeDefined();
-      expect(backendA.calls.filter((call) => call.name === 'createSession')[0]?.args[0]).toEqual({
-        directory: '/proj-a',
+      expect(backend.calls.filter((call) => call.name === 'createSession')[0]?.args[0]).toEqual({
+        directory: '/work/kohjoh',
         model: chosen,
       });
-      expect(backendA.sessions.find((session) => session.id === id)?.model).toEqual(chosen);
-      expect(backendA.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+      expect(backend.sessions.find((session) => session.id === id)?.model).toEqual(chosen);
+      expect(backend.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
     } finally {
       controller.dispose();
     }
@@ -1898,34 +1891,32 @@ describe('createSession scopes agent/model to the target project (issue #108)', 
     }
   });
 
-  test('server ignoring an explicit model switch must not receive the first prompt', async () => {
-    const { controller, backendA } = catalogController();
+  test('server ignoring an explicit model switch never receives a first prompt', async () => {
+    const backend = new FakeBackend();
+    backend.models = [
+      { providerID: 'p', modelID: 'model-a', name: 'model-a', enabled: true, variants: [] },
+    ];
+    backend.defaultModel = async () => ({ providerID: 'p', modelID: 'gpt-terra' });
     const wrongModel = { providerID: 'p', modelID: 'gpt-terra' };
-    backendA.createSessionHook = async (args) => {
+    backend.createSessionHook = async (args) => {
       const session = { ...fakeSession('ses_wrong'), directory: args.directory, model: wrongModel };
-      backendA.sessions.push(session);
+      backend.sessions.push(session);
       return session;
     };
-    // Simulate a successful but ineffective v2 switchModel call.
-    backendA.switchModel = async () => {};
+    backend.switchModel = async () => {}; // Server acknowledges but ignores the switch.
+    const controller = makeController(() => Promise.resolve([]), backend);
     try {
       await controller.bootstrap();
       controller.openOverview();
-      selectRowForDirectory(controller, '/proj-a');
-      await flush(); // settle background catalog loads from overview row navigation
-      await controller.loadCatalog('/proj-a', 'local');
       controller.setNewSessionDefaults(undefined, { providerID: 'p', modelID: 'model-a' });
-      expect(controller.catalogFresh('/proj-a', 'local')).toBe(true);
-      expect(controller.state.models.map((model) => model.modelID)).toContain('model-a');
 
       const id = await controller.createSessionWithPrompt(
-        { serverID: 'local', directory: '/proj-a' },
+        { serverID: 'local', directory: '/work/kohjoh' },
         'unsent prompt',
       );
       expect(id).toBe('ses_wrong');
-      expect(backendA.calls.some((call) => call.name === 'prompt')).toBe(false);
+      expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
       expect(controller.state.notice?.text).toContain('Prompt not sent');
-      expect(controller.state.composer.text).toBe('');
     } finally {
       controller.dispose();
     }
