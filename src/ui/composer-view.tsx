@@ -1,12 +1,9 @@
-import type { TextRenderable } from '@opentui/core';
-import { useRenderer } from '@opentui/solid';
 import type { Accessor } from 'solid-js';
-import { createEffect, For, onCleanup, Show } from 'solid-js';
+import { createSignal, For, onCleanup, Show } from 'solid-js';
 
 import type { Completion, Notice } from '../app/app-state.ts';
 import type { AppController } from '../app/controller.ts';
 import { attachmentLabel } from '../domain/attachment.ts';
-import { caretCell } from '../domain/caret-position.ts';
 import { contextSeverity } from '../domain/context-occupancy.ts';
 import { type FooterFacts, type FooterSegment, footerSegments } from '../domain/footer.ts';
 import { goalBadge } from '../domain/native-goal.ts';
@@ -15,12 +12,24 @@ import { executionLabel } from '../domain/session.ts';
 import { agentColor } from './agent-color.ts';
 import type { Theme } from './theme.ts';
 
-/** Prompt rule, composer and completion list. The caret is the terminal's real cursor. */
+/**
+ * Prompt rule, composer and completion list.
+ *
+ * The caret is painted as a thin glyph *inside* the composer renderable. It deliberately does
+ * not use the terminal's hardware cursor: OpenTUI owns that cursor and moves it during every
+ * frame paint, which left stray bars in transcript rows and welcome panels (#130). A painted
+ * caret is always at the insertion point and can never leak outside this box.
+ */
 export function ComposerView(props: { controller: AppController; theme: Theme; width: number }) {
   const state = props.controller.state;
-  const renderer = useRenderer();
-  let composerText: TextRenderable | undefined;
+  const [blinkOn, setBlinkOn] = createSignal(true);
+  const timer = setInterval(() => setBlinkOn((on) => !on), 530);
+  onCleanup(() => clearInterval(timer));
   const active = () => state.route.kind !== 'overview' || state.overview.focus === 'composer';
+  const ownsCaret = () => active() && state.overlay.kind === 'none';
+  const before = () => state.composer.text.slice(0, state.composer.cursor);
+  const after = () => state.composer.text.slice(state.composer.cursor);
+  const empty = () => state.composer.text === '';
   const placeholder = () =>
     state.route.kind === 'overview'
       ? `New session in ${directoryName(state.overview.project.directory)}`
@@ -28,21 +37,6 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
         ? `New session in ${directoryName(state.route.directory)} · ← overview`
         : '← overview · Shift+Tab agent · Ctrl+O details';
   const rule = () => '─'.repeat(Math.max(0, props.width));
-
-  createEffect(() => {
-    if (!active() || state.overlay.kind !== 'none' || composerText === undefined) {
-      renderer.setCursorPosition(0, 0, false);
-      return;
-    }
-    renderer.setCursorStyle({ style: 'line', blinking: true });
-    const { row, col } = caretCell(
-      state.composer.text,
-      state.composer.cursor,
-      Math.max(1, props.width - 2),
-    );
-    renderer.setCursorPosition(composerText.x + 2 + col, composerText.y + row, true);
-  });
-  onCleanup(() => renderer.setCursorPosition(0, 0, false));
 
   return (
     <box flexDirection="column" flexShrink={0}>
@@ -56,19 +50,12 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
       <text fg={props.theme.border}>{rule()}</text>
       <box flexDirection="row">
         <text fg={active() ? props.theme.text : props.theme.dim}>❯ </text>
-        <text
-          ref={(element: TextRenderable) => {
-            composerText = element;
-          }}
-          fg={
-            state.composer.text === ''
-              ? props.theme.dim
-              : active()
-                ? props.theme.text
-                : props.theme.dim
-          }
-        >
-          {state.composer.text === '' ? placeholder() : state.composer.text}
+        <text fg={empty() || !active() ? props.theme.dim : props.theme.text}>
+          {before()}
+          <Show when={ownsCaret()}>
+            <span style={{ fg: props.theme.accentLight }}>{blinkOn() ? '▏' : ' '}</span>
+          </Show>
+          {empty() ? placeholder() : after()}
         </text>
       </box>
       <text fg={props.theme.border}>{rule()}</text>

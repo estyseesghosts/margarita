@@ -187,6 +187,19 @@ describe('app', () => {
     expect(controller.state.route.kind).toBe('conversation');
   });
 
+  test('the caret is painted only on the composer line, never in the welcome panel (#130)', async () => {
+    const { controller, setup } = await mount(backendWithSession());
+    controller.startNewSession('/work/kohjoh');
+    await settle(setup);
+    const caretLines = setup
+      .captureCharFrame()
+      .split('\n')
+      .filter((line) => line.includes('▏'));
+    expect(caretLines).toHaveLength(1);
+    expect(caretLines[0]).toContain('❯');
+    controller.dispose();
+  });
+
   test('overview selects the first row; typing fills the prompt', async () => {
     const { controller, setup } = await mount(backendWithSession());
     controller.startNewSession('/work/kohjoh');
