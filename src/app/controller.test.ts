@@ -82,6 +82,64 @@ test('greeting is chosen once per route and stays stable (#128)', () => {
   controller.dispose();
 });
 
+describe('bounded draft undo/redo (#96)', () => {
+  test('undo and redo restore text and cursor, and a new edit invalidates redo', () => {
+    const controller = makeController(async () => []);
+    controller.setComposer(composerFrom('hello'));
+    controller.setComposer({ text: 'hello world', cursor: 11 });
+    controller.undo();
+    expect(controller.state.composer).toEqual(composerFrom('hello'));
+    controller.redo();
+    expect(controller.state.composer).toEqual({ text: 'hello world', cursor: 11 });
+    controller.undo();
+    controller.setComposer(composerFrom('new branch'));
+    controller.redo();
+    expect(controller.state.composer.text).toBe('new branch');
+    controller.dispose();
+  });
+
+  test('consecutive typing coalesces into one undo step', () => {
+    let time = 0;
+    const controller = makeController(
+      async () => [],
+      new FakeBackend(),
+      () => time,
+    );
+    controller.setComposer(composerFrom('h'));
+    time = 100;
+    controller.setComposer(composerFrom('he'));
+    time = 200;
+    controller.setComposer(composerFrom('hel'));
+    controller.undo();
+    expect(controller.state.composer.text).toBe('');
+    controller.redo();
+    expect(controller.state.composer.text).toBe('hel');
+    time = 1000;
+    controller.setComposer(composerFrom('x'));
+    controller.undo();
+    expect(controller.state.composer.text).toBe('hel');
+    controller.dispose();
+  });
+
+  test('undo/redo never touches attachments and histories are route-scoped', async () => {
+    const controller = makeController(async () => [], attachedBackend());
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom('first draft'));
+    controller.attachImage(pngBytes, 'image/png', 'shot.png');
+    controller.setComposer(composerFrom('first draft edited'));
+    controller.openOverview();
+    controller.setComposer(composerFrom('other draft'));
+    controller.undo();
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.attachments).toHaveLength(0);
+    controller.openSession('ses_a');
+    controller.undo();
+    expect(controller.state.composer.text).toBe('first draft');
+    expect(controller.state.attachments.map((item) => item.name)).toEqual(['shot.png']);
+    controller.dispose();
+  });
+});
+
 describe('@file completion', () => {
   test('shows only the latest query when requests resolve out of order', async () => {
     const scan = deferred<string[]>();

@@ -21,6 +21,8 @@ export const actionIDs = [
   'composer.stash',
   'composer.editor',
   'composer.newline',
+  'composer.undo',
+  'composer.redo',
   'composer.wordDeleteForward',
   'composer.yank',
   'composer.steer',
@@ -63,6 +65,9 @@ export const defaultBindings: Readonly<Record<ActionID, readonly string[]>> = {
   'composer.stash': ['ctrl+s'],
   'composer.editor': ['ctrl+g'],
   'composer.newline': ['ctrl+j'],
+  // Ctrl+Z is swallowed by some terminals; Alt+Z is the documented fallback.
+  'composer.undo': ['ctrl+z', 'alt+z'],
+  'composer.redo': ['ctrl+shift+z'],
   'composer.wordDeleteForward': ['alt+d'],
   'composer.yank': ['ctrl+y'],
   'composer.steer': ['f6', 'ctrl+enter', 'alt+enter'],

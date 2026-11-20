@@ -73,7 +73,7 @@ Define handling precedence: `modal > IME > paste transaction > autocomplete > se
 
 ## Draft and prompt editing
 
-- Undo/redo for editing, `Home/End`, `Ctrl+A/E`, word navigation `Alt+B/F`, deletion `Ctrl+W/U/K`, and yank/restore `Ctrl+Y` where terminals permit; these are *editing* conventions, not application chords.
+- Undo/redo for editing, `Home/End`, `Ctrl+A/E`, word navigation `Alt+B/F`, deletion `Ctrl+W/U/K`, and yank/restore `Ctrl+Y` where terminals permit; these are *editing* conventions, not application chords. Undo is `Ctrl+Z` with `Alt+Z` as the fallback for terminals that swallow Ctrl+Z; redo is `Ctrl+Shift+Z`. Undo history is bounded and scoped to each draft route; consecutive typing collapses into one step, pastes and editor replacements are atomic, and sending a prompt clears that route's history.
 - Insert Unicode grapheme clusters atomically; never split surrogate pairs or combining sequences on Backspace.
 - `Ctrl+W` removes the preceding whitespace-delimited unit and any whitespace immediately before the cursor, including line breaks. `Ctrl+Backspace` and `Alt+Backspace` skip preceding non-word graphemes then remove a run of letters, numbers, and underscores. Word movement uses the same grapheme-safe word boundaries.
 - `Alt+D` (`composer.wordDeleteForward`) removes one word forward at the cursor. Each kill (`Ctrl+W`, `Ctrl+U`, `Ctrl+K`, `Ctrl+Backspace`, `Alt+Backspace`, `Alt+D`) replaces the kill buffer; `Ctrl+Y` (`composer.yank`) inserts the last killed text at the cursor. The buffer is bounded to the last kill and never sent to the server.

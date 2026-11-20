@@ -143,6 +143,26 @@ import {
 } from './app-state.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 
+/** A point an edit can be undone/redone back to. Attachments are kept, never duplicated. */
+type UndoSnapshot = Readonly<{ composer: Composer }>;
+
+const undoLimit = 100;
+const typingCoalesceMs = 750;
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/** True when two texts differ by exactly one grapheme cluster (an insertion or deletion). */
+function isSingleGraphemeStep(before: string, after: string): boolean {
+  if (before === after) return false;
+  const a = [...graphemes.segment(before)].map((part) => part.segment);
+  const b = [...graphemes.segment(after)].map((part) => part.segment);
+  if (Math.abs(a.length - b.length) !== 1) return false;
+  let index = 0;
+  while (index < a.length && index < b.length && a[index] === b[index]) index += 1;
+  return b.length > a.length
+    ? a.slice(index).join('') === b.slice(index + 1).join('')
+    : a.slice(index + 1).join('') === b.slice(index).join('');
+}
+
 /** One row of the `/servers` list. Never contains a secret. */
 export type ServerListing = Readonly<{
   serverID: string;
@@ -263,6 +283,11 @@ export class AppController {
   /** Greetings chosen once per route; process-lifetime only, never sent to a server. */
   private readonly greetingCache = new Map<string, string>();
   private readonly recentGreetings: string[] = [];
+  /** Bounded, route-scoped undo/redo of user edits; never shared across drafts. */
+  private readonly undoStacks = new Map<string, UndoSnapshot[]>();
+  private readonly redoStacks = new Map<string, UndoSnapshot[]>();
+  private lastEditAt = 0;
+  private lastEditRoute = '';
   private readonly debugLog: DebugLog;
 
   /**
@@ -1988,7 +2013,64 @@ export class AppController {
 
   // ---------------------------------------------------------------- composer
 
+  /** Records a user edit so it can be undone; consecutive typing collapses into one step. */
+  private recordEdit(next: Composer): void {
+    const key = this.routeKey(this.state.route);
+    const before = this.state.composer;
+    if (before.text === next.text) return;
+    const coalesce =
+      this.lastEditRoute === key &&
+      this.now() - this.lastEditAt <= typingCoalesceMs &&
+      isSingleGraphemeStep(before.text, next.text);
+    if (!coalesce) {
+      const stack = this.undoStacks.get(key) ?? [];
+      stack.push({ composer: { ...before } });
+      if (stack.length > undoLimit) stack.shift();
+      this.undoStacks.set(key, stack);
+      this.redoStacks.set(key, []);
+    }
+    this.lastEditAt = this.now();
+    this.lastEditRoute = key;
+  }
+
+  /** Undo the last edit on this route; restoring does not touch attachments. */
+  undo(): void {
+    const key = this.routeKey(this.state.route);
+    const stack = this.undoStacks.get(key) ?? [];
+    const previous = stack.pop();
+    if (previous === undefined) return;
+    const redo = this.redoStacks.get(key) ?? [];
+    redo.push({ composer: { ...this.state.composer } });
+    this.undoStacks.set(key, stack);
+    this.redoStacks.set(key, redo);
+    this.lastEditRoute = '';
+    this.writeComposer(previous.composer);
+  }
+
+  /** Redo an edit that was just undone on this route. */
+  redo(): void {
+    const key = this.routeKey(this.state.route);
+    const stack = this.redoStacks.get(key) ?? [];
+    const next = stack.pop();
+    if (next === undefined) return;
+    const undo = this.undoStacks.get(key) ?? [];
+    undo.push({ composer: { ...this.state.composer } });
+    this.redoStacks.set(key, stack);
+    this.undoStacks.set(key, undo);
+    this.lastEditRoute = '';
+    this.writeComposer(next.composer);
+  }
+
+  /** Sending an acknowledged prompt checkpoints the draft: no undo across sent turns. */
+  private clearEdits(): void {
+    const key = this.routeKey(this.state.route);
+    this.undoStacks.delete(key);
+    this.redoStacks.delete(key);
+    this.lastEditRoute = '';
+  }
+
   setComposer(composer: Composer): void {
+    this.recordEdit(composer);
     batch(() => {
       this.writeComposer(composer);
       this.setState('exitArmed', false);
@@ -2477,6 +2559,7 @@ export class AppController {
     batch(() => {
       if (this.state.composer.text === submitted) {
         this.writeComposer(emptyComposer);
+        this.clearEdits();
         this.setState('completion', undefined);
         this.setState('focusedGroup', undefined);
       }

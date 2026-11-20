@@ -120,6 +120,12 @@ function runAction(controller: AppController, action: ActionID, services: Router
     case 'composer.newline':
       controller.setComposer(insertText(controller.state.composer, '\n'));
       return true;
+    case 'composer.undo':
+      controller.undo();
+      return true;
+    case 'composer.redo':
+      controller.redo();
+      return true;
     case 'composer.wordDeleteForward': {
       const composer = controller.state.composer;
       const next = deleteWordForward(composer);
