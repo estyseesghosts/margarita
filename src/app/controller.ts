@@ -65,6 +65,8 @@ import {
   setUserPlan,
   type TaskState,
 } from '../domain/goal-plan.ts';
+import { greetingPeriod } from '../domain/greeting-time.ts';
+import { selectGreeting } from '../domain/greetings.ts';
 import { formatModelRef, type ModelSelection, sameModel } from '../domain/model-ref.ts';
 import { resolveModel } from '../domain/model-resolution.ts';
 import {
@@ -258,6 +260,9 @@ export class AppController {
   private readonly modelSwitchRevisions = new Map<string, number>();
   /** Last killed composer text for Ctrl+Y; each kill replaces it (documented policy). */
   private killBuffer = '';
+  /** Greetings chosen once per route; process-lifetime only, never sent to a server. */
+  private readonly greetingCache = new Map<string, string>();
+  private readonly recentGreetings: string[] = [];
   private readonly debugLog: DebugLog;
 
   /**
@@ -509,6 +514,22 @@ export class AppController {
   /** Injected clock, so ages and recency are testable. */
   now(): number {
     return this.deps.now();
+  }
+
+  /**
+   * Returns the greeting chosen for `key`, selecting it once on first use and keeping it
+   * stable across re-renders, remounts and route revisits. Selection uses this client's
+   * local clock; history is bounded and stays in this process (local state has no schema
+   * for it yet, so it is intentionally not persisted across restarts).
+   */
+  greetingFor(key: string): string {
+    const cached = this.greetingCache.get(key);
+    if (cached !== undefined) return cached;
+    const greeting = selectGreeting(greetingPeriod(new Date(this.now())), this.recentGreetings);
+    this.greetingCache.set(key, greeting);
+    this.recentGreetings.push(greeting);
+    if (this.recentGreetings.length > 8) this.recentGreetings.shift();
+    return greeting;
   }
 
   get version(): string {

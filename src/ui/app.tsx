@@ -129,6 +129,7 @@ export function App(props: AppProps) {
           {(route: Accessor<{ kind: 'new'; serverID: string; directory: string }>) => (
             <NewSessionView
               controller={controller}
+              serverID={route().serverID}
               directory={route().directory}
               theme={props.theme}
               width={width()}

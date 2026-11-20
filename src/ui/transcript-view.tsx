@@ -194,6 +194,9 @@ export function Transcript(props: TranscriptProps) {
           controller={props.controller}
           theme={props.theme}
           width={props.width}
+          greeting={props.controller.greetingFor(
+            `conversation:${props.serverID}:${props.sessionID}`,
+          )}
           agent={state.sessions[sessionKeyValue()]?.agent}
           model={state.sessions[sessionKeyValue()]?.model}
           directory={state.sessions[sessionKeyValue()]?.directory}
@@ -274,6 +277,8 @@ export type WelcomeProps = Readonly<{
   controller: AppController;
   theme: Theme;
   width: number;
+  /** Chosen once by the caller for this route; never derived reactively from a clock. */
+  greeting: string;
   agent: string | undefined;
   model: ModelSelection | undefined;
   directory: string | undefined;
@@ -306,7 +311,7 @@ export function WelcomePanel(props: WelcomeProps) {
       </box>
       <box flexDirection="column" flexGrow={1}>
         <text fg={props.theme.text}>
-          <b>Welcome back!</b>
+          <b>{props.greeting}</b>
         </text>
         <text fg={props.theme.dim}>{detail()}</text>
         <text fg={props.theme.dim}>{directory()}</text>
@@ -843,6 +848,7 @@ function label(choice: string): string {
 /** A conversation not yet created on the server: welcome panel plus the prompt below. */
 export function NewSessionView(props: {
   controller: AppController;
+  serverID: string;
   directory: string;
   theme: Theme;
   width: number;
@@ -854,6 +860,7 @@ export function NewSessionView(props: {
         controller={props.controller}
         theme={props.theme}
         width={props.width}
+        greeting={props.controller.greetingFor(`new:${props.serverID}:${props.directory}`)}
         agent={overview().agent}
         model={overview().model}
         directory={props.directory}

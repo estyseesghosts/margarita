@@ -73,6 +73,15 @@ test('MCP catalogs retain confirmed project names through failures and late load
   controller.dispose();
 });
 
+test('greeting is chosen once per route and stays stable (#128)', () => {
+  const controller = makeController(async () => []);
+  const first = controller.greetingFor('new:local:/work');
+  expect(first).not.toBe('');
+  expect(controller.greetingFor('new:local:/work')).toBe(first);
+  expect(controller.greetingFor('conversation:local:ses_a')).toBeTypeOf('string');
+  controller.dispose();
+});
+
 describe('@file completion', () => {
   test('shows only the latest query when requests resolve out of order', async () => {
     const scan = deferred<string[]>();

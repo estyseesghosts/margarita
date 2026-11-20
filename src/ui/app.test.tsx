@@ -9,6 +9,7 @@ import { defaultConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
 import { isRecord } from '../domain/backend-event.ts';
 import { composerFrom } from '../domain/composer.ts';
+import { greetingCatalog } from '../domain/greetings.ts';
 import { buildKeymap } from '../domain/keymap.ts';
 import { directoryKey } from '../domain/path-identity.ts';
 import { projectLabel } from '../domain/project-label.ts';
@@ -17,6 +18,11 @@ import { App } from './app.tsx';
 import { pickTheme } from './theme.ts';
 
 const pageUp = '\u001b[5~';
+
+function expectWelcomeGreeting(frame: string): void {
+  const all = Object.values(greetingCatalog).flat();
+  expect(all.some((greeting) => frame.includes(greeting))).toBe(true);
+}
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let current: Setup | undefined;
@@ -125,7 +131,7 @@ describe('app', () => {
     });
     const frame = setup.captureCharFrame();
     if (process.env['DUMP'] !== undefined) console.log(frame);
-    expect(frame).toContain('Welcome back!');
+    expectWelcomeGreeting(frame);
     expect(frame).toContain('( o.o )');
     expect(frame).toContain('why is it slow?');
     expect(frame).toContain('The frame budget is exceeded.');
@@ -165,7 +171,7 @@ describe('app', () => {
     const { controller, setup } = await mount(backend);
     controller.startNewSession('/work/kohjoh');
     await settle(setup);
-    expect(setup.captureCharFrame()).toContain('Welcome back!');
+    expectWelcomeGreeting(setup.captureCharFrame());
     expect(backend.calls.some((call) => call.name === 'createSession')).toBe(false);
     await setup.mockInput.typeText('hi');
     setup.mockInput.pressEnter();
@@ -2108,5 +2114,27 @@ test('clicking the screen dismisses help', async () => {
   await setup.mockMouse.click(1, 1);
   await settle(setup);
   expect(controller.state.overlay.kind).toBe('none');
+  controller.dispose();
+});
+
+test('welcome greeting stays stable across redraws and route revisits (#128)', async () => {
+  const { controller, setup } = await mount(backendWithSession());
+  controller.startNewSession('/work/kohjoh');
+  await settle(setup);
+  const frame = setup.captureCharFrame();
+  const greeting = Object.values(greetingCatalog)
+    .flat()
+    .find((candidate) => frame.includes(candidate));
+  if (greeting === undefined) throw new Error('no greeting rendered in the welcome panel');
+
+  await setup.mockInput.typeText('some draft');
+  await settle(setup);
+  expect(setup.captureCharFrame()).toContain(greeting);
+
+  controller.openOverview();
+  await settle(setup);
+  controller.startNewSession('/work/kohjoh');
+  await settle(setup);
+  expect(setup.captureCharFrame()).toContain(greeting);
   controller.dispose();
 });
