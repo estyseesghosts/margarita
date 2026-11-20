@@ -191,6 +191,15 @@ export function deleteWordBackward(composer: Composer): Composer {
   };
 }
 
+/** Alt+D: delete one word forward at the cursor, grapheme-safely. */
+export function deleteWordForward(composer: Composer): Composer {
+  const target = moveWordRight(composer).cursor;
+  return {
+    text: composer.text.slice(0, composer.cursor) + composer.text.slice(target),
+    cursor: composer.cursor,
+  };
+}
+
 /** Ctrl+U: delete to start of line. */
 export function deleteToLineStart(composer: Composer): Composer {
   const start = lineStart(composer.text, composer.cursor);

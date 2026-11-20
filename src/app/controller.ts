@@ -256,6 +256,8 @@ export class AppController {
   private readonly modelSwitches = new Map<string, Promise<boolean>>();
   private readonly failedModelSwitches = new Set<string>();
   private readonly modelSwitchRevisions = new Map<string, number>();
+  /** Last killed composer text for Ctrl+Y; each kill replaces it (documented policy). */
+  private killBuffer = '';
   private readonly debugLog: DebugLog;
 
   /**
@@ -2119,6 +2121,16 @@ export class AppController {
       this.writeComposer(composerFrom(step.text));
     });
     return true;
+  }
+
+  /** Records text removed by a kill command; an empty kill leaves the buffer intact. */
+  killText(text: string): void {
+    if (text !== '') this.killBuffer = text;
+  }
+
+  /** Text restored by Ctrl+Y at the cursor. */
+  yankText(): string {
+    return this.killBuffer;
   }
 
   toggleStash(): void {

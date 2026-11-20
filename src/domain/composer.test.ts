@@ -9,6 +9,7 @@ import {
   deleteToLineEnd,
   deleteToLineStart,
   deleteWordBackward,
+  deleteWordForward,
   emptyComposer,
   insertText,
   leftOpensOverview,
@@ -71,6 +72,9 @@ describe('composer editing', () => {
       const deleted = deleteWordBackward(composer);
       expect(points).toContain(deleted.cursor);
       expect(deleted.text.isWellFormed()).toBe(true);
+      const forward = deleteWordForward(composer);
+      expect(points).toContain(forward.cursor);
+      expect(forward.text.isWellFormed()).toBe(true);
     }
   });
   test('whitespace deletion and word deletion use distinct boundaries', () => {

@@ -6,6 +6,7 @@ import {
   deleteToLineEnd,
   deleteToLineStart,
   deleteWordBackward,
+  deleteWordForward,
   emptyComposer,
   insertText,
   leftOpensOverview,
@@ -119,6 +120,23 @@ function runAction(controller: AppController, action: ActionID, services: Router
     case 'composer.newline':
       controller.setComposer(insertText(controller.state.composer, '\n'));
       return true;
+    case 'composer.wordDeleteForward': {
+      const composer = controller.state.composer;
+      const next = deleteWordForward(composer);
+      const removed = composer.text.slice(
+        composer.cursor,
+        composer.cursor + (composer.text.length - next.text.length),
+      );
+      controller.killText(removed);
+      controller.setComposer(next);
+      return true;
+    }
+    case 'composer.yank': {
+      const killed = controller.yankText();
+      if (killed === '') return true;
+      controller.setComposer(insertText(controller.state.composer, killed));
+      return true;
+    }
     case 'composer.steer':
       // Contextual: empty composer sends now the next queued follow-up (FIFO);
       // draft text steers the draft.
@@ -281,6 +299,19 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
     controller.setComposer(next);
     return true;
   };
+  const killBackward = (next: Composer): true => {
+    controller.killText(composer.text.slice(next.cursor, composer.cursor));
+    return edit(next);
+  };
+  const killForward = (next: Composer): true => {
+    controller.killText(
+      composer.text.slice(
+        composer.cursor,
+        composer.cursor + (composer.text.length - next.text.length),
+      ),
+    );
+    return edit(next);
+  };
 
   if (key.ctrl) {
     switch (key.name) {
@@ -298,13 +329,13 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
       case 'e':
         return edit(moveLineEnd(composer));
       case 'w':
-        return edit(deletePreviousWhitespaceUnit(composer));
+        return killBackward(deletePreviousWhitespaceUnit(composer));
       case 'backspace':
-        return edit(deleteWordBackward(composer));
+        return killBackward(deleteWordBackward(composer));
       case 'u':
-        return edit(deleteToLineStart(composer));
+        return killBackward(deleteToLineStart(composer));
       case 'k':
-        return edit(deleteToLineEnd(composer));
+        return killForward(deleteToLineEnd(composer));
       case 'p':
         controller.historyUp();
         return true;
@@ -322,7 +353,7 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
   if (key.alt) {
     if (key.name === 'b' || key.name === 'left') return edit(moveWordLeft(composer));
     if (key.name === 'f' || key.name === 'right') return edit(moveWordRight(composer));
-    if (key.name === 'backspace') return edit(deleteWordBackward(composer));
+    if (key.name === 'backspace') return killBackward(deleteWordBackward(composer));
   }
 
   switch (key.name) {
