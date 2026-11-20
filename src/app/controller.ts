@@ -162,6 +162,16 @@ const undoLimit = 100;
 const typingCoalesceMs = 750;
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
+/**
+ * The single source of truth for which overlay each footer control owns. A second click on
+ * the same control toggles that exact overlay shut; every other overlay stays guarded (#139).
+ */
+const footerOverlay: Readonly<Record<FooterAction, Overlay['kind']>> = {
+  agent: 'agent-picker',
+  model: 'model-picker',
+  context: 'usage',
+};
+
 /** True when two texts differ by exactly one grapheme cluster (an insertion or deletion). */
 function isSingleGraphemeStep(before: string, after: string): boolean {
   if (before === after) return false;
@@ -528,14 +538,72 @@ export class AppController {
   }
 
   /**
-   * Footer mouse action. Ignored when any overlay is in front, so a click can never bypass a
-   * permission/form dialog, submit a draft, or change agent/model until the picker confirms.
+   * Footer mouse action: click to open, click the same control again to close (#139).
+   *
+   * Only the overlay owned by the clicked action is toggleable. Permission/form/revert and all
+   * other unrelated dialogs stay guarded, so a footer click can never bypass them, submit a
+   * draft, or change agent/model without picker confirmation. Async picker opens carry a token
+   * and route identity: a second click cancels the request, and a late catalog response cannot
+   * resurrect a dismissed picker or one opened on a route the user has since left.
    */
   activateFooter(action: FooterAction): void {
-    if (this.state.overlay.kind !== 'none') return;
-    if (action === 'agent') void this.openAgentPicker();
-    else if (action === 'model') void this.openModelPicker();
-    else this.openUsage();
+    const owns = footerOverlay[action];
+    const overlay = this.state.overlay;
+    const routeKey = this.routeKey(this.state.route);
+
+    // A navigation replaces the route without going through setOverlay; the pending request
+    // no longer belongs to the screen the user is looking at.
+    if (this.pendingFooterOpen !== undefined && this.pendingFooterOpen.routeKey !== routeKey) {
+      this.cancelFooterOpen();
+    }
+
+    // Second click on the control that owns the visible overlay: close it, with no selection,
+    // draft mutation or submit.
+    if (overlay.kind === owns) {
+      this.cancelFooterOpen();
+      this.closeOverlay();
+      return;
+    }
+
+    // Rapid second click while the catalog is still loading: cancel the in-flight open so no
+    // overlay is left and the late response is ignored.
+    if (this.pendingFooterOpen?.action === action && overlay.kind === 'none') {
+      this.cancelFooterOpen();
+      return;
+    }
+
+    // Some other modal/unrelated overlay is in front: never dismiss or bypass it.
+    if (overlay.kind !== 'none') return;
+
+    const token = ++this.footerOpenToken;
+    this.pendingFooterOpen = { token, action, routeKey };
+    const admitted = (): boolean => {
+      const pending = this.pendingFooterOpen;
+      const ok =
+        !this.disposed &&
+        pending?.token === token &&
+        this.routeKey(this.state.route) === routeKey &&
+        this.state.overlay.kind === 'none';
+      // Clear only this request's own pending marker; never a newer click's state.
+      if (!ok && pending?.token === token) this.cancelFooterOpen();
+      return ok;
+    };
+
+    if (action === 'context') {
+      // Synchronous: openUsage() sets the overlay, which clears the pending marker.
+      this.openUsage();
+      return;
+    }
+    const open =
+      action === 'agent' ? this.openAgentPicker(admitted) : this.openModelPicker(admitted);
+    void open.catch(() => {
+      if (this.pendingFooterOpen?.token === token) this.cancelFooterOpen();
+    });
+  }
+
+  private cancelFooterOpen(): void {
+    this.footerOpenToken += 1;
+    this.pendingFooterOpen = undefined;
   }
 
   /** Counts for the tab bar, based on the same classifier as the dot. */
@@ -643,6 +711,12 @@ export class AppController {
   private catalogGeneration = 0;
   private catalogInFlight: Promise<void> | undefined;
   private catalogInFlightScope: string | undefined;
+  /**
+   * In-flight footer picker request. The token invalidates a late `ensureCatalog()` response so
+   * a picker dismissed by a second click (or a route change) can never be resurrected (#139).
+   */
+  private footerOpenToken = 0;
+  private pendingFooterOpen: { token: number; action: FooterAction; routeKey: string } | undefined;
   /** Deduplicates "agent unavailable" prompts across repeated catalog refreshes (#123). */
   private unavailableAgentNotice: string | undefined;
 
@@ -3539,8 +3613,9 @@ export class AppController {
 
   // ---------------------------------------------------------------- agent picker (#123)
 
-  async openAgentPicker(): Promise<void> {
+  async openAgentPicker(admit?: () => boolean): Promise<void> {
     if (!(await this.ensureCatalog(this.currentDirectory()))) return;
+    if (admit !== undefined && !admit()) return;
     this.setOverlay({ kind: 'agent-picker', query: '', index: 0 });
   }
 
@@ -3655,8 +3730,9 @@ export class AppController {
     return { method: 'file', path };
   }
 
-  async openModelPicker(): Promise<void> {
+  async openModelPicker(admit?: () => boolean): Promise<void> {
     if (!(await this.ensureCurrentModelCatalog())) return;
+    if (admit !== undefined && !admit()) return;
     this.setOverlay({ kind: 'model-picker', query: '', index: 0 });
   }
 
@@ -4662,6 +4738,9 @@ export class AppController {
   }
 
   setOverlay(overlay: Overlay): void {
+    // Opening any overlay settles a pending footer open: the request that produced it already
+    // succeeded, and a later close/Escape must not be mistaken for a toggle-off double click.
+    if (overlay.kind !== 'none') this.pendingFooterOpen = undefined;
     this.setState('overlay', overlay);
   }
 

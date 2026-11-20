@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 
+import { TextAttributes } from '@opentui/core';
 import { testRender } from '@opentui/solid';
 
 import { FakeBackend } from '../../test/fake-backend.ts';
@@ -27,6 +28,11 @@ function expectWelcomeGreeting(frame: string): void {
 /** Line of the cost field in a captured frame; a proxy for the pinned composer's Y. */
 function footerY(frame: string): number {
   return frame.split('\n').findIndex((line) => line.includes('$0.00'));
+}
+
+/** The composer's prompt line in a captured frame; a proxy for its text layout. */
+function composerLine(frame: string): string {
+  return frame.split('\n').find((line) => line.includes('❯')) ?? '';
 }
 
 /** 0-indexed position of a footer segment's text, searched from the bottom of the frame. */
@@ -197,16 +203,67 @@ describe('app', () => {
     expect(controller.state.route.kind).toBe('conversation');
   });
 
-  test('the caret is painted only on the composer line, never in the welcome panel (#130)', async () => {
+  test('the caret styles only the composer insertion cell, never the welcome panel (#130/#137)', async () => {
     const { controller, setup } = await mount(backendWithSession());
     controller.startNewSession('/work/kohjoh');
     await settle(setup);
-    const caretLines = setup
+    await setup.mockInput.typeText('hi');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain('▏'); // no layout-width caret glyph (#137)
+
+    const lines = setup.captureSpans().lines;
+    const underlined = lines.flatMap((line, row) =>
+      line.spans
+        .filter((span) => (span.attributes & TextAttributes.UNDERLINE) !== 0)
+        .map((span) => ({ row, text: span.text })),
+    );
+    expect(underlined).toHaveLength(1);
+    expect(underlined[0]?.text).toBe('i'); // cursor at end of "hi"
+    const composerRow = lines.findIndex((line) =>
+      line.spans.some((span) => span.text.includes('❯')),
+    );
+    expect(underlined[0]?.row).toBe(composerRow);
+    expectWelcomeGreeting(frame);
+    controller.dispose();
+  });
+
+  test('blink phases and wide glyphs never change the composer layout (#137)', async () => {
+    const backend = backendWithSession();
+    const { controller, setup } = await mount(backend);
+    await setup.mockInput.typeText('ab😀cd日本語');
+    await settle(setup);
+    const onFrame = setup.captureCharFrame();
+    expect(composerLine(onFrame)).not.toContain('▏');
+    // Wait past the 530 ms blink interval and compare the actual rendered text layout.
+    await new Promise((resolve) => setTimeout(resolve, 560));
+    await settle(setup);
+    const offFrame = setup.captureCharFrame();
+    expect(composerLine(offFrame)).toBe(composerLine(onFrame));
+    expect(offFrame).not.toContain('▏');
+    controller.dispose();
+  });
+
+  test('the caret style marks the grapheme after the cursor, not a shifted suffix (#137)', async () => {
+    const { controller, setup } = await mount(backendWithSession());
+    await setup.mockInput.typeText('abcdef');
+    setup.mockInput.pressArrow('left');
+    setup.mockInput.pressArrow('left');
+    await settle(setup);
+    const composerRow = setup
+      .captureSpans()
+      .lines.find((line) => line.spans.some((span) => span.text.includes('❯')));
+    const marked = composerRow?.spans.filter(
+      (span) => (span.attributes & TextAttributes.UNDERLINE) !== 0,
+    );
+    expect(marked).toHaveLength(1);
+    expect(marked?.[0]?.text).toBe('e'); // caret sits between "d" and "e"
+    const line = setup
       .captureCharFrame()
       .split('\n')
-      .filter((line) => line.includes('▏'));
-    expect(caretLines).toHaveLength(1);
-    expect(caretLines[0]).toContain('❯');
+      .find((row) => row.includes('❯'));
+    expect(line).toContain('abcdef'); // suffix intact, no inserted cell
+    expect(line).not.toContain('▏');
     controller.dispose();
   });
 
@@ -2315,19 +2372,40 @@ test('clicking agent, model and context footer segments opens the right overlay 
   await clickFooter('agentX');
   expect(controller.state.overlay.kind).toBe('agent-picker');
   expect(controller.state.composer.text).toBe('keep this draft');
-  controller.closeOverlay();
-  await settle(setup);
+  const agentBefore = controller.currentAgentID();
+  await clickFooter('agentX'); // second click on the same control closes, no selection
+  expect(controller.state.overlay.kind).toBe('none');
+  expect(controller.currentAgentID()).toBe(agentBefore);
+  expect(controller.state.composer.text).toBe('keep this draft');
 
   await clickFooter('longcat');
   expect(controller.state.overlay.kind).toBe('model-picker');
   expect(controller.state.composer.text).toBe('keep this draft');
-  controller.closeOverlay();
-  await settle(setup);
+  const modelBefore = controller.currentSession()?.model;
+  await clickFooter('longcat');
+  expect(controller.state.overlay.kind).toBe('none');
+  expect(controller.currentSession()?.model).toEqual(modelBefore);
+  expect(controller.state.composer.text).toBe('keep this draft');
 
   await clickFooter('ctx');
   expect(controller.state.overlay.kind).toBe('usage');
   expect(setup.captureCharFrame()).toContain('session analytics');
+  await clickFooter('ctx');
+  expect(controller.state.overlay.kind).toBe('none');
   expect(controller.state.composer.text).toBe('keep this draft');
+  controller.dispose();
+});
+
+test('a second footer click cannot dismiss an unrelated modal overlay (#139)', async () => {
+  const { controller, setup } = await mount(backendWithSession());
+  controller.openSession('ses_a');
+  await settle(setup);
+  controller.setOverlay({ kind: 'help' });
+  await settle(setup);
+  controller.activateFooter('agent');
+  controller.activateFooter('model');
+  controller.activateFooter('context');
+  expect(controller.state.overlay.kind).toBe('help');
   controller.dispose();
 });
 

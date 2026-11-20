@@ -21,6 +21,27 @@ export function splitAtCursor(composer: Composer): { before: string; at: string;
   return { before, at: composer.text.slice(composer.cursor, end), after: composer.text.slice(end) };
 }
 
+/**
+ * Layout-preserving caret paint (#137). The three returned pieces always concatenate back to
+ * the *original* text, so the renderer never receives an extra display-width character: blink
+ * phases have identical width, wrapping and grapheme/emoji placement. `marked` is the single
+ * grapheme at the insertion boundary that carries the caret style (underline). At end-of-text
+ * there is no following grapheme, so the last one is marked instead; an empty buffer marks
+ * nothing at all (the placeholder must never show a stray caret).
+ */
+export function caretPaint(
+  composer: Composer,
+  show: boolean,
+): { before: string; marked: string; after: string } {
+  const { before, at, after } = splitAtCursor(composer);
+  if (!show) return { before: before + at, marked: '', after };
+  if (at !== '') return { before, marked: at, after };
+  const leading = graphemes(before);
+  const last = leading.at(-1);
+  if (last === undefined) return { before, marked: '', after };
+  return { before: before.slice(0, before.length - last.length), marked: last, after };
+}
+
 function boundaries(text: string): number[] {
   const points = [0];
   for (const segment of segmenter.segment(text)) {

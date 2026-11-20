@@ -4713,3 +4713,76 @@ describe('session usage analytics and footer actions (#124)', () => {
     controller.dispose();
   });
 });
+
+describe('footer picker toggle and late-open guards (#139)', () => {
+  test('a second click toggles the matching overlay closed without selecting or resetting', async () => {
+    const { controller } = usageHarness();
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom('keep me'));
+    const agent = controller.currentAgentID();
+    const model = controller.currentSession()?.model;
+
+    controller.activateFooter('agent');
+    await flush();
+    expect(controller.state.overlay.kind).toBe('agent-picker');
+    controller.activateFooter('agent');
+    expect(controller.state.overlay.kind).toBe('none');
+    expect(controller.currentAgentID()).toBe(agent);
+
+    controller.activateFooter('model');
+    await flush();
+    expect(controller.state.overlay.kind).toBe('model-picker');
+    controller.activateFooter('model');
+    expect(controller.state.overlay.kind).toBe('none');
+    expect(controller.currentSession()?.model).toEqual(model);
+
+    controller.activateFooter('context');
+    expect(controller.state.overlay.kind).toBe('usage');
+    controller.activateFooter('context');
+    expect(controller.state.overlay.kind).toBe('none');
+
+    expect(controller.state.composer.text).toBe('keep me');
+    controller.dispose();
+  });
+
+  test('a rapid double click during a delayed catalog load leaves no overlay', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.models = [
+      { providerID: 'opencode', modelID: 'longcat', name: 'Longcat', enabled: true, variants: [] },
+    ];
+    const controller = makeController(async () => [], backend);
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    backend.listAgentsHook = async () => {
+      await gate;
+      return [];
+    };
+    // A new directory makes the catalog stale, so the footer open awaits the gated load.
+    controller.startNewSession('/work/other');
+    await flush();
+
+    controller.activateFooter('agent');
+    controller.activateFooter('agent'); // dismiss while the catalog is still loading
+    release();
+    await flush();
+    expect(controller.state.overlay.kind).toBe('none');
+    controller.dispose();
+  });
+
+  test('a late picker open cannot resurrect after the route changes', async () => {
+    const { controller } = usageHarness();
+    await attach(controller, 'ses_a');
+    controller.activateFooter('agent');
+    controller.openOverview();
+    await flush();
+    expect(controller.state.overlay.kind).toBe('none');
+    controller.dispose();
+  });
+});

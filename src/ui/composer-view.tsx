@@ -4,6 +4,7 @@ import { createSignal, For, onCleanup, Show } from 'solid-js';
 import type { Completion, Notice } from '../app/app-state.ts';
 import type { AppController } from '../app/controller.ts';
 import { attachmentLabel } from '../domain/attachment.ts';
+import { caretPaint } from '../domain/composer.ts';
 import { contextSeverity } from '../domain/context-occupancy.ts';
 import {
   type FooterAction,
@@ -20,10 +21,12 @@ import type { Theme } from './theme.ts';
 /**
  * Prompt rule, composer and completion list.
  *
- * The caret is painted as a thin glyph *inside* the composer renderable. It deliberately does
- * not use the terminal's hardware cursor: OpenTUI owns that cursor and moves it during every
- * frame paint, which left stray bars in transcript rows and welcome panels (#130). A painted
- * caret is always at the insertion point and can never leak outside this box.
+ * The caret is an in-cell style (underline) on the grapheme at the insertion boundary, not a
+ * character inserted into the text. It deliberately does not use the terminal's hardware cursor:
+ * OpenTUI owns that cursor and moves it during every frame paint, which left stray bars in
+ * transcript rows and welcome panels (#130). A painted glyph shifted the suffix and changed
+ * wrapping by one cell (#137); styling an existing grapheme keeps the layout identical in both
+ * blink phases. The caret is always at the insertion point and can never leak outside this box.
  */
 export function ComposerView(props: { controller: AppController; theme: Theme; width: number }) {
   const state = props.controller.state;
@@ -32,8 +35,8 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
   onCleanup(() => clearInterval(timer));
   const active = () => state.route.kind !== 'overview' || state.overview.focus === 'composer';
   const ownsCaret = () => active() && state.overlay.kind === 'none';
-  const before = () => state.composer.text.slice(0, state.composer.cursor);
-  const after = () => state.composer.text.slice(state.composer.cursor);
+  // The caret marks an existing grapheme's cell; the text itself is never changed (#137).
+  const paint = () => caretPaint(state.composer, ownsCaret() && blinkOn());
   const empty = () => state.composer.text === '';
   const placeholder = () =>
     state.route.kind === 'overview'
@@ -56,11 +59,11 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
       <box flexDirection="row">
         <text fg={active() ? props.theme.text : props.theme.dim}>❯ </text>
         <text fg={empty() || !active() ? props.theme.dim : props.theme.text}>
-          {before()}
-          <Show when={ownsCaret()}>
-            <span style={{ fg: props.theme.accentLight }}>{blinkOn() ? '▏' : ' '}</span>
+          {paint().before}
+          <Show when={paint().marked !== ''}>
+            <span style={{ underline: true, fg: props.theme.accentLight }}>{paint().marked}</span>
           </Show>
-          {empty() ? placeholder() : after()}
+          {empty() ? placeholder() : paint().after}
         </text>
       </box>
       <text fg={props.theme.border}>{rule()}</text>

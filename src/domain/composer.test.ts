@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  caretPaint,
   composerFrom,
   cursorPosition,
   deleteBackward,
@@ -221,5 +222,65 @@ describe('slash commands', () => {
       'review',
     ]);
     expect(completeCommand('/re x', [])).toEqual([]);
+  });
+});
+
+describe('layout-preserving caret paint (#137)', () => {
+  const texts = [
+    'abcdef',
+    'ab😀cd',
+    'e\u0301x', // combining mark
+    '日本語ab', // double-width
+    'a👨‍👩‍👧b', // ZWJ family emoji
+    '',
+  ];
+
+  test('the three pieces always concatenate back to the original text', () => {
+    for (const text of texts) {
+      for (let cursor = 0; cursor <= text.length; cursor += 1) {
+        for (const show of [true, false]) {
+          const parts = caretPaint({ text, cursor }, show);
+          expect(parts.before + parts.marked + parts.after).toBe(text);
+        }
+      }
+    }
+  });
+
+  test('mid-line caret marks the grapheme at the insertion boundary', () => {
+    const parts = caretPaint({ text: 'abcdef', cursor: 3 }, true);
+    expect(parts).toEqual({ before: 'abc', marked: 'd', after: 'ef' });
+    expect(caretPaint({ text: 'abcdef', cursor: 3 }, false)).toEqual({
+      before: 'abcd',
+      marked: '',
+      after: 'ef',
+    });
+  });
+
+  test('emoji, combining marks and double-width glyphs are never split', () => {
+    const emoji = caretPaint({ text: 'ab😀cd', cursor: 2 }, true);
+    expect(emoji).toEqual({ before: 'ab', marked: '😀', after: 'cd' });
+    const combining = caretPaint({ text: 'e\u0301x', cursor: 0 }, true);
+    expect(combining).toEqual({ before: '', marked: 'e\u0301', after: 'x' });
+    const wide = caretPaint({ text: '日本語', cursor: 1 }, true);
+    expect(wide).toEqual({ before: '日', marked: '本', after: '語' });
+  });
+
+  test('end of text marks the last grapheme; an empty buffer marks nothing', () => {
+    expect(caretPaint(composerFrom('abc'), true)).toEqual({
+      before: 'ab',
+      marked: 'c',
+      after: '',
+    });
+    const empty = caretPaint(emptyComposer, true);
+    expect(empty).toEqual({ before: '', marked: '', after: '' });
+  });
+
+  test('blink off removes only the style, never a display cell', () => {
+    for (const text of texts) {
+      const on = caretPaint(composerFrom(text), true);
+      const off = caretPaint(composerFrom(text), false);
+      expect(on.before.length + on.marked.length + on.after.length).toBe(text.length);
+      expect(off.before.length + off.marked.length + off.after.length).toBe(text.length);
+    }
   });
 });
