@@ -3542,10 +3542,34 @@ export class AppController {
     }
     try {
       await this.backend.backgroundTools(session.id);
-      this.showNotice('Running tools moved to the background', 'dim');
+      // The confirmation belongs to the tool call, rendered inside the transcript.
+      // A global notice would occupy a composer/footer row and shift the prompt bar (#129).
+      const running = this.runningToolIDs(session.id, session.serverID);
+      this.setState('backgrounded', this.keyFor(session.serverID, session.id), {
+        text: running.length > 1 ? 'Running tools moved to background' : 'Moved to background',
+        ...(running.at(-1) === undefined ? {} : { toolID: running.at(-1)! }),
+      });
     } catch (error) {
       this.showNotice(`Background failed: ${errorText(error)}`, 'error');
     }
+  }
+
+  /** IDs still running for a session, used to attach the background status to its tool row. */
+  private runningToolIDs(sessionID: string, serverID: string): string[] {
+    const messages = this.state.transcripts[this.keyFor(serverID, sessionID)]?.messages ?? [];
+    const ids: string[] = [];
+    for (const message of messages) {
+      if (message.kind !== 'assistant') continue;
+      for (const part of message.parts) {
+        if (
+          part.kind === 'tool' &&
+          (part.tool.status === 'running' || part.tool.status === 'streaming')
+        ) {
+          ids.push(part.tool.id);
+        }
+      }
+    }
+    return ids;
   }
 
   /**

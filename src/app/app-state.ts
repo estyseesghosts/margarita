@@ -118,6 +118,11 @@ export type AppState = {
   /** Index of the focused permission choice in the permission card. */
   permissionChoice: number;
   transcripts: Record<string, TranscriptState>;
+  /**
+   * Client-local "moved to background" status per server-qualified session key.
+   * Rendered inside the transcript beside the affected tool, never as a footer notice.
+   */
+  backgrounded: Record<string, Readonly<{ text: string; toolID?: string }>>;
   inbox: Record<string, QueuedInput[]>;
   agents: AgentDescriptor[];
   models: CatalogModel[];
@@ -208,6 +213,7 @@ export function initialState(directory: string, serverID: string = localServerID
     answering: false,
     permissionChoice: 0,
     transcripts: {},
+    backgrounded: {},
     inbox: {},
     agents: [],
     models: [],

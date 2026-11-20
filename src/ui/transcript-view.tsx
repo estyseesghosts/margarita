@@ -93,13 +93,32 @@ export function Transcript(props: TranscriptProps) {
       ]),
     );
     const expanded = props.controller.expandedSets();
-    return foldTranscript(messages, {
+    const folded = foldTranscript(messages, {
       detailed: state.detailed,
       expandedGroups: expanded.groups,
       expandedDiffs: expanded.diffs,
       mcpServers: mcpServers(),
       markers,
     });
+    // A background confirmation is a transcript event, not a footer notice: inserting it
+    // here keeps the composer anchored and attaches the line to the affected tool (#129).
+    const background = state.backgrounded[sessionKeyValue()];
+    if (background === undefined || state.running[sessionKeyValue()] !== true) return folded;
+    const notice: TranscriptNode = {
+      kind: 'notice',
+      key: `background:${background.toolID ?? sessionKeyValue()}`,
+      text: background.text,
+      tone: 'dim',
+    };
+    let insertAt = folded.length;
+    for (let index = folded.length - 1; index >= 0; index -= 1) {
+      const kind = folded[index]?.kind;
+      if (kind === 'tool' || kind === 'tool-group') {
+        insertAt = index + 1;
+        break;
+      }
+    }
+    return [...folded.slice(0, insertAt), notice, ...folded.slice(insertAt)];
   });
   const windowed = createMemo(() =>
     windowNodes(nodes(), props.controller.transcriptWindow(props.sessionID, props.serverID)),

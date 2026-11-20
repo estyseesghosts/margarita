@@ -24,6 +24,11 @@ function expectWelcomeGreeting(frame: string): void {
   expect(all.some((greeting) => frame.includes(greeting))).toBe(true);
 }
 
+/** Line of the cost field in a captured frame; a proxy for the pinned composer's Y. */
+function footerY(frame: string): number {
+  return frame.split('\n').findIndex((line) => line.includes('$0.00'));
+}
+
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let current: Setup | undefined;
 
@@ -1603,6 +1608,24 @@ describe('live action beneath a collapsed group (issue #75)', () => {
     frame = setup.captureCharFrame();
     expect(frame).toContain('└ $ bun test');
     expect(frame).toContain('Ctrl+B to move to background');
+    controller.dispose();
+  });
+
+  test('backgrounding keeps the composer anchored and puts the status in the transcript (#129)', async () => {
+    const backend = liveShellBackend('running', 0);
+    const { controller, setup } = await mount(backend, { now: () => 20_000 });
+    controller.openSession('ses_a');
+    await settle(setup);
+    const before = setup.captureCharFrame();
+    const beforeY = footerY(before);
+    expect(before).not.toContain('Moved to background');
+
+    await controller.backgroundTools();
+    await settle(setup);
+    const after = setup.captureCharFrame();
+    expect(after).toContain('Moved to background');
+    expect(footerY(after)).toBe(beforeY);
+    expect(backend.calls.some((call) => call.name === 'backgroundTools')).toBe(true);
     controller.dispose();
   });
 });
