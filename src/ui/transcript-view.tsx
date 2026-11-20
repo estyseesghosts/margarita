@@ -40,6 +40,7 @@ import {
   type TranscriptNode,
   windowNodes,
 } from '../domain/transcript.ts';
+import { workerNodes, type WorkerStatus, workerStatusLabel } from '../domain/worker.ts';
 import { markerText } from './marker-text.ts';
 import { QueuedPreview } from './queued-preview.tsx';
 import { createSyntaxStyle } from './syntax.ts';
@@ -103,22 +104,30 @@ export function Transcript(props: TranscriptProps) {
     // A background confirmation is a transcript event, not a footer notice: inserting it
     // here keeps the composer anchored and attaches the line to the affected tool (#129).
     const background = state.backgrounded[sessionKeyValue()];
-    if (background === undefined || state.running[sessionKeyValue()] !== true) return folded;
-    const notice: TranscriptNode = {
-      kind: 'notice',
-      key: `background:${background.toolID ?? sessionKeyValue()}`,
-      text: background.text,
-      tone: 'dim',
-    };
-    let insertAt = folded.length;
-    for (let index = folded.length - 1; index >= 0; index -= 1) {
-      const kind = folded[index]?.kind;
-      if (kind === 'tool' || kind === 'tool-group') {
-        insertAt = index + 1;
-        break;
+    let withBackground: TranscriptNode[] = folded;
+    if (background !== undefined && state.running[sessionKeyValue()] === true) {
+      const notice: TranscriptNode = {
+        kind: 'notice',
+        key: `background:${background.toolID ?? sessionKeyValue()}`,
+        text: background.text,
+        tone: 'dim',
+      };
+      let insertAt = folded.length;
+      for (let index = folded.length - 1; index >= 0; index -= 1) {
+        const kind = folded[index]?.kind;
+        if (kind === 'tool' || kind === 'tool-group') {
+          insertAt = index + 1;
+          break;
+        }
       }
+      withBackground = [...folded.slice(0, insertAt), notice, ...folded.slice(insertAt)];
     }
-    return [...folded.slice(0, insertAt), notice, ...folded.slice(insertAt)];
+    // Workers are server-confirmed rows (#101), appended after the turn so a still-running
+    // parent stays visible above them. No client timer contributes to their status.
+    return [
+      ...withBackground,
+      ...workerNodes(state.workers[sessionKeyValue()] ?? [], expanded.groups),
+    ];
   });
   const windowed = createMemo(() =>
     windowNodes(nodes(), props.controller.transcriptWindow(props.sessionID, props.serverID)),
@@ -360,7 +369,19 @@ function isNodeFocused(node: TranscriptNode, focusedGroup: string | undefined): 
   if (focusedGroup === undefined) return false;
   if (node.kind === 'tool-group') return focusedGroup === node.key;
   if (node.kind === 'tool') return focusedGroup === `diff:${node.tool.id}`;
+  if (node.kind === 'worker') return focusedGroup === node.key;
   return false;
+}
+
+/** Worker tone comes only from the server's status, never from a client-side timer. */
+function workerColor(status: WorkerStatus, theme: Theme): string {
+  const colors: Record<WorkerStatus, string> = {
+    running: theme.accentLight,
+    error: theme.error,
+    cancelled: theme.warn,
+    completed: theme.dim,
+  };
+  return colors[status];
 }
 
 function NodeView(props: {
@@ -540,6 +561,33 @@ function NodeView(props: {
             {`  ${sanitizeText(node().text)}`}
           </text>
         )}
+      </Match>
+      <Match when={props.node.kind === 'worker' ? props.node : undefined}>
+        {(node: Accessor<NodeOf<'worker'>>) => {
+          const worker = () => node().worker;
+          return (
+            <box flexDirection="column" marginTop={1}>
+              <text fg={workerColor(worker().status, props.theme)}>
+                {`  ${props.focused ? '▸' : '◇'} ${sanitizeText(worker().agent)} · ${sanitizeText(worker().description)} — ${workerStatusLabel(worker().status)}${worker().status === 'running' ? '…' : ''}${props.focused ? '  (Enter)' : ''}`}
+              </text>
+              <Show when={node().expanded}>
+                <text fg={theme().dim}>{`      child session ${worker().childSessionID}`}</text>
+                <Show when={worker().title !== undefined}>
+                  <text fg={theme().dim}>{`      ${sanitizeText(worker().title ?? '')}`}</text>
+                </Show>
+                <text fg={theme().dim}>
+                  {`      started ${new Date(worker().startedAt).toISOString()}`}
+                </text>
+                <Show when={worker().completedAt !== undefined}>
+                  <text fg={theme().dim}>
+                    {`      completed ${new Date(worker().completedAt ?? 0).toISOString()}`}
+                  </text>
+                </Show>
+                <text fg={theme().dim}>{'      result lives in the child session transcript'}</text>
+              </Show>
+            </box>
+          );
+        }}
       </Match>
       <Match when={props.node.kind === 'execution' ? props.node : undefined}>
         {(node: Accessor<NodeOf<'execution'>>) => (

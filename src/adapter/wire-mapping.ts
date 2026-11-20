@@ -22,6 +22,7 @@ import { sanitizeTerminalText } from '../domain/sanitize-text.ts';
 import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary, StagedRevert } from '../domain/session.ts';
 import type { AssistantPart, ToolCall, TranscriptMessage } from '../domain/transcript.ts';
+import type { WorkerJob, WorkerStatus } from '../domain/worker.ts';
 
 /**
  * Maps SDK wire values into domain types. The SDK does not validate responses at
@@ -487,6 +488,53 @@ export function toFileDiff(info: FileDiffInfo): FileDiff {
     deletions: info.deletions,
     status: info.status,
     truncated: info.more === true,
+  };
+}
+
+const workerStatuses = new Set<string>(['running', 'completed', 'error', 'cancelled']);
+
+function isWorkerStatus(value: unknown): value is WorkerStatus {
+  return typeof value === 'string' && workerStatuses.has(value);
+}
+
+/**
+ * Maps one `experimental.job.list` entry into a worker row. Only the subagent variant is a
+ * worker: shell/image jobs already have their own transcript treatment. A malformed or
+ * future-variant entry is dropped rather than guessed into a status (#101).
+ */
+export function toWorkerJob(raw: unknown): WorkerJob | undefined {
+  if (!isRecord(raw) || raw['kind'] !== 'subagent') return undefined;
+  const id = raw['id'];
+  const childSessionID = raw['childSessionID'];
+  const agent = raw['agent'];
+  const description = raw['description'];
+  const status = raw['status'];
+  const time = raw['time'];
+  if (
+    typeof id !== 'string' ||
+    id === '' ||
+    typeof childSessionID !== 'string' ||
+    childSessionID === '' ||
+    typeof agent !== 'string' ||
+    typeof description !== 'string' ||
+    !isWorkerStatus(status) ||
+    !isRecord(time)
+  ) {
+    return undefined;
+  }
+  const startedAt = finite(time['started']);
+  if (startedAt === undefined) return undefined;
+  const title = raw['title'];
+  const completedAt = finite(time['completed']);
+  return {
+    id,
+    childSessionID,
+    agent: sanitizeTerminalText(agent),
+    description: sanitizeTerminalText(description),
+    status,
+    startedAt,
+    ...(typeof title === 'string' && title !== '' ? { title: sanitizeTerminalText(title) } : {}),
+    ...(completedAt === undefined ? {} : { completedAt }),
   };
 }
 

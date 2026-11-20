@@ -16,6 +16,7 @@ import type { ProjectRef } from '../domain/server-identity.ts';
 import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
+import type { WorkerJob } from '../domain/worker.ts';
 
 /**
  * Overview and conversation (ADR-0002), plus `new`: an unsent conversation in a
@@ -125,6 +126,11 @@ export type AppState = {
    * Rendered inside the transcript beside the affected tool, never as a footer notice.
    */
   backgrounded: Record<string, Readonly<{ text: string; toolID?: string }>>;
+  /**
+   * Server-confirmed subagent jobs per server-qualified session key (#101). Cleared on
+   * disconnect so a reattach cannot show a ghost running worker from a stale snapshot.
+   */
+  workers: Record<string, readonly WorkerJob[]>;
   inbox: Record<string, QueuedInput[]>;
   agents: AgentDescriptor[];
   models: CatalogModel[];
@@ -216,6 +222,7 @@ export function initialState(directory: string, serverID: string = localServerID
     permissionChoice: 0,
     transcripts: {},
     backgrounded: {},
+    workers: {},
     inbox: {},
     agents: [],
     models: [],

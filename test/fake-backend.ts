@@ -20,6 +20,7 @@ import type { CatalogModel } from '../src/domain/model-resolution.ts';
 import type { NativeGoal } from '../src/domain/native-goal.ts';
 import type { SessionSummary } from '../src/domain/session.ts';
 import type { TranscriptMessage } from '../src/domain/transcript.ts';
+import type { WorkerJob } from '../src/domain/worker.ts';
 
 /** In-memory backend for UI and controller tests. Records every mutating call. */
 export class FakeBackend implements Backend {
@@ -28,6 +29,8 @@ export class FakeBackend implements Backend {
   readonly baseUrl = 'http://fake';
   sessions: SessionSummary[] = [];
   messages: Record<string, TranscriptMessage[]> = {};
+  /** Server-reported subagent jobs by parent session (#101). */
+  jobs: Record<string, readonly WorkerJob[]> = {};
   active = new Set<string>();
   permissions: PermissionPrompt[] = [];
   forms: FormRequest[] = [];
@@ -101,6 +104,10 @@ export class FakeBackend implements Backend {
   }
   async activeSessionIDs(): Promise<Set<string>> {
     return new Set(this.active);
+  }
+  async listSubagentJobs(sessionID: string): Promise<readonly WorkerJob[]> {
+    this.calls.push({ name: 'listSubagentJobs', args: [sessionID] });
+    return this.jobs[sessionID] ?? [];
   }
   /** Newest-first pages like the server; the cursor is the index where the page ends. */
   async listMessages(sessionID: string, limit: number, cursor?: string): Promise<MessagePage> {

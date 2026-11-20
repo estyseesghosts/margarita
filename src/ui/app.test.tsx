@@ -2174,3 +2174,56 @@ test('welcome greeting stays stable across redraws and route revisits (#128)', a
   expect(setup.captureCharFrame()).toContain(greeting);
   controller.dispose();
 });
+
+test('server-confirmed workers render with identity and expand to child details (#101)', async () => {
+  const backend = backendWithSession();
+  backend.messages = {
+    ses_a: [
+      {
+        kind: 'assistant',
+        id: 'm1',
+        createdAt: 1,
+        agent: 'build',
+        model: { providerID: 'p', modelID: 'm' },
+        parts: [],
+      },
+    ],
+  };
+  backend.jobs = {
+    ses_a: [
+      {
+        id: 'job_a',
+        childSessionID: 'child_a',
+        agent: 'build',
+        description: 'review patch',
+        status: 'running',
+        startedAt: 1000,
+      },
+      {
+        id: 'job_b',
+        childSessionID: 'child_b',
+        agent: 'plan',
+        description: 'audit tests',
+        status: 'error',
+        startedAt: 2000,
+        completedAt: 4000,
+      },
+    ],
+  };
+  const { controller, setup } = await mount(backend);
+  controller.openSession('ses_a');
+  await settle(setup);
+
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain('review patch');
+  expect(frame).toContain('audit tests');
+  expect(frame).toContain('running');
+  expect(frame).toContain('failed');
+  expect(frame).not.toContain('child_a'); // collapsed by default
+
+  controller.moveGroupFocus(1);
+  controller.toggleFocusedGroup();
+  await settle(setup);
+  expect(setup.captureCharFrame()).toContain('child_a');
+  controller.dispose();
+});

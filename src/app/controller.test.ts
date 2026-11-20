@@ -4415,3 +4415,88 @@ describe('agent picker and deterministic cycle (#123)', () => {
     controller.dispose();
   });
 });
+
+describe('background worker lifecycle (#101)', () => {
+  const jobs = [
+    {
+      id: 'job_a',
+      childSessionID: 'child_a',
+      agent: 'build',
+      description: 'review patch',
+      status: 'running' as const,
+      startedAt: 1000,
+    },
+    {
+      id: 'job_b',
+      childSessionID: 'child_b',
+      agent: 'plan',
+      description: 'audit tests',
+      status: 'error' as const,
+      startedAt: 2000,
+      completedAt: 4000,
+    },
+  ];
+
+  test('two concurrent workers are projected with identity and status, and are focusable', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    backend.jobs = { ses_a: jobs };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+
+    const rows = controller.workerNodes('ses_a', 'local');
+    expect(rows.map((row) => row.worker.childSessionID)).toEqual(['child_a', 'child_b']);
+    expect(rows.map((row) => row.worker.status)).toEqual(['running', 'error']);
+    expect(controller.collapsibleItems()).toEqual([
+      { key: 'worker:job_a', kind: 'worker' },
+      { key: 'worker:job_b', kind: 'worker' },
+    ]);
+    controller.moveGroupFocus(1);
+    expect(controller.state.focusedGroup).toBe('worker:job_a');
+    controller.toggleFocusedGroup();
+    expect(controller.workerNodes('ses_a', 'local')[0]?.expanded).toBe(true);
+    controller.dispose();
+  });
+
+  test('a failed or unsupported job RPC clears rows instead of showing a ghost worker', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    backend.jobs = { ses_a: jobs };
+    let attempts = 0;
+    backend.listSubagentJobs = async () => {
+      attempts += 1;
+      throw new Error('unsupported RPC');
+    };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+
+    expect(attempts).toBeGreaterThan(0);
+    expect(controller.workerNodes('ses_a', 'local')).toEqual([]);
+    controller.dispose();
+  });
+
+  test('detach clears workers and resync reconciles from the server', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    backend.jobs = { ses_a: jobs };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    expect(controller.workerNodes('ses_a', 'local')).toHaveLength(2);
+
+    controller.onStreamStatus('local', 'reconnecting');
+    expect(controller.workerNodes('ses_a', 'local')).toEqual([]);
+
+    // The server finished one worker while we were detached; only the finished one returns.
+    backend.jobs = { ses_a: [{ ...jobs[0]!, status: 'completed' as const }] };
+    controller.onStreamStatus('local', 'live');
+    await flush();
+
+    const rows = controller.workerNodes('ses_a', 'local');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.worker.status).toBe('completed');
+    controller.dispose();
+  });
+});

@@ -3,6 +3,7 @@ import type { ModelSelection } from './model-ref.ts';
 import { sanitizeTerminalText } from './sanitize-text.ts';
 import { assertNever } from './session.ts';
 import { truncatePrompt } from './sticky-prompt.ts';
+import type { WorkerJob } from './worker.ts';
 
 /** Frontend projection of server messages; adapters map wire types into these. */
 export type ToolStatus = 'streaming' | 'running' | 'completed' | 'error';
@@ -104,6 +105,11 @@ export type TranscriptNode =
     }
   | { kind: 'notice'; key: string; text: string; tone: 'dim' | 'error' | 'warn' }
   | { kind: 'meta'; key: string; text: string }
+  /**
+   * Server-confirmed background subagent (#101). Distinct from a generic delegate tool row:
+   * the worker can outlive the tool call that launched it and has its own child session.
+   */
+  | { kind: 'worker'; key: string; worker: WorkerJob; expanded: boolean }
   /** Lifecycle marker attached after a turn's own output; static when the run finished. */
   | { kind: 'execution'; key: string; segment: ExecutionMarker };
 

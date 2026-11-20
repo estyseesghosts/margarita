@@ -10,6 +10,7 @@ import { type NativeGoal, toNativeGoal } from '../domain/native-goal.ts';
 import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
+import type { WorkerJob } from '../domain/worker.ts';
 import type { Connection } from './connection.ts';
 import {
   maxToolOutputChars,
@@ -24,6 +25,7 @@ import {
   toQueuedInput,
   toSessionSummary,
   toTranscriptMessage,
+  toWorkerJob,
 } from './wire-mapping.ts';
 
 export type { PermissionPrompt, QueuedInput } from './wire-mapping.ts';
@@ -121,6 +123,11 @@ export interface Backend {
     model?: ModelSelection;
   }): Promise<SessionSummary>;
   activeSessionIDs(): Promise<Set<string>>;
+  /**
+   * Server-confirmed subagent jobs for a session, including descendants (#101).
+   * An empty result means the server reported no workers; a failure stays a failure.
+   */
+  listSubagentJobs(sessionID: string): Promise<readonly WorkerJob[]>;
   listMessages(sessionID: string, limit: number, cursor?: string): Promise<MessagePage>;
   listInbox(sessionID: string): Promise<QueuedInput[]>;
   cancelQueued(sessionID: string, inboxID: string): Promise<void>;
@@ -240,6 +247,16 @@ class OpenCodeBackend implements Backend {
   async activeSessionIDs(): Promise<Set<string>> {
     const active = await call('session.active', () => this.client.session.active());
     return new Set(Object.keys(active));
+  }
+
+  async listSubagentJobs(sessionID: string): Promise<readonly WorkerJob[]> {
+    const jobs = await call('experimental.job.list', () =>
+      this.client.experimental.job.list({ sessionID, kind: 'subagent', descendants: true }),
+    );
+    return jobs.flatMap((job) => {
+      const worker = toWorkerJob(job);
+      return worker === undefined ? [] : [worker];
+    });
   }
 
   async listMessages(sessionID: string, limit: number, cursor?: string): Promise<MessagePage> {

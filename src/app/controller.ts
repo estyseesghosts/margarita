@@ -141,6 +141,7 @@ import {
   type TranscriptNode,
   transcriptWindowStep,
 } from '../domain/transcript.ts';
+import { type WorkerJob, type WorkerNode, workerNodes } from '../domain/worker.ts';
 import {
   type AppState,
   type DiffOverlay,
@@ -1291,7 +1292,12 @@ export class AppController {
     if (serverID !== this.serverID) return;
     const reconnected = status === 'live' && this.state.stream === 'reconnecting';
     this.setState('stream', status);
-    if (status === 'reconnecting') this.showNotice('Connection lost · retrying', 'warn', false);
+    if (status === 'reconnecting') {
+      // Server state may have changed while detached. Drop worker rows now so no running
+      // worker survives as a ghost until the resync confirms it again (#101).
+      this.clearWorkersForServer(serverID);
+      this.showNotice('Connection lost · retrying', 'warn', false);
+    }
     if (reconnected) void this.track('resync', this.resync(serverID));
   }
 
@@ -1310,6 +1316,18 @@ export class AppController {
     batch(() => {
       for (const event of events) this.applyEvent(serverID, event);
     });
+  }
+
+  /** Drops every worker row owned by one host; local keys are unqualified, so parse them. */
+  private clearWorkersForServer(serverID: string): void {
+    this.setState(
+      'workers',
+      produce((workers) => {
+        for (const key of Object.keys(workers)) {
+          if (parseSessionKey(key).serverID === serverID) delete workers[key];
+        }
+      }),
+    );
   }
 
   /**
@@ -1374,6 +1392,7 @@ export class AppController {
         this.scheduleSummary(event.sessionID, serverID);
         return;
       case 'session-deleted':
+        this.setState('workers', this.keyFor(serverID, event.sessionID), []);
         this.forgetSession(event.sessionID, serverID);
         return;
       case 'usage':
@@ -1492,6 +1511,23 @@ export class AppController {
 
   // ---------------------------------------------------------------- transcripts
 
+  /**
+   * Worker rows are server-authoritative (#101). A failed/unsupported RPC clears them: the
+   * delegated tool call still renders from the transcript as generic tool state, but the UI
+   * never claims a worker is running (or has finished) without server confirmation.
+   */
+  private async refreshWorkers(sessionID: string, serverID = this.activeServerID()): Promise<void> {
+    const key = this.keyFor(serverID, sessionID);
+    let jobs: readonly WorkerJob[] = [];
+    try {
+      jobs = await this.backendFor(serverID).listSubagentJobs(sessionID);
+    } catch {
+      jobs = [];
+    }
+    if (this.disposed) return;
+    this.setState('workers', key, jobs);
+  }
+
   /** Throttled canonical refetch: at most one request in flight per session. */
   private scheduleTranscript(sessionID: string, serverID: string = this.activeServerID()): void {
     const key = `${serverID} ${sessionID}`;
@@ -1502,6 +1538,7 @@ export class AppController {
     const run = (async () => {
       try {
         await this.fetchLatest(sessionID, serverID);
+        await this.refreshWorkers(sessionID, serverID);
         await delay(80);
       } finally {
         this.transcriptInFlight.delete(key);
@@ -1625,6 +1662,7 @@ export class AppController {
   ): Promise<void> {
     await Promise.all([
       this.fetchLatest(sessionID, serverID),
+      this.refreshWorkers(sessionID, serverID),
       this.refreshInbox(sessionID, serverID),
       this.refreshInputRequests(sessionID, serverID),
       this.refreshSummary(sessionID, serverID),
@@ -4448,17 +4486,24 @@ export class AppController {
     if (this.state.route.kind !== 'conversation') return [];
     const route = this.state.route;
     const target = route.sessionID;
-    const messages = this.state.transcripts[this.keyFor(route.serverID, target)]?.messages ?? [];
+    const key = this.keyFor(route.serverID, target);
+    const messages = this.state.transcripts[key]?.messages ?? [];
     const expanded = this.expandedSets();
-    return foldTranscript(messages, {
+    const folded = foldTranscript(messages, {
       detailed: this.state.detailed,
       expandedGroups: expanded.groups,
       expandedDiffs: expanded.diffs,
-      mcpServers: this.mcpServersFor(
-        route.serverID,
-        this.state.sessions[this.keyFor(route.serverID, target)]?.directory ?? '',
-      ),
+      mcpServers: this.mcpServersFor(route.serverID, this.state.sessions[key]?.directory ?? ''),
     });
+    return [...folded, ...workerNodes(this.state.workers[key] ?? [], expanded.groups)];
+  }
+
+  /** Server-confirmed workers for a session, in stable render order (#101). */
+  workerNodes(sessionID: string, serverID: string = this.activeServerID()): WorkerNode[] {
+    return workerNodes(
+      this.state.workers[this.keyFor(serverID, sessionID)] ?? [],
+      this.expandedSets().groups,
+    );
   }
 
   /** Tool groups in render order; empty outside conversations and in detailed mode. */
@@ -4467,19 +4512,23 @@ export class AppController {
   }
 
   /**
-   * Collapsible transcript items in render order: tool groups and standalone edit
-   * tools whose inline diff exceeds the compact preview budget (keys `diff:<toolID>`).
-   * Empty in detailed mode, where everything is already shown expanded.
+   * Collapsible transcript items in render order: tool groups, standalone edit tools
+   * whose inline diff exceeds the compact preview budget (keys `diff:<toolID>`), and
+   * server-confirmed workers (keys `worker:<jobID>`). Groups/diffs are omitted in detailed
+   * mode where everything is already expanded; workers stay focusable in both modes.
    */
-  collapsibleItems(): { key: string; kind: 'group' | 'diff' }[] {
-    if (this.state.detailed) return [];
-    return this.conversationNodes().flatMap((node): { key: string; kind: 'group' | 'diff' }[] => {
-      if (node.kind === 'tool-group') return [{ key: node.key, kind: 'group' as const }];
-      if (node.kind === 'tool' && node.tool.status !== 'error' && hasOversizedDiff(node.tool)) {
-        return [{ key: `diff:${node.tool.id}`, kind: 'diff' as const }];
-      }
-      return [];
-    });
+  collapsibleItems(): { key: string; kind: 'group' | 'diff' | 'worker' }[] {
+    return this.conversationNodes().flatMap(
+      (node): { key: string; kind: 'group' | 'diff' | 'worker' }[] => {
+        if (node.kind === 'worker') return [{ key: node.key, kind: 'worker' as const }];
+        if (this.state.detailed) return [];
+        if (node.kind === 'tool-group') return [{ key: node.key, kind: 'group' as const }];
+        if (node.kind === 'tool' && node.tool.status !== 'error' && hasOversizedDiff(node.tool)) {
+          return [{ key: `diff:${node.tool.id}`, kind: 'diff' as const }];
+        }
+        return [];
+      },
+    );
   }
 
   /** Ctrl+↑/↓ while reading: move the lightweight selection between collapsible items. */

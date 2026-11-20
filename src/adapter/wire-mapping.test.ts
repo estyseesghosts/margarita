@@ -2,7 +2,49 @@ import { describe, expect, test } from 'bun:test';
 
 import type { JsonValue, SessionMessageAssistant, SessionMessageInfo } from '@opencode/client';
 
-import { maxToolOutputChars, toTranscriptMessage } from './wire-mapping.ts';
+import { maxToolOutputChars, toTranscriptMessage, toWorkerJob } from './wire-mapping.ts';
+
+describe('subagent job mapping (#101)', () => {
+  const rawJob = {
+    kind: 'subagent',
+    id: 'job_1',
+    sessionID: 'parent',
+    childSessionID: 'child_1',
+    status: 'running',
+    agent: 'build',
+    description: 'review patch',
+    title: 'Reviewer',
+    time: { started: 1000 },
+  };
+
+  test('maps a confirmed subagent with its child identity and times', () => {
+    expect(toWorkerJob(rawJob)).toEqual({
+      id: 'job_1',
+      childSessionID: 'child_1',
+      agent: 'build',
+      description: 'review patch',
+      title: 'Reviewer',
+      status: 'running',
+      startedAt: 1000,
+    });
+    expect(toWorkerJob({ ...rawJob, time: { started: 1000, completed: 4500 } })).toMatchObject({
+      status: 'running',
+      completedAt: 4500,
+    });
+  });
+
+  test('drops non-subagent jobs and future/unknown statuses', () => {
+    expect(toWorkerJob({ ...rawJob, kind: 'shell' })).toBeUndefined();
+    expect(toWorkerJob({ ...rawJob, status: 'parked' })).toBeUndefined();
+  });
+
+  test('drops malformed jobs instead of guessing an identity', () => {
+    expect(toWorkerJob(null)).toBeUndefined();
+    expect(toWorkerJob('job_1')).toBeUndefined();
+    expect(toWorkerJob({ ...rawJob, childSessionID: 7 })).toBeUndefined();
+    expect(toWorkerJob({ ...rawJob, time: {} })).toBeUndefined();
+  });
+});
 
 function assistantWithTool(
   output: string,
