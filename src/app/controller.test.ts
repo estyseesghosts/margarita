@@ -1807,6 +1807,7 @@ describe('createSession scopes agent/model to the target project (issue #108)', 
       await controller.bootstrap();
       controller.openOverview();
       selectRowForDirectory(controller, '/proj-a');
+      await flush(); // settle background catalog loads from overview row navigation
       await controller.loadCatalog('/proj-a', 'local');
 
       expect(controller.catalogFresh('/proj-a', 'local')).toBe(true);
@@ -1911,6 +1912,7 @@ describe('createSession scopes agent/model to the target project (issue #108)', 
       await controller.bootstrap();
       controller.openOverview();
       selectRowForDirectory(controller, '/proj-a');
+      await flush(); // settle background catalog loads from overview row navigation
       await controller.loadCatalog('/proj-a', 'local');
       controller.setNewSessionDefaults(undefined, { providerID: 'p', modelID: 'model-a' });
       expect(controller.catalogFresh('/proj-a', 'local')).toBe(true);
