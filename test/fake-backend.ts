@@ -109,6 +109,7 @@ export class FakeBackend implements Backend {
     return {
       messages: all.slice(start, end),
       ...(start > 0 ? { olderCursor: String(start) } : {}),
+      hasEarlier: start > 0,
     };
   }
   /** In-memory inbox; Margarita treats FIFO order as server order. */

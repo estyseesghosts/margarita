@@ -46,7 +46,45 @@ export class BackendError extends Error {
 }
 
 export type SessionPage = Readonly<{ sessions: SessionSummary[]; nextCursor?: string }>;
-export type MessagePage = Readonly<{ messages: TranscriptMessage[]; olderCursor?: string }>;
+export type MessagePage = Readonly<{
+  messages: TranscriptMessage[];
+  olderCursor?: string;
+  /**
+   * Whether older history was actually confirmed. OpenCode mints a `cursor.next` for
+   * every nonempty page, so a token alone is a navigation hint, not proof of history.
+   * When `false`, consumers must ignore `olderCursor` even if one is present.
+   */
+  hasEarlier?: boolean;
+}>;
+
+/** A server page as needed to decide whether older history really exists. */
+type RawMessagePage = Readonly<{ data: readonly unknown[]; cursor: { next?: string | null } }>;
+
+/**
+ * Resolve a server pagination token into a confirmed "has older" decision.
+ *
+ * A short page is exhausted. An exactly-full page is ambiguous, so a minimal
+ * lookahead decides; the lookahead only counts messages and never feeds them into
+ * the page, so nothing is dropped or duplicated. A failed lookahead fails closed
+ * rather than manufacturing history.
+ */
+export async function resolveOlderPage(
+  page: RawMessagePage,
+  limit: number,
+  lookahead: (cursor: string) => Promise<number>,
+): Promise<{ olderCursor?: string; hasEarlier: boolean }> {
+  const token = page.cursor.next;
+  if (typeof token !== 'string' || token === '' || page.data.length < limit) {
+    return { hasEarlier: false };
+  }
+  let count = 0;
+  try {
+    count = await lookahead(token);
+  } catch {
+    return { hasEarlier: false };
+  }
+  return count > 0 ? { olderCursor: token, hasEarlier: true } : { hasEarlier: false };
+}
 /** Message IDs bounding a diff; both open-ended when omitted. */
 export type DiffRange = Readonly<{ from?: string; to?: string }>;
 export type Delivery = 'queue' | 'steer';
@@ -218,10 +256,16 @@ class OpenCodeBackend implements Backend {
       )
       .filter((message) => message !== undefined)
       .toReversed();
-    const older = page.cursor.next;
+    const older = await resolveOlderPage(page, limit, async (nextCursor) => {
+      const probe = await call('message.list', () =>
+        this.client.message.list({ sessionID, limit: 1, cursor: nextCursor }),
+      );
+      return probe.data.length;
+    });
     return {
       messages,
-      ...(typeof older === 'string' && older !== '' ? { olderCursor: older } : {}),
+      ...(older.olderCursor === undefined ? {} : { olderCursor: older.olderCursor }),
+      hasEarlier: older.hasEarlier,
     };
   }
 

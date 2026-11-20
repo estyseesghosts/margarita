@@ -2,7 +2,12 @@ import { describe, expect, test } from 'bun:test';
 
 import { ClientError } from '@opencode/client';
 
-import { BackendError, type BackendErrorKind, toBackendError } from './backend.ts';
+import {
+  BackendError,
+  type BackendErrorKind,
+  resolveOlderPage,
+  toBackendError,
+} from './backend.ts';
 
 /** Declared errors from the SDK look like `Object.assign(new Error(msg), body)`. */
 function declared(tag: string, message = `${tag} message`): Error {
@@ -89,5 +94,44 @@ describe('toBackendError', () => {
   test('passes BackendError through unchanged', () => {
     const original = new BackendError('conflict', 'op', 'msg');
     expect(toBackendError('other', original)).toBe(original);
+  });
+});
+
+function olderPage(dataLength: number, next?: string) {
+  return {
+    data: Array.from({ length: dataLength }, (_, index) => index),
+    cursor: next === undefined ? {} : { next },
+  };
+}
+
+describe('resolveOlderPage (issue #125)', () => {
+  test('a server token on a short page is not proof of earlier history', async () => {
+    expect(await resolveOlderPage(olderPage(2, 'cursor'), 120, async () => 0)).toEqual({
+      hasEarlier: false,
+    });
+  });
+
+  test('no token means no earlier history', async () => {
+    expect(await resolveOlderPage(olderPage(120), 120, async () => 1)).toEqual({
+      hasEarlier: false,
+    });
+  });
+
+  test('an exactly-full page needs a confirmed lookahead', async () => {
+    expect(await resolveOlderPage(olderPage(120, 'cursor'), 120, async () => 0)).toEqual({
+      hasEarlier: false,
+    });
+    expect(await resolveOlderPage(olderPage(120, 'cursor'), 120, async () => 1)).toEqual({
+      olderCursor: 'cursor',
+      hasEarlier: true,
+    });
+  });
+
+  test('a failed lookahead fails closed', async () => {
+    expect(
+      await resolveOlderPage(olderPage(120, 'cursor'), 120, async () => {
+        throw new Error('offline');
+      }),
+    ).toEqual({ hasEarlier: false });
   });
 });

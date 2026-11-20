@@ -472,6 +472,54 @@ describe('app', () => {
     expect(transcript?.olderCursor).toBeUndefined();
     expect(transcript?.messages[0]?.id).toBe('m0000');
   });
+
+  test('a short page with a server cursor token does not show phantom earlier history (issue #125)', async () => {
+    const backend = backendWithSession();
+    backend.messages['ses_a'] = [
+      {
+        kind: 'user',
+        id: 'm0',
+        createdAt: 1,
+        text: 'hello',
+        attachments: [],
+      },
+      {
+        kind: 'user',
+        id: 'm1',
+        createdAt: 2,
+        text: 'hi',
+        attachments: [],
+      },
+    ];
+    // Emulate OpenCode v2: a token is minted for every nonempty page even when
+    // there is nothing older. The backend reports the page as exhausted.
+    backend.listMessages = async (sessionID, limit, cursor) => {
+      const all = backend.messages[sessionID] ?? [];
+      const end = cursor === undefined ? all.length : Number(cursor);
+      const start = Math.max(0, end - limit);
+      const messages = all.slice(start, end);
+      return {
+        messages,
+        ...(messages.length > 0 ? { olderCursor: String(start) } : {}),
+        hasEarlier: start > 0,
+      };
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    expect(controller.state.transcripts['ses_a']?.olderCursor).toBeUndefined();
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain('earlier messages');
+
+    const before = backend.calls.filter((call) => call.name === 'listMessages').length;
+    setup.mockInput.pressKey('HOME', { ctrl: true });
+    await settle(setup);
+    setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    expect(backend.calls.filter((call) => call.name === 'listMessages')).toHaveLength(before);
+  });
+
   test('goal, plan and Ctrl+T checklist; native goal shows alongside', async () => {
     const backend = backendWithSession();
     backend.serverCommands = [{ name: 'goal', description: 'Set the session goal' }];

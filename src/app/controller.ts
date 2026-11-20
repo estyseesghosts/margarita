@@ -1442,8 +1442,10 @@ export class AppController {
     const merged = mergeLatest(existing?.messages ?? [], page.messages);
     // Cached messages older than this page keep their own cursor; otherwise the page's
     // cursor is the way further back (an empty placeholder transcript has none).
-    const olderCursor =
-      merged.length > page.messages.length ? existing?.olderCursor : page.olderCursor;
+    // A backend that reports an exhausted page must not keep a phantom "earlier" state,
+    // even when it still carries a raw server pagination token.
+    const freshCursor = page.hasEarlier === false ? undefined : page.olderCursor;
+    const olderCursor = merged.length > page.messages.length ? existing?.olderCursor : freshCursor;
     this.setState(
       'transcripts',
       produce((transcripts) => {
@@ -1478,7 +1480,8 @@ export class AppController {
         produce((current) => {
           current.messages = [...older, ...current.messages];
           current.loading = false;
-          if (page.olderCursor === undefined) delete current.olderCursor;
+          if (page.hasEarlier === false || page.olderCursor === undefined)
+            delete current.olderCursor;
           else current.olderCursor = page.olderCursor;
         }),
       );
