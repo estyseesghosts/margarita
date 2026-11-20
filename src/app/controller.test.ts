@@ -1809,7 +1809,14 @@ describe('createSession scopes agent/model to the target project (issue #108)', 
       selectRowForDirectory(controller, '/proj-a');
       await controller.loadCatalog('/proj-a', 'local');
 
+      expect(controller.catalogFresh('/proj-a', 'local')).toBe(true);
+      expect(controller.modelChoices('model-a')).toEqual([
+        { providerID: 'p', modelID: 'model-a' },
+        { providerID: 'p', modelID: 'model-a', variant: 'high' },
+        { providerID: 'p', modelID: 'model-a', variant: 'low' },
+      ]);
       await controller.openModelPicker();
+      expect(controller.state.overlay.kind).toBe('model-picker');
       controller.setModelPickerQuery('model-a');
       controller.moveModelPicker(1); // base model, then #high
       await controller.acceptModelPicker();
@@ -1906,6 +1913,8 @@ describe('createSession scopes agent/model to the target project (issue #108)', 
       selectRowForDirectory(controller, '/proj-a');
       await controller.loadCatalog('/proj-a', 'local');
       controller.setNewSessionDefaults(undefined, { providerID: 'p', modelID: 'model-a' });
+      expect(controller.catalogFresh('/proj-a', 'local')).toBe(true);
+      expect(controller.state.models.map((model) => model.modelID)).toContain('model-a');
 
       const id = await controller.createSessionWithPrompt(
         { serverID: 'local', directory: '/proj-a' },
