@@ -1802,7 +1802,13 @@ describe('createSession scopes agent/model to the target project (issue #108)', 
   test('Alt+P pins a local model variant instead of silently using GPT Terra', async () => {
     const backend = new FakeBackend();
     backend.models = [
-      { providerID: 'p', modelID: 'model-a', name: 'model-a', enabled: true, variants: ['high', 'low'] },
+      {
+        providerID: 'p',
+        modelID: 'model-a',
+        name: 'model-a',
+        enabled: true,
+        variants: ['high', 'low'],
+      },
     ];
     backend.defaultModel = async () => ({ providerID: 'p', modelID: 'gpt-terra' });
     const controller = makeController(() => Promise.resolve([]), backend);
@@ -1894,7 +1900,13 @@ describe('createSession scopes agent/model to the target project (issue #108)', 
   test('server ignoring an explicit model switch never receives a first prompt', async () => {
     const backend = new FakeBackend();
     backend.models = [
-      { providerID: 'p', modelID: 'model-a', name: 'model-a', enabled: true, variants: [] },
+      {
+        providerID: 'p',
+        modelID: 'model-a',
+        name: 'model-a',
+        enabled: true,
+        variants: [],
+      },
     ];
     backend.defaultModel = async () => ({ providerID: 'p', modelID: 'gpt-terra' });
     const wrongModel = { providerID: 'p', modelID: 'gpt-terra' };
