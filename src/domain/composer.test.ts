@@ -217,6 +217,7 @@ describe('slash commands', () => {
       'resume',
       'rename',
       'revert',
+      'rewind',
       'review',
     ]);
     expect(completeCommand('/re x', [])).toEqual([]);

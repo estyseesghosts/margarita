@@ -43,7 +43,7 @@ During an active conversation a server permission request appears above input. F
 
 ## Rewind and recovery
 
-`Esc Esc` or `/rewind` opens a history-focused selection rather than immediately mutating working files. OpenCode v2 has staged reversion and commit operations, but exact changes to code versus conversation require validation. The UI should show scope and affected files before commit, and prevent rewind while a conflicting execution is busy. [OpenCode revert API](https://opencode.ai/docs/api). Until fully supported, leave `/rewind` disabled with honest capability note rather than simulating Claude's checkpoint behavior.
+`Esc Esc` or `/rewind` opens a history-focused selection rather than immediately mutating working files. It lists earlier user prompts from the loaded transcript (page up to load older history), with timestamps and a short prompt preview. Moving the selection reads a read-only `session.diff` preview of the files in scope; stale replies are discarded, and a failed preview is labelled rather than fabricated. Enter stages the chosen boundary with `session.revert.stage`, then opens the existing confirmation dialog: Enter commits, Esc restores the files. Rewind is refused while the session is running, and both the selector and the confirmation are bound to the owning server/session so switching hosts mid-dialog cannot cross-revert. OpenCode v2's revert changes **files only** — the conversation is not rewritten, and the server exposes no redo operation; the dialog says so explicitly instead of promising Claude-style checkpoints. Rewind boundaries older than the loaded transcript window require paging up first. [OpenCode revert API](https://opencode.ai/docs/api).
 
 ## Small-terminal view
 

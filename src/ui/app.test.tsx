@@ -2227,3 +2227,37 @@ test('server-confirmed workers render with identity and expand to child details 
   expect(setup.captureCharFrame()).toContain('child_a');
   controller.dispose();
 });
+
+test('rewind picker lists earlier prompts and shows file scope and honest limits (#102)', async () => {
+  const backend = backendWithSession();
+  backend.messages = {
+    ses_a: [
+      { kind: 'user', id: 'u1', createdAt: 1000, text: 'first request', attachments: [] },
+      { kind: 'user', id: 'u2', createdAt: 2000, text: 'second request', attachments: [] },
+    ],
+  };
+  backend.diffs = [
+    {
+      file: 'src/a.ts',
+      patch: '@@ -1 +1 @@',
+      additions: 1,
+      deletions: 1,
+      status: 'modified',
+      truncated: false,
+    },
+  ];
+  const { controller, setup } = await mount(backend);
+  controller.openSession('ses_a');
+  await settle(setup);
+  controller.enterRewindSelection();
+  await settle(setup);
+
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain('first request');
+  expect(frame).toContain('second request');
+  expect(frame).toContain('src/a.ts');
+  expect(frame).toContain('Files only');
+  expect(frame).toContain('no redo');
+  expect(backend.calls.some((call) => call.name === 'stageRevert')).toBe(false);
+  controller.dispose();
+});

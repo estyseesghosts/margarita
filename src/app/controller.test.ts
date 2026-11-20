@@ -4204,7 +4204,20 @@ describe('escape key handling (issue #90)', () => {
   });
 
   test('Double-Esc on an idle empty composer enters rewind selection without mutating files', async () => {
-    const { backend, controller } = conversationFixture();
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = {
+      ses_a: [
+        {
+          kind: 'user',
+          id: 'u1',
+          createdAt: 1,
+          text: 'earlier prompt',
+          attachments: [],
+        },
+      ],
+    };
+    const controller = makeController(async () => [], backend);
     await attach(controller, 'ses_a');
     controller.setComposer(composerFrom(''));
 
@@ -4214,9 +4227,10 @@ describe('escape key handling (issue #90)', () => {
     await flush();
 
     expect(controller.state.rewindPending).toBe(true);
+    expect(controller.state.overlay.kind).toBe('rewind-picker');
     expect(controller.state.composer.text).toBe('');
-    expect(controller.state.notice?.text).toContain('Rewind selection');
     expect(backend.calls.filter((call) => call.name === 'interrupt')).toHaveLength(0);
+    expect(backend.calls.some((call) => call.name === 'stageRevert')).toBe(false);
     controller.dispose();
   });
 
@@ -4497,6 +4511,116 @@ describe('background worker lifecycle (#101)', () => {
     const rows = controller.workerNodes('ses_a', 'local');
     expect(rows).toHaveLength(1);
     expect(rows[0]?.worker.status).toBe('completed');
+    controller.dispose();
+  });
+});
+
+describe('rewind prompt selection (#102)', () => {
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', id: 'u1', createdAt: 1000, text: 'first request', attachments: [] },
+    {
+      kind: 'assistant',
+      id: 'm1',
+      createdAt: 1100,
+      agent: 'build',
+      model: { providerID: 'p', modelID: 'm' },
+      parts: [],
+    },
+    { kind: 'user', id: 'u2', createdAt: 2000, text: 'second request', attachments: [] },
+    {
+      kind: 'assistant',
+      id: 'm2',
+      createdAt: 2100,
+      agent: 'build',
+      model: { providerID: 'p', modelID: 'm' },
+      parts: [],
+    },
+  ];
+
+  function harness() {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: messages };
+    backend.diffs = [
+      {
+        file: 'src/a.ts',
+        patch: '@@ -1 +1 @@',
+        additions: 1,
+        deletions: 1,
+        status: 'modified',
+        truncated: false,
+      },
+    ];
+    backend.revertFiles = [...backend.diffs];
+    const controller = makeController(async () => [], backend);
+    return { backend, controller };
+  }
+
+  test('selects an earlier prompt, previews files read-only, then stages that boundary', async () => {
+    const { backend, controller } = harness();
+    await attach(controller, 'ses_a');
+    controller.enterRewindSelection();
+    const open = controller.state.overlay;
+    expect(open.kind).toBe('rewind-picker');
+    expect(controller.rewindChoices('ses_a', 'local').map((item) => item.messageID)).toEqual([
+      'u1',
+      'u2',
+    ]);
+    await flush();
+    expect(backend.calls.some((call) => call.name === 'sessionDiff')).toBe(true);
+
+    controller.moveRewindPicker(-1);
+    await flush();
+    const diff = backend.calls.findLast((call) => call.name === 'sessionDiff');
+    expect(diff?.args[1]).toEqual({ from: 'u1' });
+    expect(backend.calls.some((call) => call.name === 'stageRevert')).toBe(false);
+
+    await controller.acceptRewindPicker();
+    expect(backend.calls.find((call) => call.name === 'stageRevert')?.args).toEqual([
+      'ses_a',
+      'u1',
+    ]);
+    expect(controller.state.overlay.kind).toBe('revert');
+    controller.dispose();
+  });
+
+  test('an unavailable preview is labelled, not shown as "no changes"', async () => {
+    const { backend, controller } = harness();
+    backend.sessionDiff = async () => {
+      throw new Error('diff unavailable');
+    };
+    await attach(controller, 'ses_a');
+    controller.enterRewindSelection();
+    await flush();
+    const overlay = controller.state.overlay;
+    expect(overlay.kind).toBe('rewind-picker');
+    if (overlay.kind !== 'rewind-picker') throw new Error('picker not open');
+    expect(overlay.previewUnavailable).toBe(true);
+    controller.dispose();
+  });
+
+  test('rewind is refused while the session is running', async () => {
+    const { controller } = harness();
+    await attach(controller, 'ses_a');
+    controller.onEvents(
+      'local',
+      [{ kind: 'execution', sessionID: 'ses_a', state: 'started' }],
+      false,
+    );
+    controller.enterRewindSelection();
+    expect(controller.state.overlay.kind).toBe('none');
+    expect(controller.state.notice?.text).toContain('Wait for the current run');
+    controller.dispose();
+  });
+
+  test('cancelling the selector never stages or mutates files', async () => {
+    const { backend, controller } = harness();
+    await attach(controller, 'ses_a');
+    controller.enterRewindSelection();
+    controller.closeOverlay();
+    expect(controller.state.rewindPending).toBe(false);
+    expect(backend.calls.some((call) => call.name === 'stageRevert')).toBe(false);
+    expect(backend.calls.some((call) => call.name === 'commitRevert')).toBe(false);
     controller.dispose();
   });
 });

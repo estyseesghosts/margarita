@@ -16,6 +16,7 @@ import { type Goal, progress, type TaskState } from '../domain/goal-plan.ts';
 import { actionHint, actionIDs, formatBinding, type Keymap } from '../domain/keymap.ts';
 import { formatModelRef } from '../domain/model-ref.ts';
 import type { NativeGoal } from '../domain/native-goal.ts';
+import { rewindTimeLabel } from '../domain/rewind.ts';
 import type { SessionSummary, TokenUsage } from '../domain/session.ts';
 import { localCommands } from '../domain/slash-command.ts';
 import { formatCost, formatTokenCount } from '../domain/usage-format.ts';
@@ -290,6 +291,43 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
             frame={frame}
           />
         )}
+      </Match>
+      <Match when={state.overlay.kind === 'rewind-picker' ? state.overlay : undefined}>
+        {(overlay: Accessor<Extract<Overlay, { kind: 'rewind-picker' }>>) => {
+          const choices = () =>
+            props.controller.rewindChoices(overlay().sessionID, overlay().serverID);
+          const start = () => Math.max(0, overlay().index - visibleRows + 1);
+          return (
+            <box {...frame('Rewind · ↑↓ prompt · Enter stage · Esc cancel')}>
+              <text fg={props.theme.text}>
+                {`Earlier prompt to revert file changes to (${choices().length} in loaded history):`}
+              </text>
+              <For each={choices().slice(start(), start() + visibleRows)}>
+                {(choice, index) => {
+                  const position = () => start() + index();
+                  const selected = () => position() === overlay().index;
+                  return (
+                    <text fg={selected() ? props.theme.accent : props.theme.text}>
+                      {`${selected() ? '❯' : ' '} ${choice.ordinal}. ${rewindTimeLabel(choice.createdAt)}  ${choice.text}`}
+                    </text>
+                  );
+                }}
+              </For>
+              <text fg={props.theme.text}>
+                {`Scope: files changed after prompt #${choices()[overlay().index]?.ordinal ?? '?'} · ${overlay().loading ? 'reading…' : overlay().previewUnavailable ? 'file scope unavailable' : diffSummary(overlay().files)}`}
+              </text>
+              <For each={overlay().files.slice(0, 4)}>
+                {(file) => (
+                  <text fg={dim()}>{`  ${file.file}  +${file.additions} −${file.deletions}`}</text>
+                )}
+              </For>
+              <text fg={dim()}>
+                Files only — the conversation is not rewritten; the server offers no redo.
+              </text>
+              <text fg={dim()}>Enter stages the boundary; a separate confirmation applies it.</text>
+            </box>
+          );
+        }}
       </Match>
       <Match when={state.overlay.kind === 'revert' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'revert' }>>) => (

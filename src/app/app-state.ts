@@ -43,6 +43,17 @@ export type Overlay =
   | { kind: 'form'; sessionID: string; editor: FormEditor }
   | { kind: 'tasks'; index: number; target?: { serverID: string; sessionID: string } }
   | {
+      kind: 'rewind-picker';
+      serverID: string;
+      sessionID: string;
+      index: number;
+      /** Read-only `session.diff` preview of the selected boundary; not a staged change. */
+      files: readonly FileDiff[];
+      loading: boolean;
+      /** The read-only preview failed; never render an empty result as "no changes". */
+      previewUnavailable: boolean;
+    }
+  | {
       kind: 'revert';
       /** Owning host: two servers can both own the same session ID. */
       serverID: string;

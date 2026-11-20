@@ -216,6 +216,11 @@ function routeOverlay(controller: AppController, keymap: Keymap, key: KeyInput):
       else if (key.name === 'backspace') controller.setCopyPickerQuery(overlay.query.slice(0, -1));
       else if (isPrintable(key)) controller.setCopyPickerQuery(overlay.query + key.text);
       return true;
+    case 'rewind-picker':
+      if (key.name === 'up') controller.moveRewindPicker(-1);
+      else if (key.name === 'down') controller.moveRewindPicker(1);
+      else if (key.name === 'return') void controller.acceptRewindPicker();
+      return true;
     case 'agent-picker':
       if (key.name === 'up') controller.moveAgentPicker(-1);
       else if (key.name === 'down') controller.moveAgentPicker(1);

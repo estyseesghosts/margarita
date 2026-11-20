@@ -109,6 +109,7 @@ import {
   recordEntry,
   searchHistory,
 } from '../domain/prompt-history.ts';
+import { type RewindCandidate, rewindCandidates } from '../domain/rewind.ts';
 import {
   legacyProjectKeys,
   localServerID,
@@ -279,6 +280,8 @@ const stoppedByUserReason = 'Stopped by the user';
 export class AppController {
   readonly state: AppState;
   private readonly setState: SetStoreFunction<AppState>;
+  /** Guards read-only rewind previews against late replies for a previously selected row. */
+  private rewindPreviewSeq = 0;
   private noticeCounter = 0;
   private noticeTimer: ReturnType<typeof setTimeout> | undefined;
   /** Timestamp (ms, from `deps.now`) of the most recent idle Escape tap, for double-tap detection. */
@@ -3170,6 +3173,9 @@ export class AppController {
       case 'revert':
         await this.stageRevert();
         return;
+      case 'rewind':
+        this.enterRewindSelection();
+        return;
       case 'keys':
       case 'help':
         this.setOverlay({ kind: 'help' });
@@ -4582,6 +4588,10 @@ export class AppController {
   }
 
   closeOverlay(): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind === 'rewind-picker' && this.state.rewindPending) {
+      this.setState('rewindPending', false);
+    }
     this.setState('overlay', { kind: 'none' });
   }
 
@@ -4662,10 +4672,93 @@ export class AppController {
     }
   }
 
-  /** Enter rewind selection without mutating files; confirmation is separate work (#102). */
-  private enterRewindSelection(): void {
+  /** Esc Esc / /rewind: open a history-focused selector without touching files (#102). */
+  enterRewindSelection(): void {
+    const session = this.requireSession();
+    if (session === undefined) return;
+    const key = this.keyFor(session.serverID, session.id);
+    if (this.state.running[key] === true) {
+      this.showNotice('Wait for the current run to finish before rewinding.', 'warn');
+      return;
+    }
+    const choices = this.rewindChoices(session.id, session.serverID);
+    if (choices.length === 0) {
+      this.showNotice('No earlier prompt to rewind to.', 'warn');
+      return;
+    }
+    this.rewindPreviewSeq += 1;
     this.setState('rewindPending', true);
-    this.showNotice('Rewind selection — confirm to discard working changes', 'dim');
+    this.setOverlay({
+      kind: 'rewind-picker',
+      serverID: session.serverID,
+      sessionID: session.id,
+      // The latest prompt is the default boundary, matching /revert's existing behaviour.
+      index: choices.length - 1,
+      files: [],
+      loading: true,
+      previewUnavailable: false,
+    });
+    void this.track('rewind-preview', this.refreshRewindPreview());
+  }
+
+  /** Previous user prompts in the loaded transcript, oldest first. */
+  rewindChoices(
+    sessionID: string = this.currentSession()?.id ?? '',
+    serverID: string = this.activeServerID(),
+  ): RewindCandidate[] {
+    const key = this.keyFor(serverID, sessionID);
+    return rewindCandidates(this.state.transcripts[key]?.messages ?? []);
+  }
+
+  /** Move within the selector and refresh the read-only file preview for the new row. */
+  moveRewindPicker(direction: -1 | 1): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'rewind-picker') return;
+    const count = this.rewindChoices(overlay.sessionID, overlay.serverID).length;
+    if (count === 0) return;
+    const index = Math.max(0, Math.min(count - 1, overlay.index + direction));
+    if (index === overlay.index) return;
+    this.rewindPreviewSeq += 1;
+    this.setOverlay({ ...overlay, index, files: [], loading: true, previewUnavailable: false });
+    void this.track('rewind-preview', this.refreshRewindPreview());
+  }
+
+  /**
+   * Read-only `session.diff` for the selected prompt. Stale replies are discarded; the
+   * preview never stages or commits anything and can be inspected freely before deciding.
+   */
+  private async refreshRewindPreview(): Promise<void> {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'rewind-picker') return;
+    const request = this.rewindPreviewSeq;
+    const choice = this.rewindChoices(overlay.sessionID, overlay.serverID)[overlay.index];
+    if (choice === undefined) return;
+    try {
+      const files = await this.backendFor(overlay.serverID).sessionDiff(overlay.sessionID, {
+        from: choice.messageID,
+      });
+      if (this.disposed || request !== this.rewindPreviewSeq) return;
+      const current = this.state.overlay;
+      if (current.kind !== 'rewind-picker' || current.index !== overlay.index) return;
+      this.setOverlay({ ...current, files, loading: false, previewUnavailable: false });
+    } catch {
+      if (this.disposed || request !== this.rewindPreviewSeq) return;
+      const current = this.state.overlay;
+      if (current.kind !== 'rewind-picker' || current.index !== overlay.index) return;
+      // No preview is not a reason to fabricate a scope; the row stays visible with a
+      // clear "unavailable" label and staging will still verify on the server.
+      this.setOverlay({ ...current, files: [], loading: false, previewUnavailable: true });
+    }
+  }
+
+  /** Enter on the selector stages the chosen boundary, then uses the existing confirm dialog. */
+  async acceptRewindPicker(): Promise<void> {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'rewind-picker') return;
+    const choice = this.rewindChoices(overlay.sessionID, overlay.serverID)[overlay.index];
+    if (choice === undefined) return;
+    this.closeOverlay();
+    await this.stageRevertAt(overlay.serverID, overlay.sessionID, choice.messageID);
   }
 
   currentDirectory(): string {
@@ -5001,6 +5094,12 @@ export class AppController {
   private reconcileStagedRevert(sessionID: string, serverID: string = this.activeServerID()): void {
     const session = this.state.sessions[this.keyFor(serverID, sessionID)];
     const overlay = this.state.overlay;
+    if (overlay.kind === 'rewind-picker') {
+      // An external stage while selecting supersedes the picker; never swap it for a
+      // different conversation's dialog (#82, #102).
+      if (overlay.serverID === serverID && overlay.sessionID === sessionID) this.closeOverlay();
+      return;
+    }
     const staged = session?.revert;
     if (staged !== undefined) {
       if (overlay.kind === 'revert' && overlay.serverID === serverID) {
@@ -5042,23 +5141,34 @@ export class AppController {
   private async stageRevert(): Promise<void> {
     const session = this.requireSession();
     if (session === undefined) return;
-    const serverID = session.serverID;
     const messageID = turnStart(
-      this.state.transcripts[this.keyFor(serverID, session.id)]?.messages ?? [],
+      this.state.transcripts[this.keyFor(session.serverID, session.id)]?.messages ?? [],
     );
     if (messageID === undefined) {
       this.showNotice('Nothing to revert yet.', 'warn');
       return;
     }
+    await this.stageRevertAt(session.serverID, session.id, messageID);
+  }
+
+  /**
+   * Stages one verified boundary on its owning host. Route ownership is rechecked after the
+   * RPC so a host/session switch during the call cannot open the wrong dialog (#82, #102).
+   */
+  private async stageRevertAt(
+    serverID: string,
+    sessionID: string,
+    messageID: string,
+  ): Promise<void> {
     try {
-      const files = await this.backendFor(serverID).stageRevert(session.id, messageID);
+      const files = await this.backendFor(serverID).stageRevert(sessionID, messageID);
       // The route may have changed while the RPC was in flight: the dialog belongs to the
       // host whose stage this is, and only that conversation may open it.
       const route = this.state.route;
       if (
         route.kind !== 'conversation' ||
         route.serverID !== serverID ||
-        route.sessionID !== session.id
+        route.sessionID !== sessionID
       ) {
         this.showNotice('A revert was staged on this session. Return to it to confirm.', 'warn');
         return;
@@ -5066,7 +5176,7 @@ export class AppController {
       this.setOverlay({
         kind: 'revert',
         serverID,
-        sessionID: session.id,
+        sessionID,
         messageID,
         files,
         busy: false,

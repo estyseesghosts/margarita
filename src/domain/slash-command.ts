@@ -23,6 +23,7 @@ export const localCommands = {
   rename: 'Rename this session: /rename <title>',
   fork: 'Fork this session into a new one',
   revert: 'Undo file changes since your last message (asks to confirm)',
+  rewind: 'Choose an earlier prompt and preview its file scope before reverting',
   steer: 'Send text with steer delivery: /steer <text>',
   status: 'Connection and session details',
   keys: 'Show key bindings',
