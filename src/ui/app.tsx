@@ -92,7 +92,7 @@ export function App(props: AppProps) {
   usePaste((event) => {
     if (state.overlay.kind === 'help') controller.closeOverlay();
     if (state.overlay.kind !== 'none') return;
-    void controller.pasteBytes(event.bytes);
+    void controller.pasteBytes(event.bytes, event.metadata);
   });
 
   const width = () => dimensions().width;

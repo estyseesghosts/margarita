@@ -33,6 +33,8 @@ import {
   attachmentMimeForName,
   attachmentPromptFile,
   detectAttachmentMime,
+  isBinaryPdfPayload,
+  isSupportedAttachmentMime,
   makeAttachment,
   pastedAttachmentName,
   splitPastedPaths,
@@ -2196,36 +2198,72 @@ export class AppController {
   }
 
   /**
-   * One terminal paste. Text is inserted as before, except when the whole paste names local
-   * image/PDF files: those become attachments. Non-text bytes are accepted only when they
-   * carry a known image/PDF signature; arbitrary binary is rejected instead of being decoded
-   * into placeholder characters.
+   * One terminal paste. Clipboard MIME/kind metadata (when the terminal supplies it) is
+   * authoritative: binary data is never decoded into the text draft, and text declared as
+   * text stays text even if it begins with a file signature. Otherwise a validated binary
+   * signature wins over a UTF-8 text fallback so an ASCII-only PDF becomes an attachment
+   * (#155). Every paste type, including raw bytes, is bound to the route captured here, so a
+   * queued paste cannot land on a different session or host (#154).
    */
-  async pasteBytes(bytes: Uint8Array): Promise<void> {
+  async pasteBytes(
+    bytes: Uint8Array,
+    metadata?: { mimeType?: string; kind?: 'text' | 'binary' | 'unknown' },
+  ): Promise<void> {
     // Serialize paste transactions in arrival order. The originating route is captured
     // synchronously here (before `run` is deferred onto the microtask queue) so a route
-    // switch while files are read cannot retarget the paste (issue #87).
+    // switch while files are read cannot retarget the paste (issues #87, #154).
     if (this.disposed) return;
     const originKey = this.routeKey(this.state.route);
 
     const run = async (): Promise<void> => {
       if (this.disposed) return;
 
-      const text = decodePastedText(bytes);
-      if (text !== undefined) {
-        const consumed = await this.attachPastedPaths(text, originKey);
-        if (consumed) return;
-        this.insertPastedText(text, originKey);
+      const declaredMime = metadata?.mimeType?.toLowerCase();
+      const textDeclared =
+        metadata?.kind === 'text' ||
+        (declaredMime !== undefined && declaredMime.startsWith('text/'));
+      const binaryDeclared = metadata?.kind === 'binary';
+
+      let mime: string | undefined;
+      if (!textDeclared) {
+        mime = detectAttachmentMime(bytes);
+        // A short %PDF- prefix is not a PDF on its own; an unannotated clipboard clip that
+        // merely looks like text stays text unless it carries a real PDF header and trailer.
+        if (mime === 'application/pdf' && !isBinaryPdfPayload(bytes) && !binaryDeclared)
+          mime = undefined;
+        if (mime === undefined && binaryDeclared) {
+          // Trust the clipboard type for binaries without a signature of their own.
+          if (declaredMime !== undefined && isSupportedAttachmentMime(declaredMime))
+            mime = declaredMime;
+        }
+      }
+
+      if (mime !== undefined) {
+        const name = `clipboard.${mime.split('/').at(-1) ?? 'bin'}`;
+        const attached = makeAttachment(name, mime, bytes);
+        if (!attached.ok) {
+          this.showNotice(attached.error, 'warn');
+          return;
+        }
+        // A raw image/PDF paste is held to the same origin-route guard as text and file paths.
+        if (!this.pasteStillCurrent(originKey)) {
+          this.stashPaste(originKey, [attached.attachment]);
+          return;
+        }
+        this.addAttachments([attached.attachment], `${name} attached`);
         return;
       }
 
-      const mime = detectAttachmentMime(bytes);
-      if (mime === undefined) {
-        this.showNotice('Pasted data is not text or a supported image.', 'warn');
-        return;
+      if (!binaryDeclared) {
+        const text = decodePastedText(bytes);
+        if (text !== undefined) {
+          const consumed = await this.attachPastedPaths(text, originKey);
+          if (consumed) return;
+          this.insertPastedText(text, originKey);
+          return;
+        }
       }
-      const name = `clipboard.${mime.split('/').at(-1) ?? 'bin'}`;
-      this.attachImage(bytes, mime, name);
+      this.showNotice('Pasted data is not text or a supported image.', 'warn');
     };
     this.pasteChain = this.pasteChain.then(run).catch(() => undefined);
     await this.pasteChain;
@@ -2260,7 +2298,7 @@ export class AppController {
       this.setState('draftAttachments', originKey, [...current, ...added]);
     });
     this.showNotice(
-      `Paste stashed: the route changed while reading ${added.length} file(s); they await in the originating draft.`,
+      `Paste stashed: the route changed while reading ${added.length} attachment(s); they await in the originating draft.`,
       'warn',
     );
   }

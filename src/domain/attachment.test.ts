@@ -8,6 +8,7 @@ import {
   attachmentPromptFile,
   detectAttachmentMime,
   formatBytes,
+  isBinaryPdfPayload,
   makeAttachment,
   pastedPath,
   splitPastedPaths,
@@ -33,6 +34,17 @@ describe('attachment mime detection', () => {
     expect(detectAttachmentMime(webp)).toBe('image/webp');
     expect(detectAttachmentMime(new Uint8Array([0, 1, 2, 3]))).toBeUndefined();
     expect(detectAttachmentMime(new TextEncoder().encode('hello'))).toBeUndefined();
+  });
+
+  test('a clipboard PDF needs a real header and trailer, not just a short prefix (#155)', () => {
+    expect(isBinaryPdfPayload(new TextEncoder().encode('%PDF-1.7'))).toBe(false);
+    expect(isBinaryPdfPayload(new TextEncoder().encode('%PDF-1.4 is just a sentence.'))).toBe(
+      false,
+    );
+    const real = new TextEncoder().encode(
+      '%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n',
+    );
+    expect(isBinaryPdfPayload(real)).toBe(true);
   });
 });
 

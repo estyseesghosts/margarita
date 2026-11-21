@@ -50,6 +50,25 @@ const signatures: readonly Signature[] = [
   { mime: 'application/pdf', bytes: [0x25, 0x50, 0x44, 0x46, 0x2d] },
 ];
 
+const isDigitByte = (byte: number | undefined): boolean =>
+  byte !== undefined && byte >= 0x30 && byte <= 0x39;
+
+/**
+ * Stronger, clipboard-only PDF check. A bare `%PDF-` prefix is not evidence of a PDF:
+ * a textual snippet can start with exactly those bytes. Require a real `%PDF-<major>.<minor>`
+ * header and the trailer marker near the end before promoting UTF-8-decodable clipboard
+ * bytes to an attachment (#155).
+ */
+export function isBinaryPdfPayload(bytes: Uint8Array): boolean {
+  if (bytes.length < 64) return false;
+  if (bytes[0] !== 0x25 || bytes[1] !== 0x50 || bytes[2] !== 0x44 || bytes[3] !== 0x46)
+    return false;
+  if (bytes[4] !== 0x2d || !isDigitByte(bytes[5]) || bytes[6] !== 0x2e || !isDigitByte(bytes[7]))
+    return false;
+  const tail = Buffer.from(bytes.subarray(Math.max(0, bytes.length - 2048))).toString('latin1');
+  return tail.includes('%%EOF');
+}
+
 /** MIME from magic bytes for the formats a terminal may hand us as raw data. */
 export function detectAttachmentMime(bytes: Uint8Array): string | undefined {
   for (const signature of signatures) {

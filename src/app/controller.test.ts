@@ -12,6 +12,7 @@ import { composerFrom } from '../domain/composer.ts';
 import { buildKeymap } from '../domain/keymap.ts';
 import type { GoalQueryFailure, NativeGoal } from '../domain/native-goal.ts';
 import { directoryKey } from '../domain/path-identity.ts';
+import { sessionKey } from '../domain/server-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { ToolCall, TranscriptMessage } from '../domain/transcript.ts';
 import type { WorkerJob } from '../domain/worker.ts';
@@ -4299,6 +4300,114 @@ describe('paste stays on its originating route (issue #87)', () => {
     expect(controller.state.composer.text).toBe('');
     expect(controller.state.attachments).toEqual([]);
     expect(controller.state.drafts['ses_a']?.text).toBe('help text');
+    controller.dispose();
+  });
+});
+
+/** Minimal ASCII-only PDF: valid header and trailer, entirely UTF-8 decodable. */
+const asciiPdfBytes = () =>
+  asBytes(
+    '%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n',
+  );
+
+const sharedOnHost = (serverID: string) => ({
+  ...fakeSession('ses_shared'),
+  serverID,
+  directory: '/work/kohjoh',
+});
+
+describe('binary paste ownership and classification (#154, #155)', () => {
+  test('a queued raw binary paste stays on the originating host, not the destination', async () => {
+    const a = new FakeBackend();
+    a.serverID = 'srv_a';
+    const b = new FakeBackend();
+    b.serverID = 'srv_b';
+    a.sessions = [sharedOnHost('srv_a')];
+    b.sessions = [sharedOnHost('srv_b')];
+    const controller = routingController({ srv_a: a, srv_b: b }, 'srv_a');
+    await controller.bootstrap();
+    controller.openSession('ses_shared', 'srv_a');
+    await flush();
+
+    const origin = sessionKey({ serverID: 'srv_a', sessionID: 'ses_shared' });
+    const destination = sessionKey({ serverID: 'srv_b', sessionID: 'ses_shared' });
+    expect(destination).not.toBe(origin);
+
+    const paste = controller.pasteBytes(pngBytes);
+    controller.openSession('ses_shared', 'srv_b');
+    await flush();
+    await paste;
+
+    expect(controller.state.attachments).toEqual([]);
+    expect(controller.state.draftAttachments[destination]).toBeUndefined();
+    expect(controller.state.draftAttachments[origin]?.map((entry) => entry.name)).toEqual([
+      'clipboard.png',
+    ]);
+
+    controller.openSession('ses_shared', 'srv_a');
+    await flush();
+    expect(controller.state.attachments.map((entry) => entry.name)).toEqual(['clipboard.png']);
+    controller.dispose();
+  });
+
+  test('a UTF-8 decodable PDF becomes an attachment, not inserted source text', async () => {
+    const controller = makeController(() => Promise.resolve([]), attachedBackend());
+    await attach(controller, 'ses_a');
+
+    await controller.pasteBytes(asciiPdfBytes());
+
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.attachments.map((entry) => entry.name)).toEqual(['clipboard.pdf']);
+    expect(controller.state.attachments.map((entry) => entry.mime)).toEqual(['application/pdf']);
+    controller.dispose();
+  });
+
+  test('text beginning with %PDF- stays text unless it is really a PDF', async () => {
+    const controller = makeController(() => Promise.resolve([]), attachedBackend());
+    await attach(controller, 'ses_a');
+
+    const text = '%PDF-1.4 is just a header written in a sentence.';
+    await controller.pasteBytes(asBytes(text));
+
+    expect(controller.state.composer.text).toBe(text);
+    expect(controller.state.attachments).toEqual([]);
+    controller.dispose();
+  });
+
+  test('clipboard metadata decides text vs binary for signature-looking bytes', async () => {
+    const controller = makeController(() => Promise.resolve([]), attachedBackend());
+    await attach(controller, 'ses_a');
+
+    await controller.pasteBytes(asciiPdfBytes(), { kind: 'text', mimeType: 'text/plain' });
+    expect(controller.state.composer.text).toContain('%PDF-1.4');
+    expect(controller.state.attachments).toEqual([]);
+
+    await controller.pasteBytes(pngBytes, { kind: 'binary', mimeType: 'image/png' });
+    expect(controller.state.attachments.map((entry) => entry.mime)).toEqual(['image/png']);
+    controller.dispose();
+  });
+
+  test('binary image signatures other than PNG still become chips', async () => {
+    const controller = makeController(() => Promise.resolve([]), attachedBackend());
+    await attach(controller, 'ses_a');
+
+    await controller.pasteBytes(asBytes('GIF89a'));
+
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.attachments.map((entry) => entry.mime)).toEqual(['image/gif']);
+    controller.dispose();
+  });
+
+  test('unsupported binary declared by the clipboard never creates a chip or erases text', async () => {
+    const controller = makeController(() => Promise.resolve([]), attachedBackend());
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom('keep me'));
+
+    await controller.pasteBytes(new Uint8Array([0, 1, 2, 250]), { kind: 'binary' });
+
+    expect(controller.state.attachments).toEqual([]);
+    expect(controller.state.composer.text).toBe('keep me');
+    expect(controller.state.notice?.text).toContain('not text or a supported image');
     controller.dispose();
   });
 });
