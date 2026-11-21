@@ -3,7 +3,7 @@
 
 Usage: pty-smoke.py <marg-binary> <stub-server-url> [scenario]
 
-Scenarios: `ctrl-c` (default), `editor` (Ctrl+G with an EDITOR containing spaces: draft round-trips, temp file removed, terminal usable after), `keys` (typing, Unicode editing, bracketed multi-line paste and F1 help must not submit anything), `sigterm`, `resize` (repeated SIGWINCH incl. very narrow, then
+Scenarios: `ctrl-c` (default), `editor-fail` (the editor exits 1: the draft is kept, the app keeps running), `editor` (Ctrl+G with an EDITOR containing spaces: draft round-trips, temp file removed, terminal usable after), `keys` (typing, Unicode editing, bracketed multi-line paste and F1 help must not submit anything), `sigterm`, `resize` (repeated SIGWINCH incl. very narrow, then
 Ctrl+C), `crash` (SIGKILL: only checks the harness itself, terminal modes cannot be restored).
 
 Asserts, from a directory unrelated to the checkout and with a minimal environment, that the

@@ -74,4 +74,4 @@ The PTY smoke (`keys` scenario) drives the compiled binary under a real POSIX PT
 
 ## Terminal lifecycle
 
-PTY scenarios (`ctrl-c`, `sigterm`, `resize`, `editor`) verify on Fedora 44 that the renderer exits, the cursor is re-shown, mouse reporting is disabled and the alternate screen is left; that repeated SIGWINCH down to 8 columns does not crash; and that Ctrl+G with an `EDITOR` path containing spaces round-trips the draft and removes its temp file. Not covered: `VISUAL=nano`/`vi` interaction, editor failure and cancellation, SIGKILL recovery (modes cannot be restored by the process), tmux and SSH.
+PTY scenarios (`ctrl-c`, `sigterm`, `resize`, `editor`) verify on Fedora 44 that the renderer exits, the cursor is re-shown, mouse reporting is disabled and the alternate screen is left; that repeated SIGWINCH down to 8 columns does not crash; and that Ctrl+G with an `EDITOR` path containing spaces round-trips the draft and removes its temp file. An editor that exits non-zero keeps the draft and the composer usable (`editor-fail`). Not covered: interactive `vi`/`nano`, SIGKILL recovery (modes cannot be restored by the process), tmux and SSH.

@@ -80,3 +80,47 @@ describe.skipIf(process.platform === 'win32')('cross-process state writes (#185)
     expect((await loadState(path)).state.history['/after']).toHaveLength(3);
   }, 60_000);
 });
+
+describe.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  'failures leave state intact (#185)',
+  () => {
+    test('a read-only state directory surfaces an error and keeps the previous file', async () => {
+      const { chmod, mkdir } = await import('node:fs/promises');
+      const { emptyState, saveState } = await import('../../src/config/local-state.ts');
+      const dir = await temp();
+      const stateDir = join(dir, 'state');
+      await mkdir(stateDir);
+      const path = join(stateDir, 'state.json');
+      await saveState(path, { ...emptyState, history: { '/p': ['kept'] } });
+      await chmod(stateDir, 0o500);
+      try {
+        let failed = false;
+        try {
+          await saveState(path, { ...emptyState, history: { '/p': ['lost'] } });
+        } catch {
+          failed = true;
+        }
+        expect(failed).toBe(true);
+      } finally {
+        await chmod(stateDir, 0o700);
+      }
+      expect((await loadState(path)).state.history['/p']).toEqual(['kept']);
+    });
+
+    test('an unreadable state file is reported, not treated as empty and rewritten', async () => {
+      const { chmod } = await import('node:fs/promises');
+      const { emptyState, saveState } = await import('../../src/config/local-state.ts');
+      const dir = await temp();
+      const path = join(dir, 'state.json');
+      await saveState(path, { ...emptyState, history: { '/p': ['kept'] } });
+      await chmod(path, 0o000);
+      try {
+        const loaded = await loadState(path);
+        expect(loaded.warning).toContain('Could not read');
+      } finally {
+        await chmod(path, 0o600);
+      }
+      expect((await loadState(path)).state.history['/p']).toEqual(['kept']);
+    });
+  },
+);

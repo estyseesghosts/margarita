@@ -48,7 +48,7 @@ jobs:
           bun test/smoke/stub-server.ts "$RUNNER_TEMP/port" &
           for _ in $(seq 1 50); do [ -s "$RUNNER_TEMP/port" ] && break; sleep 0.2; done
           url="http://127.0.0.1:$(cat "$RUNNER_TEMP/port")"
-          for scenario in ctrl-c keys editor sigterm resize; do
+          for scenario in ctrl-c keys editor editor-fail sigterm resize; do
             python3 test/smoke/pty-smoke.py "$RUNNER_TEMP/exe/marg" "$url" "$scenario"
           done
       - uses: actions/upload-artifact@v4
