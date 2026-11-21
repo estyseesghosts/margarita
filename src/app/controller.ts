@@ -6506,7 +6506,8 @@ export class AppController {
 
 /**
  * Merges a fresh newest-first page into the cached transcript: cached messages older
- * than the page are kept, everything the page covers is replaced by server data.
+ * than (or exactly as old as) the page are kept, everything the page covers is replaced by
+ * server data. Timestamps alone never prove a cached message was replaced (#205).
  */
 export function mergeLatest(
   cached: readonly TranscriptMessage[],
@@ -6518,7 +6519,7 @@ export function mergeLatest(
   const boundary = cached.findIndex((message) => message.id === first.id);
   const older =
     boundary === -1
-      ? cached.filter((message) => !pageIDs.has(message.id) && message.createdAt < first.createdAt)
+      ? cached.filter((message) => !pageIDs.has(message.id) && message.createdAt <= first.createdAt)
       : cached.slice(0, boundary);
   return [...older, ...page];
 }
