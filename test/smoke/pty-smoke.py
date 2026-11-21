@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Executable smoke test: run the compiled `marg` under a real PTY.
 
-Usage: pty-smoke.py <marg-binary> <stub-server-url>
+Usage: pty-smoke.py <marg-binary> <stub-server-url> [scenario]
+
+Scenarios: `ctrl-c` (default), `sigterm`, `resize` (repeated SIGWINCH incl. very narrow, then
+Ctrl+C), `crash` (SIGKILL: only checks the harness itself, terminal modes cannot be restored).
 
 Asserts, from a directory unrelated to the checkout and with a minimal environment, that the
 renderer initializes and visibly paints, that Ctrl+C exits cleanly with status 0, and that the
@@ -9,13 +12,16 @@ terminal is handed back with the cursor shown and mouse reporting disabled. On f
 PTY transcript tail is printed to stderr (it contains no credentials: the stub needs none).
 """
 
+import fcntl
 import os
 import pty
 import re
 import select
 import signal
+import struct
 import sys
 import tempfile
+import termios
 import time
 
 PAINT_TIMEOUT = 20
@@ -43,6 +49,7 @@ def read_until(fd, buffer, predicate, timeout):
 
 def main():
     binary, url = sys.argv[1], sys.argv[2]
+    scenario = sys.argv[3] if len(sys.argv) > 3 else 'ctrl-c'
     workdir = tempfile.mkdtemp(prefix='marg-smoke-')
     home = os.path.join(workdir, 'home')
     os.makedirs(home)
@@ -57,10 +64,6 @@ def main():
     if pid == 0:
         os.chdir(workdir)
         os.execve(binary, [binary, '--server', url], env)
-    import fcntl
-    import struct
-    import termios
-
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 100, 0, 0))
     buffer = bytearray()
     failures = []
@@ -83,7 +86,14 @@ def main():
     if status is None:
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
-        failures.append('process did not exit after Ctrl+C')
+        failures.append('process did not exit')
+    elif scenario == 'sigterm':
+        # Conventional outcomes: exit 0, 143, or death by SIGTERM; modes must still be restored.
+        ok = (os.WIFEXITED(status) and os.WEXITSTATUS(status) in (0, 143)) or (
+            os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGTERM
+        )
+        if not ok:
+            failures.append(f'unexpected status after SIGTERM {status}')
     elif not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
         failures.append(f'unclean exit status {status}')
     text = buffer.decode('utf-8', 'replace')

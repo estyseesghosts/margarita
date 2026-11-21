@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 /**
  * Margarita's own directories. They never overlap OpenCode's config or state.
@@ -13,6 +13,14 @@ export type AppPaths = Readonly<{
   stateDir: string;
 }>;
 
+/**
+ * The XDG Base Directory spec says an empty or relative value must be ignored, never used:
+ * a relative path would silently follow the current directory.
+ */
+function xdgDirectory(value: string | undefined): string | undefined {
+  return value !== undefined && isAbsolute(value) ? value : undefined;
+}
+
 export function appPaths(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): AppPaths {
   if (platform === 'win32') {
     const base = env['LOCALAPPDATA'] ?? join(homedir(), 'AppData', 'Local');
@@ -24,8 +32,8 @@ export function appPaths(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): App
       stateDir: dir,
     };
   }
-  const configHome = env['XDG_CONFIG_HOME'] ?? join(homedir(), '.config');
-  const stateHome = env['XDG_STATE_HOME'] ?? join(homedir(), '.local', 'state');
+  const configHome = xdgDirectory(env['XDG_CONFIG_HOME']) ?? join(homedir(), '.config');
+  const stateHome = xdgDirectory(env['XDG_STATE_HOME']) ?? join(homedir(), '.local', 'state');
   const stateDir = join(stateHome, 'margarita');
   return {
     configFile: join(configHome, 'margarita', 'config.jsonc'),
