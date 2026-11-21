@@ -513,6 +513,106 @@ function promptDraft(backend: FakeBackend): PromptDraft {
   return call.args[1];
 }
 
+describe('agent switch confirmation, picker admission and session isolation (#132, #146, #163)', () => {
+  test('a delayed agent switch blocks admission until the server confirms it (#132)', async () => {
+    const backend = new FakeBackend();
+    backend.agents = [agentFor('build'), agentFor('plan')];
+    backend.sessions = [fakeSession('ses_a')];
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const realSwitch = backend.switchAgent.bind(backend);
+    backend.switchAgent = async (sessionID, agent) => {
+      await gate;
+      await realSwitch(sessionID, agent);
+    };
+    const switching = controller.cycleAgent(1);
+    await flush();
+    controller.setComposer(composerFrom('hello'));
+    await controller.submit();
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    expect(controller.state.notice?.text).toContain('Agent selection pending');
+    release();
+    await switching;
+    expect(controller.currentAgentID()).toBe('plan');
+    await controller.submit();
+    expect(backend.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    controller.dispose();
+  });
+
+  test('a rejected switch restores the previous agent and blocks sending (#132)', async () => {
+    const backend = new FakeBackend();
+    backend.agents = [agentFor('build'), agentFor('plan')];
+    backend.sessions = [fakeSession('ses_a')];
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    backend.switchAgent = async () => {
+      throw new Error('switch rejected');
+    };
+    await controller.cycleAgent(1);
+    expect(controller.currentAgentID()).toBe('build');
+    controller.setComposer(composerFrom('hello'));
+    await controller.submit();
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    expect(controller.state.notice?.text).toContain('unconfirmed');
+    controller.dispose();
+  });
+
+  test('a delayed keyboard picker open is dropped after navigation (#146)', async () => {
+    const backend = new FakeBackend();
+    backend.agents = [agentFor('build')];
+    backend.sessions = [fakeSession('ses_a')];
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    backend.listAgents = async () => {
+      await gate;
+      return [agentFor('build')];
+    };
+    controller.startNewSession('/other'); // kicks off a held catalog load
+    await flush();
+    const opening = controller.openAgentPicker(); // no footer token: centralized admission
+    controller.startNewSession('/third'); // navigate away while the catalog is pending
+    release();
+    await opening;
+    expect(controller.state.overlay.kind).toBe('none');
+    controller.dispose();
+  });
+
+  test('a prompt in session B is not blocked by session A admitting (#163)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a'), fakeSession('ses_b')];
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const realPrompt = backend.prompt.bind(backend);
+    backend.prompt = async (sessionID, draft) => {
+      if (sessionID === 'ses_a') await gate; // hold only A, not B
+      return realPrompt(sessionID, draft);
+    };
+    controller.setComposer(composerFrom('from A'));
+    const sendingA = controller.submit();
+    controller.openSession('ses_b');
+    await flush();
+    controller.setComposer(composerFrom('from B'));
+    await controller.submit();
+    expect(backend.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    expect(promptDraft(backend).text).toBe('from B');
+    release();
+    await sendingA;
+    controller.dispose();
+  });
+});
+
 describe('remote @file resolution (issue #9)', () => {
   test('resolves a relative mention against the server project directory', async () => {
     const { backend, controller } = remoteController(

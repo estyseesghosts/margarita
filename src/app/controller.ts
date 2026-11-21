@@ -332,6 +332,11 @@ export class AppController {
   private readonly modelSwitches = new Map<string, Promise<boolean>>();
   private readonly failedModelSwitches = new Set<string>();
   private readonly modelSwitchRevisions = new Map<string, number>();
+  /** Per server-qualified session agent switches, serialized with revision checks (#132). */
+  private readonly agentSwitches = new Map<string, Promise<boolean>>();
+  private readonly failedAgentSwitches = new Set<string>();
+  /** In-flight prompt admissions keyed by server-qualified session (#163). */
+  private readonly admittingSessions = new Set<string>();
   /** Last killed composer text for Ctrl+Y; each kill replaces it (documented policy). */
   private killBuffer = '';
   /** Greetings chosen once per route; process-lifetime only, never sent to a server. */
@@ -574,57 +579,67 @@ export class AppController {
 
     // A navigation replaces the route without going through setOverlay; the pending request
     // no longer belongs to the screen the user is looking at.
-    if (this.pendingFooterOpen !== undefined && this.pendingFooterOpen.routeKey !== routeKey) {
-      this.cancelFooterOpen();
+    if (this.pendingPickerOpen !== undefined && this.pendingPickerOpen.routeKey !== routeKey) {
+      this.cancelPickerOpen();
     }
 
     // Second click on the control that owns the visible overlay: close it, with no selection,
     // draft mutation or submit.
     if (overlay.kind === owns) {
-      this.cancelFooterOpen();
+      this.cancelPickerOpen();
       this.closeOverlay();
       return;
     }
 
     // Rapid second click while the catalog is still loading: cancel the in-flight open so no
     // overlay is left and the late response is ignored.
-    if (this.pendingFooterOpen?.action === action && overlay.kind === 'none') {
-      this.cancelFooterOpen();
+    if (this.pendingPickerOpen?.action === action && overlay.kind === 'none') {
+      this.cancelPickerOpen();
       return;
     }
 
     // Some other modal/unrelated overlay is in front: never dismiss or bypass it.
     if (overlay.kind !== 'none') return;
 
-    const token = ++this.footerOpenToken;
-    this.pendingFooterOpen = { token, action, routeKey };
-    const admitted = (): boolean => {
-      const pending = this.pendingFooterOpen;
+    if (action === 'context') {
+      this.openUsage();
+      return;
+    }
+    const admitted = this.beginPickerOpen(action);
+    const token = this.pickerOpenToken;
+    const open =
+      action === 'agent' ? this.openAgentPicker(admitted) : this.openModelPicker(admitted);
+    void open.catch(() => {
+      if (this.pendingPickerOpen?.token === token) this.cancelPickerOpen();
+    });
+  }
+
+  /**
+   * Starts a picker-open request shared by footer clicks, keyboard actions and slash commands
+   * (#146). The returned guard validates the monotonic token, route identity and overlay state
+   * after `ensureCatalog` resolves, so a late response can never open a picker over a different
+   * screen or on top of a modal that appeared in the meantime.
+   */
+  private beginPickerOpen(action: 'agent' | 'model'): () => boolean {
+    const token = ++this.pickerOpenToken;
+    const routeKey = this.routeKey(this.state.route);
+    this.pendingPickerOpen = { token, action, routeKey };
+    return () => {
+      const pending = this.pendingPickerOpen;
       const ok =
         !this.disposed &&
         pending?.token === token &&
         this.routeKey(this.state.route) === routeKey &&
         this.state.overlay.kind === 'none';
-      // Clear only this request's own pending marker; never a newer click's state.
-      if (!ok && pending?.token === token) this.cancelFooterOpen();
+      // Clear only this request's own pending marker; never a newer request's state.
+      if (!ok && pending?.token === token) this.cancelPickerOpen();
       return ok;
     };
-
-    if (action === 'context') {
-      // Synchronous: openUsage() sets the overlay, which clears the pending marker.
-      this.openUsage();
-      return;
-    }
-    const open =
-      action === 'agent' ? this.openAgentPicker(admitted) : this.openModelPicker(admitted);
-    void open.catch(() => {
-      if (this.pendingFooterOpen?.token === token) this.cancelFooterOpen();
-    });
   }
 
-  private cancelFooterOpen(): void {
-    this.footerOpenToken += 1;
-    this.pendingFooterOpen = undefined;
+  private cancelPickerOpen(): void {
+    this.pickerOpenToken += 1;
+    this.pendingPickerOpen = undefined;
   }
 
   /** Counts for the tab bar, based on the same classifier as the dot. */
@@ -742,8 +757,8 @@ export class AppController {
    * In-flight footer picker request. The token invalidates a late `ensureCatalog()` response so
    * a picker dismissed by a second click (or a route change) can never be resurrected (#139).
    */
-  private footerOpenToken = 0;
-  private pendingFooterOpen: { token: number; action: FooterAction; routeKey: string } | undefined;
+  private pickerOpenToken = 0;
+  private pendingPickerOpen: { token: number; action: FooterAction; routeKey: string } | undefined;
   /** Per-session, per-job-kind refresh epochs: a late RPC response cannot restore removed state (#136). */
   private readonly jobRefreshEpoch = new Map<string, { worker: number; shell: number }>();
   /** Deduplicates "agent unavailable" prompts across repeated catalog refreshes (#123). */
@@ -2720,8 +2735,20 @@ export class AppController {
 
   /** Enter. Clears the composer only after the server accepted the input. */
   async submit(deliveryOverride?: Delivery): Promise<void> {
-    if (this.state.admitting) return;
     const routeAtSubmit = this.state.route;
+    if (
+      routeAtSubmit.kind === 'conversation' &&
+      this.admittingSessions.has(this.keyFor(routeAtSubmit.serverID, routeAtSubmit.sessionID))
+    ) {
+      // A send to the SAME session is still in flight; never silently discard the new one
+      // (#163). Other sessions and hosts stay independent.
+      this.showNotice(
+        'A prompt is still being sent from this session. Wait for confirmation before sending again.',
+        'dim',
+        false,
+      );
+      return;
+    }
     const text = this.state.composer.text;
     if (text.trim() === '' && this.state.attachments.length === 0) return;
     const localName = /^\/(\S+)/.exec(text.trimStart())?.[1];
@@ -2738,11 +2765,13 @@ export class AppController {
     );
     if (parsed.kind === 'local') {
       if (
-        routeAtSubmit.kind === 'conversation' &&
-        (parsed.name === 'compact' ||
-          parsed.name === 'steer' ||
-          (parsed.name === 'plan' && parsed.args === 'propose')) &&
-        this.modelDispatchBlocked(routeAtSubmit.serverID, routeAtSubmit.sessionID)
+        (routeAtSubmit.kind === 'conversation' &&
+          (parsed.name === 'compact' ||
+            parsed.name === 'steer' ||
+            (parsed.name === 'plan' && parsed.args === 'propose')) &&
+          this.modelDispatchBlocked(routeAtSubmit.serverID, routeAtSubmit.sessionID)) ||
+        (routeAtSubmit.kind === 'conversation' &&
+          this.agentDispatchBlocked(routeAtSubmit.serverID, routeAtSubmit.sessionID))
       ) {
         return;
       }
@@ -2800,7 +2829,11 @@ export class AppController {
               sentAttachments,
               origin.serverID,
             );
-            if (this.modelDispatchBlocked(origin.serverID, origin.sessionID)) return false;
+            if (
+              this.modelDispatchBlocked(origin.serverID, origin.sessionID) ||
+              this.agentDispatchBlocked(origin.serverID, origin.sessionID)
+            )
+              return false;
             await backend.prompt(origin.sessionID, {
               text,
               files,
@@ -2854,9 +2887,14 @@ export class AppController {
     transportNotice = 'Delivery unknown (connection problem). Check the transcript before resending.',
     sentAttachments: readonly Attachment[] = [],
   ): Promise<boolean> {
-    if (this.state.admitting || this.modelDispatchBlocked(origin.serverID, origin.sessionID))
+    const admitKey = this.keyFor(origin.serverID, origin.sessionID);
+    if (
+      this.admittingSessions.has(admitKey) ||
+      this.modelDispatchBlocked(origin.serverID, origin.sessionID) ||
+      this.agentDispatchBlocked(origin.serverID, origin.sessionID)
+    )
       return false;
-    this.setState('admitting', true);
+    this.admittingSessions.add(admitKey);
     try {
       if (!(await send())) return false;
       this.debugLog.write('action', { action: 'submit', ok: true });
@@ -2894,7 +2932,7 @@ export class AppController {
       }
       return false;
     } finally {
-      this.setState('admitting', false);
+      this.admittingSessions.delete(admitKey);
     }
   }
 
@@ -3213,7 +3251,11 @@ export class AppController {
           attachments,
           sessionServerID,
         );
-        if (this.modelDispatchBlocked(sessionServerID, session.id)) return false;
+        if (
+          this.modelDispatchBlocked(sessionServerID, session.id) ||
+          this.agentDispatchBlocked(sessionServerID, session.id)
+        )
+          return false;
         await this.backendFor(sessionServerID).prompt(session.id, {
           text,
           files,
@@ -3368,7 +3410,11 @@ export class AppController {
           sentAttachments,
           serverID,
         );
-        if (this.modelDispatchBlocked(serverID, sessionID)) return false;
+        if (
+          this.modelDispatchBlocked(serverID, sessionID) ||
+          this.agentDispatchBlocked(serverID, sessionID)
+        )
+          return false;
         await this.backendFor(serverID).prompt(sessionID, {
           text,
           files,
@@ -3717,38 +3763,88 @@ export class AppController {
     await this.setAgent(next.id);
   }
 
+  private agentDispatchBlocked(serverID: string, sessionID: string): boolean {
+    const key = this.keyFor(serverID, sessionID);
+    if (this.agentSwitches.has(key)) {
+      this.showNotice(
+        'Agent selection pending. Send again once the server confirms it.',
+        'dim',
+        false,
+      );
+      return true;
+    }
+    if (this.failedAgentSwitches.has(key)) {
+      this.showNotice(
+        'Agent selection is unconfirmed. Select an agent again before sending.',
+        'error',
+        false,
+      );
+      return true;
+    }
+    return false;
+  }
+
   private async setAgent(agentID: string): Promise<void> {
     if (!this.state.agents.some((agent) => agent.id === agentID)) {
       this.showNotice(`Agent "${agentID}" is not selectable.`, 'warn');
       return;
     }
-    const session = this.currentSession();
-    if (session === undefined) {
+    const current = this.currentSession();
+    if (current === undefined) {
       this.setState('overview', 'agent', agentID);
       return;
     }
-    // Optimistic footer update, confirmed by the summary refetch. If the server rejects the
-    // switch, restore the previously confirmed agent instead of leaving a local-only lie (#123).
+    // Snapshot the whole summary: a store proxy can reflect the optimistic write that follows,
+    // which would make the rejection path "restore" the unconfirmed agent instead (#132).
+    const session: SessionSummary = { ...current };
+    // Serialize per server-qualified session with a monotonic chain: a late response from an
+    // older selection can never overwrite a newer one. Admission is blocked until the server
+    // confirms the agent via a fresh session read (#132). The optimistic footer value is never
+    // described as confirmed; a rejection restores the whole pre-switch summary.
     const key = this.keyFor(session.serverID, session.id);
+    const previous = this.agentSwitches.get(key);
     this.setState('sessions', key, { ...session, agent: agentID });
-    try {
-      await this.backend.switchAgent(session.id, agentID);
-      if (this.state.running[key] === true) this.showNotice(`Agent: ${agentID} (next turn)`, 'dim');
-    } catch (error) {
-      // Restore the whole pre-switch summary: `agent` is an optional property and the store
-      // cannot represent "absent" under exactOptionalPropertyTypes. `refreshSummary` below
-      // then reconciles with the server's confirmed state.
-      this.setState('sessions', key, session);
-      this.showNotice(errorText(error), 'error');
-    }
-    await this.refreshSummary(session.id);
+    const operation = (async (): Promise<boolean> => {
+      if (previous !== undefined) await previous;
+      try {
+        const backend = this.backendFor(session.serverID);
+        await backend.switchAgent(session.id, agentID);
+        const confirmed = await backend.getSession(session.id);
+        if (confirmed.agent !== agentID) {
+          throw new Error('Server did not confirm the requested agent');
+        }
+        this.setState('sessions', key, { ...confirmed, serverID: session.serverID });
+        this.failedAgentSwitches.delete(key);
+        if (this.state.running[key] === true)
+          this.showNotice(`Agent: ${agentID} (next turn)`, 'dim');
+        return true;
+      } catch (error) {
+        // `agent` is optional; restoring the whole captured summary avoids an absent-property
+        // write under exactOptionalPropertyTypes. refreshSummary below reconciles with the server.
+        this.setState('sessions', key, session);
+        this.failedAgentSwitches.add(key);
+        this.showNotice(
+          `Agent selection failed: ${errorText(error)}. Select an agent again before sending.`,
+          'error',
+          false,
+        );
+        return false;
+      }
+    })();
+    this.agentSwitches.set(key, operation);
+    const confirmed = await operation;
+    if (this.agentSwitches.get(key) === operation) this.agentSwitches.delete(key);
+    if (confirmed) await this.refreshSummary(session.id, session.serverID);
   }
 
   // ---------------------------------------------------------------- agent picker (#123)
 
   async openAgentPicker(admit?: () => boolean): Promise<void> {
+    // Keyboard and /agent callers have no footer token; create one so the same post-await
+    // admission check protects every entry point (#146).
+    const admission = admit ?? this.beginPickerOpen('agent');
     if (!(await this.ensureCatalog(this.currentDirectory()))) return;
-    if (admit !== undefined && !admit()) return;
+    if (!admission()) return;
     this.setOverlay({ kind: 'agent-picker', query: '', index: 0 });
   }
 
@@ -3864,8 +3960,9 @@ export class AppController {
   }
 
   async openModelPicker(admit?: () => boolean): Promise<void> {
+    const admission = admit ?? this.beginPickerOpen('model');
     if (!(await this.ensureCurrentModelCatalog())) return;
-    if (admit !== undefined && !admit()) return;
+    if (!admission()) return;
     this.setOverlay({ kind: 'model-picker', query: '', index: 0 });
   }
 
@@ -4882,7 +4979,7 @@ export class AppController {
   setOverlay(overlay: Overlay): void {
     // Opening any overlay settles a pending footer open: the request that produced it already
     // succeeded, and a later close/Escape must not be mistaken for a toggle-off double click.
-    if (overlay.kind !== 'none') this.pendingFooterOpen = undefined;
+    if (overlay.kind !== 'none') this.pendingPickerOpen = undefined;
     this.setState('overlay', overlay);
   }
 

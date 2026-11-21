@@ -328,6 +328,9 @@ export class FakeBackend implements Backend {
 
   async switchAgent(sessionID: string, agent: string): Promise<void> {
     this.calls.push({ name: 'switchAgent', args: [sessionID, agent] });
+    this.sessions = this.sessions.map((session) =>
+      session.id === sessionID ? { ...session, agent } : session,
+    );
   }
   async switchModel(sessionID: string, model: ModelSelection): Promise<void> {
     this.calls.push({ name: 'switchModel', args: [sessionID, model] });
