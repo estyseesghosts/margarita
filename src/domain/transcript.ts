@@ -231,21 +231,13 @@ export function foldTranscript(
   options: FoldOptions,
 ): TranscriptNode[] {
   const out: TranscriptNode[] = [];
-  // Brief progress notes fold into the activity group across a working run; the last
-  // assistant message of each user turn carries that turn's answer, so its text never folds
-  // away. A turn ends at the next user message (the server writes one idle marker per run,
-  // so idle markers cannot delimit turns).
-  const answerMessages = new Set<TranscriptMessage>();
-  let turnAnswer: TranscriptMessage | undefined;
-  for (const message of messages) {
-    if (message.kind === 'user') {
-      if (turnAnswer !== undefined) answerMessages.add(turnAnswer);
-      turnAnswer = undefined;
-    } else if (message.kind === 'assistant') {
-      turnAnswer = message;
-    }
-  }
-  if (turnAnswer !== undefined) answerMessages.add(turnAnswer);
+  /**
+   * Every canonical assistant text part is user-visible prose. Whether text matters is not
+   * decidable from its length, newline count, or whether a later step was appended (issue
+   * #167): short status notes, warnings and intermediate results are all meaningful. The
+   * fold therefore never discards canonical text — only repetitive tool calls collapse.
+   * Tools still group, reasoning stays hidden in compact mode, and chronology is preserved.
+   */
   /** Emits the marker for the message just appended, if the segment boundary falls there. */
   function appendBoundaryMarker(messageId: string) {
     const marker = options.markers?.get(messageId);
@@ -270,7 +262,7 @@ export function foldTranscript(
         break;
       }
       case 'assistant':
-        foldAssistant(message, options, out, answerMessages.has(message));
+        foldAssistant(message, options, out);
         break;
       case 'shell':
         out.push({
@@ -375,8 +367,6 @@ function foldAssistant(
   message: Extract<TranscriptMessage, { kind: 'assistant' }>,
   options: FoldOptions,
   out: TranscriptNode[],
-  /** The newest assistant message's prose is the user-visible answer; never folded away. */
-  keepsText: boolean,
 ): void {
   let pending: ToolCall[] = [];
   let sawReasoningText = false;
@@ -453,13 +443,9 @@ function foldAssistant(
         });
         return;
       case 'text': {
-        const trimmed = part.text.trim();
-        if (trimmed === '') return;
-        // Brief progress notes interleaved with tool activity fold into the group; the
-        // latest assistant message keeps its prose so the final reply never disappears.
-        if (!options.detailed && !keepsText && trimmed.length <= 80 && !trimmed.includes('\n')) {
-          return;
-        }
+        // Canonical assistant text is never discarded in compact mode: a later reasoning,
+        // tool or assistant step must not make already-visible prose disappear (issue #167).
+        if (part.text.trim() === '') return;
         flush();
         out.push({ kind: 'text', key: `${message.id}:${index}`, text: part.text });
         return;

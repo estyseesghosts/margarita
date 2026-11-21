@@ -353,12 +353,16 @@ function runFixture(): TranscriptMessage[] {
 describe('grouped activity (issue #23)', () => {
   test('a full run folds into a few meaningful rows; failure and final reply stay visible', () => {
     const nodes = foldTranscript(runFixture(), compact);
-    expect(kinds(nodes)).toEqual(['group(20)', 'tool', 'text']);
-    const group = nodes[0];
-    expect(group?.kind === 'tool-group' && group.summary).toBe(
-      'Ran 11 shell commands, read 3 files, edited 6 files',
+    // The short progress note is preserved (#167); tools still fold into groups around it.
+    expect(kinds(nodes)).toEqual(['group(10)', 'text', 'group(10)', 'tool', 'text']);
+    expect(nodes[0]?.kind === 'tool-group' && nodes[0].summary).toBe('Ran 10 shell commands');
+    expect(nodes[2]?.kind === 'tool-group' && nodes[2].summary).toBe(
+      'Read 3 files, edited 6 files, ran 1 shell command',
     );
-    expect(group?.kind === 'tool-group' && group.tools.map((entry) => entry.id)).toEqual([
+    const allToolIds = nodes.flatMap((node) =>
+      node.kind === 'tool-group' ? node.tools.map((entry) => entry.id) : [],
+    );
+    expect(allToolIds).toEqual([
       ...Array.from({ length: 10 }, (_, index) => `s${index}`),
       'read1',
       'read2',
@@ -366,14 +370,14 @@ describe('grouped activity (issue #23)', () => {
       ...Array.from({ length: 6 }, (_, index) => `e${index}`),
       's10',
     ]);
-    const failed = nodes[1];
+    const failed = nodes[3];
     expect(failed?.kind === 'tool' && failed.tool.status).toBe('error');
     expect(failed?.kind === 'tool' && failed.expanded).toBe(true);
-    expect(nodes[2]?.kind).toBe('text');
-    // The brief progress chatter folds away; it is not rendered as its own row.
+    expect(nodes[4]?.kind).toBe('text');
+    // The brief progress note now remains visible instead of folding away (#167).
     expect(
       nodes.some((node) => node.kind === 'text' && node.text.includes('Running the build')),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   test('detailed mode shows every underlying call in transcript order', () => {
@@ -410,7 +414,7 @@ describe('grouped activity (issue #23)', () => {
 
   test('a failure is never folded into the counts of the surrounding group', () => {
     const nodes = foldTranscript(runFixture(), compact);
-    const failed = nodes[1];
+    const failed = nodes[3];
     expect(failed?.kind === 'tool' && failed.tool.error).toBe('exit 1');
   });
 });
@@ -763,6 +767,10 @@ const reply = (id: string, ...texts: string[]): TranscriptMessage => ({
 });
 const texts = (nodes: TranscriptNode[]) =>
   nodes.flatMap((node) => (node.kind === 'text' ? [node.text] : []));
+const visibleText = (messages: readonly TranscriptMessage[]) =>
+  foldTranscript(messages, compact).flatMap((node) =>
+    node.kind === 'text' ? [{ key: node.key, text: node.text }] : [],
+  );
 
 describe('foldTranscript answers across turns', () => {
   test('every completed turn keeps its short answer in compact mode', () => {
@@ -780,12 +788,12 @@ describe('foldTranscript answers across turns', () => {
     expect(texts(nodes)).toEqual(['Yes, 42 tests passed.', 'One link is broken.', 'Yes']);
   });
 
-  test('progress notes before a turn’s final message still fold', () => {
+  test('progress notes before a turn’s final message stay visible (#167)', () => {
     const nodes = foldTranscript(
       [user('u1', 'go'), reply('a1', 'Looking now.'), reply('a2', 'Done.'), user('u2', 'more')],
       compact,
     );
-    expect(texts(nodes)).toEqual(['Done.']);
+    expect(texts(nodes)).toEqual(['Looking now.', 'Done.']);
   });
 
   test('queued follow-ups sharing one run each keep their answer', () => {
@@ -844,5 +852,89 @@ describe('background confirmation anchoring (#135)', () => {
       { toolID: 't2', text: 'Moved to background' },
     ]);
     expect(annotated[groupIndex + 1]?.kind).toBe('notice');
+  });
+});
+
+/** A temporal snapshot sequence: folding is re-run after every canonical change (#168). */
+describe('foldTranscript visible-text temporal invariant (#167, #168)', () => {
+  test('short prose survives later reasoning, tool start, tool completion and run idle', () => {
+    const prose = 'Found the cause. Checking the fix.';
+    const u1 = user('u1', 'Investigate this');
+    const a1 = assistantWithId('a1', [{ kind: 'text', text: prose }]);
+    const reasoningStarted = assistantWithId('a2', [
+      { kind: 'reasoning', text: '', done: false },
+      tool('tool1', 'read', 'running'),
+    ]);
+    const toolCompleted = assistantWithId('a2', [
+      { kind: 'reasoning', text: '', done: false },
+      tool('tool1', 'read', 'completed'),
+    ]);
+    const idle: TranscriptMessage = {
+      kind: 'idle',
+      id: 'idle1',
+      createdAt: 0,
+      outcome: 'succeeded',
+    };
+
+    expect(visibleText([u1, a1])).toEqual([{ key: 'a1:0', text: prose }]);
+    expect(visibleText([u1, a1, reasoningStarted])).toEqual([{ key: 'a1:0', text: prose }]);
+    expect(visibleText([u1, a1, toolCompleted])).toEqual([{ key: 'a1:0', text: prose }]);
+    expect(visibleText([u1, a1, toolCompleted, idle])).toEqual([{ key: 'a1:0', text: prose }]);
+  });
+
+  test('no length or newline discontinuity: 1, 80, 81 chars, multiline, multiple parts', () => {
+    for (const sample of ['x', 'a'.repeat(80), 'b'.repeat(81), 'line one\nline two']) {
+      const nodes = foldTranscript(
+        [
+          user('u1', 'go'),
+          assistantWithId('a1', [{ kind: 'text', text: sample }]),
+          assistantWithId('a2', [tool('t1', 'bash', 'running')]),
+        ],
+        compact,
+      );
+      expect(texts(nodes)).toContain(sample);
+    }
+    const parts = foldTranscript(
+      [
+        assistantWithId('a1', [
+          { kind: 'text', text: 'one.' },
+          { kind: 'text', text: 'two.' },
+        ]),
+      ],
+      compact,
+    );
+    expect(texts(parts)).toEqual(['one.', 'two.']);
+  });
+
+  test('preserving text does not ungroup tools or reveal hidden reasoning', () => {
+    const nodes = foldTranscript(
+      [
+        assistantWithId('a1', [
+          { kind: 'text', text: 'Working.' },
+          { kind: 'reasoning', text: 'secret chain of thought', done: true },
+          tool('t1', 'read'),
+          tool('t2', 'read'),
+        ]),
+      ],
+      compact,
+    );
+    expect(texts(nodes)).toEqual(['Working.']);
+    expect(kinds(nodes)).toEqual(['text', 'group(2)']);
+    expect(nodes.some((node) => node.kind === 'reasoning')).toBe(false);
+  });
+
+  test('compact and detailed modes agree on visible prose; a fresh turn and reload agree', () => {
+    const messages: TranscriptMessage[] = [
+      user('u1', 'go'),
+      assistantWithId('a1', [{ kind: 'text', text: 'Short.' }]),
+      assistantWithId('a2', [tool('t1', 'read')]),
+      user('u2', 'again'),
+      assistantWithId('a3', [{ kind: 'text', text: 'Done.' }]),
+    ];
+    const compactTexts = texts(foldTranscript(messages, compact));
+    expect(compactTexts).toEqual(['Short.', 'Done.']);
+    // Reload/reconnect derives nodes from the same canonical messages, not cache state.
+    expect(texts(foldTranscript([...messages], compact))).toEqual(compactTexts);
+    expect(texts(foldTranscript(messages, detailed))).toEqual(compactTexts);
   });
 });

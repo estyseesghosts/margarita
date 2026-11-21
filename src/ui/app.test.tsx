@@ -1601,15 +1601,15 @@ describe('grouped activity (issue #23)', () => {
     await settle(setup);
     const frame = setup.captureCharFrame();
 
-    expect(frame).toContain('Ran 11 shell commands');
+    expect(frame).toContain('Ran 10 shell commands');
     expect(frame).toContain('edited 6 files');
     // The lone failure stays visible with its error; its name is not folded away.
     expect(frame).toContain('edit src/fixed.ts');
     expect(frame).toContain('exit 1');
     // The final reply is visible.
     expect(frame).toContain('The rewrite is complete');
-    // Brief progress chatter and individual call rows are folded away.
-    expect(frame).not.toContain('Running the build.');
+    // Short assistant prose is never silently dropped (#167); tools still fold away.
+    expect(frame).toContain('Running the build.');
     expect(frame).not.toContain('bash s0.log');
     expect(frame).not.toContain('Update(src/index.ts)');
 
