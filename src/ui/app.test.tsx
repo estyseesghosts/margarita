@@ -154,6 +154,12 @@ describe('app', () => {
     if (process.env['DUMP'] !== undefined) console.log(frame);
     expectWelcomeGreeting(frame);
     expect(frame).toContain('( o.o )');
+    // The version sits under the greeting block, not above it, and the cat starts a row lower.
+    const rows = frame.split('\n');
+    const catRow = rows.findIndex((row) => row.includes('( o.o )'));
+    const versionRow = rows.findIndex((row) => row.includes('margarita v'));
+    expect(versionRow).toBeGreaterThan(catRow);
+    expect(rows.slice(0, catRow).some((row) => row.includes('margarita v'))).toBe(false);
     expect(frame).toContain('why is it slow?');
     expect(frame).toContain('The frame budget is exceeded.');
     expect(frame).toContain('46k in · 5k out');

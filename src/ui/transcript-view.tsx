@@ -341,12 +341,12 @@ export function WelcomePanel(props: WelcomeProps) {
   /** The hints only appear when the cat, the details and the hints all fit unsqueezed. */
   const wide = () =>
     props.width >= catWidth + 2 + Math.max(detail().length, directory().length, 16) + 2 + hintWidth;
-  // Borderless on purpose (#194): the version is a subdued row above the content.
+  // Borderless on purpose (#194): the text column starts one row above the cat and ends
+  // with the version as a subdued row under the working directory.
   return (
     <box flexDirection="column" marginBottom={1} flexShrink={0}>
-      <text fg={props.theme.dim}>{`margarita v${props.controller.version}`}</text>
       <box flexDirection="row">
-        <box flexDirection="column" marginRight={2} width={catWidth} flexShrink={0}>
+        <box flexDirection="column" marginTop={1} marginRight={2} width={catWidth} flexShrink={0}>
           <For each={cat}>{(line) => <text fg={props.theme.accent}>{line}</text>}</For>
         </box>
         <box flexDirection="column" flexGrow={1}>
@@ -355,6 +355,7 @@ export function WelcomePanel(props: WelcomeProps) {
           </text>
           <text fg={props.theme.dim}>{detail()}</text>
           <text fg={props.theme.dim}>{directory()}</text>
+          <text fg={props.theme.dim}>{`margarita v${props.controller.version}`}</text>
         </box>
         <Show when={wide()}>
           <box flexDirection="column" marginLeft={2} flexShrink={0}>
