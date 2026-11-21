@@ -85,10 +85,18 @@ import {
 } from '../domain/goal-plan.ts';
 import { greetingPeriod } from '../domain/greeting-time.ts';
 import { selectGreeting } from '../domain/greetings.ts';
-import { formatModelRef, type ModelSelection, sameModel } from '../domain/model-ref.ts';
+import {
+  defaultVariant,
+  effectiveVariant,
+  formatModelRef,
+  type ModelSelection,
+  normalizeModel,
+  sameModel,
+} from '../domain/model-ref.ts';
 import {
   type CatalogModel,
   type EffectiveModel,
+  isModelAvailable,
   resolveEffectiveModel,
   resolveModel,
 } from '../domain/model-resolution.ts';
@@ -4415,6 +4423,10 @@ export class AppController {
       this.showNotice(`Variants: ${catalog?.variants.join(', ') || 'none'}`, 'dim');
       return;
     }
+    if (variant === defaultVariant) {
+      await this.setModel({ providerID: current.providerID, modelID: current.modelID });
+      return;
+    }
     if (catalog === undefined || !catalog.variants.includes(variant)) {
       this.showNotice(
         `No variant "${variant}". Available: ${catalog?.variants.join(', ') || 'none'}.`,
@@ -4444,13 +4456,16 @@ export class AppController {
       (entry) =>
         entry.enabled && entry.providerID === model.providerID && entry.modelID === model.modelID,
     );
-    const reconciled =
+    const unsupported =
       catalog !== undefined &&
-      model.variant !== undefined &&
-      !catalog.variants.includes(model.variant)
-        ? { providerID: model.providerID, modelID: model.modelID }
+      effectiveVariant(model.variant) !== undefined &&
+      !catalog.variants.includes(model.variant ?? '');
+    const reconciled = unsupported
+      ? { providerID: model.providerID, modelID: model.modelID }
+      : model.variant !== undefined && effectiveVariant(model.variant) === undefined
+        ? normalizeModel(model)
         : model;
-    if (reconciled !== model) {
+    if (unsupported) {
       this.showNotice(
         `Variant "${model.variant}" is not available for ${model.modelID}; using the server default.`,
         'dim',
@@ -4691,13 +4706,7 @@ export class AppController {
     if (!(await this.ensureCurrentModelCatalog())) return;
     const current = this.effectiveModel();
     const available = this.state.recentModels.filter((recent) =>
-      this.state.models.some(
-        (model) =>
-          model.enabled &&
-          model.providerID === recent.providerID &&
-          model.modelID === recent.modelID &&
-          (recent.variant === undefined || model.variants.includes(recent.variant)),
-      ),
+      isModelAvailable(this.state.models, recent),
     );
     if (available.length === 0) {
       this.showNotice('No recent models yet · Alt+P to pick one', 'dim');

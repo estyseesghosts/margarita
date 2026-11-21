@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import { isRecord } from '../domain/backend-event.ts';
-import type { ModelSelection } from '../domain/model-ref.ts';
+import { effectiveVariant, type ModelSelection } from '../domain/model-ref.ts';
 import { acquireFileLock } from './file-lock.ts';
 import {
   declaredVersion,
@@ -121,7 +121,12 @@ function parseModelEntry(entry: unknown): ModelSelection | undefined {
   if (!isRecord(entry)) return undefined;
   const { providerID, modelID, variant } = entry;
   if (typeof providerID !== 'string' || typeof modelID !== 'string') return undefined;
-  return { providerID, modelID, ...(typeof variant === 'string' ? { variant } : {}) };
+  // Older files may hold the server's explicit `default`; store the default as no variant.
+  return {
+    providerID,
+    modelID,
+    ...(typeof variant === 'string' && effectiveVariant(variant) !== undefined ? { variant } : {}),
+  };
 }
 
 function parseModelMap(raw: unknown): Record<string, ModelSelection> | undefined {

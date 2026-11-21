@@ -40,10 +40,32 @@ export function parseModelRef(input: string): ParsedModelRef | undefined {
   };
 }
 
+/** OpenCode v2 accepts an omitted variant and the literal `default` as the same selection. */
+export const defaultVariant = 'default';
+
+/** The variant that distinguishes a model: omitted and `default` both mean "no override". */
+export function effectiveVariant(variant: string | undefined): string | undefined {
+  return variant === undefined || variant === '' || variant === defaultVariant
+    ? undefined
+    : variant;
+}
+
+/** Stable representation: the default is stored as no variant at all (#206). */
+export function normalizeModel(model: ModelSelection): ModelSelection {
+  const variant = effectiveVariant(model.variant);
+  return variant === undefined
+    ? { providerID: model.providerID, modelID: model.modelID }
+    : { providerID: model.providerID, modelID: model.modelID, variant };
+}
+
+/**
+ * Semantic equality: provider and model must match exactly; only the variant treats an
+ * omitted value and `default` as equivalent. `low`, `high`, ... stay strictly distinct.
+ */
 export function sameModel(left: ModelSelection, right: ModelSelection): boolean {
   return (
     left.providerID === right.providerID &&
     left.modelID === right.modelID &&
-    left.variant === right.variant
+    effectiveVariant(left.variant) === effectiveVariant(right.variant)
   );
 }

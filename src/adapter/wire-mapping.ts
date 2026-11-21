@@ -16,7 +16,7 @@ import { type Attachment, attachmentFromBase64 } from '../domain/attachment.ts';
 import { isRecord, readTokens } from '../domain/backend-event.ts';
 import type { FileDiff } from '../domain/diff.ts';
 import type { FormField, FormRequest } from '../domain/form.ts';
-import type { ModelSelection } from '../domain/model-ref.ts';
+import { effectiveVariant, type ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
 import { sanitizeTerminalText } from '../domain/sanitize-text.ts';
 import { localServerID } from '../domain/server-identity.ts';
@@ -43,7 +43,8 @@ export function toModelSelection(value: unknown): ModelSelection | undefined {
   return {
     providerID,
     modelID: id,
-    ...(typeof variant === 'string' && variant !== '' ? { variant } : {}),
+    // The server reports its default as `variant: "default"`; keep one stable representation.
+    ...(typeof variant === 'string' && effectiveVariant(variant) !== undefined ? { variant } : {}),
   };
 }
 

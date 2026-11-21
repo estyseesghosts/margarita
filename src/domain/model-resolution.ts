@@ -1,4 +1,9 @@
-import { type ModelSelection, type ParsedModelRef, parseModelRef } from './model-ref.ts';
+import {
+  effectiveVariant,
+  type ModelSelection,
+  type ParsedModelRef,
+  parseModelRef,
+} from './model-ref.ts';
 
 /** The subset of a catalog entry needed to validate a model choice. */
 export type CatalogModel = Readonly<{
@@ -194,7 +199,9 @@ export function isModelAvailable(catalog: readonly CatalogModel[], model: ModelS
       entry.enabled &&
       entry.providerID === model.providerID &&
       entry.modelID === model.modelID &&
-      (model.variant === undefined || entry.variants.includes(model.variant)),
+      // The default needs no catalog entry: models with `variants: []` still accept it (#206).
+      (effectiveVariant(model.variant) === undefined ||
+        entry.variants.includes(model.variant ?? '')),
   );
 }
 

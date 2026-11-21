@@ -1,12 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 
 import { FakeBackend } from '../../test/fake-backend.ts';
+import { toModelSelection } from '../adapter/wire-mapping.ts';
 import { defaultConfig } from '../config/config.ts';
-import { emptyState, type LocalState } from '../config/local-state.ts';
+import { emptyState, type LocalState, parseState } from '../config/local-state.ts';
 import { isRecord } from '../domain/backend-event.ts';
 import { composerFrom } from '../domain/composer.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
+import { sameModel } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
+import { isModelAvailable } from '../domain/model-resolution.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import { AppController } from './controller.ts';
 
@@ -264,5 +267,157 @@ describe('/model default (#190)', () => {
     await send(fixture, '/model default set project');
     expect(Object.keys(fixture.controller.state.pinnedModels)).toEqual(['project:local|/work']);
     expect(fixture.controller.modelFor('local', '/work')).toEqual({ model: fast });
+  });
+});
+
+/** The server reports `variant: "default"` for every session model it stores. */
+function reportDefault(backend: FakeBackend): void {
+  const real = backend.getSession.bind(backend);
+  backend.getSession = async (id) => {
+    const found = await real(id);
+    return found.model === undefined
+      ? found
+      : { ...found, model: { ...found.model, variant: 'default' } };
+  };
+}
+
+function count(backend: FakeBackend, name: string): number {
+  return backend.calls.filter((call) => call.name === name).length;
+}
+
+describe('omitted variant and server "default" are the same selection (#206)', () => {
+  const liquid: ModelSelection = { providerID: 'openrouter', modelID: 'liquid/lfm-3-1.7b:free' };
+  const liquidCatalog: CatalogModel[] = [
+    { ...liquid, name: 'LFM', enabled: true, variants: [] },
+    ...catalog,
+  ];
+
+  test('the first prompt is sent once, without a spurious switchModel', async () => {
+    const fixture = await boot({
+      setup: (backend) => {
+        backend.models = liquidCatalog;
+        reportDefault(backend);
+      },
+    });
+    await fixture.controller.setModel(liquid);
+    await send(fixture, 'hello');
+    expect(count(fixture.backend, 'createSession')).toBe(1);
+    expect(count(fixture.backend, 'switchModel')).toBe(0);
+    expect(count(fixture.backend, 'prompt')).toBe(1);
+    expect(createdModel(fixture.backend)).toEqual(liquid);
+    expect(fixture.controller.state.lastModels['local|/work']).toEqual(liquid);
+  });
+
+  test('an existing session confirms omitted vs default in both directions', async () => {
+    const fixture = await boot({
+      setup: (backend) => {
+        backend.models = liquidCatalog;
+        backend.sessions = [session('ses_a')];
+        reportDefault(backend);
+      },
+    });
+    fixture.controller.openSession('ses_a', 'local');
+    await flush();
+    await fixture.controller.setModel(liquid);
+    expect(fixture.controller.state.recentModels).toEqual([liquid]);
+    // Inverse: explicitly requested #default, server reports it omitted.
+    const second = await boot({
+      setup: (backend) => {
+        backend.models = liquidCatalog;
+        backend.sessions = [session('ses_a')];
+      },
+    });
+    second.controller.openSession('ses_a', 'local');
+    await flush();
+    await second.controller.setModel({ ...liquid, variant: 'default' });
+    expect(second.controller.state.recentModels).toEqual([liquid]);
+    second.controller.setComposer(composerFrom('go'));
+    await second.controller.submit();
+    await flush();
+    expect(count(second.backend, 'prompt')).toBe(1);
+  });
+
+  test('a real mismatch still blocks: other effort, model or provider', async () => {
+    for (const reported of [
+      { ...liquid, variant: 'default' },
+      { providerID: 'openrouter', modelID: 'other' },
+      { providerID: 'elsewhere', modelID: liquid.modelID },
+    ]) {
+      const fixture = await boot({
+        setup: (backend) => {
+          backend.models = [
+            { ...liquid, name: 'LFM', enabled: true, variants: ['high'] },
+            ...catalog,
+          ];
+          backend.sessions = [session('ses_a')];
+          const real = backend.getSession.bind(backend);
+          backend.getSession = async (id) => ({ ...(await real(id)), model: reported });
+        },
+      });
+      fixture.controller.openSession('ses_a', 'local');
+      await flush();
+      await fixture.controller.setModel({ ...liquid, variant: 'high' });
+      expect(fixture.controller.state.recentModels).toEqual([]);
+      fixture.controller.setComposer(composerFrom('do not send'));
+      await fixture.controller.submit();
+      await flush();
+      expect(count(fixture.backend, 'prompt')).toBe(0);
+    }
+  });
+
+  test('a new-session confirmation mismatch never dispatches the prompt', async () => {
+    const fixture = await boot({
+      setup: (backend) => {
+        backend.models = [
+          { ...liquid, name: 'LFM', enabled: true, variants: ['high'] },
+          ...catalog,
+        ];
+        const real = backend.getSession.bind(backend);
+        backend.getSession = async (id) => ({
+          ...(await real(id)),
+          model: { ...liquid, variant: 'default' },
+        });
+      },
+    });
+    await fixture.controller.setModel({ ...liquid, variant: 'high' });
+    await send(fixture, 'hello');
+    expect(count(fixture.backend, 'prompt')).toBe(0);
+    expect(fixture.controller.state.notice?.text).toContain('not confirmed');
+  });
+
+  test('a stored #default is available for a model with no listed variants and normalizes on load', async () => {
+    const state = parseState({
+      schemaVersion: 1,
+      history: {},
+      recentModels: [{ ...liquid, variant: 'default' }],
+      pinnedModels: { user: { ...liquid, variant: 'default' } },
+      lastModels: { 'local|/work': { ...liquid, variant: 'default' } },
+    });
+    expect(state.recentModels).toEqual([liquid]);
+    expect(state.pinnedModels).toEqual({ user: liquid });
+    const fixture = await boot({
+      state,
+      setup: (backend) => {
+        backend.models = liquidCatalog;
+      },
+    });
+    expect(fixture.controller.modelFor('local', '/work')).toEqual({ model: liquid });
+    expect(isModelAvailable(liquidCatalog, { ...liquid, variant: 'default' })).toBe(true);
+    expect(isModelAvailable(liquidCatalog, { ...liquid, variant: 'high' })).toBe(false);
+  });
+
+  test('semantic comparison and the wire mapper agree', () => {
+    expect(sameModel(liquid, { ...liquid, variant: 'default' })).toBe(true);
+    expect(sameModel({ ...liquid, variant: 'default' }, liquid)).toBe(true);
+    expect(sameModel({ ...liquid, variant: 'high' }, { ...liquid, variant: 'default' })).toBe(
+      false,
+    );
+    expect(sameModel(liquid, { ...liquid, modelID: 'x' })).toBe(false);
+    expect(
+      toModelSelection({ id: liquid.modelID, providerID: liquid.providerID, variant: 'default' }),
+    ).toEqual(liquid);
+    expect(
+      toModelSelection({ id: liquid.modelID, providerID: liquid.providerID, variant: 'high' }),
+    ).toEqual({ ...liquid, variant: 'high' });
   });
 });
