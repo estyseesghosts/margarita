@@ -3,11 +3,13 @@ import { describe, expect, test } from 'bun:test';
 import { sanitizeTerminalText } from './sanitize-text.ts';
 import {
   type AssistantPart,
+  attachBackgroundNotices,
   backgroundHint,
   describeTool,
   foldTranscript,
   formatToolTiming,
   groupKey,
+  nodeIndexForTool,
   type ToolCall,
   type TranscriptMessage,
   type TranscriptNode,
@@ -46,6 +48,14 @@ function assistant(
 
 const compact = { detailed: false, expandedGroups: new Set<string>() };
 const detailed = { detailed: true, expandedGroups: new Set<string>() };
+
+/** Two expanded running calls, so each tool is its own node for background-anchor tests. */
+function foldedTwoRunningTools(): TranscriptNode[] {
+  return foldTranscript(
+    [user('u1', 'go'), assistant([tool('t1', 'bash', 'running'), tool('t2', 'bash', 'running')])],
+    detailed,
+  );
+}
 
 function kinds(nodes: TranscriptNode[]): string[] {
   return nodes.map((node) =>
@@ -784,5 +794,55 @@ describe('foldTranscript answers across turns', () => {
       compact,
     );
     expect(texts(nodes)).toEqual(['First.', 'Second.']);
+  });
+});
+
+describe('background confirmation anchoring (#135)', () => {
+  test('nodeIndexForTool finds the exact call, never a last-matching fallback', () => {
+    const nodes = foldedTwoRunningTools();
+    expect(nodeIndexForTool(nodes, 't1')).toBe(nodes.findIndex((node) => node.key === 't1'));
+    expect(nodeIndexForTool(nodes, 't2')).toBe(nodes.findIndex((node) => node.key === 't2'));
+    expect(nodeIndexForTool(nodes, 'missing')).toBeUndefined();
+  });
+
+  test('a confirmation attaches directly beneath its own tool', () => {
+    const folded = foldedTwoRunningTools();
+    const first = attachBackgroundNotices(folded, [{ toolID: 't1', text: 'Moved to background' }]);
+    const firstKeys = first.map((node) => node.key);
+    expect(firstKeys.indexOf('background:t1')).toBe(firstKeys.indexOf('t1') + 1);
+    expect(firstKeys.indexOf('t2')).toBeGreaterThan(firstKeys.indexOf('background:t1'));
+
+    const second = attachBackgroundNotices(folded, [{ toolID: 't2', text: 'Moved to background' }]);
+    const secondKeys = second.map((node) => node.key);
+    expect(secondKeys.indexOf('background:t2')).toBe(secondKeys.indexOf('t2') + 1);
+    expect(secondKeys.indexOf('background:t2')).toBeGreaterThan(secondKeys.indexOf('t1'));
+  });
+
+  test('multiple concurrent calls get distinct notices with stable keys', () => {
+    const annotated = attachBackgroundNotices(foldedTwoRunningTools(), [
+      { toolID: 't1', text: 'Moved to background' },
+      { toolID: 't2', text: 'Moved to background' },
+    ]);
+    const notices = annotated.filter((node) => node.kind === 'notice');
+    expect(notices).toHaveLength(2);
+    expect(new Set(notices.map((node) => node.key)).size).toBe(2);
+  });
+
+  test('a tool outside this window shows no notice instead of a wrong one', () => {
+    const folded = foldedTwoRunningTools();
+    expect(attachBackgroundNotices(folded, [{ toolID: 'gone', text: 'x' }])).toEqual([...folded]);
+  });
+
+  test('a folded group owns a confirmation for any call inside it', () => {
+    const folded = foldTranscript(
+      [user('u1', 'go'), assistant([tool('t1', 'bash', 'running'), tool('t2', 'bash', 'running')])],
+      compact,
+    );
+    const groupIndex = folded.findIndex((node) => node.kind === 'tool-group');
+    expect(groupIndex).toBeGreaterThanOrEqual(0);
+    const annotated = attachBackgroundNotices(folded, [
+      { toolID: 't2', text: 'Moved to background' },
+    ]);
+    expect(annotated[groupIndex + 1]?.kind).toBe('notice');
   });
 });

@@ -1708,6 +1708,81 @@ describe('live action beneath a collapsed group (issue #75)', () => {
     expect(backend.calls.some((call) => call.name === 'backgroundTools')).toBe(true);
     controller.dispose();
   });
+
+  test('each background confirmation stays under its own call when tools follow (#135)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [
+      {
+        id: 'ses_a',
+        serverID: 'local',
+        projectID: 'p',
+        directory: '/work/kohjoh',
+        title: 'Two tools',
+        agent: 'build',
+        tokens: { input: 100, output: 10, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+        cost: 0,
+        createdAt: 1,
+        updatedAt: 2,
+        archived: false,
+      },
+    ];
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'u1', createdAt: 1, text: 'run both', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'mA',
+          createdAt: 2,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 's1',
+                name: 'bash',
+                status: 'running',
+                input: { command: 'bun test' },
+                startedAt: 2,
+              },
+            },
+            {
+              kind: 'tool',
+              tool: {
+                id: 's2',
+                name: 'bash',
+                status: 'running',
+                input: { command: 'cargo test' },
+                startedAt: 2,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    controller.toggleDetails();
+    await settle(setup);
+    controller.onEvents(
+      'local',
+      [{ kind: 'execution', sessionID: 'ses_a', state: 'started' }],
+      false,
+    );
+    await settle(setup);
+    await controller.backgroundTools();
+    await settle(setup);
+
+    const frame = setup.captureCharFrame();
+    const firstCall = frame.indexOf('bun test');
+    const notice = frame.indexOf('Moved to background');
+    const laterCall = frame.indexOf('cargo test');
+    expect(firstCall).toBeGreaterThanOrEqual(0);
+    expect(notice).toBeGreaterThan(firstCall);
+    expect(laterCall).toBeGreaterThan(notice);
+    expect(frame.match(/Moved to background/g)).toHaveLength(2);
+    controller.dispose();
+  });
 });
 
 /** One shell call in a foldable group; `startedAt` is chosen relative to `now` per test. */

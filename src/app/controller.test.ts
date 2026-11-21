@@ -14,6 +14,7 @@ import type { GoalQueryFailure, NativeGoal } from '../domain/native-goal.ts';
 import { directoryKey } from '../domain/path-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { ToolCall, TranscriptMessage } from '../domain/transcript.ts';
+import type { WorkerJob } from '../domain/worker.ts';
 import { AppController } from './controller.ts';
 import { routeKey } from './key-router.ts';
 
@@ -4511,6 +4512,133 @@ describe('background worker lifecycle (#101)', () => {
     const rows = controller.workerNodes('ses_a', 'local');
     expect(rows).toHaveLength(1);
     expect(rows[0]?.worker.status).toBe('completed');
+    controller.dispose();
+  });
+});
+
+describe('job state lifecycle on disconnect and removal (#136)', () => {
+  const remoteJob: WorkerJob = {
+    id: 'job_r',
+    childSessionID: 'child_r',
+    agent: 'build',
+    description: 'remote work',
+    status: 'running',
+    startedAt: 1000,
+  };
+
+  test('a remote host disconnect clears only that host live-looking workers', async () => {
+    const { controller, backendA, backendB } = twoHostController();
+    backendA.jobs = { ses_a: [remoteJob] };
+    backendB.jobs = { ses_b: [remoteJob] };
+    await controller.bootstrap();
+    controller.openSession('ses_a', 'local');
+    await flush();
+    controller.openSession('ses_b', 'srv_1');
+    await flush();
+    expect(controller.workerNodes('ses_a', 'local')).toHaveLength(1);
+    expect(controller.workerNodes('ses_b', 'srv_1')).toHaveLength(1);
+
+    controller.onStreamStatus('srv_1', 'reconnecting');
+    expect(controller.workerNodes('ses_b', 'srv_1')).toEqual([]);
+    expect(controller.workerNodes('ses_a', 'local')).toHaveLength(1);
+    controller.dispose();
+  });
+
+  test('a delayed worker refresh after deletion cannot resurrect rows', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    const delayed = deferred<readonly WorkerJob[]>();
+    backend.listSubagentJobs = () => delayed.promise;
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    // A refresh is in flight. The session is deleted before it resolves.
+    controller.onEvents('local', [{ kind: 'session-deleted', sessionID: 'ses_a' }], false);
+    delayed.resolve([remoteJob]);
+    await flush();
+    expect(controller.state.workers['ses_a']).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('unpairing a host removes its worker, shell-job and background records', async () => {
+    const harness = adminHarness();
+    const controller = controllerWith(harness.admin);
+    const key = 'server:srv_1/session:ses_a';
+    controller.state.sessions[key] = { ...fakeSession('ses_a'), serverID: 'srv_1' };
+    controller.state.workers[key] = [remoteJob];
+    controller.state.shellJobs[key] = [];
+    controller.state.backgrounded[key] = [{ toolID: 't1', text: 'Moved to background' }];
+
+    controller.setComposer(composerFrom('/unpair buildbox'));
+    await controller.submit();
+    expect(controller.state.workers[key]).toBeUndefined();
+    expect(controller.state.shellJobs[key]).toBeUndefined();
+    expect(controller.state.backgrounded[key]).toBeUndefined();
+    controller.dispose();
+  });
+});
+
+function controllerWithRunningTools() {
+  const backend = new FakeBackend();
+  backend.sessions = [fakeSession('ses_a')];
+  backend.messages = {
+    ses_a: [
+      {
+        kind: 'assistant',
+        id: 'm1',
+        createdAt: 1,
+        agent: 'build',
+        model: { providerID: 'p', modelID: 'm' },
+        parts: [
+          {
+            kind: 'tool',
+            tool: { id: 't1', name: 'bash', status: 'running', input: {}, startedAt: 1 },
+          },
+          {
+            kind: 'tool',
+            tool: { id: 't2', name: 'bash', status: 'running', input: {}, startedAt: 2 },
+          },
+        ],
+      },
+    ],
+  };
+  const controller = makeController(async () => [], backend);
+  return { backend, controller };
+}
+
+describe('transient background confirmation lifecycle (#135)', () => {
+  test('each running call gets its own confirmation; repeating does not duplicate it', async () => {
+    const { controller } = controllerWithRunningTools();
+    await attach(controller, 'ses_a');
+    controller.onEvents(
+      'local',
+      [{ kind: 'execution', sessionID: 'ses_a', state: 'started' }],
+      false,
+    );
+    await controller.backgroundTools();
+    const key = 'ses_a';
+    expect(controller.state.backgrounded[key]?.map((event) => event.toolID)).toEqual(['t1', 't2']);
+    await controller.backgroundTools();
+    expect(controller.state.backgrounded[key]).toHaveLength(2);
+    controller.dispose();
+  });
+
+  test('turn completion clears confirmations so a later run cannot resurrect them', async () => {
+    const { controller } = controllerWithRunningTools();
+    await attach(controller, 'ses_a');
+    controller.onEvents(
+      'local',
+      [{ kind: 'execution', sessionID: 'ses_a', state: 'started' }],
+      false,
+    );
+    await controller.backgroundTools();
+    expect(controller.state.backgrounded['ses_a']).toHaveLength(2);
+    controller.onEvents(
+      'local',
+      [{ kind: 'execution', sessionID: 'ses_a', state: 'succeeded' }],
+      false,
+    );
+    expect(controller.state.backgrounded['ses_a']).toEqual([]);
     controller.dispose();
   });
 });

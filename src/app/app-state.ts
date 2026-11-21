@@ -19,6 +19,13 @@ import type { ShellJob } from '../domain/shell-job.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
 import type { WorkerJob } from '../domain/worker.ts';
 
+/** A transient Ctrl+B confirmation bound to one tool call of one session (#135). */
+export type BackgroundEvent = Readonly<{
+  /** The exact tool call ID from the transcript, never a last-matching-node guess. */
+  toolID: string;
+  text: string;
+}>;
+
 /**
  * Overview and conversation (ADR-0002), plus `new`: an unsent conversation in a
  * directory. The server session is created only when its first prompt is sent.
@@ -134,10 +141,12 @@ export type AppState = {
   permissionChoice: number;
   transcripts: Record<string, TranscriptState>;
   /**
-   * Client-local "moved to background" status per server-qualified session key.
-   * Rendered inside the transcript beside the affected tool, never as a footer notice.
+   * Client-local "moved to background" events per server-qualified session key (#135).
+   * Each event is owned by the specific tool call it confirms, so it can never attach to a
+   * later, unrelated tool. This is transient call status, cleared on turn completion,
+   * disconnect and session removal - never persistent call history.
    */
-  backgrounded: Record<string, Readonly<{ text: string; toolID?: string }>>;
+  backgrounded: Record<string, readonly BackgroundEvent[]>;
   /**
    * Server-confirmed subagent jobs per server-qualified session key (#101). Cleared on
    * disconnect so a reattach cannot show a ghost running worker from a stale snapshot.

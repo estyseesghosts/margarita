@@ -148,6 +148,7 @@ import { projectUsage, type UsageAnalytics } from '../domain/usage-analytics.ts'
 import { type WorkerJob, type WorkerNode, workerNodes } from '../domain/worker.ts';
 import {
   type AppState,
+  type BackgroundEvent,
   type DiffOverlay,
   initialState,
   type Overlay,
@@ -717,6 +718,8 @@ export class AppController {
    */
   private footerOpenToken = 0;
   private pendingFooterOpen: { token: number; action: FooterAction; routeKey: string } | undefined;
+  /** Per-session, per-job-kind refresh epochs: a late RPC response cannot restore removed state (#136). */
+  private readonly jobRefreshEpoch = new Map<string, { worker: number; shell: number }>();
   /** Deduplicates "agent unavailable" prompts across repeated catalog refreshes (#123). */
   private unavailableAgentNotice: string | undefined;
 
@@ -921,6 +924,8 @@ export class AppController {
           const ref = parseSessionKey(key);
           if (ref.serverID !== serverID || active.has(ref.sessionID) || superseded(key)) continue;
           delete state.running[key];
+          // The turn is over, so its transient background confirmations are over too (#135).
+          delete state.backgrounded[key];
         }
         for (const sessionID of active) {
           const key = this.keyFor(serverID, sessionID);
@@ -1168,6 +1173,10 @@ export class AppController {
         delete state.running[key];
         delete state.openedAt[key];
         delete state.transcriptWindow[key];
+        // A deleted session must not keep a live-looking worker or a stale background note.
+        delete state.workers[key];
+        delete state.shellJobs[key];
+        delete state.backgrounded[key];
         for (const expansionKey of Object.keys(state.expandedGroups)) {
           if (expansionKey.startsWith(expansionPrefix)) delete state.expandedGroups[expansionKey];
         }
@@ -1179,6 +1188,7 @@ export class AppController {
     this.transcriptOrder = this.transcriptOrder.filter((entry) => entry !== key);
     this.goalVersions.delete(key);
     this.runningEventSeq.delete(key);
+    this.invalidateJobRefresh(key);
     const route = this.state.route;
     if (
       route.kind === 'conversation' &&
@@ -1406,15 +1416,17 @@ export class AppController {
     // Track every host's stream so the viewed conversation's footer reflects its own host,
     // not the launch server's badge (issue #109).
     this.streamByServer.set(serverID, status);
+    // Every host, not just the launch one: a remote disconnect must drop that host's live-
+    // looking job rows and transient background confirmations (#136). Only this host's keys
+    // are touched, so other servers keep their server-confirmed state.
+    if (status === 'reconnecting') this.clearRuntimeStateForServer(serverID);
     // The single stream badge belongs to the launch server; per-server health lives on the
-    // manager. A remote reconnect resyncs that host only and never touches the badge.
+    // manager. A remote reconnect resyncs that host through onEvents and never touches the
+    // badge here.
     if (serverID !== this.serverID) return;
     const reconnected = status === 'live' && this.state.stream === 'reconnecting';
     this.setState('stream', status);
     if (status === 'reconnecting') {
-      // Server state may have changed while detached. Drop worker rows now so no running
-      // worker survives as a ghost until the resync confirms it again (#101).
-      this.clearWorkersForServer(serverID);
       this.showNotice('Connection lost · retrying', 'warn', false);
     }
     if (reconnected) void this.track('resync', this.resync(serverID));
@@ -1437,14 +1449,20 @@ export class AppController {
     });
   }
 
-  /** Drops every job row owned by one host; local keys are unqualified, so parse them. */
-  private clearWorkersForServer(serverID: string): void {
-    for (const field of ['workers', 'shellJobs'] as const) {
+  /**
+   * Drops every live-looking job row and transient background confirmation owned by one host,
+   * and invalidates in-flight refreshes for those keys, on disconnect/unpair (#136). Local keys
+   * are unqualified, so ownership is parsed rather than prefix-matched. Other hosts are untouched.
+   */
+  private clearRuntimeStateForServer(serverID: string): void {
+    for (const field of ['workers', 'shellJobs', 'backgrounded'] as const) {
       this.setState(
         field,
-        produce((jobs) => {
-          for (const key of Object.keys(jobs)) {
-            if (parseSessionKey(key).serverID === serverID) delete jobs[key];
+        produce((rows) => {
+          for (const key of Object.keys(rows)) {
+            if (parseSessionKey(key).serverID !== serverID) continue;
+            delete rows[key];
+            this.invalidateJobRefresh(key);
           }
         }),
       );
@@ -1530,6 +1548,9 @@ export class AppController {
         // Stamp the event so a snapshot that began before it can never overwrite it.
         this.runningEventSeq.set(key, (this.runningEventSequence += 1));
         this.setState('running', key, event.state === 'started');
+        // A background confirmation is transient call status: it lives only inside the turn
+        // that produced it. Any execution transition (including a new turn) retires it (#135).
+        this.setState('backgrounded', key, []);
         this.scheduleSummary(event.sessionID, serverID);
         if (attached === event.sessionID) this.scheduleTranscript(event.sessionID, serverID);
         else this.markStale(event.sessionID, serverID);
@@ -1633,6 +1654,23 @@ export class AppController {
 
   // ---------------------------------------------------------------- transcripts
 
+  /** Starts a new job refresh epoch for one kind; the other kind refreshes independently. */
+  private nextJobRefreshEpoch(key: string, kind: 'worker' | 'shell'): number {
+    const current = this.jobRefreshEpoch.get(key) ?? { worker: 0, shell: 0 };
+    const epoch = current[kind] + 1;
+    this.jobRefreshEpoch.set(key, { ...current, [kind]: epoch });
+    return epoch;
+  }
+
+  private isJobRefreshCurrent(key: string, kind: 'worker' | 'shell', epoch: number): boolean {
+    return (this.jobRefreshEpoch.get(key)?.[kind] ?? 0) === epoch;
+  }
+
+  /** Invalidates in-flight job refreshes when a session's runtime state is discarded. */
+  private invalidateJobRefresh(key: string): void {
+    this.jobRefreshEpoch.delete(key);
+  }
+
   /**
    * Worker rows are server-authoritative (#101). A failed/unsupported RPC clears them: the
    * delegated tool call still renders from the transcript as generic tool state, but the UI
@@ -1640,13 +1678,18 @@ export class AppController {
    */
   private async refreshWorkers(sessionID: string, serverID = this.activeServerID()): Promise<void> {
     const key = this.keyFor(serverID, sessionID);
+    const epoch = this.nextJobRefreshEpoch(key, 'worker');
     let jobs: readonly WorkerJob[] = [];
     try {
       jobs = await this.backendFor(serverID).listSubagentJobs(sessionID);
     } catch {
       jobs = [];
     }
-    if (this.disposed) return;
+    // Ownership + epoch: the session may have been deleted, unpaired or disconnected while
+    // the RPC was in flight. An old response must never restore its rows (#136).
+    if (this.disposed || !this.isJobRefreshCurrent(key, 'worker', epoch)) return;
+    const owner = this.state.sessions[key];
+    if (owner !== undefined && owner.serverID !== serverID) return;
     this.setState('workers', key, jobs);
   }
 
@@ -1659,13 +1702,16 @@ export class AppController {
     serverID = this.activeServerID(),
   ): Promise<void> {
     const key = this.keyFor(serverID, sessionID);
+    const epoch = this.nextJobRefreshEpoch(key, 'shell');
     let jobs: readonly ShellJob[] = [];
     try {
       jobs = await this.backendFor(serverID).listShellJobs(sessionID);
     } catch {
       jobs = [];
     }
-    if (this.disposed) return;
+    if (this.disposed || !this.isJobRefreshCurrent(key, 'shell', epoch)) return;
+    const owner = this.state.sessions[key];
+    if (owner !== undefined && owner.serverID !== serverID) return;
     this.setState('shellJobs', key, jobs);
   }
 
@@ -3527,6 +3573,9 @@ export class AppController {
 
   /** Drops every cached frontend record for one server without touching other servers. */
   private forgetServer(serverID: string): void {
+    for (const key of this.jobRefreshEpoch.keys()) {
+      if (parseSessionKey(key).serverID === serverID) this.invalidateJobRefresh(key);
+    }
     this.setState(
       produce((state) => {
         delete state.mcpCatalogs[serverID];
@@ -3548,6 +3597,9 @@ export class AppController {
           state.drafts,
           state.draftAttachments,
           state.transcriptWindow,
+          state.workers,
+          state.shellJobs,
+          state.backgrounded,
         ]) {
           for (const key of Object.keys(map)) {
             if (parseSessionKey(key).serverID === serverID) delete map[key];
@@ -3967,11 +4019,20 @@ export class AppController {
       await this.backend.backgroundTools(session.id);
       // The confirmation belongs to the tool call, rendered inside the transcript.
       // A global notice would occupy a composer/footer row and shift the prompt bar (#129).
+      // One event per running call, keyed by its exact tool ID: a second Ctrl+B updates the
+      // same event instead of duplicating it, and no later call can inherit it (#135).
       const running = this.runningToolIDs(session.id, session.serverID);
-      this.setState('backgrounded', this.keyFor(session.serverID, session.id), {
-        text: running.length > 1 ? 'Running tools moved to background' : 'Moved to background',
-        ...(running.at(-1) === undefined ? {} : { toolID: running.at(-1)! }),
-      });
+      if (running.length === 0) return;
+      const key = this.keyFor(session.serverID, session.id);
+      const previous = this.state.backgrounded[key] ?? [];
+      const events: BackgroundEvent[] = running.map((toolID) => ({
+        toolID,
+        text: 'Moved to background',
+      }));
+      this.setState('backgrounded', key, [
+        ...previous.filter((event) => !running.includes(event.toolID)),
+        ...events,
+      ]);
     } catch (error) {
       this.showNotice(`Background failed: ${errorText(error)}`, 'error');
     }

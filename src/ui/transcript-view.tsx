@@ -31,6 +31,7 @@ import { stickyPrompt, truncatePrompt } from '../domain/sticky-prompt.ts';
 import { type ThrobberFacts } from '../domain/throbber.ts';
 import {
   activeTool,
+  attachBackgroundNotices,
   backgroundHint,
   describeTool,
   foldTranscript,
@@ -102,26 +103,14 @@ export function Transcript(props: TranscriptProps) {
       markers,
     });
     // A background confirmation is a transcript event, not a footer notice: inserting it
-    // here keeps the composer anchored and attaches the line to the affected tool (#129).
-    const background = state.backgrounded[sessionKeyValue()];
-    let withBackground: TranscriptNode[] = folded;
-    if (background !== undefined && state.running[sessionKeyValue()] === true) {
-      const notice: TranscriptNode = {
-        kind: 'notice',
-        key: `background:${background.toolID ?? sessionKeyValue()}`,
-        text: background.text,
-        tone: 'dim',
-      };
-      let insertAt = folded.length;
-      for (let index = folded.length - 1; index >= 0; index -= 1) {
-        const kind = folded[index]?.kind;
-        if (kind === 'tool' || kind === 'tool-group') {
-          insertAt = index + 1;
-          break;
-        }
-      }
-      withBackground = [...folded.slice(0, insertAt), notice, ...folded.slice(insertAt)];
-    }
+    // here keeps the composer anchored (#129). It is attached to the *exact* owning tool node
+    // by tool ID, never to "the last tool-looking node": a later appended call cannot inherit
+    // it, and a call outside this window simply shows no notice instead of a wrong one (#135).
+    const background = state.backgrounded[sessionKeyValue()] ?? [];
+    const withBackground: TranscriptNode[] =
+      background.length > 0 && state.running[sessionKeyValue()] === true
+        ? attachBackgroundNotices(folded, background)
+        : folded;
     // Workers are server-confirmed rows (#101), appended after the turn so a still-running
     // parent stays visible above them. No client timer contributes to their status.
     return [

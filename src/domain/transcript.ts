@@ -579,6 +579,56 @@ export function activeTool(tools: readonly ToolCall[]): ToolCall | undefined {
     .toSorted((left, right) => right.startedAt - left.startedAt)[0];
 }
 
+/**
+ * Index of the folded transcript node that owns a specific tool call (#135). A call inside a
+ * folded group is confirmed under that group; an expanded single call under its own row.
+ * `undefined` means the call is not in this window, so no confirmation may be attached —
+ * never fall back to "the last tool-looking node" and mislabel an unrelated call.
+ */
+export function nodeIndexForTool(
+  nodes: readonly TranscriptNode[],
+  toolID: string,
+): number | undefined {
+  const index = nodes.findIndex(
+    (node) =>
+      (node.kind === 'tool' && node.tool.id === toolID) ||
+      (node.kind === 'tool-group' && node.tools.some((tool) => tool.id === toolID)),
+  );
+  return index === -1 ? undefined : index;
+}
+
+/** A transient background confirmation bound to one tool call (#135). */
+export type BackgroundNotice = Readonly<{ toolID: string; text: string }>;
+
+/**
+ * Inserts each confirmation immediately after the node that owns its tool ID. Notices for the
+ * same node keep their input order; a notice whose tool is not in this window is dropped rather
+ * than attached to an unrelated call. No "last tool-looking node" fallback (#135).
+ */
+export function attachBackgroundNotices(
+  nodes: readonly TranscriptNode[],
+  notices: readonly BackgroundNotice[],
+): TranscriptNode[] {
+  if (notices.length === 0) return [...nodes];
+  const byIndex = new Map<number, TranscriptNode[]>();
+  for (const notice of notices) {
+    const index = nodeIndexForTool(nodes, notice.toolID);
+    if (index === undefined) continue;
+    const inserted = byIndex.get(index) ?? [];
+    inserted.push({
+      kind: 'notice',
+      key: `background:${notice.toolID}`,
+      text: notice.text,
+      tone: 'dim',
+    });
+    byIndex.set(index, inserted);
+  }
+  if (byIndex.size === 0) return [...nodes];
+  return nodes.flatMap((node, index) =>
+    byIndex.has(index) ? [node, ...(byIndex.get(index) ?? [])] : [node],
+  );
+}
+
 export type LiveTool = Readonly<{
   /** Safe single-line label: `$ tail -8 file`, `lotus: get_issue`, `Reading src/a.ts`. */
   text: string;
