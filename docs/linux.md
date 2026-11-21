@@ -11,7 +11,9 @@ This page separates what is **CI-verified**, **manually verified** and **unteste
 | Binary starts outside the checkout without Bun or `node_modules` | Manually verified (Fedora 44) | `--version`, `--help`, PTY smoke |
 | Interactive renderer paints and exits 0 under a PTY, terminal restored | Manually verified (Fedora 44, xterm-256color via a scripted PTY); CI job added | `test/smoke/pty-smoke.py` |
 | Secret Service credentials (`secret-tool`) round trip | Manually verified against a private gnome-keyring (Fedora 44) | `scripts/test-keyring.sh` |
-| Real terminal emulators (Ghostty, kitty, GNOME Terminal), tmux, SSH | **Untested** | #181, #182, #184 |
+| tmux 3.x (paint, Unicode typing, resize 100x30→40x12→120x40 with draft kept, Ctrl+C exit 0) | Manually verified (Fedora 44 under WSL2) | `scripts/test-tmux.sh` |
+| Real terminal emulators (Ghostty, kitty, GNOME Terminal), SSH | **Untested**; record observations in `docs/smoke-matrix.md` | #181, #182, #184 |
+| Failed save on a full filesystem keeps previous state | Manually verified on a 128 KiB tmpfs (`MARGARITA_TINY_DIR=/mnt/tiny bun test test/linux/persistence.test.ts`) | #185 |
 | ARM64 and musl builds | **Unsupported**: build refuses them (native packages not installed); evaluation recorded in ADR-0006 | #188 |
 | Ubuntu/Debian native run | **Untested** | – |
 | Local OpenCode v2.3.0 sessions end to end on Linux | Manually verified (Fedora 44 under WSL2): `bun run test:writable` passes 15/15 against a disposable `opencode serve` 2.3.0 (prompt flow, permissions, forms, fork/revert, events, directories) | #186 |

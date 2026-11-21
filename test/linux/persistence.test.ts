@@ -124,3 +124,26 @@ describe.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     });
   },
 );
+
+/** Opt-in: MARGARITA_TINY_DIR is a writable directory on a nearly-full tiny filesystem. */
+const tinyDir = process.env['MARGARITA_TINY_DIR'];
+describe.skipIf(tinyDir === undefined)('low disk space (#185)', () => {
+  test('a failed save on a full filesystem is reported and the previous state survives', async () => {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    const { emptyState, saveState } = await import('../../src/config/local-state.ts');
+    const dir = join(tinyDir ?? '', `case-${Date.now()}`);
+    dirs.push(dir);
+    await mkdir(dir);
+    const path = join(dir, 'state.json');
+    await saveState(path, { ...emptyState, history: { '/p': ['kept'] } });
+    await writeFile(join(dir, 'ballast'), Buffer.alloc(200 * 1024)).catch(() => undefined);
+    let failed = false;
+    try {
+      await saveState(path, { ...emptyState, history: { '/p': ['x'.repeat(100_000)] } });
+    } catch {
+      failed = true;
+    }
+    expect(failed).toBe(true);
+    expect((await loadState(path)).state.history['/p']).toEqual(['kept']);
+  });
+});
