@@ -701,6 +701,64 @@ describe('typed agent attachments (#99)', () => {
     expect(controller.state.completion?.items[0]?.detail).toBe('agent');
     controller.dispose();
   });
+
+  test('a subagent-only agent is a valid @attachment but not a primary selection (#133)', async () => {
+    const backend = new FakeBackend();
+    backend.agents = [agentFor('build'), { ...agentFor('reviewer'), mode: 'subagent' }];
+    backend.sessions = [fakeSession('ses_a')];
+    const controller = makeController(async () => [], backend);
+    await controller.loadCatalog('/work/kohjoh', 'local');
+    expect(controller.state.agents.map((agent) => agent.id)).toEqual(['build']);
+    expect(controller.state.mentionAgents.map((agent) => agent.id)).toEqual(['build', 'reviewer']);
+    await attach(controller, 'ses_a');
+    await controller.sendToSession('ses_a', 'ask @reviewer about this');
+    expect(promptDraft(backend).agents).toEqual([
+      { name: 'reviewer', mention: { start: 4, end: 13, text: '@reviewer' } },
+    ]);
+    expect(backend.calls.some((call) => call.name === 'findProjectFiles')).toBe(false);
+    controller.dispose();
+  });
+
+  test('completion suggests only mention-eligible agents from the verified snapshot (#133/#134)', async () => {
+    const backend = new FakeBackend();
+    backend.agents = [agentFor('build'), { ...agentFor('reviewer'), mode: 'subagent' }];
+    const controller = makeController(async () => [], backend);
+    await controller.loadCatalog('/work/kohjoh', 'local');
+    controller.setComposer(composerFrom('@rev'));
+    await flush();
+    expect(controller.state.completion?.items.map((item) => item.label)).toEqual(['@reviewer']);
+    controller.dispose();
+  });
+
+  test('an unverifiable catalog fails closed for @name but not for plain prompts (#134)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    let catalogAvailable = true;
+    backend.listAgents = async () => {
+      if (!catalogAvailable) throw new Error('catalog broken');
+      return [agentFor('reviewer')];
+    };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a'); // catalog loads successfully at first
+    catalogAvailable = false;
+    // Navigate away and back so the session's catalog must reload — and now cannot be verified.
+    controller.startNewSession('/other');
+    await flush();
+    controller.openSession('ses_a');
+    await flush();
+    controller.setComposer(composerFrom('ask @reviewer about this'));
+    await controller.submit();
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    expect(controller.state.composer.text).toBe('ask @reviewer about this');
+    expect(controller.state.notice?.text).toContain('Cannot verify');
+
+    catalogAvailable = true;
+    await controller.loadCatalog('/work/kohjoh', 'local');
+    controller.setComposer(composerFrom('just a plain prompt'));
+    await controller.submit();
+    expect(promptDraft(backend).text).toBe('just a plain prompt');
+    controller.dispose();
+  });
 });
 
 function pagedSessions(count: number): SessionSummary[] {

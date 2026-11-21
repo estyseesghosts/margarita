@@ -30,6 +30,18 @@ Margarita deliberately cycles and offers the **full selectable catalog** instead
 project-only filter it cannot verify. If a future server API exposes provenance, the quick
 cycle can narrow to the project-defined set without changing the picker.
 
+**#138 investigation (re-confirmed).** The generated SDK types were checked again with the
+2.3.2 package: `AgentInfo` still has **no** `source`, `scope`, `builtin`, `location` or
+`path` field, and `AgentListInput` only accepts `location.directory` — it returns the merged,
+effective catalog for that directory. The config agent definitions carry no provenance either.
+There is consequently no server-supported way for *any* client, local or remote, to classify
+an agent as project-defined, global or built-in. The smallest upstream addition that would
+unblock project-defined-first cycling is an optional provenance field on `AgentInfo` (for
+example `source: 'project' | 'global' | 'builtin'`, scoped to the queried `location.directory`),
+plus a matching filter on `agent.list` so the server — not the client — resolves the set.
+Until that exists, Margarita keeps the full deterministic selectable catalog for Shift+Tab;
+this is an explicit limitation, not a silent approximation of project-aware behavior.
+
 New sessions leave `agent` unset when the user has not chosen one, so the **server's own
 `default_agent`** wins; an explicit choice or CLI flag overrides it. Existing sessions are
 never moved automatically. [OpenCode agents configuration](https://opencode.ai/docs/agents/).

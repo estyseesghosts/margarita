@@ -155,7 +155,13 @@ export type AppState = {
   /** Server-confirmed shell jobs per session key; a timed-out shell can still be running. */
   shellJobs: Record<string, readonly ShellJob[]>;
   inbox: Record<string, QueuedInput[]>;
+  /** Primary-selectable agents for Shift+Tab and the picker (hidden/subagent-only excluded). */
   agents: AgentDescriptor[];
+  /**
+   * Full mention-eligible catalog: every non-hidden agent including subagent-only (#133).
+   * Used only for `@name` completion and submission, never for primary selection.
+   */
+  mentionAgents: AgentDescriptor[];
   models: CatalogModel[];
   defaultModel?: ModelSelection;
   serverCommands: ServerCommand[];
@@ -249,6 +255,7 @@ export function initialState(directory: string, serverID: string = localServerID
     shellJobs: {},
     inbox: {},
     agents: [],
+    mentionAgents: [],
     models: [],
     serverCommands: [],
     mcpCatalogs: {},

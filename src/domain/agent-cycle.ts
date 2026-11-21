@@ -31,6 +31,23 @@ export function selectableAgents(
   return [...preferred, ...rest];
 }
 
+/**
+ * Agents eligible for `@name` mention attachments (#133): every non-hidden agent the server
+ * exposed, including subagent-only ones. Mention eligibility is a different concern from
+ * primary selection, so this deliberately does not apply `selectableAgents`' mode filter. A
+ * subagent-only agent can still be attached to a prompt even though it cannot drive a session.
+ * Hidden entries are excluded per the server's contract, IDs are de-duplicated, and the result
+ * is sorted so completion and submission see one stable set regardless of backend ordering.
+ */
+export function mentionableAgents(agents: readonly AgentDescriptor[]): AgentDescriptor[] {
+  const byID = new Map<string, AgentDescriptor>();
+  for (const agent of agents) {
+    if (agent.hidden) continue;
+    if (!byID.has(agent.id)) byID.set(agent.id, agent);
+  }
+  return [...byID.values()].toSorted((left, right) => left.id.localeCompare(right.id));
+}
+
 /** Picker rows matching all whitespace-separated query tokens, in stable cycle order. */
 export function filterAgents(agents: readonly AgentDescriptor[], query: string): AgentDescriptor[] {
   const tokens = query

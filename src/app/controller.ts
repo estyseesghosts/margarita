@@ -19,7 +19,14 @@ import type { AppConfig } from '../config/config.ts';
 import { GoalConflictError, type GoalStore, memoryGoalStore } from '../config/goal-store.ts';
 import type { LocalState, SaveResult } from '../config/local-state.ts';
 import { mergeState } from '../config/local-state.ts';
-import { defaultAgent, filterAgents, nextAgent, selectableAgents } from '../domain/agent-cycle.ts';
+import {
+  type AgentDescriptor,
+  defaultAgent,
+  filterAgents,
+  mentionableAgents,
+  nextAgent,
+  selectableAgents,
+} from '../domain/agent-cycle.ts';
 import {
   type Attachment,
   attachmentLimitBytes,
@@ -46,6 +53,7 @@ import {
   activeMention,
   agentMentions,
   findFileMentions,
+  isBareAgentNameMention,
   rankPaths,
   withLineRange,
 } from '../domain/file-reference.ts';
@@ -158,6 +166,18 @@ import { type DebugLog, noDebugLog } from './debug-log.ts';
 
 /** A point an edit can be undone/redone back to. Attachments are kept, never duplicated. */
 type UndoSnapshot = Readonly<{ composer: Composer }>;
+
+/**
+ * A catalog confirmed for one exact `(server, canonical directory)` scope (#134). Both agent
+ * lists are captured together at load time so completion and submission resolve `@name` against
+ * the same verified snapshot, never the mutable global UI state that may describe another
+ * project while a load is in flight.
+ */
+type CatalogSnapshot = Readonly<{
+  selectable: readonly AgentDescriptor[];
+  mentionable: readonly AgentDescriptor[];
+  mentionIDs: ReadonlySet<string>;
+}>;
 
 const undoLimit = 100;
 const typingCoalesceMs = 750;
@@ -713,6 +733,12 @@ export class AppController {
   private catalogInFlight: Promise<void> | undefined;
   private catalogInFlightScope: string | undefined;
   /**
+   * Verified catalogs keyed by exact `(server, canonical directory)` scope (#134). Only a
+   * successfully loaded snapshot lives here; a failed reload removes it, so a stale or
+   * other-project catalog can never classify an in-flight prompt's `@name` tokens.
+   */
+  private readonly catalogSnapshots = new Map<string, CatalogSnapshot>();
+  /**
    * In-flight footer picker request. The token invalidates a late `ensureCatalog()` response so
    * a picker dismissed by a second click (or a route change) can never be resurrected (#139).
    */
@@ -766,10 +792,20 @@ export class AppController {
       // Reject a late response from a server/project the user has already left.
       if (generation !== this.catalogGeneration || this.catalogScope(directory, serverID) !== scope)
         return;
+      // Build both catalogs from the same server response. Mention eligibility and primary
+      // selection are distinct: subagent-only agents are mentioned but never cycle-driven (#133).
+      const selectable = selectableAgents(agents, this.deps.config.agents.cycle);
+      const mentionable = mentionableAgents(agents);
+      this.catalogSnapshots.set(scope, {
+        selectable,
+        mentionable,
+        mentionIDs: new Set(mentionable.map((agent) => agent.id)),
+      });
       batch(() => {
         this.setState('catalogDirectory', directoryKey(directory, this.platformFor(serverID)));
         this.setState('catalogServerID', serverID);
-        this.setState('agents', selectableAgents(agents, this.deps.config.agents.cycle));
+        this.setState('agents', selectable);
+        this.setState('mentionAgents', mentionable);
         this.setState('models', models);
         this.setState('defaultModel', fallback);
         this.setState('serverCommands', commands);
@@ -800,9 +836,13 @@ export class AppController {
       }
     } catch (error) {
       if (generation !== this.catalogGeneration) return;
+      // A failed reload must not leave any earlier snapshot usable for this scope: a prompt
+      // with an @name could otherwise be classified against a catalog that no longer exists.
+      this.catalogSnapshots.delete(scope);
       // Never leave another project's or server's catalog usable after a failed reload.
       batch(() => {
         this.setState('agents', []);
+        this.setState('mentionAgents', []);
         this.setState('models', []);
         this.setState('defaultModel', undefined);
         this.setState('serverCommands', []);
@@ -2416,12 +2456,15 @@ export class AppController {
     ) {
       return;
     }
-    // Agents complete bare `@name` mentions from this server's scoped catalog, visibly
-    // distinguished from files by their detail label (issue #99).
+    // Agents complete bare `@name` mentions from the verified snapshot for THIS exact scope,
+    // visibly distinguished from files by their detail label (#99/#133/#134). Using the
+    // snapshot rather than the mutable global state keeps completion consistent with final
+    // submission and never suggests another project's agents during a catalog load.
+    const mentionable = this.catalogSnapshots.get(this.catalogScope(root, serverID))?.mentionable;
     const agentItems =
       partial === '' || /[\\/.]/.test(partial)
         ? []
-        : this.state.agents
+        : (mentionable ?? [])
             .filter((agent) => agent.id.toLowerCase().startsWith(partial.toLowerCase()))
             .slice(0, 8)
             .map((agent) => ({
@@ -2875,6 +2918,35 @@ export class AppController {
   }
 
   /**
+   * Verified agent IDs for a prompt's exact `(server, canonical directory)` scope (#133/#134).
+   * Reads only the immutable snapshot captured at load time for that scope - never the mutable
+   * `state.agents`/`state.mentionAgents`, which may still describe another project mid-load. A
+   * bare `@name` is ambiguous until this scope's catalog is confirmed; if it cannot be, we throw
+   * so `admit` preserves the draft and shows an actionable error instead of silently dropping
+   * mention semantics. File-only prompts need no agent catalog and are unaffected.
+   */
+  private async verifiedMentionIDs(
+    text: string,
+    directory: string,
+    serverID: string,
+  ): Promise<ReadonlySet<string>> {
+    if (!findFileMentions(text).some(isBareAgentNameMention)) return new Set();
+    if (!(await this.ensureCatalog(directory, serverID))) {
+      throw new Error(
+        'Cannot verify the agent catalog for this project. Your prompt was not sent; ' +
+          'try again once the project catalog is available.',
+      );
+    }
+    const snapshot = this.catalogSnapshots.get(this.catalogScope(directory, serverID));
+    if (snapshot === undefined) {
+      throw new Error(
+        'Cannot verify agent mentions for this project. Your prompt was not sent; try again.',
+      );
+    }
+    return snapshot.mentionIDs;
+  }
+
+  /**
    * Prompt files for a send: `@` mentions resolved for this server, then image/PDF
    * attachments. Attachments are inline `data:` URIs so a remote server never needs the
    * local path.
@@ -2888,10 +2960,8 @@ export class AppController {
     files: PromptFile[];
     agents: readonly { name: string; mention?: { start: number; end: number; text: string } }[];
   }> {
-    const agentRefs = agentMentions(
-      findFileMentions(text),
-      new Set(this.state.agents.map((a) => a.id)),
-    );
+    const agentIDs = await this.verifiedMentionIDs(text, directory, serverID);
+    const agentRefs = agentMentions(findFileMentions(text), agentIDs);
     const excluded = new Set(agentRefs.map((mention) => mention.start));
     const mentioned = await this.resolveFiles(text, directory, serverID, excluded);
     return {

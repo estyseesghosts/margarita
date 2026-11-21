@@ -73,6 +73,18 @@ export function activeMention(text: string, cursor: number): FileMention | undef
 }
 
 /**
+ * True for a bare `@name` token that could be an agent attachment. Paths (`@src/file.ts`,
+ * `C:\…`, `./…`) and ranged references (`@file.ts#1-9`) are never agent candidates. This is
+ * the single rule shared by completion, submission and the fail-closed guard: a bare name is
+ * ambiguous until a verified catalog for the owning scope says whether it is an agent (#134).
+ */
+export function isBareAgentNameMention(mention: FileMention): boolean {
+  return (
+    mention.range === undefined && mention.rangeError === undefined && !/[\\/.]/.test(mention.path)
+  );
+}
+
+/**
  * Bare `@name` mentions that name a known agent. Paths (`@src/file.ts`, `C:\…`, `./…`)
  * are never agents, and an agent is only used when it is in the current server's catalog.
  * File mentions keep their exact spans, so both attachment kinds can coexist in one prompt.
@@ -82,11 +94,7 @@ export function agentMentions(
   agentIDs: ReadonlySet<string>,
 ): FileMention[] {
   return mentions.filter(
-    (mention) =>
-      mention.range === undefined &&
-      mention.rangeError === undefined &&
-      !/[\\/.]/.test(mention.path) &&
-      agentIDs.has(mention.path),
+    (mention) => isBareAgentNameMention(mention) && agentIDs.has(mention.path),
   );
 }
 
