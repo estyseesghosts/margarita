@@ -17,8 +17,9 @@ import {
   renameServerProfile,
   type ServerProfiles,
 } from '../config/server-profiles.ts';
+import { enqueueCredentialCleanup, reconcileCredentialCleanup } from '../config/unpair-recovery.ts';
 import { osc52Clipboard } from '../domain/osc52.ts';
-import { AppController, type ServerAdmin, type ServerListing } from './controller.ts';
+import { AppController, errorText, type ServerAdmin, type ServerListing } from './controller.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { pairServer } from './pairing-service.ts';
 import { listProjectFiles } from './project-files.ts';
@@ -213,14 +214,26 @@ export async function createProductionAssembly(
     },
     unpair: async (targetID) => {
       // An `auth: none` profile has no secret by design, so the credential store is never
-      // consulted: a machine without a working keyring must still be able to forget an
-      // anonymous host (issue #81). Authenticated profiles delete the secret first, so a
-      // failure to remove it surfaces instead of reporting a half-finished unpair as done.
+      // consulted: a machine without a working keyring can still forget an anonymous host.
+      // For authenticated hosts the registry entry is removed first: a failure before that
+      // point leaves both profile and credential intact (#156). If credential cleanup then
+      // fails, the ID is queued for a durable retry at next startup instead of stranding an
+      // unusable registered host or silently losing the secret.
       const anonymous =
         profiles.profiles.find((profile) => profile.serverID === targetID)?.auth === 'none';
-      if (!anonymous) await input.credentials.delete(targetID);
       keepFresh(await removeServerProfile(input.paths.serversFile, targetID));
       await servers.remove(targetID);
+      if (!anonymous) {
+        try {
+          await input.credentials.delete(targetID);
+        } catch (error) {
+          await enqueueCredentialCleanup(input.paths.stateDir, targetID);
+          throw new Error(
+            `Server ${targetID} was unpaired, but its credential cleanup failed and will be retried on next launch: ${errorText(error)}`,
+            { cause: error },
+          );
+        }
+      }
     },
   };
 
@@ -301,6 +314,15 @@ export async function createProductionAssembly(
     platformFor: (targetID) => servers.platformFor(targetID),
     debugLog,
   });
+
+  // Reconcile an unpair whose credential deletion failed in a previous run (#156).
+  const unpairRecovery = await reconcileCredentialCleanup(input.paths.stateDir, input.credentials);
+  if (unpairRecovery.cleared > 0 || unpairRecovery.remaining.length > 0) {
+    debugLog.write('unpair-recovery', {
+      cleared: unpairRecovery.cleared,
+      remaining: unpairRecovery.remaining,
+    });
+  }
 
   return { servers, controller, serverAdmin };
 }

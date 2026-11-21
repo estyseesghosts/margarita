@@ -21,6 +21,16 @@ export class CredentialError extends Error {
   override readonly name = 'CredentialError';
 }
 
+/**
+ * Removes exactly one trailing line terminator added by a subprocess, preserving every other
+ * byte (including leading/trailing spaces, tabs and Unicode) in an opaque secret (#159).
+ */
+export function stripOutputFraming(text: string): string {
+  if (text.endsWith('\r\n')) return text.slice(0, -2);
+  if (text.endsWith('\n') || text.endsWith('\r')) return text.slice(0, -1);
+  return text;
+}
+
 export function memoryCredentialStore(): CredentialStore & { secrets: Map<string, string> } {
   const secrets = new Map<string, string>();
   return {
@@ -76,7 +86,7 @@ async function runPowerShell(script: string, input?: string): Promise<string> {
     process.exited,
   ]);
   if (code !== 0) throw new CredentialError(`Credential storage failed: ${err.trim()}`);
-  return out.trim();
+  return stripOutputFraming(out);
 }
 
 export function windowsCredentialStore(dir: string): CredentialStore {
@@ -200,7 +210,7 @@ export function keychainCredentialStore(runner: KeychainRunner = spawnSecurity):
         argv: ['security', 'find-generic-password', '-s', service, '-a', serverID, '-w'],
       });
       if (result.exitCode !== 0) return undefined;
-      return result.stdout.trim();
+      return stripOutputFraming(result.stdout);
     },
     async set(serverID, secret) {
       assertSafeAccount(serverID);
@@ -242,7 +252,7 @@ function secretToolCredentialStore(): CredentialStore {
         serverID,
       ]);
       if (result.exitCode !== 0) return undefined;
-      return result.stdout.toString().trim();
+      return stripOutputFraming(result.stdout.toString());
     },
     async set(serverID, secret) {
       if (secret === '') throw new CredentialError('Refusing to store an empty credential.');

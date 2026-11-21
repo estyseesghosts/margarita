@@ -6,6 +6,7 @@ import {
   keychainCredentialStore,
   type KeychainResult,
   memoryCredentialStore,
+  stripOutputFraming,
   systemCredentialStore,
   unavailableCredentialStore,
 } from './credentials.ts';
@@ -36,6 +37,29 @@ describe('credential store', () => {
   test('an unsupported platform reports unavailable', () => {
     const store = systemCredentialStore('aix', '/tmp');
     expect(store.kind).toBe('unavailable');
+  });
+});
+
+describe('subprocess framing preserves exact secret bytes (#159)', () => {
+  test('only one trailing line terminator is removed', () => {
+    expect(stripOutputFraming('  key  \n')).toBe('  key  ');
+    expect(stripOutputFraming('\ttoken\t\r\n')).toBe('\ttoken\t');
+    expect(stripOutputFraming('secret\r')).toBe('secret');
+    expect(stripOutputFraming('  raw  ')).toBe('  raw  ');
+    // A secret that itself ends in a newline survives because only one terminator goes.
+    expect(stripOutputFraming('secret\n\n')).toBe('secret\n');
+  });
+
+  test('Keychain get returns leading/trailing whitespace and Unicode verbatim', async () => {
+    const secret = '  leading\ttrailing ünicode  ';
+    const found = recorder({ exitCode: 0, stdout: `${secret}\n`, stderr: '' });
+    expect(await keychainCredentialStore(found.runner).get('srv_1')).toBe(secret);
+  });
+
+  test('Keychain get strips CRLF framing, not significant tabs', async () => {
+    const secret = '\t key \t';
+    const found = recorder({ exitCode: 0, stdout: `${secret}\r\n`, stderr: '' });
+    expect(await keychainCredentialStore(found.runner).get('srv_1')).toBe(secret);
   });
 });
 function recorder(result: KeychainResult = { exitCode: 0, stdout: '', stderr: '' }) {

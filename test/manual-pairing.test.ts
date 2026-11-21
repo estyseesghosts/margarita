@@ -448,8 +448,8 @@ describe('anonymous profiles never depend on a credential store (issue #81)', ()
     first.controller.dispose();
     await first.servers.dispose();
 
-    // The secret cannot be removed from a locked store: keep the profile and say why, rather
-    // than reporting a half-finished unpair as done.
+    // The secret cannot be removed from a locked store: the profile is still removed (so no
+    // unusable host is registered), the error says why, and cleanup is queued for a retry (#156).
     fixture.connections.length = 0;
     const second = await createProductionAssembly(
       fixture.input({ profiles: paired.profiles, credentials: locked }),
@@ -461,7 +461,12 @@ describe('anonymous profiles never depend on a credential store (issue #81)', ()
 
     expect(second.controller.state.notice?.tone).toBe('error');
     expect(second.controller.state.notice?.text).toContain('credential storage is unavailable');
-    expect((await loadServerProfiles(fixture.serversFile)).profiles.profiles).toHaveLength(1);
+    expect(second.controller.state.notice?.text).toContain('retried on next launch');
+    expect((await loadServerProfiles(fixture.serversFile)).profiles.profiles).toHaveLength(0);
+    const pending = JSON.parse(
+      await Bun.file(join(fixture.directory, 'pending-unpair.json')).text(),
+    );
+    expect(pending.serverIDs).toContain('srv_basic');
     second.controller.dispose();
     await second.servers.dispose();
   });
