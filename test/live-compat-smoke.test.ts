@@ -7,8 +7,11 @@ import {
   compatConfig,
   type CompatTarget,
   disposableSetupErrors,
+  type InfoFetch,
   recordResult,
   result,
+  verifyTargetVersion,
+  versionBlockedResult,
   waitFor,
 } from './live-compat-harness.ts';
 
@@ -30,7 +33,12 @@ async function runCase(
   body: () => Promise<string>,
 ): Promise<void> {
   try {
-    await recordResult(settings, result(caseID, target.version, 'live pass', await body()));
+    const detail = await body();
+    await recordResult(settings, {
+      ...result(caseID, target.version, 'live pass', detail),
+      expectedVersion: target.version.replace(/^v/, ''),
+      observedVersion: target.version.replace(/^v/, ''),
+    });
   } catch (error) {
     await recordResult(
       settings,
@@ -92,6 +100,20 @@ describe.skipIf(!config.enabled)('live disposable compatibility smoke (#148)', (
       const directory = config.directory;
       const model = config.model;
       if (directory === undefined || model === undefined) return;
+
+      // The operator's label is not evidence. Read the service's own version first; only a
+      // verified match may produce a version-specific live pass (#177).
+      const check = await verifyTargetVersion(target);
+      if (check.kind !== 'verified') {
+        for (const caseID of ['C1', 'C2', 'C3', 'reconnect', 'permission-form']) {
+          await recordResult(config, versionBlockedResult(caseID, target, check));
+        }
+        throw new Error(
+          check.kind === 'mismatch'
+            ? `${target.version} target reports ${check.observed}; refusing to record a live pass`
+            : `${target.version} target version unverified: ${check.reason}`,
+        );
+      }
 
       // Explicit URL only: origin must be 'remote', never a discovered/started user service.
       const connection = await connect({ server: target.url, startServer: false });
@@ -165,4 +187,61 @@ describe.skipIf(!config.enabled)('live disposable compatibility smoke (#148)', (
       });
     }, 180_000);
   }
+});
+
+const serving =
+  (body: unknown, status = 200): InfoFetch =>
+  async () =>
+    Response.json(body, { status });
+
+describe('version verification before recording a live pass (#177)', () => {
+  const target = { version: 'v2.3.1', url: 'http://127.0.0.1:5101' } as const;
+  test('a v2.3.1 label pointed at a v2.3.2 service is a mismatch, never a pass', async () => {
+    const check = await verifyTargetVersion(target, serving({ version: '2.3.2', pid: 1 }));
+    expect(check).toEqual({ kind: 'mismatch', expected: '2.3.1', observed: '2.3.2' });
+    if (check.kind !== 'mismatch') throw new Error('expected a mismatch');
+    const row = versionBlockedResult('C1', target, check);
+    expect(row).toMatchObject({
+      status: 'version mismatch',
+      expectedVersion: '2.3.1',
+      observedVersion: '2.3.2',
+    });
+  });
+
+  test('a matching service records expected and observed versions', async () => {
+    expect(await verifyTargetVersion(target, serving({ version: 'v2.3.1', pid: 1 }))).toEqual({
+      kind: 'verified',
+      expected: '2.3.1',
+      observed: '2.3.1',
+    });
+  });
+
+  test('missing, unparseable or unreachable versions stay explicitly unverified', async () => {
+    for (const fake of [
+      serving({ pid: 1 }),
+      serving({ version: 'dev', pid: 1 }),
+      serving({}, 404),
+      async () => {
+        throw new Error('ECONNREFUSED');
+      },
+    ]) {
+      const check = await verifyTargetVersion(target, fake);
+      expect(check.kind).toBe('unverified');
+      if (check.kind === 'unverified') {
+        expect(versionBlockedResult('C1', target, check).status).toBe('unverified');
+      }
+    }
+  });
+
+  test('OpenCode’s default port is refused as a disposable target', () => {
+    const errors = disposableSetupErrors(
+      compatConfig({
+        MARGARITA_LIVE: '1',
+        MARGARITA_COMPAT_V231_URL: 'http://127.0.0.1:4096',
+        MARGARITA_COMPAT_DIRECTORY: '/tmp/x',
+        MARGARITA_COMPAT_MODEL: 'p/m',
+      }),
+    );
+    expect(errors.some((error) => error.includes('4096'))).toBe(true);
+  });
 });
