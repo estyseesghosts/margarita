@@ -233,6 +233,34 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
           );
         }}
       </Match>
+      <Match when={state.overlay.kind === 'effort-picker' ? state.overlay : undefined}>
+        {(overlay: Accessor<Extract<Overlay, { kind: 'effort-picker' }>>) => {
+          const choices = () => props.controller.effortChoices(overlay().query);
+          const start = () => Math.max(0, overlay().index - visibleRows + 1);
+          const current = () => props.controller.currentEffort();
+          return (
+            <box {...frame('Effort · type to filter · Enter select · Esc cancel')}>
+              <text fg={props.theme.text}>{`> ${overlay().query}`}</text>
+              <Show
+                when={choices().length > 0}
+                fallback={<text fg={dim()}>No variants available for this model.</text>}
+              >
+                <For each={choices().slice(start(), start() + visibleRows)}>
+                  {(choice, index) => {
+                    const selected = () => start() + index() === overlay().index;
+                    const active = () => choice.variant === current();
+                    return (
+                      <text fg={selected() ? props.theme.accent : props.theme.text}>
+                        {`${selected() ? '❯' : ' '} ${choice.label}${active() ? ' (current)' : ''}`}
+                      </text>
+                    );
+                  }}
+                </For>
+              </Show>
+            </box>
+          );
+        }}
+      </Match>
       <Match when={state.overlay.kind === 'agent-picker' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'agent-picker' }>>) => {
           const choices = () => props.controller.agentChoices(overlay().query);

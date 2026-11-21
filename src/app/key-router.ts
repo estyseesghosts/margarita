@@ -87,6 +87,9 @@ function runAction(controller: AppController, action: ActionID, services: Router
     case 'model.pick':
       void controller.openModelPicker();
       return true;
+    case 'model.effort':
+      void controller.openEffortPicker();
+      return true;
     case 'model.recentNext':
       void controller.nextRecentModel();
       return true;
@@ -208,6 +211,14 @@ function routeOverlay(controller: AppController, keymap: Keymap, key: KeyInput):
       else if (key.name === 'return') void controller.acceptModelPicker();
       else if (key.name === 'backspace') controller.setModelPickerQuery(overlay.query.slice(0, -1));
       else if (isPrintable(key)) controller.setModelPickerQuery(overlay.query + key.text);
+      return true;
+    case 'effort-picker':
+      if (key.name === 'up') controller.moveEffortPicker(-1);
+      else if (key.name === 'down') controller.moveEffortPicker(1);
+      else if (key.name === 'return') void controller.acceptEffortPicker();
+      else if (key.name === 'backspace')
+        controller.setEffortPickerQuery(overlay.query.slice(0, -1));
+      else if (isPrintable(key)) controller.setEffortPickerQuery(overlay.query + key.text);
       return true;
     case 'copy-picker':
       if (key.name === 'up') controller.moveCopyPicker(-1);

@@ -43,6 +43,7 @@ export type Overlay =
   | { kind: 'status' }
   | { kind: 'queue'; index: number }
   | { kind: 'model-picker'; query: string; index: number }
+  | { kind: 'effort-picker'; query: string; index: number }
   | { kind: 'agent-picker'; query: string; index: number }
   | { kind: 'copy-picker'; query: string; index: number }
   | { kind: 'history-search'; query: string; before: number }

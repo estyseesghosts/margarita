@@ -87,6 +87,7 @@ import { greetingPeriod } from '../domain/greeting-time.ts';
 import { selectGreeting } from '../domain/greetings.ts';
 import { formatModelRef, type ModelSelection, sameModel } from '../domain/model-ref.ts';
 import { type CatalogModel, resolveModel } from '../domain/model-resolution.ts';
+import { sortModelCatalogForPicker } from '../domain/model-sort.ts';
 import {
   type GoalQueryFailure,
   type NativeGoal,
@@ -642,7 +643,7 @@ export class AppController {
    * after `ensureCatalog` resolves, so a late response can never open a picker over a different
    * screen or on top of a modal that appeared in the meantime.
    */
-  private beginPickerOpen(action: 'agent' | 'model'): () => boolean {
+  private beginPickerOpen(action: FooterAction | 'effort'): () => boolean {
     const token = ++this.pickerOpenToken;
     const routeKey = this.routeKey(this.state.route);
     this.pendingPickerOpen = { token, action, routeKey };
@@ -780,7 +781,8 @@ export class AppController {
    * a picker dismissed by a second click (or a route change) can never be resurrected (#139).
    */
   private pickerOpenToken = 0;
-  private pendingPickerOpen: { token: number; action: FooterAction; routeKey: string } | undefined;
+  private pendingPickerOpen:
+    { token: number; action: FooterAction | 'effort'; routeKey: string } | undefined;
   /** Per-session, per-job-kind refresh epochs: a late RPC response cannot restore removed state (#136). */
   private readonly jobRefreshEpoch = new Map<string, { worker: number; shell: number }>();
   /** Deduplicates "agent unavailable" prompts across repeated catalog refreshes (#123). */
@@ -3642,7 +3644,9 @@ export class AppController {
         else await this.setModelFromRef(args);
         return;
       case 'effort':
-        await this.setEffort(args);
+        // `/effort` with no argument opens the picker; `/effort <name>` stays for scripts.
+        if (args === '') await this.openEffortPicker();
+        else await this.setEffort(args);
         return;
       case 'diff':
         await this.openDiff(args.trim() === 'turn' ? 'turn' : 'session');
@@ -4162,21 +4166,19 @@ export class AppController {
     this.setOverlay({ kind: 'model-picker', query: '', index: 0 });
   }
 
-  /** Picker rows: every enabled model plus each of its variants. */
+  /** One row per enabled model, provider-grouped and release/tier ordered (#165, #166). */
   modelChoices(query: string): ModelSelection[] {
     const tokens = query
       .toLowerCase()
       .split(/\s+/)
       .filter((token) => token !== '');
     const choices: ModelSelection[] = [];
-    for (const model of this.state.models) {
+    for (const model of sortModelCatalogForPicker(this.state.models)) {
       if (!model.enabled) continue;
       const haystack = `${model.providerID}/${model.modelID} ${model.name}`.toLowerCase();
       if (!tokens.every((token) => haystack.includes(token))) continue;
+      // Effort is chosen in its own picker; selecting a model never silently pins a variant.
       choices.push({ providerID: model.providerID, modelID: model.modelID });
-      for (const variant of model.variants) {
-        choices.push({ providerID: model.providerID, modelID: model.modelID, variant });
-      }
     }
     return choices;
   }
@@ -4199,6 +4201,83 @@ export class AppController {
     const choice = this.modelChoices(overlay.query)[overlay.index];
     this.setOverlay({ kind: 'none' });
     if (choice !== undefined) await this.setModel(choice);
+  }
+
+  /** The model whose variants the effort picker edits: conversation first, overview default next. */
+  private effectiveModel(): ModelSelection | undefined {
+    return this.currentSession()?.model ?? this.state.overview.model ?? this.state.defaultModel;
+  }
+
+  /** Currently effective variant; `undefined` means the server-defined default. */
+  currentEffort(): string | undefined {
+    return this.effectiveModel()?.variant;
+  }
+
+  /**
+   * Effort rows come from the effective model's verified scoped catalog only. The first row
+   * clears an explicit override and uses the server default; invalid catalogs expose no choices.
+   */
+  effortChoices(query: string): ReadonlyArray<{ label: string; variant: string | undefined }> {
+    const current = this.effectiveModel();
+    if (current === undefined) return [];
+    const scoped = this.scopedModelsFor(this.activeServerID(), this.currentDirectory());
+    const catalog = (scoped.length > 0 ? scoped : this.state.models).find(
+      (model) =>
+        model.enabled &&
+        model.providerID === current.providerID &&
+        model.modelID === current.modelID,
+    );
+    if (catalog === undefined) return [];
+    const options: Array<{ label: string; variant: string | undefined }> = [
+      { label: 'default (no override)', variant: undefined },
+      ...catalog.variants.map((variant) => ({ label: variant, variant })),
+    ];
+    const needle = query.trim().toLowerCase();
+    return needle === ''
+      ? options
+      : options.filter((option) => option.label.toLowerCase().includes(needle));
+  }
+
+  async openEffortPicker(admit?: () => boolean): Promise<void> {
+    const admission = admit ?? this.beginPickerOpen('effort');
+    if (!(await this.ensureCurrentModelCatalog())) return;
+    if (!admission()) return;
+    this.setOverlay({ kind: 'effort-picker', query: '', index: 0 });
+  }
+
+  setEffortPickerQuery(query: string): void {
+    this.setState('overlay', { kind: 'effort-picker', query, index: 0 });
+  }
+
+  moveEffortPicker(direction: -1 | 1): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'effort-picker') return;
+    const count = this.effortChoices(overlay.query).length;
+    if (count === 0) return;
+    this.setState('overlay', { ...overlay, index: (overlay.index + direction + count) % count });
+  }
+
+  async acceptEffortPicker(): Promise<void> {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'effort-picker') return;
+    const choice = this.effortChoices(overlay.query)[overlay.index];
+    this.setOverlay({ kind: 'none' });
+    if (choice === undefined) return;
+    await this.setEffortChoice(choice.variant);
+  }
+
+  private async setEffortChoice(variant: string | undefined): Promise<void> {
+    const current = this.effectiveModel();
+    if (current === undefined) {
+      this.showNotice('No model selected.', 'warn');
+      return;
+    }
+    // Only authoritative confirmation changes the footer: setModel verifies with the server.
+    await this.setModel(
+      variant === undefined
+        ? { providerID: current.providerID, modelID: current.modelID }
+        : { providerID: current.providerID, modelID: current.modelID, variant },
+    );
   }
 
   private async setModelFromRef(ref: string): Promise<void> {
@@ -4249,13 +4328,33 @@ export class AppController {
   }
 
   async setModel(model: ModelSelection): Promise<void> {
-    this.rememberModel(model);
+    // A variant is only valid for the model that advertises it. Never carry an unsupported
+    // effort onto a different model; fall back to that model's server-defined default (#165).
+    const catalog = this.state.models.find(
+      (entry) =>
+        entry.enabled && entry.providerID === model.providerID && entry.modelID === model.modelID,
+    );
+    const reconciled =
+      catalog !== undefined &&
+      model.variant !== undefined &&
+      !catalog.variants.includes(model.variant)
+        ? { providerID: model.providerID, modelID: model.modelID }
+        : model;
+    if (reconciled !== model) {
+      this.showNotice(
+        `Variant "${model.variant}" is not available for ${model.modelID}; using the server default.`,
+        'dim',
+      );
+    }
+    this.rememberModel(reconciled);
     const session = this.currentSession();
     if (session === undefined) {
-      this.setState('overview', 'model', model);
+      // Solid merges objects on assignment; clear first so a dropped variant really disappears.
+      this.setState('overview', 'model', undefined);
+      this.setState('overview', 'model', reconciled);
       return;
     }
-    await this.switchSessionModel(session, model);
+    await this.switchSessionModel(session, reconciled);
   }
 
   private modelDispatchBlocked(serverID: string, sessionID: string): boolean {

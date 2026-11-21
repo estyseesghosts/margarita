@@ -10,6 +10,7 @@ export const actionIDs = [
   'agent.cyclePrevious',
   'agent.pick',
   'model.pick',
+  'model.effort',
   'model.recentNext',
   'transcript.details',
   'transcript.copy',
@@ -56,6 +57,8 @@ export const defaultBindings: Readonly<Record<ActionID, readonly string[]>> = {
   'agent.cyclePrevious': ['alt+shift+tab'],
   'agent.pick': ['f3'],
   'model.pick': ['alt+p'],
+  // Alt+E is free in every supported terminal (Alt+C/D/P/Z are taken); mnemonic for "effort".
+  'model.effort': ['alt+e'],
   'model.recentNext': ['f2'],
   'transcript.details': ['ctrl+o'],
   'transcript.copy': ['alt+c'],

@@ -2452,7 +2452,7 @@ describe('createSession scopes agent/model to the target project (issue #108)', 
     }
   });
 
-  test('Alt+P pins a local model variant instead of silently using GPT Terra', async () => {
+  test('Alt+P then Alt+E pins a local model variant instead of silently using GPT Terra', async () => {
     const backend = new FakeBackend();
     backend.models = [
       {
@@ -2468,11 +2468,20 @@ describe('createSession scopes agent/model to the target project (issue #108)', 
     try {
       await controller.bootstrap();
       controller.openOverview();
-      expect(controller.modelChoices('model-a')).toHaveLength(3);
+      // The model picker has one row per model; effort is selected separately (#165).
+      expect(controller.modelChoices('model-a')).toHaveLength(1);
       await controller.openModelPicker();
       controller.setModelPickerQuery('model-a');
-      controller.moveModelPicker(1);
       await controller.acceptModelPicker();
+      expect(controller.state.overview.model).toEqual({ providerID: 'p', modelID: 'model-a' });
+      await controller.openEffortPicker();
+      expect(controller.effortChoices('').map((choice) => choice.variant)).toEqual([
+        undefined,
+        'high',
+        'low',
+      ]);
+      controller.setEffortPickerQuery('high');
+      await controller.acceptEffortPicker();
       const chosen = { providerID: 'p', modelID: 'model-a', variant: 'high' };
       expect(controller.state.overview.model).toEqual(chosen);
 
@@ -2487,6 +2496,106 @@ describe('createSession scopes agent/model to the target project (issue #108)', 
       });
       expect(backend.sessions.find((session) => session.id === id)?.model).toEqual(chosen);
       expect(backend.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('model picker lists one sorted, provider-grouped row per model (#165, #166)', async () => {
+    const backend = new FakeBackend();
+    backend.models = [
+      {
+        providerID: 'opencode',
+        modelID: 'gpt-6.1-terra',
+        name: 'GPT Terra',
+        enabled: true,
+        variants: ['high', 'low'],
+      },
+      {
+        providerID: 'openai',
+        modelID: 'gpt-6.9-sol',
+        name: 'Sol',
+        enabled: true,
+        variants: ['high'],
+      },
+      {
+        providerID: 'openai',
+        modelID: 'gpt-6.10-sol',
+        name: 'Sol',
+        enabled: true,
+        variants: ['high'],
+      },
+      {
+        providerID: 'openai',
+        modelID: 'gpt-6.2-astra',
+        name: 'Astra',
+        enabled: true,
+        variants: [],
+      },
+    ];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      expect(controller.modelChoices('')).toEqual([
+        { providerID: 'openai', modelID: 'gpt-6.10-sol' },
+        { providerID: 'openai', modelID: 'gpt-6.9-sol' },
+        { providerID: 'openai', modelID: 'gpt-6.2-astra' },
+        { providerID: 'opencode', modelID: 'gpt-6.1-terra' },
+      ]);
+      // Filtering still finds models across groups and never drops a valid row.
+      expect(controller.modelChoices('gpt-6.9')).toEqual([
+        { providerID: 'openai', modelID: 'gpt-6.9-sol' },
+      ]);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('effort picker is scoped to the effective model and handles zero variants (#165)', async () => {
+    const backend = new FakeBackend();
+    backend.models = [
+      { providerID: 'p', modelID: 'with', name: 'with', enabled: true, variants: ['low', 'high'] },
+      { providerID: 'p', modelID: 'without', name: 'without', enabled: true, variants: [] },
+    ];
+    backend.defaultModel = async () => ({ providerID: 'p', modelID: 'with' });
+    const controller = makeController(() => Promise.resolve([]), backend);
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      controller.setComposer(composerFrom('/effort'));
+      await controller.submit();
+      expect(controller.state.overlay.kind).toBe('effort-picker');
+      expect(controller.effortChoices('').map((choice) => choice.variant)).toEqual([
+        undefined,
+        'low',
+        'high',
+      ]);
+      controller.closeOverlay();
+
+      await controller.setModel({ providerID: 'p', modelID: 'without' });
+      expect(controller.effortChoices('')).toEqual([
+        { label: 'default (no override)', variant: undefined },
+      ]);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('changing model drops a variant unsupported by the new model (#165)', async () => {
+    const backend = new FakeBackend();
+    backend.models = [
+      { providerID: 'p', modelID: 'a', name: 'a', enabled: true, variants: ['high'] },
+      { providerID: 'p', modelID: 'b', name: 'b', enabled: true, variants: ['low'] },
+    ];
+    const controller = makeController(() => Promise.resolve([]), backend);
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      await controller.setModel({ providerID: 'p', modelID: 'a', variant: 'high' });
+      await controller.setModel({ providerID: 'p', modelID: 'b', variant: 'high' });
+      expect(controller.state.overview.model).toEqual({ providerID: 'p', modelID: 'b' });
+      expect(controller.state.notice?.text).toContain('server default');
     } finally {
       controller.dispose();
     }
