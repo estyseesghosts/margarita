@@ -1,8 +1,16 @@
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import { isRecord } from '../domain/backend-event.ts';
 import { localServerID } from '../domain/server-identity.ts';
+import { acquireFileLock } from './file-lock.ts';
+import {
+  declaredVersion,
+  IncompatibleSchemaError,
+  isIncompatibleVersion,
+  supportedSchemaVersion,
+} from './schema-guard.ts';
 
 /** A paired server. Identity is `serverID`; `shortname` is a user-editable alias. */
 export type ServerProfile = Readonly<{
@@ -186,8 +194,13 @@ export function removeProfile(
 }
 
 export function parseServerProfiles(raw: unknown): ServerProfiles {
-  if (!isRecord(raw) || raw['schemaVersion'] !== 1 || !Array.isArray(raw['profiles'])) {
-    return emptyServerProfiles;
+  if (!isRecord(raw) || !Array.isArray(raw['profiles'])) return emptyServerProfiles;
+  if (isIncompatibleVersion(raw)) {
+    throw new IncompatibleSchemaError({
+      path: '(parsed profiles)',
+      version: declaredVersion(raw),
+      supported: supportedSchemaVersion,
+    });
   }
   const profiles: ServerProfile[] = [];
   for (const entry of raw['profiles']) {
@@ -239,13 +252,23 @@ export function parseServerProfiles(raw: unknown): ServerProfiles {
   return { schemaVersion: 1, profiles };
 }
 
-const lockStaleMs = 10_000;
 const lockRetryMs = 25;
 const lockTimeoutMs = 5_000;
 
-export async function loadServerProfiles(
-  path: string,
-): Promise<{ profiles: ServerProfiles; warning?: string }> {
+export type LoadProfilesResult = Readonly<{
+  profiles: ServerProfiles;
+  warning?: string;
+  /** The file exists but uses a schema this build cannot write; it was left untouched. */
+  incompatible?: { path: string; version: unknown };
+}>;
+
+async function preserveUnreadable(path: string): Promise<string> {
+  const backup = `${path}.corrupt-${Date.now()}-${process.pid}-${randomUUID().slice(0, 8)}`;
+  await rename(path, backup).catch(() => {});
+  return backup;
+}
+
+export async function loadServerProfiles(path: string): Promise<LoadProfilesResult> {
   let text: string;
   try {
     text = await readFile(path, 'utf8');
@@ -256,14 +279,36 @@ export async function loadServerProfiles(
       warning: `Could not read paired servers: ${String(cause)}`,
     };
   }
+  let raw: unknown;
   try {
-    return { profiles: parseServerProfiles(JSON.parse(text)) };
+    raw = JSON.parse(text);
   } catch (cause) {
+    const backup = await preserveUnreadable(path);
     return {
       profiles: emptyServerProfiles,
-      warning: `Paired servers were unreadable and were reset: ${String(cause)}`,
+      warning: `Paired servers were unreadable; the original was preserved at ${backup}. ${String(cause)}`,
     };
   }
+  if (isIncompatibleVersion(raw)) {
+    const error = new IncompatibleSchemaError({
+      path,
+      version: declaredVersion(raw),
+      supported: supportedSchemaVersion,
+    });
+    return {
+      profiles: emptyServerProfiles,
+      warning: error.message,
+      incompatible: { path, version: declaredVersion(raw) },
+    };
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    const backup = await preserveUnreadable(path);
+    return {
+      profiles: emptyServerProfiles,
+      warning: `Paired servers were unreadable; the original was preserved at ${backup}.`,
+    };
+  }
+  return { profiles: parseServerProfiles(raw) };
 }
 
 /**
@@ -276,11 +321,23 @@ export async function updateServerProfiles(
   operation: (disk: ServerProfiles) => ServerProfiles,
 ): Promise<ServerProfiles> {
   await mkdir(dirname(path), { recursive: true });
-  const release = await acquireLock(`${path}.lock`);
+  const lock = await acquireFileLock(`${path}.lock`, {
+    timeoutMs: lockTimeoutMs,
+    retryMs: lockRetryMs,
+  });
   try {
-    const disk = (await loadServerProfiles(path)).profiles;
-    const next = operation(disk);
-    const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
+    // Re-read under the lock: a file upgraded to another schema since startup must never be
+    // downgraded by add/rename/remove (#150). The lock is still released in `finally`.
+    const loaded = await loadServerProfiles(path);
+    if (loaded.incompatible !== undefined) {
+      throw new IncompatibleSchemaError({
+        path,
+        version: loaded.incompatible.version,
+        supported: supportedSchemaVersion,
+      });
+    }
+    const next = operation(loaded.profiles);
+    const temp = `${path}.${process.pid}.${lock.token}.${Date.now()}.tmp`;
     await writeFile(temp, `${JSON.stringify(next, null, 2)}\n`, {
       encoding: 'utf8',
       mode: 0o600,
@@ -288,7 +345,7 @@ export async function updateServerProfiles(
     await rename(temp, path);
     return next;
   } finally {
-    await release();
+    await lock.release();
   }
 }
 
@@ -318,30 +375,4 @@ export async function removeServerProfile(path: string, serverID: string): Promi
     schemaVersion: 1,
     profiles: removeProfile(disk.profiles, serverID),
   }));
-}
-
-async function acquireLock(lockPath: string): Promise<() => Promise<void>> {
-  const deadline = Date.now() + lockTimeoutMs;
-  for (;;) {
-    try {
-      const handle = await open(lockPath, 'wx');
-      return async () => {
-        await handle.close();
-        await rm(lockPath, { force: true });
-      };
-    } catch (cause) {
-      if (!isRecord(cause) || cause['code'] !== 'EEXIST') throw cause;
-      try {
-        const info = await stat(lockPath);
-        if (Date.now() - info.mtimeMs > lockStaleMs) {
-          await rm(lockPath, { force: true });
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      if (Date.now() >= deadline) throw new ProfileError('Timed out waiting for the profile lock.');
-      await Bun.sleep(lockRetryMs);
-    }
-  }
 }

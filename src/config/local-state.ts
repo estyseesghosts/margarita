@@ -1,8 +1,16 @@
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import { isRecord } from '../domain/backend-event.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
+import { acquireFileLock } from './file-lock.ts';
+import {
+  declaredVersion,
+  IncompatibleSchemaError,
+  isIncompatibleVersion,
+  supportedSchemaVersion,
+} from './schema-guard.ts';
 
 /** Frontend-only presentation state. Session history is never stored here. */
 export type LocalState = Readonly<{
@@ -14,7 +22,21 @@ export type LocalState = Readonly<{
 
 export const emptyState: LocalState = { schemaVersion: 1, history: {}, recentModels: [] };
 
-export async function loadState(path: string): Promise<{ state: LocalState; warning?: string }> {
+export type LoadStateResult = Readonly<{
+  state: LocalState;
+  warning?: string;
+  /** The file exists but uses a schema this build cannot write; it was left untouched. */
+  incompatible?: { path: string; version: unknown };
+}>;
+
+/** Moves an unreadable file aside instead of resetting it in place. */
+async function preserveUnreadable(path: string): Promise<string> {
+  const backup = `${path}.corrupt-${Date.now()}-${process.pid}-${randomUUID().slice(0, 8)}`;
+  await rename(path, backup).catch(() => {});
+  return backup;
+}
+
+export async function loadState(path: string): Promise<LoadStateResult> {
   let text: string;
   try {
     text = await readFile(path, 'utf8');
@@ -22,18 +44,47 @@ export async function loadState(path: string): Promise<{ state: LocalState; warn
     if (isRecord(cause) && cause['code'] === 'ENOENT') return { state: emptyState };
     return { state: emptyState, warning: `Could not read local state: ${String(cause)}` };
   }
+  let raw: unknown;
   try {
-    return { state: parseState(JSON.parse(text)) };
+    raw = JSON.parse(text);
   } catch (cause) {
+    const backup = await preserveUnreadable(path);
     return {
       state: emptyState,
-      warning: `Local state was unreadable and was reset: ${String(cause)}`,
+      warning: `Local state was unreadable; the original was preserved at ${backup}. ${String(cause)}`,
     };
   }
+  if (isIncompatibleVersion(raw)) {
+    const error = new IncompatibleSchemaError({
+      path,
+      version: declaredVersion(raw),
+      supported: supportedSchemaVersion,
+    });
+    return {
+      state: emptyState,
+      warning: error.message,
+      incompatible: { path, version: declaredVersion(raw) },
+    };
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    const backup = await preserveUnreadable(path);
+    return {
+      state: emptyState,
+      warning: `Local state was unreadable; the original was preserved at ${backup}.`,
+    };
+  }
+  return { state: parseState(raw) };
 }
 
 export function parseState(raw: unknown): LocalState {
-  if (!isRecord(raw) || raw['schemaVersion'] !== 1) return emptyState;
+  if (!isRecord(raw)) return emptyState;
+  if (isIncompatibleVersion(raw)) {
+    throw new IncompatibleSchemaError({
+      path: '(parsed state)',
+      version: declaredVersion(raw),
+      supported: supportedSchemaVersion,
+    });
+  }
   const history: Record<string, string[]> = {};
   if (isRecord(raw['history'])) {
     for (const [key, entries] of Object.entries(raw['history'])) {
@@ -103,41 +154,8 @@ export type SaveResult = Readonly<{
   warning?: string;
 }>;
 
-const lockStaleMs = 10_000;
 const lockRetryMs = 25;
 const lockTimeoutMs = 5_000;
-
-async function acquireLock(lockPath: string): Promise<() => Promise<void>> {
-  const deadline = Date.now() + lockTimeoutMs;
-  for (;;) {
-    try {
-      const handle = await open(lockPath, 'wx');
-      return async () => {
-        await handle.close();
-        await rm(lockPath, { force: true });
-      };
-    } catch (cause) {
-      if (!isRecord(cause) || cause['code'] !== 'EEXIST') throw cause;
-      // Steal a stale lock left by a crashed process.
-      try {
-        const info = await stat(lockPath);
-        if (Date.now() - info.mtimeMs > lockStaleMs) {
-          await rm(lockPath, { force: true });
-          continue;
-        }
-      } catch {
-        // Lock vanished between checks; retry immediately.
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting for the local state lock (${lockPath})`, {
-          cause: cause,
-        });
-      }
-      await Bun.sleep(lockRetryMs + Math.floor(Math.random() * lockRetryMs));
-    }
-  }
-}
 
 async function readForMerge(path: string): Promise<{ state: LocalState; warning?: string }> {
   let text: string;
@@ -147,17 +165,26 @@ async function readForMerge(path: string): Promise<{ state: LocalState; warning?
     if (isRecord(cause) && cause['code'] === 'ENOENT') return { state: emptyState };
     return { state: emptyState, warning: `Could not read local state for merge: ${String(cause)}` };
   }
+  let raw: unknown;
   try {
-    return { state: parseState(JSON.parse(text)) };
+    raw = JSON.parse(text);
   } catch (cause) {
     // Never silently destroy what another process may have written: keep a backup.
-    const backup = `${path}.corrupt-${Date.now()}`;
-    await rename(path, backup).catch(() => {});
+    const backup = await preserveUnreadable(path);
     return {
       state: emptyState,
-      warning: `Local state was unreadable; moved aside to ${backup}: ${String(cause)}`,
+      warning: `Local state was unreadable; the original was preserved at ${backup}: ${String(cause)}`,
     };
   }
+  // A newer schema on disk is a hard stop: a save must never downgrade it to v1 (#150).
+  if (isIncompatibleVersion(raw)) {
+    throw new IncompatibleSchemaError({
+      path,
+      version: declaredVersion(raw),
+      supported: supportedSchemaVersion,
+    });
+  }
+  return { state: parseState(raw) };
 }
 
 /**
@@ -183,12 +210,15 @@ export async function saveState(
   try {
     await mkdir(dirname(path), { recursive: true });
     const lockPath = `${path}.lock`;
-    const releaseLock = await acquireLock(lockPath);
+    const lock = await acquireFileLock(lockPath, {
+      timeoutMs: lockTimeoutMs,
+      retryMs: lockRetryMs,
+    });
     try {
       const disk = await readForMerge(path);
       const merged = mergeState(state, disk.state, limits);
       tempCounter += 1;
-      const temp = `${path}.${process.pid}.${Date.now()}.${tempCounter}.tmp`;
+      const temp = `${path}.${process.pid}.${lock.token}.${Date.now()}.${tempCounter}.tmp`;
       await writeFile(temp, `${JSON.stringify(merged, null, 2)}\n`, {
         encoding: 'utf8',
         mode: 0o600,
@@ -197,7 +227,7 @@ export async function saveState(
       const warning = disk.warning;
       return warning === undefined ? { state: merged } : { state: merged, warning };
     } finally {
-      await releaseLock();
+      await lock.release();
     }
   } finally {
     release();

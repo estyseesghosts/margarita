@@ -1,9 +1,10 @@
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { isRecord } from '../domain/backend-event.ts';
 import { type GoalPlanV1, parseGoalPlan } from '../domain/goal-plan.ts';
 import { sessionKey, type SessionRef } from '../domain/server-identity.ts';
+import { acquireFileLock } from './file-lock.ts';
 
 /** Another process saved a newer revision since this one was loaded. */
 export class GoalConflictError extends Error {
@@ -49,15 +50,16 @@ export function fileGoalStore(dir: string, now: () => string): GoalStore {
       const path = pathOf(ref);
       const lock = `${path}.lock`;
       await mkdir(dirname(path), { recursive: true });
-      // An exclusive lock file makes read-compare-rename atomic across processes.
-      await acquire(lock);
+      // An owned lock makes read-compare-rename atomic across processes. A live holder is
+      // never displaced by age, and release removes only our own lock (#157).
+      const owner = await acquireFileLock(lock);
       try {
         const current = await read(ref);
         if ((current?.revision ?? 0) !== doc.revision) {
           throw new GoalConflictError(current ?? doc);
         }
         const saved: GoalPlanV1 = { ...doc, revision: doc.revision + 1 };
-        const temp = `${path}.${process.pid}.tmp`;
+        const temp = `${path}.${process.pid}.${owner.token}.tmp`;
         await writeFile(temp, `${JSON.stringify(saved, null, 2)}\n`, {
           encoding: 'utf8',
           mode: 0o600,
@@ -65,28 +67,10 @@ export function fileGoalStore(dir: string, now: () => string): GoalStore {
         await rename(temp, path);
         return saved;
       } finally {
-        await unlink(lock).catch(() => {});
+        await owner.release();
       }
     },
   };
-}
-
-const lockAttempts = 50;
-const staleLockMs = 10_000;
-
-async function acquire(lock: string): Promise<void> {
-  for (let attempt = 0; attempt < lockAttempts; attempt += 1) {
-    try {
-      await writeFile(lock, String(Date.now()), { flag: 'wx' });
-      return;
-    } catch (cause) {
-      if (!isRecord(cause) || cause['code'] !== 'EEXIST') throw cause;
-      const since = Number(await readFile(lock, 'utf8').catch(() => '0'));
-      if (Date.now() - since > staleLockMs) await unlink(lock).catch(() => {});
-      else await Bun.sleep(10);
-    }
-  }
-  throw new Error('goal plan is locked by another process');
 }
 
 /** In-memory store for tests and for sessions whose sidecar cannot be written. */

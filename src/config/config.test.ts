@@ -7,6 +7,7 @@ import { pickTheme } from '../ui/theme.ts';
 import { defaultConfig, loadConfig, parseConfig, stripJsonComments } from './config.ts';
 import { emptyState, loadState, mergeState, parseState, saveState } from './local-state.ts';
 import { appPaths } from './paths.ts';
+import { IncompatibleSchemaError } from './schema-guard.ts';
 
 const temps: string[] = [];
 afterEach(async () => {
@@ -121,13 +122,42 @@ describe('local state', () => {
     expect((await loadState(path)).state).toEqual(state);
     expect(await readFile(path, 'utf8')).toContain('longcat');
   });
-  test('corrupt state resets with a warning', async () => {
+  test('corrupt state is preserved aside with a warning, never silently reset', async () => {
     const dir = await tempDir();
     const path = join(dir, 'state.json');
     await Bun.write(path, '{not json');
     const result = await loadState(path);
     expect(result.state).toEqual(emptyState);
-    expect(result.warning).toBeDefined();
+    expect(result.warning).toContain('preserved');
+    expect((await readdir(dir)).some((name) => name.startsWith('state.json.corrupt-'))).toBe(true);
+  });
+
+  test('a newer schema is reported as incompatible and left untouched (#150)', async () => {
+    const dir = await tempDir();
+    const path = join(dir, 'state.json');
+    const raw = '{"schemaVersion":2,"history":{"/p":["keep me"]},"recentModels":[],"future":true}';
+    await Bun.write(path, raw);
+    const result = await loadState(path);
+    expect(result.incompatible?.version).toBe(2);
+    expect(result.warning).toContain('schema version 2');
+    expect(await readFile(path, 'utf8')).toBe(raw);
+
+    // A later write must not downgrade or destroy the newer file.
+    let failed: unknown;
+    try {
+      await saveState(path, { schemaVersion: 1, history: {}, recentModels: [] });
+    } catch (cause) {
+      failed = cause;
+    }
+    expect(failed).toBeInstanceOf(IncompatibleSchemaError);
+    expect(await readFile(path, 'utf8')).toBe(raw);
+  });
+
+  test('a missing file still starts from safe empty v1 state', async () => {
+    const path = join(await tempDir(), 'missing', 'state.json');
+    const result = await loadState(path);
+    expect(result.state).toEqual(emptyState);
+    expect(result.incompatible).toBeUndefined();
   });
   test('drops malformed entries', () => {
     expect(

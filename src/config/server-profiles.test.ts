@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { IncompatibleSchemaError } from './schema-guard.ts';
 import {
   addProfile,
   addServerProfile,
@@ -208,6 +209,38 @@ describe('server profiles', () => {
   });
 
   test('parse accepts an empty registry and rejects the wrong schema', () => {
-    expect(parseServerProfiles({ schemaVersion: 2, profiles: [] })).toEqual(emptyServerProfiles);
+    expect(parseServerProfiles({ schemaVersion: 1, profiles: [] })).toEqual(emptyServerProfiles);
+    expect(() => parseServerProfiles({ schemaVersion: 2, profiles: [] })).toThrow(
+      IncompatibleSchemaError,
+    );
+  });
+
+  test('a newer registry schema is reported and never downgraded by mutations (#150)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'marg-profiles-schema-'));
+    const path = join(dir, 'servers.json');
+    const raw = '{"schemaVersion":2,"profiles":[{"serverID":"srv_new","shortname":"new"}]}';
+    try {
+      await writeFile(path, raw);
+      const loaded = await loadServerProfiles(path);
+      expect(loaded.incompatible?.version).toBe(2);
+      expect(loaded.warning).toContain('schema version 2');
+
+      for (const mutate of [
+        () => addServerProfile(path, buildbox),
+        () => renameServerProfile(path, 'srv_new', 'renamed'),
+        () => removeServerProfile(path, 'srv_new'),
+      ]) {
+        let failed: unknown;
+        try {
+          await mutate();
+        } catch (cause) {
+          failed = cause;
+        }
+        expect(failed).toBeInstanceOf(IncompatibleSchemaError);
+        expect(await readFile(path, 'utf8')).toBe(raw);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
