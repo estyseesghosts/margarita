@@ -3,7 +3,7 @@
 
 Usage: pty-smoke.py <marg-binary> <stub-server-url> [scenario]
 
-Scenarios: `ctrl-c` (default), `keys` (typing, Unicode editing, bracketed multi-line paste and F1 help must not submit anything), `sigterm`, `resize` (repeated SIGWINCH incl. very narrow, then
+Scenarios: `ctrl-c` (default), `editor` (Ctrl+G with an EDITOR containing spaces: draft round-trips, temp file removed, terminal usable after), `keys` (typing, Unicode editing, bracketed multi-line paste and F1 help must not submit anything), `sigterm`, `resize` (repeated SIGWINCH incl. very narrow, then
 Ctrl+C), `crash` (SIGKILL: only checks the harness itself, terminal modes cannot be restored).
 
 Asserts, from a directory unrelated to the checkout and with a minimal environment, that the
@@ -60,6 +60,18 @@ def main():
         'XDG_CONFIG_HOME': os.path.join(home, 'config'),
         'XDG_STATE_HOME': os.path.join(home, 'state'),
     }
+    editor_dir = os.path.join(workdir, 'ed it or')
+    os.makedirs(editor_dir)
+    editor = os.path.join(editor_dir, 'fake-editor.sh')
+    with open(editor, 'w', encoding='utf-8') as handle:
+        handle.write(
+            '#!/bin/sh\n'
+            'printf " edited-by-editor" >> "$1"\n'
+            'printf "%s" "$1" > "$MARG_EDITOR_SEEN"\n'
+        )
+    os.chmod(editor, 0o755)
+    env['EDITOR'] = f"'{editor}'"
+    env['MARG_EDITOR_SEEN'] = os.path.join(workdir, 'editor-path')
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(workdir)

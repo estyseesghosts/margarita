@@ -71,3 +71,7 @@ WSL2 is a good place to build and run the source gate, but it does not replace n
 ## Keyboard and paste
 
 The PTY smoke (`keys` scenario) drives the compiled binary under a real POSIX PTY with `TERM=xterm-256color`: typing Unicode, grapheme-wise backspace, a bracketed multi-line paste, F1 (help) and Esc must paint correctly and must not cause any server write (nothing is submitted). Alt/Shift+Tab/modified-Enter, mouse and wheel, kitty-protocol versus legacy sequences, and Ghostty, kitty, GNOME Terminal and tmux/SSH behaviour are **untested**; record observations (TERM, protocol, version, deviations) in `docs/smoke-matrix.md` before adding any terminal-specific branch.
+
+## Terminal lifecycle
+
+PTY scenarios (`ctrl-c`, `sigterm`, `resize`, `editor`) verify on Fedora 44 that the renderer exits, the cursor is re-shown, mouse reporting is disabled and the alternate screen is left; that repeated SIGWINCH down to 8 columns does not crash; and that Ctrl+G with an `EDITOR` path containing spaces round-trips the draft and removes its temp file. Not covered: `VISUAL=nano`/`vi` interaction, editor failure and cancellation, SIGKILL recovery (modes cannot be restored by the process), tmux and SSH.
