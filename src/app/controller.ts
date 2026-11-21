@@ -1521,6 +1521,11 @@ export class AppController {
    * are unqualified, so ownership is parsed rather than prefix-matched. Other hosts are untouched.
    */
   private clearRuntimeStateForServer(serverID: string): void {
+    // Invalidate *every* in-flight refresh for this host, including first fetches that have
+    // not written any row yet. Their response must not survive a reconnect (#140).
+    for (const key of this.jobRefreshEpoch.keys()) {
+      if (parseSessionKey(key).serverID === serverID) this.invalidateJobRefresh(key);
+    }
     for (const field of ['workers', 'shellJobs', 'backgrounded'] as const) {
       this.setState(
         field,
@@ -1732,9 +1737,17 @@ export class AppController {
     return (this.jobRefreshEpoch.get(key)?.[kind] ?? 0) === epoch;
   }
 
-  /** Invalidates in-flight job refreshes when a session's runtime state is discarded. */
+  /**
+   * Invalidates in-flight job refreshes when a session's runtime state is discarded. Epochs are
+   * monotonically *bumped*, never deleted: deleting lets the counter restart at 1 on reconnect,
+   * so an old response could pass the freshness check again (#140).
+   */
   private invalidateJobRefresh(key: string): void {
-    this.jobRefreshEpoch.delete(key);
+    const current = this.jobRefreshEpoch.get(key) ?? { worker: 0, shell: 0 };
+    this.jobRefreshEpoch.set(key, {
+      worker: current.worker + 1,
+      shell: current.shell + 1,
+    });
   }
 
   /**
@@ -1755,7 +1768,7 @@ export class AppController {
     // the RPC was in flight. An old response must never restore its rows (#136).
     if (this.disposed || !this.isJobRefreshCurrent(key, 'worker', epoch)) return;
     const owner = this.state.sessions[key];
-    if (owner !== undefined && owner.serverID !== serverID) return;
+    if (owner === undefined || owner.serverID !== serverID) return; // missing owner is not confirmed ownership
     this.setState('workers', key, jobs);
   }
 
@@ -1777,7 +1790,7 @@ export class AppController {
     }
     if (this.disposed || !this.isJobRefreshCurrent(key, 'shell', epoch)) return;
     const owner = this.state.sessions[key];
-    if (owner !== undefined && owner.serverID !== serverID) return;
+    if (owner === undefined || owner.serverID !== serverID) return; // missing owner is not confirmed ownership
     this.setState('shellJobs', key, jobs);
   }
 
@@ -4193,22 +4206,43 @@ export class AppController {
       this.showNotice('Nothing running to background.', 'dim');
       return;
     }
+    // Capture request-time identity BEFORE the async RPC: the transcript and turn can change
+    // while it is pending, and ownership must never be derived from whatever is running after
+    // the await (#147).
+    const key = this.keyFor(session.serverID, session.id);
+    const routeKey = this.routeKey(this.state.route);
+    const turnGeneration = this.runningEventSeq.get(key) ?? 0;
+    const captured = this.runningToolIDs(session.id, session.serverID);
     try {
-      await this.backend.backgroundTools(session.id);
-      // The confirmation belongs to the tool call, rendered inside the transcript.
+      await this.backendFor(session.serverID).backgroundTools(session.id);
+      // Re-validate the captured session, host, route and turn. An acknowledgement from an
+      // old turn can neither be lost when its tool finishes nor retargeted to a new turn/tool.
+      if (
+        this.disposed ||
+        this.state.sessions[key]?.serverID !== session.serverID ||
+        this.routeKey(this.state.route) !== routeKey ||
+        (this.runningEventSeq.get(key) ?? 0) !== turnGeneration
+      )
+        return;
+      const toolIDs = new Set(
+        (this.state.transcripts[key]?.messages ?? []).flatMap((message) =>
+          message.kind === 'assistant'
+            ? message.parts.flatMap((part) => (part.kind === 'tool' ? [part.tool.id] : []))
+            : [],
+        ),
+      );
+      const acknowledged = captured.filter((toolID) => toolIDs.has(toolID));
+      if (acknowledged.length === 0) return;
+      // The confirmation belongs to the captured tool call, rendered inside the transcript.
       // A global notice would occupy a composer/footer row and shift the prompt bar (#129).
-      // One event per running call, keyed by its exact tool ID: a second Ctrl+B updates the
-      // same event instead of duplicating it, and no later call can inherit it (#135).
-      const running = this.runningToolIDs(session.id, session.serverID);
-      if (running.length === 0) return;
-      const key = this.keyFor(session.serverID, session.id);
+      // One event per tool ID: a second Ctrl+B updates the same event instead of duplicating it.
       const previous = this.state.backgrounded[key] ?? [];
-      const events: BackgroundEvent[] = running.map((toolID) => ({
+      const events: BackgroundEvent[] = acknowledged.map((toolID) => ({
         toolID,
         text: 'Moved to background',
       }));
       this.setState('backgrounded', key, [
-        ...previous.filter((event) => !running.includes(event.toolID)),
+        ...previous.filter((event) => !acknowledged.includes(event.toolID)),
         ...events,
       ]);
     } catch (error) {

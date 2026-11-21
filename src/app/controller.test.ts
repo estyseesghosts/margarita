@@ -4718,6 +4718,20 @@ describe('job state lifecycle on disconnect and removal (#136)', () => {
     controller.dispose();
   });
 
+  test('a first pending job refresh with no rows cannot survive disconnect (#140)', async () => {
+    const { controller, backendB } = twoHostController();
+    const delayed = deferred<readonly WorkerJob[]>();
+    backendB.listSubagentJobs = () => delayed.promise;
+    await controller.bootstrap();
+    controller.openSession('ses_b', 'srv_1');
+    await flush(); // first refresh is in flight and has written no rows
+    controller.onStreamStatus('srv_1', 'reconnecting');
+    delayed.resolve([remoteJob]); // the pre-disconnect response arrives after reconnect
+    await flush();
+    expect(controller.state.workers['server:srv_1/session:ses_b']).toBeUndefined();
+    controller.dispose();
+  });
+
   test('unpairing a host removes its worker, shell-job and background records', async () => {
     const harness = adminHarness();
     const controller = controllerWith(harness.admin);
@@ -4778,6 +4792,84 @@ describe('transient background confirmation lifecycle (#135)', () => {
     expect(controller.state.backgrounded[key]?.map((event) => event.toolID)).toEqual(['t1', 't2']);
     await controller.backgroundTools();
     expect(controller.state.backgrounded[key]).toHaveLength(2);
+    controller.dispose();
+  });
+
+  test('a delayed RPC keeps captured tool identity even if a tool finishes (#147)', async () => {
+    const { backend, controller } = controllerWithRunningTools();
+    await attach(controller, 'ses_a');
+    controller.onEvents(
+      'local',
+      [{ kind: 'execution', sessionID: 'ses_a', state: 'started' }],
+      false,
+    );
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const realBackground = backend.backgroundTools.bind(backend);
+    backend.backgroundTools = async (sessionID) => {
+      await gate;
+      await realBackground(sessionID);
+    };
+    const pending = controller.backgroundTools();
+    // While the RPC is pending, t1 completes — no recomputation should drop it.
+    const transcript = controller.state.transcripts['ses_a'];
+    if (transcript !== undefined) {
+      controller.state.transcripts['ses_a'] = {
+        ...transcript,
+        messages: transcript.messages.map((message) =>
+          message.kind === 'assistant'
+            ? {
+                ...message,
+                parts: message.parts.map((part) =>
+                  part.kind === 'tool' && part.tool.id === 't1'
+                    ? { ...part, tool: { ...part.tool, status: 'completed' } }
+                    : part,
+                ),
+              }
+            : message,
+        ),
+      };
+    }
+    release();
+    await pending;
+    expect(controller.state.backgrounded['ses_a']?.map((event) => event.toolID)).toEqual([
+      't1',
+      't2',
+    ]);
+    controller.dispose();
+  });
+
+  test('a late acknowledgement from an ended turn cannot attach to a new one (#147)', async () => {
+    const { backend, controller } = controllerWithRunningTools();
+    await attach(controller, 'ses_a');
+    controller.onEvents(
+      'local',
+      [{ kind: 'execution', sessionID: 'ses_a', state: 'started' }],
+      false,
+    );
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const realBackground = backend.backgroundTools.bind(backend);
+    backend.backgroundTools = async (sessionID) => {
+      await gate;
+      await realBackground(sessionID);
+    };
+    const pending = controller.backgroundTools();
+    controller.onEvents(
+      'local',
+      [
+        { kind: 'execution', sessionID: 'ses_a', state: 'succeeded' },
+        { kind: 'execution', sessionID: 'ses_a', state: 'started' },
+      ],
+      false,
+    );
+    release();
+    await pending;
+    expect(controller.state.backgrounded['ses_a'] ?? []).toEqual([]);
     controller.dispose();
   });
 
