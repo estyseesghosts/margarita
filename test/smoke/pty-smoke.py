@@ -3,7 +3,7 @@
 
 Usage: pty-smoke.py <marg-binary> <stub-server-url> [scenario]
 
-Scenarios: `ctrl-c` (default), `editor-fail` (the editor exits 1: the draft is kept, the app keeps running), `editor` (Ctrl+G with an EDITOR containing spaces: draft round-trips, temp file removed, terminal usable after), `keys` (typing, Unicode editing, bracketed multi-line paste and F1 help must not submit anything), `sigterm`, `resize` (repeated SIGWINCH incl. very narrow, then
+Scenarios: `ctrl-c` (default), `mouse` (SGR clicks and wheel over the footer/transcript, plus legacy and kitty modified-Enter and F6, must not crash or submit), `editor-fail` (the editor exits 1: the draft is kept, the app keeps running), `editor` (Ctrl+G with an EDITOR containing spaces: draft round-trips, temp file removed, terminal usable after), `keys` (typing, Unicode editing, bracketed multi-line paste and F1 help must not submit anything), `sigterm`, `resize` (repeated SIGWINCH incl. very narrow, then
 Ctrl+C), `crash` (SIGKILL: only checks the harness itself, terminal modes cannot be restored).
 
 Asserts, from a directory unrelated to the checkout and with a minimal environment, that the
@@ -114,7 +114,7 @@ def main():
     if '\x1b[?1000h' in text and '\x1b[?1000l' not in text:
         failures.append('mouse reporting was left enabled')
     submitted = os.environ.get('STUB_LOG')
-    if scenario == 'keys' and submitted and os.path.exists(submitted):
+    if scenario in ('keys', 'mouse') and submitted and os.path.exists(submitted):
         with open(submitted, encoding='utf-8') as handle:
             writes = [line for line in handle.read().splitlines() if not line.startswith('GET ')]
         if writes:

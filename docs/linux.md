@@ -70,7 +70,7 @@ WSL2 is a good place to build and run the source gate, but it does not replace n
 
 ## Keyboard and paste
 
-The PTY smoke (`keys` scenario) drives the compiled binary under a real POSIX PTY with `TERM=xterm-256color`: typing Unicode, grapheme-wise backspace, a bracketed multi-line paste, F1 (help) and Esc must paint correctly and must not cause any server write (nothing is submitted). Alt/Shift+Tab/modified-Enter, mouse and wheel, kitty-protocol versus legacy sequences, and Ghostty, kitty, GNOME Terminal and tmux/SSH behaviour are **untested**; record observations (TERM, protocol, version, deviations) in `docs/smoke-matrix.md` before adding any terminal-specific branch.
+The PTY smoke (`keys` scenario) drives the compiled binary under a real POSIX PTY with `TERM=xterm-256color`: typing Unicode, grapheme-wise backspace, a bracketed multi-line paste, F1 (help) and Esc must paint correctly and must not cause any server write (nothing is submitted). Alt/Shift+Tab, semantic effects of mouse clicks, kitty-versus-legacy negotiation (the `mouse` scenario only proves SGR mouse, wheel, kitty Ctrl+Enter and F6 input neither crash the app nor submit), and Ghostty, kitty, GNOME Terminal and tmux/SSH behaviour are **untested**; record observations (TERM, protocol, version, deviations) in `docs/smoke-matrix.md` before adding any terminal-specific branch.
 
 ## Terminal lifecycle
 
