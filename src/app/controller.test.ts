@@ -4515,6 +4515,63 @@ describe('copy picker (#105)', () => {
     expect(controller.state.notice?.text).toContain('UI cap');
     controller.dispose();
   });
+
+  test('the file fallback uses a client-local directory, never the remote cwd (#153)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = {
+      ses_a: [
+        {
+          kind: 'assistant',
+          id: 'm1',
+          createdAt: 1,
+          agent: 'build',
+          model: { providerID: 'p', modelID: 'm' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 't1',
+                name: 'shell',
+                status: 'completed',
+                input: {},
+                startedAt: 0,
+                output: 'exact payload',
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const written: { path: string; text: string }[] = [];
+    const controller = new AppController({
+      backend,
+      config: defaultConfig,
+      localState: emptyState,
+      platform: 'linux',
+      cwd: '/srv/remote-project',
+      version: '0.0.1',
+      now: () => 10_000,
+      saveLocalState: async () => {},
+      listFiles: () => Promise.resolve([]),
+      requestExit: () => {},
+      copyFallbackDir: '/local/client-state',
+      writeFile: async (path, text) => {
+        written.push({ path, text });
+      },
+    });
+    await attach(controller, 'ses_a');
+    controller.openCopyPicker();
+    await controller.acceptCopyPicker();
+    expect(written).toHaveLength(1);
+    // node:path.join uses the host separator, so assert on path-agnostic segments.
+    expect(written[0]?.path).toContain('client-state');
+    expect(written[0]?.path).toContain('marg-copy-');
+    expect(written[0]?.path).not.toContain('remote-project');
+    expect(written[0]?.text).toBe('exact payload');
+    expect(controller.state.notice?.text).toContain('client-state');
+    controller.dispose();
+  });
 });
 
 function pickerBackend(): FakeBackend {

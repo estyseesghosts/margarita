@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { chmod, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { Backend } from '../adapter/backend.ts';
@@ -239,15 +241,25 @@ export async function createProductionAssembly(
       input.listFiles === undefined ? listProjectFiles(root) : input.listFiles(root),
     ...(input.remoteFilesystem === undefined ? {} : { remoteFilesystem: input.remoteFilesystem }),
     requestExit: input.requestExit,
-    // OSC 52 only when a real terminal can receive it; otherwise save an explicit local file
-    // so the user always gets the exact bytes and a visible path (#105). Never a network hop.
+    copyFallbackDir: input.paths.stateDir,
+    // OSC 52 only when a real terminal can receive it AND the single set operation fits the
+    // explicit byte limit; otherwise save an exact local file with a visible path (#105, #131).
+    // The fallback directory is client-local state, never the active (possibly remote) cwd (#153).
     copyText: async (text) => {
-      if (input.env['TERM'] !== 'dumb' && process.stdout.isTTY) {
-        process.stdout.write(osc52Clipboard(text));
+      const sequence =
+        input.env['TERM'] !== 'dumb' && process.stdout.isTTY ? osc52Clipboard(text) : undefined;
+      if (sequence !== undefined) {
+        process.stdout.write(sequence);
         return { method: 'clipboard' };
       }
-      const path = join(input.cwd, `marg-copy-${Date.now()}.txt`);
+      await mkdir(input.paths.stateDir, { recursive: true });
+      const path = join(input.paths.stateDir, `marg-copy-${process.pid}-${randomUUID()}.txt`);
       await Bun.write(path, text);
+      try {
+        await chmod(path, 0o600);
+      } catch {
+        // Filesystems without POSIX permission bits still keep the exact bytes; report the path.
+      }
       return { method: 'file', path };
     },
     goalStore:

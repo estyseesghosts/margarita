@@ -2,25 +2,25 @@ import { describe, expect, test } from 'bun:test';
 
 import { osc52Clipboard } from './osc52.ts';
 
-describe('OSC 52 clipboard payloads (#105)', () => {
-  test('encodes exact UTF-8 bytes and terminates every chunk', () => {
+describe('OSC 52 clipboard payloads (#105, #131)', () => {
+  test('emits exactly one complete set operation with the exact UTF-8 bytes', () => {
     const text = 'café\nsecond line';
     const sequence = osc52Clipboard(text);
-    expect(sequence.startsWith('\u001b]52;c;')).toBe(true);
-    expect(sequence.endsWith('\u001b\\')).toBe(true);
     const encoded = Buffer.from(text, 'utf8').toString('base64');
     expect(sequence).toBe(`\u001b]52;c;${encoded}\u001b\\`);
+    // One opener and one terminator: never independent fragment sets (#131).
+    expect(sequence?.split('\u001b]52;c;')).toHaveLength(2);
   });
 
-  test('splits large payloads into whole base64 quartets that concatenate exactly', () => {
+  test('oversized encoded payloads are refused instead of split into several sets', () => {
     const text = 'x'.repeat(20_000) + '\n尾';
-    const sequence = osc52Clipboard(text, 1000);
-    const chunks = sequence
-      .split('\u001b\\')
-      .filter((part) => part !== '')
-      .map((part) => part.slice('\u001b]52;c;'.length));
-    expect(chunks.length).toBeGreaterThan(1);
-    expect(chunks.every((chunk) => chunk.length % 4 === 0)).toBe(true);
-    expect(Buffer.from(chunks.join(''), 'base64').toString('utf8')).toBe(text);
+    expect(osc52Clipboard(text, 1000)).toBeUndefined();
+    expect(osc52Clipboard(text, 40_000)).toContain('\u001b]52;c;');
+  });
+
+  test('the limit is based on encoded bytes, not characters', () => {
+    const unicode = '尾'.repeat(10); // 30 UTF-8 bytes, 40 base64 chars
+    expect(osc52Clipboard(unicode, 39)).toBeUndefined();
+    expect(osc52Clipboard(unicode, 40)).toBeDefined();
   });
 });

@@ -1,4 +1,4 @@
-import { isAbsolute, posix, resolve, win32 } from 'node:path';
+import { isAbsolute, join, posix, resolve, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { batch } from 'solid-js';
@@ -272,6 +272,8 @@ export type ControllerDeps = Readonly<{
    * copy always has an explicit, visible fallback when the terminal cannot receive OSC52.
    */
   copyText?: (text: string) => Promise<CopyResult>;
+  /** Client-local directory for copy fallback files; never derived from a remote cwd (#153). */
+  copyFallbackDir?: string;
   /** Goal/plan sidecar storage; defaults to memory (tests). */
   goalStore?: GoalStore;
   /** Frontend-local pairing; implemented by main so the controller owns no network setup. */
@@ -3955,7 +3957,7 @@ export class AppController {
           : ` (${item.truncation === 'server' ? 'server-truncated' : 'UI cap only'})`;
       this.showNotice(
         result.method === 'clipboard'
-          ? `Copied ${item.kind}${suffix} to clipboard.`
+          ? `Clipboard sequence emitted for ${item.kind}${suffix} (no terminal acknowledgement).`
           : `Clipboard unavailable; saved ${result.path ?? 'a file'}${suffix}.`,
         'dim',
       );
@@ -3966,7 +3968,9 @@ export class AppController {
 
   private async copyToDestination(text: string): Promise<CopyResult> {
     if (this.deps.copyText !== undefined) return this.deps.copyText(text);
-    const path = resolve(this.deps.cwd, `marg-copy-${this.deps.now()}.txt`);
+    // Fall back to a client-local directory, not the (possibly remote) project cwd (#153).
+    const dir = this.deps.copyFallbackDir ?? this.deps.cwd;
+    const path = join(dir, `marg-copy-${process.pid}-${this.deps.now()}.txt`);
     const write = this.deps.writeFile ?? (async (file, body) => void (await Bun.write(file, body)));
     await write(path, text);
     return { method: 'file', path };
