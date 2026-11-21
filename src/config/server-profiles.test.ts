@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -10,6 +10,7 @@ import {
   emptyServerProfiles,
   findDuplicates,
   loadServerProfiles,
+  MalformedRegistryError,
   normalizeServerUrl,
   parseServerProfiles,
   ProfileError,
@@ -242,5 +243,100 @@ describe('server profiles', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+async function failure(run: () => Promise<unknown>): Promise<unknown> {
+  try {
+    await run();
+  } catch (cause) {
+    return cause;
+  }
+  return undefined;
+}
+
+async function inTemp(run: (path: string, dir: string) => Promise<void>): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'marg-servers-'));
+  try {
+    await run(join(dir, 'servers.json'), dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+describe('malformed same-version registries (#201)', () => {
+  const bad = [
+    '{"schemaVersion":1,"profiles":"unexpected"}',
+    '{"schemaVersion":1,"other":"field"}',
+    '{"schemaVersion":1,"profiles":{"a":1}}',
+  ];
+
+  for (const content of bad) {
+    test(`refuses every mutation and keeps the bytes of ${content}`, async () => {
+      await inTemp(async (path) => {
+        await writeFile(path, content);
+        const loaded = await loadServerProfiles(path);
+        expect(loaded.malformed).toEqual({ path });
+        expect(loaded.warning).toContain('malformed');
+        expect(await failure(() => addServerProfile(path, buildbox))).toBeInstanceOf(
+          MalformedRegistryError,
+        );
+        expect(await failure(() => removeServerProfile(path, 'srv_1'))).toBeInstanceOf(
+          MalformedRegistryError,
+        );
+        expect(await failure(() => renameServerProfile(path, 'srv_1', 'other'))).toBeInstanceOf(
+          MalformedRegistryError,
+        );
+        expect(await readFile(path, 'utf8')).toBe(content);
+      });
+    });
+  }
+
+  test('a valid empty registry still loads and accepts a pairing', async () => {
+    await inTemp(async (path) => {
+      await writeFile(path, '{"schemaVersion":1,"profiles":[]}');
+      const loaded = await loadServerProfiles(path);
+      expect(loaded.malformed).toBeUndefined();
+      expect(loaded.warning).toBeUndefined();
+      await addServerProfile(path, buildbox);
+      expect((await loadServerProfiles(path)).profiles.profiles).toHaveLength(1);
+    });
+  });
+
+  test('valid records survive malformed siblings and the original is backed up first', async () => {
+    await inTemp(async (path, dir) => {
+      const original = JSON.stringify({
+        schemaVersion: 1,
+        profiles: [buildbox, 'junk', { serverID: 'srv_2' }],
+      });
+      await writeFile(path, original);
+      const loaded = await loadServerProfiles(path);
+      expect(loaded.skippedRecords).toBe(2);
+      expect(loaded.profiles.profiles.map((profile) => profile.serverID)).toEqual(['srv_1']);
+      await addServerProfile(path, {
+        ...buildbox,
+        serverID: 'srv_3',
+        shortname: 'other',
+        baseUrl: 'https://o.example.com',
+      });
+      const names = await readdir(dir);
+      const backup = names.find((name) => name.startsWith('servers.json.skipped-'));
+      expect(backup).toBeDefined();
+      expect(await readFile(join(dir, backup ?? ''), 'utf8')).toBe(original);
+      expect(
+        (await loadServerProfiles(path)).profiles.profiles.map((profile) => profile.serverID),
+      ).toEqual(['srv_1', 'srv_3']);
+    });
+  });
+
+  test('records differing only by name case are not both kept', () => {
+    const parsed = parseServerProfiles({
+      schemaVersion: 1,
+      profiles: [
+        buildbox,
+        { serverID: 'srv_2', shortname: 'BuildBox', baseUrl: 'https://two.example.com' },
+      ],
+    });
+    expect(parsed.profiles.map((profile) => profile.serverID)).toEqual(['srv_1']);
   });
 });

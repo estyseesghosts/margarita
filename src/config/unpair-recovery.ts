@@ -16,20 +16,50 @@ const queueName = 'pending-unpair.json';
 
 type Pending = Readonly<{ serverIDs: string[] }>;
 
-async function readPending(path: string): Promise<Pending> {
-  try {
-    const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
-    if (isRecord(parsed) && Array.isArray(parsed['serverIDs'])) {
-      return {
-        serverIDs: parsed['serverIDs'].filter(
-          (entry): entry is string => typeof entry === 'string',
-        ),
-      };
-    }
-  } catch {
-    // Missing or unreadable queue: nothing pending.
+/**
+ * The queue exists but cannot be trusted. It is never overwritten or treated as empty: the
+ * original bytes stay in place so the pending credential IDs remain recoverable by hand.
+ * The message names only the path and the failure class, never queue contents.
+ */
+export class PendingQueueError extends Error {
+  constructor(
+    readonly path: string,
+    readonly reason: 'unreadable' | 'malformed',
+    options?: ErrorOptions,
+  ) {
+    super(
+      `The pending credential cleanup queue at ${path} is ${reason}; it was left untouched. ` +
+        `Inspect or repair it by hand (it is JSON of the form {"serverIDs":["srv_..."]}), then retry.`,
+      options,
+    );
+    this.name = 'PendingQueueError';
   }
-  return { serverIDs: [] };
+}
+
+/** Only a genuinely absent file is an empty queue; every other failure fails closed. */
+async function readPending(path: string): Promise<Pending> {
+  let text: string;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch (cause) {
+    if (isRecord(cause) && cause['code'] === 'ENOENT') return { serverIDs: [] };
+    throw new PendingQueueError(path, 'unreadable', { cause });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (cause) {
+    throw new PendingQueueError(path, 'malformed', { cause });
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed['serverIDs'])) {
+    throw new PendingQueueError(path, 'malformed');
+  }
+  const ids: string[] = [];
+  for (const entry of parsed['serverIDs']) {
+    if (typeof entry !== 'string' || entry === '') throw new PendingQueueError(path, 'malformed');
+    if (!ids.includes(entry)) ids.push(entry);
+  }
+  return { serverIDs: ids };
 }
 
 async function writePending(path: string, token: string, pending: Pending): Promise<void> {

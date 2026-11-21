@@ -22,7 +22,7 @@ import { osc52Clipboard } from '../domain/osc52.ts';
 import { AppController, errorText, type ServerAdmin, type ServerListing } from './controller.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { pairServer } from './pairing-service.ts';
-import { listProjectFiles } from './project-files.ts';
+import { scanProjectFiles } from './project-files.ts';
 
 export type AppPaths = Readonly<{
   stateFile: string;
@@ -229,7 +229,15 @@ export async function createProductionAssembly(
       try {
         await input.credentials.delete(targetID);
       } catch (error) {
-        await enqueueCredentialCleanup(input.paths.stateDir, targetID);
+        try {
+          await enqueueCredentialCleanup(input.paths.stateDir, targetID);
+        } catch (queueError) {
+          // The retry could not be recorded (e.g. a damaged queue): say so, never claim it is queued.
+          return {
+            credentialCleanup: 'pending',
+            error: `${errorText(error)}; the retry could not be queued: ${errorText(queueError)}`,
+          };
+        }
         return { credentialCleanup: 'pending', error: errorText(error) };
       }
       return { credentialCleanup: 'done' };
@@ -250,8 +258,18 @@ export async function createProductionAssembly(
       input.saveLocalState === undefined
         ? saveState(input.paths.stateFile, state)
         : input.saveLocalState(state),
-    listFiles: (root) =>
-      input.listFiles === undefined ? listProjectFiles(root) : input.listFiles(root),
+    listFiles: async (root) => {
+      if (input.listFiles !== undefined) return input.listFiles(root);
+      const scan = await scanProjectFiles(root);
+      if (scan.truncated !== undefined && scan.truncated !== 'files') {
+        debugLog.write('file-scan-truncated', { reason: scan.truncated });
+        controller.showNotice(
+          `File suggestions may be incomplete (scan stopped: ${scan.truncated} limit).`,
+          'dim',
+        );
+      }
+      return scan.files;
+    },
     ...(input.remoteFilesystem === undefined ? {} : { remoteFilesystem: input.remoteFilesystem }),
     requestExit: input.requestExit,
     copyFallbackDir: input.paths.stateDir,
@@ -316,12 +334,21 @@ export async function createProductionAssembly(
   });
 
   // Reconcile an unpair whose credential deletion failed in a previous run (#156).
-  const unpairRecovery = await reconcileCredentialCleanup(input.paths.stateDir, input.credentials);
-  if (unpairRecovery.cleared > 0 || unpairRecovery.remaining.length > 0) {
-    debugLog.write('unpair-recovery', {
-      cleared: unpairRecovery.cleared,
-      remaining: unpairRecovery.remaining,
-    });
+  try {
+    const unpairRecovery = await reconcileCredentialCleanup(
+      input.paths.stateDir,
+      input.credentials,
+    );
+    if (unpairRecovery.cleared > 0 || unpairRecovery.remaining.length > 0) {
+      debugLog.write('unpair-recovery', {
+        cleared: unpairRecovery.cleared,
+        remaining: unpairRecovery.remaining,
+      });
+    }
+  } catch (error) {
+    // A damaged queue must not block startup, and must not be reported as "nothing pending".
+    debugLog.write('unpair-recovery', { failed: errorText(error) });
+    controller.showNotice(errorText(error), 'error', false);
   }
 
   return { servers, controller, serverAdmin };

@@ -131,3 +131,40 @@ describe('sortModelCatalogForPicker (#166)', () => {
     expect(sortModelCatalogForPicker(filtered)).toEqual(filtered);
   });
 });
+
+const sortedIDs = (provider: string, modelIDs: string[]) =>
+  sortModelCatalogForPicker(modelIDs.map((id) => model(provider, id))).map(
+    (entry) => entry.modelID,
+  );
+
+describe('release recognition (#202)', () => {
+  test('major-only releases outrank older dotted ones', () => {
+    expect(
+      sortedIDs('openai', ['gpt-5.9-sol', 'unversioned', 'gpt-6.1-terra', 'gpt-6-astra']),
+    ).toEqual(['gpt-6.1-terra', 'gpt-6-astra', 'gpt-5.9-sol', 'unversioned']);
+  });
+
+  test('multi-digit components compare numerically and tiers order within a release', () => {
+    expect(sortedIDs('openai', ['gpt-6.9-sol', 'gpt-6.10-luna', 'gpt-6.10-astra'])).toEqual([
+      'gpt-6.10-astra',
+      'gpt-6.10-luna',
+      'gpt-6.9-sol',
+    ]);
+  });
+
+  test('dates, context sizes and embedded digits are not releases', () => {
+    expect(sortedIDs('openai', ['gpt-4o-2024-05-13', 'gpt-6-astra', 'o3-mini-128k'])).toEqual([
+      'gpt-6-astra',
+      'o3-mini-128k',
+      'gpt-4o-2024-05-13',
+    ]);
+  });
+
+  test('generic providers stay alphabetical regardless of version tokens', () => {
+    expect(sortedIDs('opencode', ['gpt-6-astra', 'gpt-5.9-sol', 'alpha'])).toEqual([
+      'alpha',
+      'gpt-5.9-sol',
+      'gpt-6-astra',
+    ]);
+  });
+});

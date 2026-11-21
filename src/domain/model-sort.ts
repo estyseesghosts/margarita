@@ -18,15 +18,26 @@ function familyOf(providerID: string): ProviderFamily {
   return 'generic';
 }
 
-/** First dotted numeric run, e.g. `6.10` in `gpt-6.10-astra`. Effort suffixes never match. */
-const releasePattern = /(?:^|[^0-9])(\d+(?:\.\d+)+)(?:[^0-9]|$)/;
+/** A whole-segment release: major-only (`6`) or dotted (`5.9`, `6.10`, `6.1.2`), at most 3 digits per part. */
+const releaseSegment = /^\d{1,3}(?:\.\d{1,3})*$/;
+const numericSegment = /^\d+$/;
 
+/**
+ * First release segment of a model ID, e.g. `6` in `gpt-6-astra` and `6.10` in `gpt-6.10-astra`.
+ * IDs are split on `-`, `_`, `/` and `:` (the `#variant` suffix is dropped), and only a whole
+ * segment counts. Dates (`2024-05-13`, `20260102`), context sizes (`128k`) and digits embedded
+ * in names (`o3`, `4o`) are never releases: a segment next to another purely numeric segment is
+ * part of a date or a compound number and is skipped.
+ */
 function releaseOf(modelID: string): readonly number[] | undefined {
-  const match = releasePattern.exec(modelID);
-  const raw = match?.[1];
-  if (raw === undefined) return undefined;
-  const parts = raw.split('.').map((part) => Number(part));
-  return parts.some((part) => !Number.isFinite(part)) ? undefined : parts;
+  const segments = (modelID.split('#')[0] ?? '').split(/[-_/:]/);
+  for (const [index, segment] of segments.entries()) {
+    if (!releaseSegment.test(segment)) continue;
+    const neighbours = [segments[index - 1], segments[index + 1]];
+    if (neighbours.some((other) => other !== undefined && numericSegment.test(other))) continue;
+    return segment.split('.').map((part) => Number(part));
+  }
+  return undefined;
 }
 
 function tierRank(family: ProviderFamily, modelID: string): number | undefined {

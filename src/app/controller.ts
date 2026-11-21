@@ -2666,7 +2666,12 @@ export class AppController {
     // Remote results arrive ranked by the server's own fuzzy search; trust that order.
     const fileItems = (remote ? files.slice(0, 8) : rankPaths(files, partial, 8))
       .filter((path) => !agentItems.some((item) => item.label === `@${path}`))
-      .map((path) => ({ label: `@${path}`, detail: '', insert: `@${path} ` }));
+      .map((path) => ({
+        label: `@${path}`,
+        detail: '',
+        // A name with whitespace is inserted quoted so it parses back as one reference (#203).
+        insert: /\s/.test(path) ? `@"${path}" ` : `@${path} `,
+      }));
     const items = [...agentItems, ...fileItems];
     this.setState(
       'completion',

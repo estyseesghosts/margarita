@@ -178,3 +178,63 @@ describe('agent mention classification (issue #99)', () => {
     expect(agentMentions(mentions, new Set(['src/a.ts', 'a.ts', './local']))).toEqual([]);
   });
 });
+
+function expectSpan(text: string, path: string, count = 1) {
+  const mentions = findFileMentions(text);
+  expect(mentions).toHaveLength(count);
+  const [mention] = mentions;
+  expect(mention?.path).toBe(path);
+  if (mention !== undefined) expect(text.slice(mention.start, mention.end)).toBe(mention.text);
+  return mention;
+}
+
+describe('quoted mentions with spaces (#203)', () => {
+  test('a quote before the @ may contain spaces, punctuation and Unicode', () => {
+    expectSpan('read "@docs/design notes.md" please', 'docs/design notes.md');
+    expectSpan('read `@docs/a (draft), v2.md`.', 'docs/a (draft), v2.md');
+    expectSpan("open '@src/café menu.ts'", 'src/café menu.ts');
+    expectSpan('😀 "@C:\\work\\my docs\\a b.md"', 'C:\\work\\my docs\\a b.md');
+  });
+
+  test('a quote after the @ delimits the path and an outside range suffix applies', () => {
+    expectSpan('see @"docs/design notes.md" now', 'docs/design notes.md');
+    const ranged = expectSpan('see @"docs/design notes.md"#2-4, ok', 'docs/design notes.md');
+    expect(ranged?.range).toEqual({ start: 2, end: 4 });
+    expect(ranged?.text).toBe('@"docs/design notes.md"#2-4');
+    const inside = expectSpan('see "@docs/a b.md#10-12"', 'docs/a b.md');
+    expect(inside?.range).toEqual({ start: 10, end: 12 });
+  });
+
+  test('adjacent agent and file mentions keep independent exact spans', () => {
+    const text = '@reviewer,"@docs/design notes.md",@other';
+    const mentions = findFileMentions(text);
+    expect(mentions.map((mention) => mention.path)).toEqual([
+      'reviewer',
+      'docs/design notes.md',
+      'other',
+    ]);
+    for (const mention of mentions) {
+      expect(text.slice(mention.start, mention.end)).toBe(mention.text);
+    }
+  });
+
+  test('unmatched or unbounded quotes never swallow the rest of the prompt', () => {
+    expectSpan('say "@a.md and keep going', 'a.md');
+    expect(findFileMentions('say "@a.md and "quoted" text')[0]?.path).toBe('a.md');
+    expect(findFileMentions('say @"a.md and more')[0]?.path).toBe('"a.md');
+    expect(findFileMentions('mail "me@x.com and you" ok')).toEqual([]);
+  });
+
+  test('completion follows the same grammar while typing', () => {
+    const open = activeMention('open "@docs/design no', 'open "@docs/design no'.length);
+    expect(open).toMatchObject({ path: 'docs/design no', start: 6 });
+    const after = activeMention('open @"docs/design no', 'open @"docs/design no'.length);
+    expect(after).toMatchObject({ path: 'docs/design no', start: 5 });
+    expect(activeMention('line one\n"@a b', 'line one\n"@a b'.length)).toMatchObject({
+      path: 'a b',
+      start: 10,
+    });
+    // A bare partial still behaves as before.
+    expect(activeMention('see @src/ap', 'see @src/ap'.length)?.path).toBe('src/ap');
+  });
+});

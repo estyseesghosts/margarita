@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import { isRecord } from '../domain/backend-event.ts';
@@ -193,8 +193,23 @@ export function removeProfile(
   return profiles.filter((profile) => profile.serverID !== serverID);
 }
 
+/** True when a same-version document does not have the registry shape at all (#201). */
+export function isMalformedRegistry(raw: unknown): boolean {
+  return !isRecord(raw) || !Array.isArray(raw['profiles']);
+}
+
 export function parseServerProfiles(raw: unknown): ServerProfiles {
-  if (!isRecord(raw) || !Array.isArray(raw['profiles'])) return emptyServerProfiles;
+  return parseServerProfilesDetailed(raw).profiles;
+}
+
+/** Same as `parseServerProfiles`, also reporting how many records could not be kept. */
+export function parseServerProfilesDetailed(raw: unknown): {
+  profiles: ServerProfiles;
+  skipped: number;
+} {
+  if (!isRecord(raw) || !Array.isArray(raw['profiles'])) {
+    return { profiles: emptyServerProfiles, skipped: 0 };
+  }
   if (isIncompatibleVersion(raw)) {
     throw new IncompatibleSchemaError({
       path: '(parsed profiles)',
@@ -203,8 +218,12 @@ export function parseServerProfiles(raw: unknown): ServerProfiles {
     });
   }
   const profiles: ServerProfile[] = [];
+  let skipped = 0;
   for (const entry of raw['profiles']) {
-    if (!isRecord(entry)) continue;
+    if (!isRecord(entry)) {
+      skipped += 1;
+      continue;
+    }
     const serverID = entry['serverID'];
     const shortname = entry['shortname'];
     const baseUrl = entry['baseUrl'];
@@ -212,8 +231,10 @@ export function parseServerProfiles(raw: unknown): ServerProfiles {
       typeof serverID !== 'string' ||
       typeof shortname !== 'string' ||
       typeof baseUrl !== 'string'
-    )
+    ) {
+      skipped += 1;
       continue;
+    }
     try {
       const parsedPlatform = normalizePlatform(entry['platform']);
       const profile = normalizeProfile({
@@ -242,14 +263,23 @@ export function parseServerProfiles(raw: unknown): ServerProfiles {
         ...(parsedPlatform === undefined ? {} : { platform: parsedPlatform }),
       });
       // Skip records that collide with one already parsed: never drop the older one.
-      if (profiles.some((other) => other.serverID === profile.serverID)) continue;
-      if (profiles.some((other) => other.shortname === profile.shortname)) continue;
+      if (
+        profiles.some(
+          (other) =>
+            other.serverID === profile.serverID ||
+            other.shortname.toLowerCase() === profile.shortname.toLowerCase(),
+        )
+      ) {
+        skipped += 1;
+        continue;
+      }
       profiles.push(profile);
     } catch {
-      // Malformed individual records are ignored; the rest of the registry survives.
+      // Malformed individual records are skipped, counted, and backed up before any rewrite.
+      skipped += 1;
     }
   }
-  return { schemaVersion: 1, profiles };
+  return { profiles: { schemaVersion: 1, profiles }, skipped };
 }
 
 const lockRetryMs = 25;
@@ -260,7 +290,24 @@ export type LoadProfilesResult = Readonly<{
   warning?: string;
   /** The file exists but uses a schema this build cannot write; it was left untouched. */
   incompatible?: { path: string; version: unknown };
+  /**
+   * The file is valid JSON of the right version but not a registry document. It is left in
+   * place untouched and every mutation is refused until it is repaired (#201).
+   */
+  malformed?: { path: string };
+  /** Records of an otherwise valid registry that could not be kept; backed up before a rewrite. */
+  skippedRecords?: number;
 }>;
+
+/** Thrown when a mutation would overwrite a malformed registry. */
+export class MalformedRegistryError extends Error {
+  constructor(readonly path: string) {
+    super(
+      `The paired servers file at ${path} is malformed and was left untouched. Repair or remove it by hand before pairing, renaming or unpairing servers.`,
+    );
+    this.name = 'MalformedRegistryError';
+  }
+}
 
 async function preserveUnreadable(path: string): Promise<string> {
   const backup = `${path}.corrupt-${Date.now()}-${process.pid}-${randomUUID().slice(0, 8)}`;
@@ -308,7 +355,23 @@ export async function loadServerProfiles(path: string): Promise<LoadProfilesResu
       warning: `Paired servers were unreadable; the original was preserved at ${backup}.`,
     };
   }
-  return { profiles: parseServerProfiles(raw) };
+  if (isMalformedRegistry(raw)) {
+    return {
+      profiles: emptyServerProfiles,
+      warning: `Paired servers file ${path} is malformed and was left untouched; paired servers are unavailable until it is repaired.`,
+      malformed: { path },
+    };
+  }
+  const detailed = parseServerProfilesDetailed(raw);
+  return {
+    profiles: detailed.profiles,
+    ...(detailed.skipped === 0
+      ? {}
+      : {
+          skippedRecords: detailed.skipped,
+          warning: `${detailed.skipped} paired server record(s) in ${path} could not be read and were skipped; a backup is kept before the file is rewritten.`,
+        }),
+  };
 }
 
 /**
@@ -336,7 +399,12 @@ export async function updateServerProfiles(
         supported: supportedSchemaVersion,
       });
     }
+    if (loaded.malformed !== undefined) throw new MalformedRegistryError(path);
     const next = operation(loaded.profiles);
+    if ((loaded.skippedRecords ?? 0) > 0) {
+      // Keep the unreadable records recoverable before the rewrite drops them.
+      await copyFile(path, `${path}.skipped-${Date.now()}-${process.pid}`);
+    }
     const temp = `${path}.${process.pid}.${lock.token}.${Date.now()}.tmp`;
     await writeFile(temp, `${JSON.stringify(next, null, 2)}\n`, {
       encoding: 'utf8',
