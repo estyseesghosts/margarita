@@ -307,6 +307,17 @@ const exportPageSize = 500;
 export const diffPageLines = 18;
 
 /**
+ * A session handed to a CLI-facing operation is either a legacy bare ID (resolved against
+ * the active host) or a server-qualified ref. New callers pass the ref so the owning host is
+ * never lost; old callers and tests keep working with a string (#149).
+ */
+type SessionTarget = string | SessionRef;
+
+function sessionRefOf(target: SessionTarget, defaultServerID: string): SessionRef {
+  return typeof target === 'string' ? { serverID: defaultServerID, sessionID: target } : target;
+}
+
+/**
  * Owns all frontend state and every server interaction. Views read `state` and call
  * methods; they never talk to the backend. Leaving a session is a pure view change:
  * nothing here calls interrupt/background/delete on navigation.
@@ -1437,15 +1448,26 @@ export class AppController {
    * reported so the turn never silently runs with the old selection.
    */
   async applyCliOverrides(
-    sessionID: string,
+    target: SessionTarget,
     flags: { agent?: string; provider?: string; model?: string; effort?: string },
   ): Promise<{ ok: true } | { ok: false; message: string }> {
     const wantsModel =
       flags.provider !== undefined || flags.model !== undefined || flags.effort !== undefined;
     if (flags.agent === undefined && !wantsModel) return { ok: true };
-    const session = await this.ensureSession(sessionID);
-    if (session === undefined) return { ok: false, message: `session ${sessionID} not found.` };
-    if (!(await this.ensureCatalog(session.directory))) {
+    const ref = sessionRefOf(target, this.activeServerID());
+    // A qualified ref is authoritative: never look the ID up on a different host (#149).
+    // A legacy bare ID keeps the old cross-server resolution for existing callers/tests.
+    const session =
+      typeof target === 'string'
+        ? await this.ensureSession(ref.sessionID, ref.serverID)
+        : await this.ensureSession(ref.sessionID, ref.serverID, { onlyServer: true });
+    if (session === undefined) {
+      return { ok: false, message: `session ${ref.sessionID} not found.` };
+    }
+    // The resolved summary's owner is authoritative in both paths: a bare ID that resolved
+    // on another host must still be mutated there, never at the launch host.
+    const serverID = session.serverID;
+    if (!(await this.ensureCatalog(session.directory, serverID))) {
       return { ok: false, message: `could not load the catalog for ${session.directory}.` };
     }
     let agent: string | undefined;
@@ -1465,7 +1487,8 @@ export class AppController {
       model = resolved.model;
     }
     try {
-      if (agent !== undefined) await this.backend.switchAgent(sessionID, agent);
+      // Every mutation goes to the session's owning host, not the launch backend (#149).
+      if (agent !== undefined) await this.backendFor(serverID).switchAgent(ref.sessionID, agent);
       if (model !== undefined && !(await this.switchSessionModel(session, model))) {
         return { ok: false, message: 'The server did not confirm the requested model.' };
       }
@@ -1473,7 +1496,7 @@ export class AppController {
       return { ok: false, message: `could not apply the requested selection: ${errorText(error)}` };
     }
     if (model !== undefined) this.rememberModel(model);
-    await this.refreshSummary(sessionID);
+    await this.refreshSummary(ref.sessionID, serverID);
     return { ok: true };
   }
 
@@ -3324,46 +3347,73 @@ export class AppController {
    * 500 global sessions. Archived and child sessions are filtered here; the result is
    * stored in state before attach so directory/model metadata is correct.
    */
-  async findLatestSessionIn(directory: string): Promise<SessionSummary | undefined> {
-    const key = directoryKey(directory, this.platformFor(this.serverID));
+  /**
+   * Latest root session for `directory` on the explicit target host (#152). Every candidate
+   * is server-scoped before timestamp comparison and normalized with its owning host's path
+   * style, so an identically named project on another machine can never win.
+   */
+  async findLatestSessionIn(
+    directory: string,
+    serverID: string = this.serverID,
+  ): Promise<SessionSummary | undefined> {
+    const key = directoryKey(directory, this.platformFor(serverID));
     const directoryQuery = { directory };
     let cursor: string | undefined;
     let pages = 0;
     let best: SessionSummary | undefined;
     try {
       do {
-        const page = await this.backend.listSessions(
+        const page = await this.backendFor(serverID).listSessions(
           cursor === undefined ? directoryQuery : { directory, cursor },
         );
         for (const session of page.sessions) {
           if (session.archived || session.parentID !== undefined) continue;
-          if (directoryKey(session.directory, this.platformFor(this.serverID)) !== key) continue;
+          // A row from another host is never eligible, even if it shares the directory.
+          if ((session.serverID ?? serverID) !== serverID) continue;
+          if (
+            directoryKey(session.directory, this.platformFor(session.serverID ?? serverID)) !== key
+          )
+            continue;
           if (best === undefined || session.updatedAt > best.updatedAt) best = session;
         }
         cursor = page.nextCursor;
         pages += 1;
       } while (cursor !== undefined && pages < 50);
     } catch (error) {
-      // Directory filtering unsupported by this server (older builds ignored the
-      // parameter): pages already handled by the overview load are the best effort fallback.
       if (best === undefined) {
-        this.debugLog.write('find-latest-fallback', { error: errorText(error) });
-        return this.latestSessionInState(directory);
+        // A transport/auth failure is not evidence that directory filtering is unsupported.
+        // Never guess a session from cached state after such a failure (#152): surface it so
+        // the CLI can report an actionable error instead of choosing another host's project.
+        if (
+          error instanceof BackendError &&
+          (error.kind === 'transport' || error.kind === 'unauthorized' || error.kind === 'unknown')
+        ) {
+          this.debugLog.write('find-latest-unavailable', { serverID, error: errorText(error) });
+          throw error;
+        }
+        // Unsupported parameter (invalid/not-found on older builds): best-effort fallback,
+        // now scoped to the target host and its path style.
+        this.debugLog.write('find-latest-fallback', { serverID, error: errorText(error) });
+        return this.latestSessionInState(directory, serverID);
       }
     }
     if (best !== undefined) this.storeSessionSummary(best);
     return best;
   }
 
-  /** Fallback used only when the server cannot filter by directory: match loaded pages. */
-  private latestSessionInState(directory: string): SessionSummary | undefined {
-    const key = directoryKey(directory, this.platformFor(this.serverID));
+  /** Fallback used only when the target server cannot filter by directory: match loaded pages. */
+  private latestSessionInState(
+    directory: string,
+    serverID: string = this.serverID,
+  ): SessionSummary | undefined {
+    const key = directoryKey(directory, this.platformFor(serverID));
     return Object.values(this.state.sessions)
       .filter(
         (session) =>
+          session.serverID === serverID &&
           !session.archived &&
           session.parentID === undefined &&
-          directoryKey(session.directory, this.platformFor(this.serverID)) === key,
+          directoryKey(session.directory, this.platformFor(session.serverID)) === key,
       )
       .toSorted((left, right) => right.updatedAt - left.updatedAt)[0];
   }
@@ -3382,10 +3432,14 @@ export class AppController {
   async ensureSession(
     sessionID: string,
     active = this.activeServerID(),
+    options: { onlyServer?: boolean } = {},
   ): Promise<SessionSummary | undefined> {
+    // CLI targets that already carry an owning server must never search unrelated hosts:
+    // a colliding ID on another machine cannot be mistaken for this one (#149).
+    const candidates = options.onlyServer === true ? [active] : this.serverIDs();
     // The session may belong to any registered host, not just the one the route currently
     // shows: qualify by session ID across every server before picking a backend.
-    for (const serverID of [active, ...this.serverIDs().filter((id) => id !== active)]) {
+    for (const serverID of [active, ...candidates.filter((id) => id !== active)]) {
       const known = this.state.sessions[this.keyFor(serverID, sessionID)];
       if (known !== undefined) {
         try {
@@ -3409,21 +3463,88 @@ export class AppController {
     }
   }
 
-  async sendToSession(sessionID: string, text: string): Promise<boolean> {
+  /**
+   * Resolves a CLI `--resume` ID to a server-qualified ref (#149). An explicit target host
+   * (`--remote`/`--server`) is authoritative and no other host is consulted. When the host is
+   * unspecified, a colliding ID on multiple cached hosts is ambiguous and fails with an
+   * actionable message rather than silently picking one; a single cached match (or, failing
+   * that, the launch host's own lookup) is used.
+   */
+  async resolveCliSession(
+    sessionID: string,
+    options: { serverID?: string } = {},
+  ): Promise<
+    | { ok: true; ref: SessionRef; directory: string }
+    | { ok: false; reason: 'not-found' | 'ambiguous' | 'unavailable'; message: string }
+  > {
+    const registered = this.serverIDs();
+    const explicit = options.serverID;
+    if (explicit !== undefined && !registered.includes(explicit)) {
+      return {
+        ok: false,
+        reason: 'unavailable',
+        message: `Server "${explicit}" is not registered. Use /servers to see available hosts.`,
+      };
+    }
+    const cachedOn = (serverID: string): boolean =>
+      this.state.sessions[this.keyFor(serverID, sessionID)] !== undefined;
+    const finish = async (
+      serverID: string,
+    ): Promise<
+      | { ok: true; ref: SessionRef; directory: string }
+      | { ok: false; reason: 'not-found' | 'ambiguous' | 'unavailable'; message: string }
+    > => {
+      try {
+        const summary = await this.ensureSession(sessionID, serverID, { onlyServer: true });
+        if (summary === undefined) {
+          return { ok: false, reason: 'not-found', message: `session ${sessionID} not found.` };
+        }
+        return {
+          ok: true,
+          ref: { serverID: summary.serverID ?? serverID, sessionID },
+          directory: summary.directory,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          reason: 'unavailable',
+          message: `could not resolve session ${sessionID}: ${errorText(error)}`,
+        };
+      }
+    };
+    if (explicit !== undefined) return finish(explicit);
+    const matches = registered.filter(cachedOn);
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        reason: 'ambiguous',
+        message: `Session ${sessionID} exists on multiple servers (${matches.join(', ')}). Use --remote <server> or --server to select one.`,
+      };
+    }
+    if (matches.length === 1) return finish(matches[0]!);
+    // Not cached anywhere: probe only the launch host (the old ensureSession behaviour).
+    return finish(this.activeServerID());
+  }
+
+  async sendToSession(target: SessionTarget, text: string): Promise<boolean> {
     const route = this.state.route;
     const composer = this.state.composer;
     const originServerID = this.activeServerID();
+    const ref = sessionRefOf(target, originServerID);
     const sentAttachments = [...this.state.attachments];
-    const session = await this.ensureSession(sessionID, originServerID);
-    const serverID = session?.serverID ?? originServerID;
-    const activeKey = this.keyFor(serverID, sessionID);
+    const session =
+      typeof target === 'string'
+        ? await this.ensureSession(ref.sessionID, originServerID)
+        : await this.ensureSession(ref.sessionID, ref.serverID, { onlyServer: true });
+    const serverID = session?.serverID ?? ref.serverID;
+    const activeKey = this.keyFor(serverID, ref.sessionID);
     const directory = session?.directory ?? this.deps.cwd;
     if (this.state.route === route && this.state.composer === composer) {
       this.writeComposer(composerFrom(text));
     }
     const running = this.state.running[activeKey] === true;
     return this.admit(
-      { serverID, sessionID },
+      { serverID, sessionID: ref.sessionID },
       text,
       directory,
       async () => {
@@ -3434,11 +3555,11 @@ export class AppController {
           serverID,
         );
         if (
-          this.modelDispatchBlocked(serverID, sessionID) ||
-          this.agentDispatchBlocked(serverID, sessionID)
+          this.modelDispatchBlocked(serverID, ref.sessionID) ||
+          this.agentDispatchBlocked(serverID, ref.sessionID)
         )
           return false;
-        await this.backendFor(serverID).prompt(sessionID, {
+        await this.backendFor(serverID).prompt(ref.sessionID, {
           text,
           files,
           ...(agents.length === 0 ? {} : { agents }),

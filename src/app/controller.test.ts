@@ -971,6 +971,217 @@ describe('continue/resume attach (issues #10 #11)', () => {
   });
 });
 
+/** Controller wired to several independent fake hosts, with per-host platform styles. */
+function routingController(
+  backends: Record<string, FakeBackend>,
+  activeServerID: string,
+  platforms: Record<string, NodeJS.Platform> = {},
+) {
+  return new AppController({
+    backend: backends[activeServerID] ?? new FakeBackend(),
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+    serverID: activeServerID,
+    serverIDs: () => Object.keys(backends),
+    backendFor: (id) => backends[id],
+    platformFor: (id) => platforms[id] ?? 'linux',
+  });
+}
+
+const sharedOn = (serverID: string, directory = '/work/kohjoh') => ({
+  ...fakeSession('ses_shared'),
+  serverID,
+  directory,
+});
+
+describe('server-qualified CLI session routing (#149)', () => {
+  test('unscoped resume of a colliding ID is ambiguous, not silently resolved', async () => {
+    const a = new FakeBackend();
+    a.serverID = 'srv_a';
+    const b = new FakeBackend();
+    b.serverID = 'srv_b';
+    a.sessions = [sharedOn('srv_a')];
+    b.sessions = [sharedOn('srv_b')];
+    const controller = routingController({ srv_a: a, srv_b: b }, 'srv_a');
+    await controller.bootstrap();
+
+    const result = await controller.resolveCliSession('ses_shared');
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('ambiguous');
+      expect(result.message).toContain('srv_a');
+      expect(result.message).toContain('srv_b');
+      expect(result.message).toContain('--remote');
+    }
+    controller.dispose();
+  });
+
+  test('an explicit host resolves only that host, even when the launch host has the ID', async () => {
+    const a = new FakeBackend();
+    a.serverID = 'srv_a';
+    const b = new FakeBackend();
+    b.serverID = 'srv_b';
+    a.sessions = [sharedOn('srv_a', '/project-a')];
+    b.sessions = [sharedOn('srv_b', '/project-b')];
+    let bRead = false;
+    b.getSession = async (id) => {
+      bRead = true;
+      return b.sessions.find((s) => s.id === id)!;
+    };
+    const controller = routingController({ srv_a: a, srv_b: b }, 'srv_a');
+    await controller.bootstrap();
+
+    const result = await controller.resolveCliSession('ses_shared', { serverID: 'srv_b' });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.ref).toEqual({ serverID: 'srv_b', sessionID: 'ses_shared' });
+      expect(result.directory).toBe('/project-b');
+    }
+    expect(bRead).toBe(true);
+    controller.dispose();
+  });
+
+  test('applyCliOverrides with a qualified ref mutates only the owning host', async () => {
+    const a = new FakeBackend();
+    a.serverID = 'srv_a';
+    const b = new FakeBackend();
+    b.serverID = 'srv_b';
+    a.sessions = [{ ...sharedOn('srv_a', '/project-a'), agent: 'stale' }];
+    b.sessions = [sharedOn('srv_b', '/project-b')];
+    b.agents = [agentFor('agent-b')];
+    b.models = modelFor('model-b');
+    const controller = routingController({ srv_a: a, srv_b: b }, 'srv_a');
+    await controller.bootstrap();
+
+    const result = await controller.applyCliOverrides(
+      { serverID: 'srv_b', sessionID: 'ses_shared' },
+      { agent: 'agent-b', model: 'model-b' },
+    );
+    expect(result).toEqual({ ok: true });
+    expect(b.calls.some((call) => call.name === 'switchAgent')).toBe(true);
+    expect(b.calls.some((call) => call.name === 'switchModel')).toBe(true);
+    expect(a.calls.some((call) => call.name === 'switchAgent' || call.name === 'switchModel')).toBe(
+      false,
+    );
+    controller.dispose();
+  });
+
+  test('sendToSession with a qualified ref admits the prompt only on the owning host', async () => {
+    const a = new FakeBackend();
+    a.serverID = 'srv_a';
+    const b = new FakeBackend();
+    b.serverID = 'srv_b';
+    a.sessions = [sharedOn('srv_a', '/project-a')];
+    b.sessions = [sharedOn('srv_b', '/project-b')];
+    const controller = routingController({ srv_a: a, srv_b: b }, 'srv_a');
+    await controller.bootstrap();
+
+    await controller.sendToSession({ serverID: 'srv_b', sessionID: 'ses_shared' }, 'check');
+    expect(b.calls.some((call) => call.name === 'prompt')).toBe(true);
+    expect(a.calls.some((call) => call.name === 'prompt')).toBe(false);
+    controller.dispose();
+  });
+});
+
+describe('server-scoped continue fallback (#152)', () => {
+  test("a query failure on A never selects B's newer session from cache", async () => {
+    const a = new FakeBackend();
+    a.serverID = 'srv_a';
+    const b = new FakeBackend();
+    b.serverID = 'srv_b';
+    a.sessions = [{ ...fakeSession('ses_a'), serverID: 'srv_a', updatedAt: 10 }];
+    b.sessions = [{ ...fakeSession('ses_b'), serverID: 'srv_b', updatedAt: 99 }];
+    // Directory-targeted filtering is unsupported on A; bootstrap's unscoped list still works.
+    a.listSessionsHook = async (query) => {
+      if (query.directory !== undefined)
+        throw new BackendError('invalid', 'session.list', 'unsupported directory filter');
+      return { sessions: a.sessions };
+    };
+    const controller = routingController({ srv_a: a, srv_b: b }, 'srv_a');
+    await controller.bootstrap();
+
+    const found = await controller.findLatestSessionIn('/work/kohjoh', 'srv_a');
+    expect(found?.id).toBe('ses_a');
+    controller.dispose();
+  });
+
+  test('a transport failure is surfaced instead of guessing a session from cache', async () => {
+    const a = new FakeBackend();
+    a.serverID = 'srv_a';
+    a.sessions = [{ ...fakeSession('ses_a'), serverID: 'srv_a' }];
+    a.listSessionsHook = async (query) => {
+      if (query.directory !== undefined)
+        throw new BackendError('transport', 'session.list', 'offline');
+      return { sessions: a.sessions };
+    };
+    const controller = routingController({ srv_a: a }, 'srv_a');
+    await controller.bootstrap();
+
+    let threw = false;
+    try {
+      await controller.findLatestSessionIn('/work/kohjoh', 'srv_a');
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+    controller.dispose();
+  });
+
+  test('rows owned by another host in the target page are ignored', async () => {
+    const a = new FakeBackend();
+    a.serverID = 'srv_a';
+    a.listSessionsHook = async () => ({
+      sessions: [
+        { ...fakeSession('ses_b'), serverID: 'srv_b', updatedAt: 99 },
+        { ...fakeSession('ses_a'), serverID: 'srv_a', updatedAt: 10 },
+      ],
+    });
+    const controller = routingController({ srv_a: a }, 'srv_a');
+    await controller.bootstrap();
+
+    const found = await controller.findLatestSessionIn('/work/kohjoh', 'srv_a');
+    expect(found?.id).toBe('ses_a');
+    controller.dispose();
+  });
+
+  test('candidate paths are normalized with the owning host platform', async () => {
+    const a = new FakeBackend();
+    a.serverID = 'srv_a';
+    const win = new FakeBackend();
+    win.serverID = 'srv_win';
+    a.listSessionsHook = async () => ({ sessions: [] });
+    win.listSessionsHook = async () => ({
+      sessions: [
+        {
+          ...fakeSession('ses_win'),
+          serverID: 'srv_win',
+          directory: 'C:\\Work\\Project',
+          updatedAt: 99,
+        },
+      ],
+    });
+    // Cases and separators are folded with the owning host's platform (Windows here), and a
+    // POSIX-looking path is a different project on that host.
+    const controller = routingController({ srv_a: a, srv_win: win }, 'srv_a', {
+      srv_win: 'win32',
+    });
+    await controller.bootstrap();
+
+    expect((await controller.findLatestSessionIn('c:/work/project', 'srv_win'))?.id).toBe(
+      'ses_win',
+    );
+    expect(await controller.findLatestSessionIn('/work/project', 'srv_win')).toBeUndefined();
+    controller.dispose();
+  });
+});
+
 const agentFor = (id: string) => ({ id, name: id, mode: 'primary' as const, hidden: false });
 const modelFor = (id: string) => [
   { providerID: 'p', modelID: id, name: id, enabled: true, variants: [] },

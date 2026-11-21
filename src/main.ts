@@ -26,6 +26,7 @@ import { appPaths } from './config/paths.ts';
 import { loadServerProfiles } from './config/server-profiles.ts';
 import { buildKeymap } from './domain/keymap.ts';
 import type { ModelSelection } from './domain/model-ref.ts';
+import type { SessionRef } from './domain/server-identity.ts';
 import { App } from './ui/app.tsx';
 import { pickTheme } from './ui/theme.ts';
 
@@ -283,20 +284,36 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
       return exitCodes.usage;
     }
   }
-  let existingSessionID: string | undefined;
+  // An explicit --remote/--server host is authoritative for resume/continue: resolution must
+  // never silently search unrelated hosts (#149, #152).
+  const explicitServerID =
+    options.remote !== undefined || options.server !== undefined ? serverID : undefined;
+  let sessionRef: SessionRef | undefined;
+  let resolvedDirectory = cwd;
   if (target.kind === 'resume') {
-    const summary = await controller.ensureSession(target.sessionID);
-    if (summary === undefined) {
-      process.stderr.write(`marg: session ${target.sessionID} not found.\n`);
-      return exitCodes.notFound;
+    const resolved = await controller.resolveCliSession(
+      target.sessionID,
+      explicitServerID === undefined ? {} : { serverID: explicitServerID },
+    );
+    if (!resolved.ok) {
+      process.stderr.write(`marg: ${resolved.message}\n`);
+      return resolved.reason === 'not-found' ? exitCodes.notFound : exitCodes.failed;
     }
-    existingSessionID = summary.id;
+    sessionRef = resolved.ref;
+    resolvedDirectory = resolved.directory;
   } else if (target.kind === 'continue') {
-    const latest = await controller.findLatestSessionIn(cwd);
-    existingSessionID = latest?.id;
-    if (existingSessionID === undefined && options.print) {
-      process.stderr.write('marg: no session to continue in this project.\n');
-      return exitCodes.notFound;
+    try {
+      const latest = await controller.findLatestSessionIn(cwd, serverID);
+      if (latest !== undefined) {
+        sessionRef = { serverID: latest.serverID, sessionID: latest.id };
+        resolvedDirectory = latest.directory;
+      } else if (options.print) {
+        process.stderr.write('marg: no session to continue in this project.\n');
+        return exitCodes.notFound;
+      }
+    } catch (error) {
+      process.stderr.write(`marg: could not continue in this project: ${errorText(error)}\n`);
+      return exitCodes.failed;
     }
   }
 
@@ -304,7 +321,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   // checked against that session's project. A new session uses the startup project's catalog.
   let agent: { agent?: string } = {};
   let model: { model?: ModelSelection } = {};
-  if (existingSessionID === undefined) {
+  if (sessionRef === undefined) {
     const resolvedAgent = controller.resolveCliAgent(options.agent);
     if (!resolvedAgent.ok) {
       process.stderr.write(`marg: ${resolvedAgent.message}\n`);
@@ -323,7 +340,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     model = resolvedModel;
     controller.setNewSessionDefaults(agent.agent, model.model);
   } else {
-    const applied = await controller.applyCliOverrides(existingSessionID, {
+    const applied = await controller.applyCliOverrides(sessionRef, {
       ...(options.agent === undefined ? {} : { agent: options.agent }),
       ...(options.provider === undefined ? {} : { provider: options.provider }),
       ...(options.model === undefined ? {} : { model: options.model }),
@@ -343,13 +360,17 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     }
     const abort = new AbortController();
     process.once('SIGINT', () => abort.abort());
-    debugLog.write('print', { json: options.json });
+    debugLog.write('print', { json: options.json, serverID: sessionRef?.serverID ?? serverID });
     try {
+      // Print and interactive mode share the same resolved target: an existing session is
+      // always driven through its owning host's backend, never the launch backend (#149).
+      const printBackend =
+        sessionRef === undefined ? backend : servers.backendFor(sessionRef.serverID);
       return await runPrint({
-        backend,
-        directory: cwd,
+        backend: printBackend,
+        directory: resolvedDirectory,
         prompt,
-        ...(existingSessionID === undefined ? {} : { sessionID: existingSessionID }),
+        ...(sessionRef === undefined ? {} : { sessionID: sessionRef.sessionID }),
         ...(agent.agent === undefined ? {} : { agent: agent.agent }),
         ...(model.model === undefined ? {} : { model: model.model }),
         json: options.json,
@@ -405,9 +426,9 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
   );
 
   const prompt = 'prompt' in target ? target.prompt : undefined;
-  if (existingSessionID !== undefined) {
-    controller.openSession(existingSessionID);
-    if (prompt !== undefined) await controller.sendToSession(existingSessionID, prompt);
+  if (sessionRef !== undefined) {
+    controller.openSession(sessionRef.sessionID, sessionRef.serverID);
+    if (prompt !== undefined) await controller.sendToSession(sessionRef, prompt);
   } else if ((target.kind === 'new' || target.kind === 'continue') && cwd !== '') {
     if (prompt === undefined) controller.startNewSession(cwd, serverID);
     else await controller.createSessionWithPrompt({ serverID, directory: cwd }, prompt);
