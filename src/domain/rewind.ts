@@ -15,10 +15,18 @@ export type RewindCandidate = Readonly<{
   ordinal: number;
 }>;
 
-/** Compact UTC timestamp for a prompt row; a corrupt server value stays visibly unknown. */
+/**
+ * Compact timestamp for a prompt row. We render UTC with an explicit `UTC` suffix so the
+ * clock is never mistaken for local time in any timezone (#145). A corrupt or unrepresentable
+ * server value stays visibly unknown and never throws into the renderer.
+ */
 export function rewindTimeLabel(createdAt: number): string {
   if (!Number.isFinite(createdAt)) return 'time unknown';
-  return new Date(createdAt).toISOString().slice(0, 16).replace('T', ' ');
+  const date = new Date(createdAt);
+  // A finite but out-of-range millisecond value yields an Invalid Date whose getTime() is NaN;
+  // calling toISOString() on it would throw RangeError.
+  if (!Number.isFinite(date.getTime())) return 'time unknown';
+  return `${date.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
 }
 
 /** All user prompts in the loaded transcript, oldest first. Page up to load earlier ones. */

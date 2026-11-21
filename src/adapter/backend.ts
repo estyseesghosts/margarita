@@ -56,36 +56,46 @@ export type MessagePage = Readonly<{
   /**
    * Whether older history was actually confirmed. OpenCode mints a `cursor.next` for
    * every nonempty page, so a token alone is a navigation hint, not proof of history.
-   * When `false`, consumers must ignore `olderCursor` even if one is present.
+   * When `false`, consumers must ignore `olderCursor` unless `retryable` is true.
    */
   hasEarlier?: boolean;
+  /**
+   * The lookahead probe failed, so history is *unknown*, not exhausted. The cursor is kept
+   * so the caller can retry; no claim is made that older messages definitely exist (#144).
+   */
+  retryable?: boolean;
 }>;
 
 /** A server page as needed to decide whether older history really exists. */
 type RawMessagePage = Readonly<{ data: readonly unknown[]; cursor: { next?: string | null } }>;
 
 /**
- * Resolve a server pagination token into a confirmed "has older" decision.
+ * Resolve a server pagination token into a three-way decision (#144):
+ *  - confirmed older history        -> `{ hasEarlier: true, olderCursor }`
+ *  - confirmed exhaustion           -> `{ hasEarlier: false }`
+ *  - probe unavailable (unknown)    -> `{ hasEarlier: false, retryable: true, olderCursor }`
  *
  * A short page is exhausted. An exactly-full page is ambiguous, so a minimal
  * lookahead decides; the lookahead only counts messages and never feeds them into
- * the page, so nothing is dropped or duplicated. A failed lookahead fails closed
- * rather than manufacturing history.
+ * the page, so nothing is dropped or duplicated. A failed lookahead no longer claims
+ * exhaustion: the token is kept as a retry path so a transient error cannot permanently
+ * hide real history, while `hasEarlier: false` avoids the #125 phantom banner.
  */
 export async function resolveOlderPage(
   page: RawMessagePage,
   limit: number,
   lookahead: (cursor: string) => Promise<number>,
-): Promise<{ olderCursor?: string; hasEarlier: boolean }> {
+): Promise<{ olderCursor?: string; hasEarlier: boolean; retryable?: boolean }> {
   const token = page.cursor.next;
   if (typeof token !== 'string' || token === '' || page.data.length < limit) {
     return { hasEarlier: false };
   }
-  let count = 0;
+  let count: number;
   try {
     count = await lookahead(token);
   } catch {
-    return { hasEarlier: false };
+    // Unknown, not exhausted. Keep the token so the caller can retry later; assert nothing.
+    return { olderCursor: token, hasEarlier: false, retryable: true };
   }
   return count > 0 ? { olderCursor: token, hasEarlier: true } : { hasEarlier: false };
 }
@@ -301,6 +311,7 @@ class OpenCodeBackend implements Backend {
       messages,
       ...(older.olderCursor === undefined ? {} : { olderCursor: older.olderCursor }),
       hasEarlier: older.hasEarlier,
+      ...(older.retryable === undefined ? {} : { retryable: older.retryable }),
     };
   }
 

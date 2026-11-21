@@ -30,8 +30,16 @@ describe('rewind prompts (#102)', () => {
     expect(candidates[1]?.text).toContain('first');
   });
 
-  test('a corrupt timestamp is labelled, never thrown into the renderer', () => {
+  test('timestamps carry an explicit UTC label so they are never mistaken for local time (#145)', () => {
+    expect(rewindTimeLabel(0)).toBe('1970-01-01 00:00 UTC');
+    expect(rewindTimeLabel(Date.UTC(2024, 0, 2, 3, 4))).toBe('2024-01-02 03:04 UTC');
+  });
+
+  test('corrupt and unrepresentable timestamps are labelled, never thrown (#145)', () => {
     expect(rewindTimeLabel(Number.NaN)).toBe('time unknown');
-    expect(rewindTimeLabel(0)).toBe('1970-01-01 00:00');
+    expect(rewindTimeLabel(Number.POSITIVE_INFINITY)).toBe('time unknown');
+    expect(rewindTimeLabel(Number.NEGATIVE_INFINITY)).toBe('time unknown');
+    expect(rewindTimeLabel(1e20)).toBe('time unknown');
+    expect(rewindTimeLabel(-1e20)).toBe('time unknown');
   });
 });

@@ -354,6 +354,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
               <text fg={dim()}>
                 Files only — the conversation is not rewritten; the server offers no redo.
               </text>
+              <text fg={dim()}>Prompt times are shown in UTC.</text>
               <text fg={dim()}>Enter stages the boundary; a separate confirmation applies it.</text>
             </box>
           );

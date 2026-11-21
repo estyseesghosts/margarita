@@ -1357,6 +1357,40 @@ describe('reconnect reconciliation (issue #36)', () => {
   });
 });
 
+describe('earlier-history retry state (#144)', () => {
+  test('a failed lookahead keeps a retryable cursor and no false "earlier" claim', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.listMessages = async (_sessionID, _limit, cursor) => {
+      if (cursor === undefined) {
+        // exact-full page with a token, but the lookahead probe is unavailable
+        return { messages: [], olderCursor: 'more', hasEarlier: false, retryable: true };
+      }
+      return { messages: [], hasEarlier: true };
+    };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    await flush();
+    const transcript = controller.state.transcripts['ses_a'];
+    expect(transcript?.olderCursor).toBe('more');
+    expect(transcript?.olderCheckFailed).toBe(true);
+    controller.dispose();
+  });
+
+  test('confirmed exhaustion clears the cursor and retry state', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.listMessages = async () => ({ messages: [], hasEarlier: false });
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    await flush();
+    const transcript = controller.state.transcripts['ses_a'];
+    expect(transcript?.olderCursor).toBeUndefined();
+    expect(transcript?.olderCheckFailed).toBeUndefined();
+    controller.dispose();
+  });
+});
+
 describe('session pagination', () => {
   test('bootstrap caps the first load; Load more pages in older sessions keyboard-only', async () => {
     const backend = new FakeBackend();

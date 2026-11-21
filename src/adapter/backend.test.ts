@@ -127,11 +127,12 @@ describe('resolveOlderPage (issue #125)', () => {
     });
   });
 
-  test('a failed lookahead fails closed', async () => {
-    expect(
-      await resolveOlderPage(olderPage(120, 'cursor'), 120, async () => {
-        throw new Error('offline');
-      }),
-    ).toEqual({ hasEarlier: false });
+  test('a failed lookahead is unknown but keeps a retryable cursor (#144)', async () => {
+    const result = await resolveOlderPage(olderPage(120, 'cursor'), 120, async () => {
+      throw new Error('offline');
+    });
+    // No claim that history exists (no #125 phantom banner), but the token survives so a
+    // transient failure cannot permanently hide real history.
+    expect(result).toEqual({ olderCursor: 'cursor', hasEarlier: false, retryable: true });
   });
 });

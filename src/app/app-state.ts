@@ -91,6 +91,8 @@ export type Notice = Readonly<{ text: string; tone: 'dim' | 'warn' | 'error'; id
 export type TranscriptState = {
   messages: TranscriptMessage[];
   olderCursor?: string;
+  /** The last older-history lookahead failed; the cursor is a retry path, not proof (#144). */
+  olderCheckFailed?: boolean;
   loading: boolean;
   /** Events arrived while detached; refetch on attach. */
   stale: boolean;

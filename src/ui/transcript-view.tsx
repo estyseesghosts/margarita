@@ -222,7 +222,9 @@ export function Transcript(props: TranscriptProps) {
           <text fg={props.theme.dim}>
             {transcript()?.loading === true
               ? ' … loading earlier messages'
-              : ' … earlier messages · PageUp at the top to show them'}
+              : transcript()?.olderCheckFailed === true
+                ? ' … earlier history check failed · PageUp at the top to retry'
+                : ' … earlier messages · PageUp at the top to show them'}
           </text>
         </Show>
         <Show when={transcript()?.loading === true && nodes().length === 0}>
