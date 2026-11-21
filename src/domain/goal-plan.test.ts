@@ -6,8 +6,10 @@ import { join } from 'node:path';
 import { fileGoalStore, GoalConflictError } from '../config/goal-store.ts';
 import {
   acceptProposal,
+  addEvidence,
   emptyGoalPlan,
   forkGoalPlan,
+  type GoalPlanV1,
   nextTaskState,
   parseGoalPlan,
   parseSteps,
@@ -147,5 +149,91 @@ describe('goal store', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+const withDep = (doc: GoalPlanV1, title: string, deps: string[]): GoalPlanV1 => ({
+  ...doc,
+  plan: {
+    ...doc.plan!,
+    tasks: doc.plan!.tasks.map((task) => (task.title === title ? { ...task, deps } : task)),
+  },
+});
+
+describe('plan task identity across rewrites (#162)', () => {
+  test('reordering A/B keeps B dependent on A, never on itself', () => {
+    const doc = withDep(setUserPlan(base, ['A', 'B'], now), 'B', ['t1']);
+    const reordered = setUserPlan(doc, ['B', 'A'], now);
+    const a = reordered.plan?.tasks.find((task) => task.title === 'A');
+    const b = reordered.plan?.tasks.find((task) => task.title === 'B');
+    if (a === undefined || b === undefined) throw new Error('missing task');
+    expect(b.deps).toEqual([a.id]);
+    expect(b.deps).not.toContain(b.id);
+  });
+
+  test('duplicate titles stay independent when one is completed and rewritten', () => {
+    let doc = setUserPlan(base, ['Test', 'Test'], now);
+    const first = doc.plan?.tasks[0];
+    if (first === undefined) throw new Error('no task');
+    doc = setTaskState(doc, first.id, 'done', now);
+    const rewritten = setUserPlan(doc, ['Test', 'Test'], now);
+    expect(rewritten.plan?.tasks.map((task) => task.state)).toEqual(['done', 'todo']);
+    expect(new Set(rewritten.plan?.tasks.map((task) => task.id)).size).toBe(2);
+  });
+
+  test('matched tasks keep their state and evidence across a rewrite', () => {
+    let doc = setUserPlan(base, ['a', 'b'], now);
+    doc = setTaskState(doc, 't2', 'done', now);
+    doc = addEvidence(doc, 't2', { note: 'proof' }, now);
+    const rewritten = setUserPlan(doc, ['z', 'b'], now);
+    const b = rewritten.plan?.tasks.find((task) => task.title === 'b');
+    expect(b?.state).toBe('done');
+    expect(b?.evidence).toEqual([{ note: 'proof' }]);
+  });
+
+  test('deleted tasks do not leave dependencies pointing at reused IDs', () => {
+    const doc = withDep(setUserPlan(base, ['A', 'B'], now), 'B', ['t1']);
+    const rewritten = setUserPlan(doc, ['B', 'C'], now);
+    const b = rewritten.plan?.tasks.find((task) => task.title === 'B');
+    const c = rewritten.plan?.tasks.find((task) => task.title === 'C');
+    expect(b?.deps).toEqual([]);
+    expect(c?.id).not.toBe('t1');
+  });
+
+  test('parsed plans drop dangling and self-referential dependencies', () => {
+    const parsed = parseGoalPlan(
+      {
+        schemaVersion: 1,
+        sessionID: 'ses_a',
+        revision: 1,
+        plan: {
+          revision: 1,
+          source: 'user',
+          accepted: true,
+          updatedAt: now,
+          tasks: [
+            {
+              id: 't1',
+              title: 'A',
+              state: 'todo',
+              deps: ['t1', 't9'],
+              evidence: [],
+              updatedAt: now,
+            },
+            {
+              id: 't2',
+              title: 'B',
+              state: 'todo',
+              deps: ['t1', 't1'],
+              evidence: [],
+              updatedAt: now,
+            },
+          ],
+        },
+      },
+      now,
+    );
+    expect(parsed.plan?.tasks[0]?.deps).toEqual([]);
+    expect(parsed.plan?.tasks[1]?.deps).toEqual(['t1']);
   });
 });

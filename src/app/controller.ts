@@ -394,6 +394,13 @@ export class AppController {
    * interleave two paste transactions. */
   private pasteChain: Promise<void> = Promise.resolve();
   private readonly goalStore: GoalStore;
+  /**
+   * Highest goal revision whose UI state was confirmed for a server-qualified session. A late
+   * read or an out-of-order save can never make the displayed plan regress (#161).
+   */
+  private readonly goalRevisions = new Map<string, number>();
+  /** Local goal edits, serialized per session so overlapping changes rebase deterministically. */
+  private readonly goalEditChains = new Map<string, Promise<void>>();
   /** Identity of the server this controller talks to; part of every session key. */
   readonly serverID: string;
 
@@ -1249,6 +1256,8 @@ export class AppController {
         delete state.permissions[key];
         delete state.forms[key];
         delete state.goals[key];
+        this.goalRevisions.delete(key);
+        this.goalEditChains.delete(key);
         delete state.nativeGoals[key];
         delete state.awaitingSteer[key];
         delete state.running[key];
@@ -3914,6 +3923,9 @@ export class AppController {
             if (parseSessionKey(key).serverID === serverID) delete map[key];
           }
         }
+        for (const key of this.goalRevisions.keys()) {
+          if (parseSessionKey(key).serverID === serverID) this.goalRevisions.delete(key);
+        }
         // Qualified expansion entries are `<server-qualified session key> <node key>`; match
         // them by the session-key prefix of this host only.
         for (const map of [state.expandedGroups, state.expandedDiffs]) {
@@ -5418,13 +5430,30 @@ export class AppController {
     return plan === undefined || plan.tasks.length === 0 ? undefined : progress(plan);
   }
 
+  /**
+   * Commits a confirmed snapshot only when it is at least as new as the last UI revision for
+   * this session. A late read or an out-of-order save can never make the view regress (#161).
+   */
+  private commitGoalUI(key: string, doc: GoalPlanV1): boolean {
+    const seen = this.goalRevisions.get(key);
+    if (seen !== undefined && doc.revision < seen) return false;
+    this.goalRevisions.set(key, doc.revision);
+    this.setState('goals', key, doc);
+    return true;
+  }
+
   private async loadGoal(
     sessionID: string,
     serverID: string = this.activeServerID(),
   ): Promise<void> {
+    const key = this.keyFor(serverID, sessionID);
+    const existed = this.state.sessions[key] !== undefined;
     try {
       const doc = await this.goalStore.load({ serverID, sessionID });
-      if (doc !== undefined) this.setState('goals', this.keyFor(serverID, sessionID), doc);
+      if (doc === undefined || this.disposed) return;
+      // A session deleted or unpaired while the read was in flight must not be resurrected.
+      if (existed && this.state.sessions[key] === undefined) return;
+      this.commitGoalUI(key, doc);
     } catch (error) {
       this.showNotice(`Goal file unreadable: ${errorText(error)}`, 'warn');
     }
@@ -5437,9 +5466,9 @@ export class AppController {
   }
 
   /**
-   * Applies an edit and saves with compare-and-swap. If another process saved first, the
-   * same edit is re-applied on top of its version (task IDs keep merges stable), so
-   * nothing is silently lost.
+   * Applies an edit and saves with compare-and-swap. Local edits are serialized per session so
+   * they rebase deterministically instead of racing; conflicts from other windows are retried
+   * with a bounded budget rather than a single blind retry (#161).
    */
   private async changeGoal(
     change: (doc: GoalPlanV1) => GoalPlanV1,
@@ -5453,28 +5482,70 @@ export class AppController {
     const serverID = current.serverID;
     const sessionID = current.id;
     const key = this.keyFor(serverID, sessionID);
-    const session = this.state.sessions[key];
-    const base =
-      this.state.goals[key] ?? emptyGoalPlan(serverID, sessionID, session?.projectID ?? '');
-    let saved: GoalPlanV1;
+    const previous = this.goalEditChains.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const tail = new Promise<void>((resolvePromise) => {
+      release = resolvePromise;
+    });
+    this.goalEditChains.set(
+      key,
+      previous.then(() => tail),
+    );
+    await previous;
     try {
-      saved = await this.goalStore.save(change(base));
-    } catch (error) {
-      if (!(error instanceof GoalConflictError)) {
-        this.showNotice(`Goal not saved: ${errorText(error)}`, 'error');
-        return undefined;
-      }
-      try {
-        saved = await this.goalStore.save(change(error.current));
-        notice = `${notice ?? 'Saved'} · merged with a change from another window`;
-      } catch (retry) {
-        this.showNotice(`Goal not saved: ${errorText(retry)}`, 'error');
-        return undefined;
+      return await this.applyGoalChange(key, serverID, sessionID, change, notice);
+    } finally {
+      release();
+      const chain = this.goalEditChains.get(key);
+      if (chain !== undefined) {
+        void chain.then(() => {
+          if (this.goalEditChains.get(key) === chain) this.goalEditChains.delete(key);
+        });
       }
     }
-    this.setState('goals', key, saved);
-    if (notice !== undefined) this.showNotice(notice, 'dim');
-    return saved;
+  }
+
+  /** Bounded CAS loop: each conflict rebases the same edit onto the newest disk snapshot. */
+  private async applyGoalChange(
+    key: string,
+    serverID: string,
+    sessionID: string,
+    change: (doc: GoalPlanV1) => GoalPlanV1,
+    notice?: string,
+  ): Promise<GoalPlanV1 | undefined> {
+    const session = this.state.sessions[key];
+    let base =
+      this.state.goals[key] ?? emptyGoalPlan(serverID, sessionID, session?.projectID ?? '');
+    const maxAttempts = 5;
+    let rebased = false;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        const saved = await this.goalStore.save(change(base));
+        this.commitGoalUI(key, saved);
+        if (notice !== undefined) {
+          this.showNotice(
+            `${notice}${rebased ? ' · merged with a change from another window' : ''}`,
+            'dim',
+          );
+        }
+        return saved;
+      } catch (error) {
+        if (!(error instanceof GoalConflictError)) {
+          this.showNotice(`Goal not saved: ${errorText(error)}`, 'error');
+          return undefined;
+        }
+        if (attempt === maxAttempts - 1) {
+          this.showNotice(
+            `Goal not saved after ${maxAttempts} conflicting updates; keep your edits and retry.`,
+            'error',
+          );
+          return undefined;
+        }
+        base = error.current;
+        rebased = true;
+      }
+    }
+    return undefined;
   }
 
   private async planCommand(args: string): Promise<void> {

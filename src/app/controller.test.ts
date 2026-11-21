@@ -7,8 +7,10 @@ import { FakeBackend } from '../../test/fake-backend.ts';
 import { BackendError, type BackendErrorKind, type PromptDraft } from '../adapter/backend.ts';
 import { defaultConfig } from '../config/config.ts';
 import type { AppConfig } from '../config/config.ts';
+import { GoalConflictError, type GoalStore } from '../config/goal-store.ts';
 import { emptyState, type LocalState } from '../config/local-state.ts';
 import { composerFrom } from '../domain/composer.ts';
+import { emptyGoalPlan, type GoalPlanV1 } from '../domain/goal-plan.ts';
 import { buildKeymap } from '../domain/keymap.ts';
 import type { GoalQueryFailure, NativeGoal } from '../domain/native-goal.ts';
 import { directoryKey } from '../domain/path-identity.ts';
@@ -5658,6 +5660,109 @@ describe('footer picker toggle and late-open guards (#139)', () => {
     controller.openOverview();
     await flush();
     expect(controller.state.overlay.kind).toBe('none');
+    controller.dispose();
+  });
+});
+
+function goalController(store: GoalStore) {
+  const backend = new FakeBackend();
+  backend.sessions = [fakeSession('ses_a')];
+  return new AppController({
+    backend,
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+    goalStore: store,
+  });
+}
+
+const revDoc = (revision: number, title = `rev${revision}`): GoalPlanV1 => ({
+  ...emptyGoalPlan('local', 'ses_a', 'p'),
+  revision,
+  goal: { title, acceptance: [], owner: 'user', updatedAt: 'now' },
+});
+
+describe('monotonic goal plan UI state (#161)', () => {
+  test('a stale load cannot overwrite a newer saved revision', async () => {
+    const stale = deferred<ReturnType<typeof revDoc>>();
+    let disk = revDoc(0);
+    const store: GoalStore = {
+      load: () => stale.promise,
+      async save(doc) {
+        disk = { ...doc, revision: doc.revision + 1 };
+        return disk;
+      },
+    };
+    const controller = goalController(store);
+    await attach(controller, 'ses_a'); // starts a load that we hold open
+
+    await submitCommand(controller, '/plan alpha');
+    expect(controller.state.goals['ses_a']?.revision).toBe(1);
+
+    stale.resolve(revDoc(0, 'old read'));
+    await flush();
+    expect(controller.state.goals['ses_a']?.revision).toBe(1);
+    expect(controller.state.goals['ses_a']?.goal?.title).not.toBe('old read');
+    controller.dispose();
+  });
+
+  test('a repeated conflict is retried with a bounded budget', async () => {
+    let attempts = 0;
+    const store: GoalStore = {
+      load: async () => undefined,
+      async save(doc) {
+        attempts += 1;
+        throw new GoalConflictError({ ...doc, revision: attempts });
+      },
+    };
+    const controller = goalController(store);
+    await attach(controller, 'ses_a');
+    await submitCommand(controller, '/plan alpha');
+    expect(attempts).toBe(5);
+    expect(controller.state.goals['ses_a']).toBeUndefined();
+    expect(controller.state.notice?.tone).toBe('error');
+    controller.dispose();
+  });
+
+  test('overlapping edits on one session end at the newest revision with both edits', async () => {
+    let disk = revDoc(0);
+    const store: GoalStore = {
+      load: async () => disk,
+      async save(doc) {
+        disk = { ...doc, revision: doc.revision + 1 };
+        return disk;
+      },
+    };
+    const controller = goalController(store);
+    await attach(controller, 'ses_a');
+    const first = submitCommand(controller, '/plan one');
+    const second = submitCommand(controller, '/plan two');
+    await Promise.all([first, second]);
+    expect(controller.state.goals['ses_a']?.revision).toBe(2);
+    // The later edit deterministically wins; both saves were actually persisted.
+    expect(controller.state.goals['ses_a']?.plan?.tasks.map((task) => task.title)).toEqual(['two']);
+    expect(disk.revision).toBe(2);
+    controller.dispose();
+  });
+
+  test('a load for a session removed mid-read cannot resurrect its goal', async () => {
+    const pending = deferred<ReturnType<typeof revDoc>>();
+    const store: GoalStore = {
+      load: () => pending.promise,
+      save: async (doc) => ({ ...doc, revision: doc.revision + 1 }),
+    };
+    const controller = goalController(store);
+    await attach(controller, 'ses_a');
+    controller.onEvents('local', [{ kind: 'session-deleted', sessionID: 'ses_a' }], false);
+    pending.resolve(revDoc(1));
+    await flush();
+    expect(controller.state.goals['ses_a']).toBeUndefined();
     controller.dispose();
   });
 });

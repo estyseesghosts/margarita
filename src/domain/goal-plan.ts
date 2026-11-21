@@ -101,11 +101,23 @@ function parseTask(raw: unknown, now: string): PlanTask | undefined {
   };
 }
 
+/**
+ * Drops self-references, duplicate IDs and dangling dependencies so a rewritten or parsed
+ * plan never points a task at itself or at an ID that no longer exists (#162).
+ */
+function sanitizeDeps(tasks: readonly PlanTask[]): PlanTask[] {
+  const ids = new Set(tasks.map((task) => task.id));
+  return tasks.map((task) => ({
+    ...task,
+    deps: [...new Set(task.deps)].filter((dep) => dep !== task.id && ids.has(dep)),
+  }));
+}
+
 function parsePlan(raw: unknown, now: string): Plan | undefined {
   if (!isRecord(raw) || !Array.isArray(raw['tasks'])) return undefined;
-  const tasks = raw['tasks']
-    .map((task) => parseTask(task, now))
-    .filter((task) => task !== undefined);
+  const tasks = sanitizeDeps(
+    raw['tasks'].map((task) => parseTask(task, now)).filter((task) => task !== undefined),
+  );
   return {
     revision: typeof raw['revision'] === 'number' ? raw['revision'] : 1,
     source: raw['source'] === 'agent-proposal' ? 'agent-proposal' : 'user',
@@ -220,12 +232,38 @@ function makeTasks(steps: readonly string[], now: string): PlanTask[] {
   }));
 }
 
-/** A user-authored plan is authoritative immediately; it keeps states of tasks with the same title. */
+/**
+ * A user-authored plan is authoritative immediately. Steps keep their stable identity across
+ * rewrites: matching titles are paired by occurrence (so duplicate titles stay independent),
+ * and new steps get IDs that never reuse an old one. Because IDs no longer follow array
+ * positions, dependencies stay attached to the task they originally referenced instead of a
+ * position that may now belong to another task (#162).
+ */
 export function setUserPlan(doc: GoalPlanV1, steps: readonly string[], now: string): GoalPlanV1 {
-  const previous = new Map((doc.plan?.tasks ?? []).map((task) => [task.title, task]));
-  const tasks = makeTasks(steps, now).map((task) => {
-    const kept = previous.get(task.title);
-    return kept === undefined ? task : { ...kept, id: task.id };
+  const old = doc.plan?.tasks ?? [];
+  const byTitle = new Map<string, PlanTask[]>();
+  for (const task of old) {
+    const group = byTitle.get(task.title) ?? [];
+    group.push(task);
+    byTitle.set(task.title, group);
+  }
+  const occurrence = new Map<string, number>();
+  const usedIDs = new Set(old.map((task) => task.id));
+  let nextID = old.length + 1;
+  const freshID = (): string => {
+    while (usedIDs.has(`t${nextID}`)) nextID += 1;
+    const id = `t${nextID}`;
+    usedIDs.add(id);
+    return id;
+  };
+  const tasks: PlanTask[] = steps.map((title) => {
+    const seen = occurrence.get(title) ?? 0;
+    occurrence.set(title, seen + 1);
+    const matched = byTitle.get(title)?.[seen];
+    if (matched === undefined) {
+      return { id: freshID(), title, state: 'todo', deps: [], evidence: [], updatedAt: now };
+    }
+    return { ...matched, updatedAt: now };
   });
   return {
     ...doc,
@@ -234,7 +272,7 @@ export function setUserPlan(doc: GoalPlanV1, steps: readonly string[], now: stri
       source: 'user',
       accepted: true,
       updatedAt: now,
-      tasks,
+      tasks: sanitizeDeps(tasks),
     },
   };
 }
