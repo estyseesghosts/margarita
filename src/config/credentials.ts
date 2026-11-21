@@ -235,48 +235,95 @@ export function keychainCredentialStore(runner: KeychainRunner = spawnSecurity):
   };
 }
 
-function secretToolCredentialStore(): CredentialStore {
-  if (!commandAvailable('secret-tool')) {
-    return unavailableCredentialStore('secret-tool not found');
+/** One `secret-tool` invocation; the secret (if any) goes on stdin, never argv or env. */
+export type SecretToolCommand = Readonly<{ argv: readonly string[]; stdin?: string }>;
+export type SecretToolResult = Readonly<{ exitCode: number; stdout: string; stderr: string }>;
+export type SecretToolRunner = (command: SecretToolCommand) => Promise<SecretToolResult>;
+
+/** Launches `secret-tool`; `env` lets tests point it at a private or unreachable bus. */
+export function spawnSecretToolRunner(env?: Record<string, string>): SecretToolRunner {
+  return (command) => runSecretTool(command, env);
+}
+
+const spawnSecretTool: SecretToolRunner = (command) => runSecretTool(command);
+
+async function runSecretTool(
+  command: SecretToolCommand,
+  env?: Record<string, string>,
+): Promise<SecretToolResult> {
+  const child = Bun.spawn([...command.argv], {
+    ...(env === undefined ? {} : { env }),
+    stdin: command.stdin === undefined ? 'ignore' : Buffer.from(command.stdin, 'utf8'),
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { exitCode, stdout, stderr };
+}
+
+const secretToolHelp =
+  'Install libsecret-tools (Debian/Ubuntu) or libsecret (Fedora) and run a Secret Service provider such as gnome-keyring or KeePassXC inside your login session. Headless/SSH sessions usually have none: use MARGARITA_SERVER_PASSWORD for a direct connection instead.';
+
+/**
+ * Classifies a failed `secret-tool` run without ever echoing its output into an error that
+ * could be shown or logged next to a secret. `secret-tool` signals "no such item" as exit 1
+ * with nothing on stderr; a locked keyring, a missing session bus or a crash all say
+ * something, and must never read as "no credential" (#183).
+ */
+function secretToolFailure(action: string, result: SecretToolResult): CredentialError {
+  const detail = result.stderr.toLowerCase();
+  const reason = detail.includes('locked')
+    ? 'the keyring is locked; unlock it and retry'
+    : /connect|bus|dbus|autolaunch|no such file|org\.freedesktop/.test(detail)
+      ? `no Secret Service is reachable on the session bus. ${secretToolHelp}`
+      : /cancel|dismiss/.test(detail)
+        ? 'the unlock prompt was cancelled'
+        : `secret-tool exited with status ${result.exitCode}`;
+  return new CredentialError(`Could not ${action} the credential: ${reason}.`);
+}
+
+const itemNotFound = (result: SecretToolResult): boolean =>
+  result.exitCode === 1 && result.stderr.trim() === '' && result.stdout === '';
+
+const attributes = (serverID: string) => ['service', service, 'server', serverID];
+
+export function secretToolCredentialStore(runner?: SecretToolRunner): CredentialStore {
+  if (runner === undefined && !commandAvailable('secret-tool')) {
+    return unavailableCredentialStore(`secret-tool not found. ${secretToolHelp}`);
   }
+  const run = runner ?? spawnSecretTool;
   return {
     kind: 'system',
     description: 'Secret Service',
     async get(serverID) {
-      const result = Bun.spawnSync([
-        'secret-tool',
-        'lookup',
-        'service',
-        'margarita',
-        'server',
-        serverID,
-      ]);
-      if (result.exitCode !== 0) return undefined;
-      return stripOutputFraming(result.stdout.toString());
+      const result = await run({ argv: ['secret-tool', 'lookup', ...attributes(serverID)] });
+      if (result.exitCode === 0) return stripOutputFraming(result.stdout);
+      if (itemNotFound(result)) return undefined;
+      throw secretToolFailure('read', result);
     },
     async set(serverID, secret) {
       if (secret === '') throw new CredentialError('Refusing to store an empty credential.');
-      const process = Bun.spawn(
-        [
+      const result = await run({
+        argv: [
           'secret-tool',
           'store',
           '--label',
           `Margarita (${serverID})`,
-          'service',
-          'margarita',
-          'server',
-          serverID,
+          ...attributes(serverID),
         ],
-        { stdin: 'pipe', stderr: 'pipe' },
-      );
-      void process.stdin.write(secret);
-      void process.stdin.end();
-      if ((await process.exited) !== 0) {
-        throw new CredentialError('Could not write to the Secret Service.');
-      }
+        stdin: secret,
+      });
+      if (result.exitCode !== 0) throw secretToolFailure('store', result);
     },
     async delete(serverID) {
-      Bun.spawnSync(['secret-tool', 'clear', 'service', 'margarita', 'server', serverID]);
+      const result = await run({ argv: ['secret-tool', 'clear', ...attributes(serverID)] });
+      // An already-absent item is a successful delete; anything else must not read as one.
+      if (result.exitCode === 0 || itemNotFound(result)) return;
+      throw secretToolFailure('delete', result);
     },
   };
 }

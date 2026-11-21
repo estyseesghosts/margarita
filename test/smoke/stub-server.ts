@@ -20,8 +20,8 @@ const server = Bun.serve({
       });
     }
     const listLike = /(list|agent|model|command|session|mcp|job|permission|form)s?$/.test(pathname);
-    
-    if (pathname === "/api/session") return Response.json({ data: [], cursor: {} });
+
+    if (pathname === '/api/session') return Response.json({ data: [], cursor: {} });
     return Response.json(listLike ? { data: [] } : { data: {} });
   },
 });
