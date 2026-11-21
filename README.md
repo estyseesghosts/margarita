@@ -1,12 +1,4 @@
-# margarita
-
-```
- /\_/\
-( o.o )   
- > ^ <
-```
-
-![margarita](margarita.png)
+![margarita](margarita.webp)
 
 **margarita** (`marg`) is a terminal frontend for the [OpenCode](https://opencode.ai) v2 server. it makes opencode feel more like claude or codex.
 
@@ -207,8 +199,11 @@ The product spec and decisions live in [`docs/`](docs/) (start with [01-product-
 
 ## Status
 
-Early days: version **0.0.1**. It works against OpenCode v2.3.0, and its wire contract is unchanged on
-v2.3.1 and v2.3.2 (the SDK stays pinned at `@opencode/client` 2.3.0); see
+Early days. Every build is stamped with its identity — the two-digit year and month of the commit,
+and the short commit hash it was built from, plus `-dirty` when the working tree has uncommitted
+changes (for example `26-11-c7fd21`); `marg --version` prints it. It works against OpenCode v2.3.0,
+and its wire contract is unchanged on v2.3.1 and v2.3.2 (the SDK stays pinned at `@opencode/client`
+2.3.0); see
 [docs/25-compatibility](docs/25-compatibility.md) for the version matrix, the audited divergences and the
 opt-in live-test gap. Some terminals (Windows Terminal, Ghostty, tmux) still want a manual look-over;
 see [checklists/release-candidate.md](checklists/release-candidate.md).
