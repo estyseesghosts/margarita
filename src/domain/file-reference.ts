@@ -12,8 +12,30 @@ export type FileMention = Readonly<{
   rangeError?: string;
 }>;
 
-const mentionPattern = /(^|\s)@([^\s@]+)/g;
+// A mention may follow prose punctuation (e.g. `(@reviewer)` or `@a,@b`). Quoting/backtick
+// delimiters additionally let a filename contain its own punctuation (#164).
+const mentionPrefix = '[\\s(\\[{`"\',;:]';
+const mentionPattern = new RegExp(`(^|${mentionPrefix})@([^\\s@]+)`, 'g');
+const activeMentionPattern = new RegExp(`(^|${mentionPrefix})@([^\\s@]*)$`);
 const rangeSuffix = /#(\d+)-(\d+)$/;
+
+/** A quoted mention keeps its internal punctuation; a bare one drops trailing prose. */
+const closingDelimiter: Readonly<Record<string, string>> = {
+  '(': ')',
+  '[': ']',
+  '{': '}',
+  '`': '`',
+  '"': '"',
+  "'": "'",
+};
+
+function mentionIdentity(prefix: string, raw: string): string {
+  const closing = closingDelimiter[prefix];
+  if (closing !== undefined && raw.endsWith(closing)) return raw.slice(0, -closing.length);
+  // Deterministic rule: these trailing marks are prose, never part of a bare mention.
+  // A sentence-ending period is dropped only as the final character (extensions survive).
+  return raw.replace(/[,;:!?)\]}]+$/, '').replace(/\.$/, '');
+}
 
 /** Parse an optional, unambiguous `#start-end` line-range suffix (1-based, start <= end). */
 export function parseMentionPath(raw: string): {
@@ -49,14 +71,16 @@ function mentionFrom(raw: string, start: number, end: number): FileMention {
   };
 }
 
-/** `@path` tokens at word starts. Email-like `a@b` is ignored. */
+/** `@path` tokens at word starts. Email-like `a@b` is ignored; prose punctuation is not
+ * part of the identity, and quoted tokens keep their internal punctuation (#164). */
 export function findFileMentions(text: string): FileMention[] {
   const mentions: FileMention[] = [];
   for (const match of text.matchAll(mentionPattern)) {
     const prefix = match[1] ?? '';
-    const raw = match[2] ?? '';
+    const identity = mentionIdentity(prefix, match[2] ?? '');
     const start = match.index + prefix.length;
-    mentions.push(mentionFrom(raw, start, start + raw.length + 1));
+    // The span covers only the real mention (`@` + identity), never trailing prose.
+    mentions.push(mentionFrom(identity, start, start + identity.length + 1));
   }
   return mentions;
 }
@@ -64,12 +88,12 @@ export function findFileMentions(text: string): FileMention[] {
 /** The `@partial` token ending at the cursor, if the user is typing one. */
 export function activeMention(text: string, cursor: number): FileMention | undefined {
   const before = text.slice(0, cursor);
-  const match = /(^|\s)@([^\s@]*)$/.exec(before);
+  const match = activeMentionPattern.exec(before);
   if (match === null) return undefined;
   const prefix = match[1] ?? '';
-  const raw = match[2] ?? '';
+  const identity = mentionIdentity(prefix, match[2] ?? '');
   const start = match.index + prefix.length;
-  return mentionFrom(raw, start, cursor);
+  return mentionFrom(identity, start, start + identity.length + 1);
 }
 
 /**

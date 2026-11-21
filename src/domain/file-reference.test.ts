@@ -64,6 +64,61 @@ describe('line-range mention syntax (issue #98)', () => {
   });
 });
 
+describe('sentence punctuation around mentions (#164)', () => {
+  test('agent mentions followed by comma, period or parenthesis keep the bare name and span', () => {
+    for (const text of [
+      'Please ask @reviewer, then summarize',
+      'Ask @reviewer. Done',
+      'Ask (@reviewer) now',
+      'Ask @reviewer; then continue',
+    ]) {
+      const mentions = findFileMentions(text);
+      expect(mentions).toHaveLength(1);
+      const mention = mentions[0]!;
+      expect(mention.path).toBe('reviewer');
+      expect(mention.text).toBe('@reviewer');
+      expect(mention.start).toBe(text.indexOf('@'));
+      expect(mention.end).toBe(text.indexOf('@') + '@reviewer'.length);
+      expect(agentMentions(mentions, new Set(['reviewer']))).toEqual([mention]);
+    }
+  });
+
+  test('file mentions drop trailing prose but keep line ranges and extensions', () => {
+    const ranged = 'See @src/a.ts#20-45, please';
+    const [mention] = findFileMentions(ranged);
+    expect(mention?.path).toBe('src/a.ts');
+    expect(mention?.range).toEqual({ start: 20, end: 45 });
+    expect(mention?.text).toBe('@src/a.ts#20-45');
+    expect(mention?.end).toBe(ranged.indexOf('@') + '@src/a.ts#20-45'.length);
+    expect(findFileMentions('Read @src/main.ts, please')[0]?.path).toBe('src/main.ts');
+    expect(findFileMentions('See @src/a.ts.')[0]?.path).toBe('src/a.ts');
+  });
+
+  test('quoted or backticked mentions keep intentional internal punctuation', () => {
+    expect(findFileMentions('See `@src/a,b.ts` now')[0]?.path).toBe('src/a,b.ts');
+    expect(findFileMentions('Open "@docs/a(b).md"')[0]?.path).toBe('docs/a(b).md');
+  });
+
+  test('emails and ordinary code snippets still produce no mentions', () => {
+    expect(findFileMentions('mail me@x.com or a@b.com')).toEqual([]);
+    expect(findFileMentions('use user@host for ssh')).toEqual([]);
+    expect(findFileMentions('see a@b and c@d')).toEqual([]);
+  });
+
+  test('adjacent and mixed references preserve exact UTF-16 spans', () => {
+    const text = '@reviewer, @src/a.ts; (@other)';
+    const mentions = findFileMentions(text);
+    expect(mentions.map((mention) => mention.path)).toEqual(['reviewer', 'src/a.ts', 'other']);
+    for (const mention of mentions) {
+      expect(text.slice(mention.start, mention.end)).toBe(mention.text);
+    }
+    expect(agentMentions(mentions, new Set(['reviewer', 'other'])).map((m) => m.path)).toEqual([
+      'reviewer',
+      'other',
+    ]);
+  });
+});
+
 describe('agent mention classification (issue #99)', () => {
   test('only bare names present in the scoped catalog are agents', () => {
     const mentions = findFileMentions('@reviewer @src/a.ts @unknown review@x.com');
