@@ -14,7 +14,8 @@ This page separates what is **CI-verified**, **manually verified** and **unteste
 | Real terminal emulators (Ghostty, kitty, GNOME Terminal), tmux, SSH | **Untested** | #181, #182, #184 |
 | ARM64 and musl builds | **Unsupported**: build refuses them (native packages not installed); evaluation recorded in ADR-0006 | #188 |
 | Ubuntu/Debian native run | **Untested** | – |
-| Local and remote OpenCode sessions end to end on Linux | **Untested** | #186 |
+| Local OpenCode v2.3.0 sessions end to end on Linux | Manually verified (Fedora 44 under WSL2): `bun run test:writable` passes 15/15 against a disposable `opencode serve` 2.3.0 (prompt flow, permissions, forms, fork/revert, events, directories) | #186 |
+| Remote OpenCode servers over a real network on Linux | **Untested** | #186 |
 
 ## Requirements
 
