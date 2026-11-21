@@ -15,8 +15,12 @@ const server = Bun.serve({
   hostname: '127.0.0.1',
   fetch(request) {
     const { pathname } = new URL(request.url);
-    if (logFile !== undefined) void appendFile(logFile, `${request.method} ${pathname}
-`);
+    if (logFile !== undefined)
+      void appendFile(
+        logFile,
+        `${request.method} ${pathname}
+`,
+      );
     if (pathname.endsWith('/event') || pathname.includes('/stream')) {
       return new Response(new ReadableStream({ start() {} }), {
         headers: { 'content-type': 'text/event-stream' },
