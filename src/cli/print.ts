@@ -137,16 +137,47 @@ class TurnReader {
  */
 export async function runPrint(request: PrintRequest): Promise<number> {
   const { backend } = request;
-  const sessionID =
-    request.sessionID ??
-    (
-      await backend.createSession({
-        directory: request.directory,
-        ...(request.agent === undefined ? {} : { agent: request.agent }),
-        ...(request.model === undefined ? {} : { model: request.model }),
-      })
-    ).id;
-  const admitted = await backend.prompt(sessionID, { text: request.prompt, files: [] });
+  // Never create a session or submit a billable prompt when cancellation is already known.
+  if (request.signal.aborted) return exitCodes.interrupted;
+
+  let sessionID = request.sessionID;
+  if (sessionID === undefined) {
+    const created = await backend.createSession({
+      directory: request.directory,
+      ...(request.agent === undefined ? {} : { agent: request.agent }),
+      ...(request.model === undefined ? {} : { model: request.model }),
+    });
+    if (request.signal.aborted) {
+      request.diagnostic(
+        `marg: cancelled while creating the session; no prompt was submitted (session ${created.id} may exist).${eol}`,
+      );
+      return exitCodes.interrupted;
+    }
+    sessionID = created.id;
+  }
+  // Last check immediately before admission — the billable boundary (#151).
+  if (request.signal.aborted) return exitCodes.interrupted;
+
+  let admitted: QueuedInput;
+  try {
+    admitted = await backend.prompt(sessionID, { text: request.prompt, files: [] });
+  } catch (error) {
+    if (request.signal.aborted) {
+      request.diagnostic(
+        `marg: cancelled while submitting to session ${sessionID}; the prompt may have been accepted and server work may continue: ${String(error)}${eol}`,
+      );
+      return exitCodes.interrupted;
+    }
+    throw error;
+  }
+  // Past admission the server owns the turn: report the ambiguity honestly instead of
+  // implying nothing started or submitting again. The CLI never interrupts it here.
+  if (request.signal.aborted) {
+    request.diagnostic(
+      `marg: cancelled after the prompt was submitted to session ${sessionID}; server work may continue.${eol}`,
+    );
+    return exitCodes.interrupted;
+  }
 
   const pollMs = request.pollMs ?? 500;
   const startTimeoutMs = request.startTimeoutMs ?? 120_000;
@@ -205,8 +236,7 @@ function report(
       request.write(`${JSON.stringify({ sessionID, message })}${eol}`);
     }
   } else {
-    const text = finalText(progress.messages);
-    if (text !== '') request.write(text.endsWith(eol) ? text : `${text}${eol}`);
+    request.write(stdoutText(finalText(progress.messages)));
   }
   if (progress.outcome === 'succeeded') return exitCodes.ok;
   const detail = progress.error === undefined ? '' : `: ${progress.error}`;
@@ -214,12 +244,24 @@ function report(
   return exitCodes.failed;
 }
 
+/**
+ * Exact assistant text from the final reply. Indentation, blank lines and trailing whitespace
+ * are preserved verbatim so redirected `--print` output matches the server text (#158).
+ */
 export function finalText(messages: readonly TranscriptMessage[]): string {
   const assistant = messages.findLast((message) => message.kind === 'assistant');
   if (assistant?.kind !== 'assistant') return '';
   return assistant.parts
     .filter((part) => part.kind === 'text')
     .map((part) => part.text)
-    .join('\n')
-    .trim();
+    .join('\n');
+}
+
+/**
+ * Stdout contract: write the exact text, adding at most one line terminator when it does not
+ * already end in one. Never trims, rewrites line endings, or doubles an existing newline.
+ */
+export function stdoutText(text: string): string {
+  if (text === '' || text.endsWith('\n') || text.endsWith('\r')) return text;
+  return `${text}${eol}`;
 }

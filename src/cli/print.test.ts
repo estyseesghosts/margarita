@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { FakeBackend } from '../../test/fake-backend.ts';
 import type { MessagePage, PromptDraft, QueuedInput } from '../adapter/backend.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
-import { exitCodes, findTurn, runPrint } from './print.ts';
+import { exitCodes, finalText, findTurn, runPrint, stdoutText } from './print.ts';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -350,5 +350,92 @@ describe('runPrint', () => {
     const result = await run(backend, { signal: abort.signal });
     expect(result.code).toBe(exitCodes.interrupted);
     expect(backend.calls.some((call) => call.name === 'interrupt')).toBe(false);
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+  });
+});
+
+describe('print abort boundaries (#151)', () => {
+  const silent = { write: () => {}, diagnostic: () => {} };
+
+  test('a pre-aborted print creates no session and admits no prompt', async () => {
+    const backend = new ScriptedBackend();
+    const abort = new AbortController();
+    abort.abort();
+    const code = await runPrint({
+      backend,
+      directory: '/w',
+      prompt: 'run tests',
+      json: false,
+      signal: abort.signal,
+      ...silent,
+    });
+    expect(code).toBe(exitCodes.interrupted);
+    expect(backend.calls.some((call) => call.name === 'createSession')).toBe(false);
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+  });
+
+  test('abort while creating a session never admits the prompt', async () => {
+    const backend = new ScriptedBackend();
+    const abort = new AbortController();
+    const create = backend.createSession.bind(backend);
+    backend.createSession = async (args) => {
+      await Bun.sleep(5);
+      abort.abort();
+      return create(args);
+    };
+    const diagnostics: string[] = [];
+    const code = await runPrint({
+      backend,
+      directory: '/w',
+      prompt: 'run tests',
+      json: false,
+      signal: abort.signal,
+      write: () => {},
+      diagnostic: (text) => diagnostics.push(text),
+    });
+    expect(code).toBe(exitCodes.interrupted);
+    expect(backend.calls.some((call) => call.name === 'createSession')).toBe(true);
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    expect(diagnostics.join('')).toContain('no prompt was submitted');
+  });
+
+  test('abort after admission reports that server work may continue', async () => {
+    const backend = new ScriptedBackend();
+    const abort = new AbortController();
+    const prompt = backend.prompt.bind(backend);
+    backend.prompt = async (sessionID, draft) => {
+      const admitted = await prompt(sessionID, draft);
+      abort.abort();
+      return admitted;
+    };
+    const diagnostics: string[] = [];
+    const code = await runPrint({
+      backend,
+      directory: '/w',
+      prompt: 'run tests',
+      sessionID: 'ses_1',
+      json: false,
+      signal: abort.signal,
+      write: () => {},
+      diagnostic: (text) => diagnostics.push(text),
+    });
+    expect(code).toBe(exitCodes.interrupted);
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(true);
+    expect(diagnostics.join('')).toContain('server work may continue');
+    expect(backend.calls.some((call) => call.name === 'interrupt')).toBe(false);
+  });
+});
+
+describe('print text fidelity (#158)', () => {
+  test('final text keeps indentation and trailing newlines verbatim', () => {
+    const text = '    indented code\n\n';
+    expect(finalText([assistant('a1', 21, text)])).toBe(text);
+  });
+
+  test('stdout adds at most one terminator and never doubles an existing one', () => {
+    expect(stdoutText('plain')).toBe('plain\n');
+    expect(stdoutText('has newline\n')).toBe('has newline\n');
+    expect(stdoutText('many\n\n')).toBe('many\n\n');
+    expect(stdoutText('')).toBe('');
   });
 });

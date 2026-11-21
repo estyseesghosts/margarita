@@ -6,6 +6,14 @@ import { join } from 'node:path';
 import type { CliRenderer } from '@opentui/core';
 
 /**
+ * Line-ending policy for editor round trips (#158): CRLF is deliberately converted to LF, but
+ * no content is removed — notably a trailing newline the user saved (or never touched).
+ */
+export function normalizeEditedText(edited: string): string {
+  return edited.replace(/\r\n/g, '\n');
+}
+
+/**
  * Edits `text` in `$VISUAL`/`$EDITOR` with the renderer suspended. Resolves to the new
  * text, or `undefined` when the editor failed or no editor is configured.
  */
@@ -30,7 +38,7 @@ export async function editExternally(
     });
     if (code !== 0) return { ok: false, message: `Editor exited with code ${code ?? 'signal'}.` };
     const edited = await readFile(file, 'utf8');
-    return { ok: true, text: edited.replace(/\r\n/g, '\n').replace(/\n$/, '') };
+    return { ok: true, text: normalizeEditedText(edited) };
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   } finally {
