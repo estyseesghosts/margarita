@@ -18,6 +18,22 @@ const linux = target === undefined ? process.platform === 'linux' : target.inclu
 // time embeds exactly one variant (#179).
 const libc = target?.includes('musl') === true ? 'musl' : 'glibc';
 
+// A Linux target needs OpenTUI's matching native package (OS, architecture and libc). Only
+// glibc x64 is verified (#179); the others fail here with a reason instead of a bundler
+// resolution error, and stay unadvertised until a tested artifact exists (#188).
+if (linux && target !== undefined) {
+  const arch = target.includes('arm64') ? 'arm64' : 'x64';
+  const pkg = `@opentui/core-linux-${arch}${libc === 'musl' ? '-musl' : ''}`;
+  try {
+    Bun.resolveSync(pkg, process.cwd());
+  } catch {
+    console.error(
+      `${target} is not a supported build: ${pkg} is not installed. Only bun-linux-x64 (glibc) is verified; see docs/linux.md.`,
+    );
+    process.exit(2);
+  }
+}
+
 await mkdir('dist', { recursive: true });
 const result = await Bun.build({
   entrypoints: ['src/main.ts'],

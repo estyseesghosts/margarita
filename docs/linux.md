@@ -12,7 +12,8 @@ This page separates what is **CI-verified**, **manually verified** and **unteste
 | Interactive renderer paints and exits 0 under a PTY, terminal restored | Manually verified (Fedora 44, xterm-256color via a scripted PTY); CI job added | `test/smoke/pty-smoke.py` |
 | Secret Service credentials (`secret-tool`) round trip | Manually verified against a private gnome-keyring (Fedora 44) | `scripts/test-keyring.sh` |
 | Real terminal emulators (Ghostty, kitty, GNOME Terminal), tmux, SSH | **Untested** | #181, #182, #184 |
-| Ubuntu/Debian native run, ARM64, musl | **Untested** | #188 |
+| ARM64 and musl builds | **Unsupported**: build refuses them (native packages not installed); evaluation recorded in ADR-0006 | #188 |
+| Ubuntu/Debian native run | **Untested** | – |
 | Local and remote OpenCode sessions end to end on Linux | **Untested** | #186 |
 
 ## Requirements
