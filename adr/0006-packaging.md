@@ -13,3 +13,10 @@
 - Binary size is about 126 MB on Windows x64 (Bun runtime dominates). Acceptable for a developer tool; revisit if Bun ships a slimmer runtime.
 
 **Consequences:** releases are one file per target plus a SHA-256 checksum. Updating is replacing the file. Config and state stay in margarita's own app-data directories (see README), never OpenCode's.
+
+**Verified on Bun 1.4.4 / Fedora 44 (WSL2, x86_64, glibc) (#179):**
+
+- Without help, `bun run build bun-linux-x64` fails with `Could not resolve: "@opentui/core-linux-x64-musl"`: OpenTUI chooses its Linux native package from `process.env.OPENTUI_LIBC` at run time, so the bundler follows both variants. `scripts/build.ts` now defines `process.env.OPENTUI_LIBC` at compile time (`musl` for `-musl` targets, `glibc` otherwise, Linux targets only), which embeds exactly one variant and leaves Windows untouched.
+- The resulting `dist/marg` (about 126 MB) runs from an unrelated directory with no Bun or `node_modules`: `--version`, `--help` and an interactive PTY session (renderer paints, Ctrl+C exits 0, cursor/mouse/alternate-screen restored). The CI job `executable-linux` repeats this on every push.
+- `ldd` lists only `libc`, `libm`, `libdl`, `libpthread` and the loader; the highest versioned glibc symbol imported by the binary was `GLIBC_2.17`. That is a property of this build, not a promise for every distribution: build on the oldest glibc you intend to support.
+- Not verified: Ubuntu, ARM64 and musl targets (tracked separately), and real terminal emulators.

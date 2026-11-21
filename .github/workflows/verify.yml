@@ -17,3 +17,39 @@ jobs:
           bun-version-file: .bun-version
       - run: bun install --frozen-lockfile
       - run: bun run verify
+
+  # The source gate above cannot notice a missing OpenTUI native library inside the compiled
+  # executable. This job builds the real Linux x64 glibc binary, runs it from an unrelated
+  # directory against a disposable stub service, and checks the renderer paints and exits
+  # cleanly under a PTY. It never touches a user's OpenCode service or a paid model.
+  executable-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+      - run: bun run build bun-linux-x64
+      - name: Stage the binary outside the checkout
+        run: |
+          mkdir -p "$RUNNER_TEMP/exe"
+          cp dist/marg "$RUNNER_TEMP/exe/marg"
+          (cd "$RUNNER_TEMP/exe" && sha256sum marg | tee marg.sha256)
+          ldd "$RUNNER_TEMP/exe/marg" || true
+      - name: Smoke test --help and --version from an unrelated directory
+        working-directory: ${{ runner.temp }}/exe
+        run: |
+          ./marg --version
+          ./marg --help > /dev/null
+      - name: Interactive PTY smoke against a disposable stub service
+        run: |
+          bun test/smoke/stub-server.ts "$RUNNER_TEMP/port" &
+          for _ in $(seq 1 50); do [ -s "$RUNNER_TEMP/port" ] && break; sleep 0.2; done
+          python3 test/smoke/pty-smoke.py "$RUNNER_TEMP/exe/marg" "http://127.0.0.1:$(cat "$RUNNER_TEMP/port")"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: marg-linux-x64
+          path: |
+            ${{ runner.temp }}/exe/marg
+            ${{ runner.temp }}/exe/marg.sha256

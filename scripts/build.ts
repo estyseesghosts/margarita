@@ -12,6 +12,11 @@ const requested = process.argv[2];
 const target = requested === undefined ? undefined : asTarget(requested);
 const windows = target === undefined ? process.platform === 'win32' : target.includes('windows');
 const outfile = `dist/marg${windows ? '.exe' : ''}`;
+const linux = target === undefined ? process.platform === 'linux' : target.includes('linux');
+// OpenTUI picks its Linux native package from this variable at run time, which would pull in
+// (and fail to resolve) the musl package inside a compiled glibc binary. Fixing it at compile
+// time embeds exactly one variant (#179).
+const libc = target?.includes('musl') === true ? 'musl' : 'glibc';
 
 await mkdir('dist', { recursive: true });
 const result = await Bun.build({
@@ -19,6 +24,7 @@ const result = await Bun.build({
   plugins: [solidPlugin],
   minify: true,
   sourcemap: 'linked',
+  define: linux ? { 'process.env.OPENTUI_LIBC': JSON.stringify(libc) } : {},
   compile: {
     outfile,
     // Never pick up a bunfig.toml/.env from wherever marg is launched (e.g. this repo).
