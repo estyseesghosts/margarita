@@ -71,6 +71,8 @@ def main():
         )
     os.chmod(editor, 0o755)
     env['EDITOR'] = f"'{editor}'"
+    if os.environ.get('MARGARITA_SERVER_PASSWORD'):
+        env['MARGARITA_SERVER_PASSWORD'] = os.environ['MARGARITA_SERVER_PASSWORD']
     env['MARG_EDITOR_SEEN'] = os.path.join(workdir, 'editor-path')
     pid, fd = pty.fork()
     if pid == 0:

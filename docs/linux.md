@@ -15,7 +15,8 @@ This page separates what is **CI-verified**, **manually verified** and **unteste
 | ARM64 and musl builds | **Unsupported**: build refuses them (native packages not installed); evaluation recorded in ADR-0006 | #188 |
 | Ubuntu/Debian native run | **Untested** | – |
 | Local OpenCode v2.3.0 sessions end to end on Linux | Manually verified (Fedora 44 under WSL2): `bun run test:writable` passes 15/15 against a disposable `opencode serve` 2.3.0 (prompt flow, permissions, forms, fork/revert, events, directories) | #186 |
-| Remote OpenCode servers over a real network on Linux | **Untested** | #186 |
+| Compiled `marg` against a real disposable `opencode serve` 2.3.0 (PTY: paint, keys, resize, Ctrl+C exit 0, terminal restored) | Manually verified (Fedora 44 under WSL2) | `scripts/test-real-service.sh` |
+| Remote OpenCode servers over a real network; Linux client → Windows server (drive/UNC `--cwd`) | **Untested**: contract fixtures only; manual scenario below | #186 |
 
 ## Requirements
 
@@ -76,3 +77,7 @@ The PTY smoke (`keys` scenario) drives the compiled binary under a real POSIX PT
 ## Terminal lifecycle
 
 PTY scenarios (`ctrl-c`, `sigterm`, `resize`, `editor`) verify on Fedora 44 that the renderer exits, the cursor is re-shown, mouse reporting is disabled and the alternate screen is left; that repeated SIGWINCH down to 8 columns does not crash; and that Ctrl+G with an `EDITOR` path containing spaces round-trips the draft and removes its temp file. An editor that exits non-zero keeps the draft and the composer usable (`editor-fail`). Not covered: interactive `vi`/`nano`, SIGKILL recovery (modes cannot be restored by the process), tmux and SSH.
+
+## Manual scenario: remote servers (#186)
+
+With two machines you control: start `opencode serve` on the remote with its own throwaway XDG roots, then from Linux run `marg --server http://host:port --cwd <absolute path on the remote>` (Windows remote: `C:\proj`; Linux remote: check `/srv/App` and `/srv/app` stay separate sessions). Verify first prompt, `--continue`, `--resume`, model change, queue/steer, interrupt, a permission prompt, reconnect after briefly stopping the server, and clean exit. Record results in `docs/smoke-matrix.md`.
