@@ -66,3 +66,7 @@ WSL2 is a good place to build and run the source gate, but it does not replace n
 | no TTY, `TERM=dumb`, over the limit | exact text written to an owner-only (`0600`, created that way) file under the state directory; the notice shows the path | unit-tested |
 | Ghostty, kitty, GNOME Terminal, tmux (`set -g set-clipboard on`), SSH | whether the terminal honours or filters OSC 52 | **untested** |
 | Clipboard image paste, `file://` and quoted-path attachments | existing paste tests cover PNG/JPEG/WebP/PDF classification and rejected binaries; terminal delivery of raw clipboard images varies | emulator behaviour **untested** |
+
+## Keyboard and paste
+
+The PTY smoke (`keys` scenario) drives the compiled binary under a real POSIX PTY with `TERM=xterm-256color`: typing Unicode, grapheme-wise backspace, a bracketed multi-line paste, F1 (help) and Esc must paint correctly and must not cause any server write (nothing is submitted). Alt/Shift+Tab/modified-Enter, mouse and wheel, kitty-protocol versus legacy sequences, and Ghostty, kitty, GNOME Terminal and tmux/SSH behaviour are **untested**; record observations (TERM, protocol, version, deviations) in `docs/smoke-matrix.md` before adding any terminal-specific branch.
