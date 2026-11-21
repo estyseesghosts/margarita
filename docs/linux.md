@@ -57,3 +57,12 @@ WSL2 is a good place to build and run the source gate, but it does not replace n
 
 - `test/smoke/pty-smoke.py` and `test/smoke/stub-server.ts`: the executable smoke used by CI.
 - `scripts/test-keyring.sh`: opt-in Secret Service round trip against a throwaway session bus and keyring (needs `dbus-run-session`, `gnome-keyring-daemon`, `secret-tool`).
+
+## Clipboard (OSC 52) and attachments
+
+| Path | Behaviour | Status |
+| --- | --- | --- |
+| TTY, `TERM` not `dumb`, payload ≤ 4096 base64 bytes | one OSC 52 set sequence; the notice says "emitted (no terminal acknowledgement)" | unit-tested (`src/app/clipboard.test.ts`) |
+| no TTY, `TERM=dumb`, over the limit | exact text written to an owner-only (`0600`, created that way) file under the state directory; the notice shows the path | unit-tested |
+| Ghostty, kitty, GNOME Terminal, tmux (`set -g set-clipboard on`), SSH | whether the terminal honours or filters OSC 52 | **untested** |
+| Clipboard image paste, `file://` and quoted-path attachments | existing paste tests cover PNG/JPEG/WebP/PDF classification and rejected binaries; terminal delivery of raw clipboard images varies | emulator behaviour **untested** |
