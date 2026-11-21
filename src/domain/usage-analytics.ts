@@ -46,14 +46,18 @@ export type UsageAnalytics = Readonly<{
   /** Server-reported USD; `undefined` means unknown, NOT zero. */
   cost?: number;
   context: ContextReading;
-  completedAssistantTurns: number;
+  /** Completed *user* turns: one prompt plus its assistant steps, however many steps it took. */
+  completedUserTurns: number;
   toolUsingTurns: number;
-  /** toolUsingTurns / completedAssistantTurns, absent when the denominator is zero. */
+  /** toolUsingTurns / completedUserTurns, absent when the denominator is zero. */
   toolTurnPercent?: number;
   toolCalls: number;
   toolCategories: Readonly<Record<ToolCategoryKey, number>>;
   toolCompleted: number;
   toolFailed: number;
+  /** Server-confirmed running calls only; streaming/pending/unknown states are not labelled running. */
+  toolRunning: number;
+  /** Streaming or otherwise unclassified tool states. */
   toolOther: number;
   /** failed / (completed + failed), absent without a known outcome denominator. */
   toolFailurePercent?: number;
@@ -72,8 +76,6 @@ export type UsageInput = Readonly<{
   cost?: number;
   catalog: readonly CatalogModel[];
   mcpServers?: readonly string[];
-  /** A staged revert boundary: assistant steps after it are excluded from active context. */
-  revertMessageID?: string;
   stale?: boolean;
 }>;
 
@@ -133,18 +135,13 @@ export function projectUsage(input: UsageInput): UsageAnalytics {
     lastCompactionAt = message.createdAt;
   });
 
-  // A staged revert excludes assistant steps at or after its boundary from active context.
-  let upper = messages.length - 1;
-  if (input.revertMessageID !== undefined) {
-    const revertIndex = messages.findIndex((message) => message.id === input.revertMessageID);
-    // The boundary message itself is part of the reverted state; only later steps are out.
-    if (revertIndex >= 0) upper = revertIndex;
-  }
-
+  // Active context moves only on a server-confirmed context event (a completed compaction
+  // above). A staged files-only revert does not rewrite the conversation or its consumed
+  // context, so it is deliberately not an input here (issue #142).
   const scoped: { message: Extract<TranscriptMessage, { kind: 'assistant' }>; index: number }[] =
     [];
   messages.forEach((message, index) => {
-    if (index <= upper && index > compactionIndex && message.kind === 'assistant') {
+    if (index > compactionIndex && message.kind === 'assistant') {
       scoped.push({ message, index });
     }
   });
@@ -176,23 +173,43 @@ export function projectUsage(input: UsageInput): UsageAnalytics {
     context = { ...context, sinceCompaction: since };
   }
 
-  // Activity stats over the loaded window. Each tool call belongs to exactly one category
-  // and outcome; deduplicate by tool id so a repeated message cannot double-count.
+  // Activity stats over the loaded window. A turn is one user prompt plus all of its
+  // assistant steps, so multiple steps for a single prompt count as ONE completed turn (#141).
+  // Tools from the active streaming step are included and reported by their real status,
+  // while an incomplete first/last turn (no user boundary in the window) is not counted.
   const seen = new Set<string>();
   const tools: ToolCall[] = [];
-  let completedAssistantTurns = 0;
+  let completedUserTurns = 0;
   let toolUsingTurns = 0;
+  let turnStarted = false;
+  let turnCompleted = false;
+  let turnUsedTools = false;
+  const finishTurn = (): void => {
+    if (turnStarted && turnCompleted) {
+      completedUserTurns += 1;
+      if (turnUsedTools) toolUsingTurns += 1;
+    }
+    turnStarted = false;
+    turnCompleted = false;
+    turnUsedTools = false;
+  };
   messages.forEach((message) => {
-    if (message.kind !== 'assistant' || message.completedAt === undefined) return;
-    completedAssistantTurns += 1;
+    if (message.kind === 'user') {
+      finishTurn();
+      turnStarted = true;
+      return;
+    }
+    if (message.kind !== 'assistant') return;
     const parts = toolsIn(message.parts);
-    if (parts.length > 0) toolUsingTurns += 1;
+    if (parts.length > 0) turnUsedTools = true;
     parts.forEach((tool) => {
       if (seen.has(tool.id)) return;
       seen.add(tool.id);
       tools.push(tool);
     });
+    if (message.completedAt !== undefined) turnCompleted = true;
   });
+  finishTurn();
 
   const toolCategories: Record<ToolCategoryKey, number> = {
     read: 0,
@@ -206,12 +223,14 @@ export function projectUsage(input: UsageInput): UsageAnalytics {
   };
   let toolCompleted = 0;
   let toolFailed = 0;
+  let toolRunning = 0;
   let toolOther = 0;
   tools.forEach((tool) => {
     toolCategories[categoryOf(tool.name, mcpServers)] += 1;
     if (tool.status === 'completed') toolCompleted += 1;
     else if (tool.status === 'error') toolFailed += 1;
-    else toolOther += 1;
+    else if (tool.status === 'running') toolRunning += 1;
+    else toolOther += 1; // streaming or unknown — never presented as running
   });
 
   const knownOutcomes = toolCompleted + toolFailed;
@@ -221,15 +240,16 @@ export function projectUsage(input: UsageInput): UsageAnalytics {
     ...(input.tokens === undefined ? {} : { lifetime: input.tokens }),
     ...(input.cost === undefined ? {} : { cost: input.cost }),
     context,
-    completedAssistantTurns,
+    completedUserTurns,
     toolUsingTurns,
-    ...(completedAssistantTurns > 0
-      ? { toolTurnPercent: (toolUsingTurns / completedAssistantTurns) * 100 }
+    ...(completedUserTurns > 0
+      ? { toolTurnPercent: (toolUsingTurns / completedUserTurns) * 100 }
       : {}),
     toolCalls: tools.length,
     toolCategories,
     toolCompleted,
     toolFailed,
+    toolRunning,
     toolOther,
     ...(knownOutcomes > 0 ? { toolFailurePercent: (toolFailed / knownOutcomes) * 100 } : {}),
     completedCompactions,

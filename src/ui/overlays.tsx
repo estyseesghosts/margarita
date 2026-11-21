@@ -131,13 +131,13 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
           </text>
           <text fg={props.theme.text}>{'Activity · loaded messages only'}</text>
           <text fg={dim()}>
-            {`  tool turns ${usage().toolUsingTurns}/${usage().completedAssistantTurns} (${analyticsPercent(usage().toolTurnPercent)} of turns) · tool calls ${usage().toolCalls}`}
+            {`  tool turns ${usage().toolUsingTurns}/${usage().completedUserTurns} (${analyticsPercent(usage().toolTurnPercent)} of user turns) · tool calls ${usage().toolCalls}`}
           </text>
           <text fg={dim()}>
             {`  read ${usage().toolCategories.read} · search ${usage().toolCategories.search} · edit ${usage().toolCategories.edit} · shell ${usage().toolCategories.shell} · web ${usage().toolCategories.web} · delegate ${usage().toolCategories.delegate} · MCP ${usage().toolCategories.mcp} · other ${usage().toolCategories.other}`}
           </text>
           <text fg={dim()}>
-            {`  completed ${usage().toolCompleted} · failed ${usage().toolFailed} · running ${usage().toolOther} · failure ${analyticsPercent(usage().toolFailurePercent)} of known outcomes`}
+            {`  completed ${usage().toolCompleted} · failed ${usage().toolFailed} · running ${usage().toolRunning} · other ${usage().toolOther} · failure ${analyticsPercent(usage().toolFailurePercent)} of known outcomes`}
           </text>
           <text fg={dim()}>
             {'Tool stats cover loaded messages only; context uses the step model limit.'}

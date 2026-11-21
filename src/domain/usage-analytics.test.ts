@@ -72,6 +72,14 @@ const compaction = (
 
 const lifetime = usage(10_000, 2_000);
 
+const user = (id: string, at: number): TranscriptMessage => ({
+  kind: 'user',
+  id,
+  createdAt: at,
+  text: id,
+  attachments: [],
+});
+
 function base(messages: TranscriptMessage[], overrides: Record<string, unknown> = {}) {
   return projectUsage({
     serverID: 'local',
@@ -137,16 +145,16 @@ describe('session usage analytics (#124)', () => {
     expect(rows.context.sinceCompaction).toBeUndefined();
   });
 
-  test('a staged revert excludes later steps; clearing it restores the latest step', () => {
+  test('a files-only staged revert does not reduce conversation context (#142)', () => {
     const messages = [
       assistant('a1', 10, 'big', usage(100, 20)),
       assistant('a2', 20, 'big', usage(200, 50)),
       assistant('a3', 30, 'big', usage(300, 60)),
     ];
-    const staged = base(messages, { revertMessageID: 'a2' });
-    expect(staged.context.tokens).toBe(250); // a2, a3 excluded
-    const cleared = base(messages);
-    expect(cleared.context.tokens).toBe(360); // a3 restored
+    // The projector has no revert input at all: a files-only stage cannot move the context
+    // boundary, so the latest step's usage always wins.
+    const rows = base(messages);
+    expect(rows.context.tokens).toBe(360);
   });
 
   test('a model with no known limit gives tokens without a fabricated percentage', () => {
@@ -171,17 +179,22 @@ describe('session usage analytics (#124)', () => {
 
   test('tool turn and category percentages use explicit, deduplicated denominators', () => {
     const messages: TranscriptMessage[] = [
+      user('u1', 5),
       assistant('a1', 10, 'big', usage(1, 1), [tool('t1', 'read'), tool('t2', 'grep')]),
+      assistant('a1b', 15, 'big', usage(1, 1)), // second step of the same prompt
+      user('u2', 18),
       assistant('a2', 20, 'big', usage(1, 1), [
         tool('t2', 'grep'),
         tool('t3', 'bash'),
         tool('t4', 'github_pr', 'error'),
       ]),
+      user('u3', 28),
       assistant('a3', 30, 'big', usage(1, 1)), // completed turn, no tools
+      user('u4', 38),
       assistant('a4', 40, 'big', undefined, [], false), // streaming, not a completed turn
     ];
     const rows = base(messages, { mcpServers: ['github'] });
-    expect(rows.completedAssistantTurns).toBe(3);
+    expect(rows.completedUserTurns).toBe(3);
     expect(rows.toolUsingTurns).toBe(2);
     expect(rows.toolTurnPercent).toBeCloseTo((2 / 3) * 100);
     expect(rows.toolCalls).toBe(4); // t2 deduplicated
@@ -199,5 +212,27 @@ describe('session usage analytics (#124)', () => {
     const rows = base([assistant('a1', 10, 'big', undefined, [], false)]);
     expect(rows.toolTurnPercent).toBeUndefined();
     expect(rows.toolFailurePercent).toBeUndefined();
+  });
+
+  test('a running streaming tool is counted as running, not as an unknown outcome (#141)', () => {
+    const rows = base([
+      user('u1', 5),
+      assistant('a1', 10, 'big', usage(1, 1), [tool('t1', 'read'), tool('t2', 'grep')]),
+      assistant(
+        'a2',
+        15,
+        'big',
+        undefined,
+        [tool('t3', 'bash', 'running'), tool('t4', 'read', 'streaming')],
+        false,
+      ),
+    ]);
+    expect(rows.completedUserTurns).toBe(1); // multiple steps for one prompt = one turn
+    expect(rows.toolUsingTurns).toBe(1);
+    expect(rows.toolCalls).toBe(4); // tools from the streaming step are included
+    expect(rows.toolCompleted).toBe(2);
+    expect(rows.toolRunning).toBe(1); // server-confirmed running only
+    expect(rows.toolOther).toBe(1); // streaming is not presented as running
+    expect(rows.toolFailurePercent).toBe(0); // two known completed outcomes, zero failures
   });
 });

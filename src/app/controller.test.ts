@@ -4811,6 +4811,26 @@ describe('rewind prompt selection (#102)', () => {
   });
 });
 
+const sharedModelCatalog = (contextLimit: number) => ({
+  providerID: 'opencode',
+  modelID: 'shared',
+  name: 'Shared',
+  enabled: true,
+  variants: [],
+  contextLimit,
+});
+
+const sharedModelStep = (id: string) => ({
+  kind: 'assistant' as const,
+  id,
+  createdAt: 2,
+  completedAt: 3,
+  agent: 'build',
+  model: { providerID: 'opencode', modelID: 'shared' },
+  parts: [],
+  usage: { input: 120, output: 30, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+});
+
 function usageHarness() {
   const backend = new FakeBackend();
   backend.sessions = [
@@ -4896,6 +4916,72 @@ describe('session usage analytics and footer actions (#124)', () => {
     controller.setComposer(composerFrom('/usage'));
     await controller.submit();
     expect(controller.state.overlay).toEqual({ kind: 'usage' });
+    controller.dispose();
+  });
+
+  test('a files-only staged revert does not reduce the context reading (#142)', async () => {
+    const { backend, controller } = usageHarness();
+    await attach(controller, 'ses_a');
+    expect(controller.usageAnalytics().context.tokens).toBe(150);
+    backend.sessions = [
+      {
+        ...fakeSession('ses_a'),
+        tokens: { input: 40_000, output: 5_000, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+        cost: 0.5,
+        revert: {
+          messageID: 'u1',
+          files: [
+            {
+              file: 'src/a.ts',
+              patch: '',
+              additions: 3,
+              deletions: 0,
+              status: 'modified',
+              truncated: false,
+            },
+          ],
+        },
+      },
+    ];
+    // The revert is files-only; neither the conversation nor its context changed.
+    expect(controller.usageAnalytics().context.tokens).toBe(150);
+    controller.dispose();
+  });
+
+  test('context limits come from the conversation owning host, not the latest catalog (#143)', async () => {
+    const backendA = new FakeBackend();
+    const backendB = new FakeBackend();
+    backendB.serverID = 'srv_1';
+    backendA.models = [sharedModelCatalog(1000)];
+    backendB.models = [sharedModelCatalog(200)];
+    backendA.messages = { ses_a: [sharedModelStep('a1')] };
+    backendB.messages = { ses_b: [sharedModelStep('b1')] };
+    backendA.sessions = [{ ...fakeSession('ses_a'), directory: '/a' }];
+    backendB.sessions = [{ ...fakeSession('ses_b'), serverID: 'srv_1', directory: '/b' }];
+    const controller = new AppController({
+      backend: backendA,
+      config: defaultConfig,
+      localState: emptyState,
+      platform: 'linux',
+      cwd: '/work/kohjoh',
+      version: '0.0.1',
+      now: () => 10_000,
+      saveLocalState: async () => {},
+      listFiles: () => Promise.resolve([]),
+      requestExit: () => {},
+      serverIDs: () => ['srv_1'],
+      backendFor: (serverID: string) => (serverID === 'srv_1' ? backendB : backendA),
+      serverInfo: () => ({ online: true }),
+    });
+    await controller.bootstrap();
+    await controller.loadCatalog('/a', 'local');
+    controller.openSession('ses_a');
+    await flush();
+    expect(controller.usageAnalytics().context.limit).toBe(1000);
+    await controller.loadCatalog('/b', 'srv_1');
+    controller.openSession('ses_b', 'srv_1');
+    await flush();
+    expect(controller.usageAnalytics().context.limit).toBe(200);
     controller.dispose();
   });
 });

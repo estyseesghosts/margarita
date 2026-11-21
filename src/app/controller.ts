@@ -84,7 +84,7 @@ import {
 import { greetingPeriod } from '../domain/greeting-time.ts';
 import { selectGreeting } from '../domain/greetings.ts';
 import { formatModelRef, type ModelSelection, sameModel } from '../domain/model-ref.ts';
-import { resolveModel } from '../domain/model-resolution.ts';
+import { type CatalogModel, resolveModel } from '../domain/model-resolution.ts';
 import {
   type GoalQueryFailure,
   type NativeGoal,
@@ -177,6 +177,7 @@ type CatalogSnapshot = Readonly<{
   selectable: readonly AgentDescriptor[];
   mentionable: readonly AgentDescriptor[];
   mentionIDs: ReadonlySet<string>;
+  models: readonly CatalogModel[];
 }>;
 
 const undoLimit = 100;
@@ -547,9 +548,8 @@ export class AppController {
       messages: this.state.transcripts[key]?.messages ?? [],
       ...(session?.tokens === undefined ? {} : { tokens: session.tokens }),
       ...(session?.cost === undefined ? {} : { cost: session.cost }),
-      catalog: this.state.models,
+      catalog: this.scopedModelsFor(serverID, session?.directory ?? this.deps.cwd),
       mcpServers: this.mcpServersFor(serverID, session?.directory ?? ''),
-      ...(session?.revert === undefined ? {} : { revertMessageID: session.revert.messageID }),
       stale: view?.stream !== 'live',
     });
   }
@@ -800,6 +800,7 @@ export class AppController {
         selectable,
         mentionable,
         mentionIDs: new Set(mentionable.map((agent) => agent.id)),
+        models,
       });
       batch(() => {
         this.setState('catalogDirectory', directoryKey(directory, this.platformFor(serverID)));
@@ -857,6 +858,16 @@ export class AppController {
     return (
       this.state.mcpCatalogs[serverID]?.[directoryKey(directory, this.platformFor(serverID))] ?? []
     );
+  }
+
+  /**
+   * Model catalog verified for the exact `(server, directory)` scope (#143). Usage limits must
+   * come from the conversation's owning scope, never the globally mutable `state.models`, which
+   * may describe the most recently visited project. An absent snapshot means "unknown limit",
+   * not a fabricated percentage; lifetime tokens/cost remain unaffected.
+   */
+  private scopedModelsFor(serverID: string, directory: string): readonly CatalogModel[] {
+    return this.catalogSnapshots.get(this.catalogScope(directory, serverID))?.models ?? [];
   }
 
   /** True when the loaded catalog is exactly the one for `(server, directory)` and usable. */
