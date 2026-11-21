@@ -777,6 +777,27 @@ describe('directory and line-range attachments (#98)', () => {
 });
 
 describe('typed agent attachments (#99)', () => {
+  test('adjacent agent and ranged file mentions keep their server and spans (#173)', async () => {
+    const { backend, controller } = remoteController(
+      ['src/app.ts'],
+      '/srv/proj',
+      'C:\\Users\\me\\proj',
+    );
+    backend.agents = [agentFor('reviewer')];
+    try {
+      await controller.bootstrap();
+      await controller.sendToSession('ses_remote', 'ask @reviewer,@src/app.ts#2-4');
+      const draft = promptDraft(backend);
+      expect(draft.agents).toEqual([
+        { name: 'reviewer', mention: { start: 4, end: 13, text: '@reviewer' } },
+      ]);
+      expect(draft.files[0]?.uri).toBe('file:///srv/proj/src/app.ts?start=2&end=4');
+      expect(draft.files[0]?.mention).toEqual({ start: 14, end: 29, text: '@src/app.ts#2-4' });
+    } finally {
+      controller.dispose();
+    }
+  });
+
   test('a bare @agent mention is sent as an agent attachment, not a file lookup', async () => {
     const backend = new FakeBackend();
     backend.agents = [agentFor('reviewer')];

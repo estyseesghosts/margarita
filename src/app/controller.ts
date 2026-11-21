@@ -2,7 +2,7 @@ import { isAbsolute, join, posix, resolve, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { batch } from 'solid-js';
-import { createStore, produce, reconcile, type SetStoreFunction } from 'solid-js/store';
+import { createStore, produce, reconcile, type SetStoreFunction, unwrap } from 'solid-js/store';
 
 import {
   type Backend,
@@ -258,6 +258,8 @@ export type ControllerDeps = Readonly<{
   localState: LocalState;
   platform: NodeJS.Platform;
   cwd: string;
+  /** Local launch directory, distinct from a remote server's project directory. */
+  clientCwd?: string;
   version: string;
   now: () => number;
   saveLocalState: (state: LocalState) => Promise<SaveResult | void>;
@@ -333,6 +335,10 @@ export class AppController {
   private readonly setState: SetStoreFunction<AppState>;
   /** Guards read-only rewind previews against late replies for a previously selected row. */
   private rewindPreviewSeq = 0;
+  private diffRequestSeq = 0;
+  private readonly pendingCompactions = new Set<string>();
+  /** Changes whenever navigation or a modal interaction can supersede a pending fork. */
+  private interactionGeneration = 0;
   private noticeCounter = 0;
   private noticeTimer: ReturnType<typeof setTimeout> | undefined;
   /** Timestamp (ms, from `deps.now`) of the most recent idle Escape tap, for double-tap detection. */
@@ -353,6 +359,11 @@ export class AppController {
   private readonly failedAgentSwitches = new Set<string>();
   /** In-flight prompt admissions keyed by server-qualified session (#163). */
   private readonly admittingSessions = new Set<string>();
+  /** Each open form has a unique token, and replies are guarded per server/session/form. */
+  private formToken = 0;
+  private readonly answeringForms = new Set<string>();
+  private inputRequestRevision = 0;
+  private readonly inputRequestRevisions = new Map<string, number>();
   /** Last killed composer text for Ctrl+Y; each kill replaces it (documented policy). */
   private killBuffer = '';
   /** Greetings chosen once per route; process-lifetime only, never sent to a server. */
@@ -1281,13 +1292,18 @@ export class AppController {
     this.goalVersions.delete(key);
     this.runningEventSeq.delete(key);
     this.invalidateJobRefresh(key);
+    this.inputRequestRevisions.delete(key);
     const route = this.state.route;
     if (
       route.kind === 'conversation' &&
       route.serverID === serverID &&
       route.sessionID === sessionID
     ) {
+      this.interactionGeneration += 1;
       this.setState('route', { kind: 'overview' });
+      if (this.state.overlay.kind === 'diff' || this.state.overlay.kind === 'form') {
+        this.closeOverlay();
+      }
       this.showNotice('This session was deleted on the server.', 'warn');
     }
   }
@@ -1739,9 +1755,20 @@ export class AppController {
   private async refreshInbox(
     sessionID: string,
     serverID: string = this.activeServerID(),
+    backend: Backend = this.backendFor(serverID),
   ): Promise<void> {
-    const items = await this.backendFor(serverID).listInbox(sessionID);
-    this.setState('inbox', this.keyFor(serverID, sessionID), items);
+    const key = this.keyFor(serverID, sessionID);
+    if (this.state.sessions[key] === undefined || !this.isRegisteredBackend(serverID, backend)) {
+      return;
+    }
+    const items = await backend.listInbox(sessionID);
+    if (this.state.sessions[key] !== undefined && this.isRegisteredBackend(serverID, backend)) {
+      this.setState('inbox', key, items);
+    }
+  }
+
+  private isRegisteredBackend(serverID: string, backend: Backend): boolean {
+    return this.deps.backendFor === undefined || this.deps.backendFor(serverID) === backend;
   }
 
   private async refreshInputRequests(
@@ -1749,15 +1776,27 @@ export class AppController {
     serverID: string = this.activeServerID(),
   ): Promise<void> {
     const backend = this.backendFor(serverID);
+    const key = this.keyFor(serverID, sessionID);
+    const revision = ++this.inputRequestRevision;
+    this.inputRequestRevisions.set(key, revision);
     const [permissions, forms] = await Promise.all([
       backend.listPermissions(sessionID),
       backend.listForms(sessionID),
     ]);
-    const key = this.keyFor(serverID, sessionID);
+    if (this.inputRequestRevisions.get(key) !== revision) return;
+    if (!this.isRegisteredBackend(serverID, backend)) return;
     batch(() => {
       this.setState('permissions', key, permissions);
       this.setState('forms', key, forms);
-      if (permissions.length === 0) this.setState('permissionChoice', 0);
+      const route = this.state.route;
+      if (
+        permissions.length === 0 &&
+        route.kind === 'conversation' &&
+        route.serverID === serverID &&
+        route.sessionID === sessionID
+      ) {
+        this.setState('permissionChoice', 0);
+      }
     });
   }
 
@@ -2000,6 +2039,7 @@ export class AppController {
 
   /** View change only: no backend mutation. Drafts are kept per route. */
   openSession(sessionID: string, serverID: string = this.serverID): void {
+    this.interactionGeneration += 1;
     this.debugLog.write('route', { kind: 'conversation', serverID, sessionID });
     this.saveDraft();
     this.invalidateCompletion();
@@ -2034,6 +2074,7 @@ export class AppController {
    * first prompt is submitted, so opening margarita never leaves empty sessions behind.
    */
   startNewSession(directory: string, serverID: string = this.serverID): void {
+    this.interactionGeneration += 1;
     this.debugLog.write('route', { kind: 'new', serverID, directory });
     this.saveDraft();
     this.invalidateCompletion();
@@ -2054,6 +2095,7 @@ export class AppController {
    * the first row; typing still goes straight to the new-session prompt.
    */
   openOverview(): void {
+    this.interactionGeneration += 1;
     this.debugLog.write('route', { kind: 'overview' });
     this.saveDraft();
     this.invalidateCompletion();
@@ -2728,7 +2770,7 @@ export class AppController {
       if (match !== undefined) this.setState('overlay', { ...overlay, before: match.index });
       return;
     }
-    this.setState('overlay', {
+    this.setOverlay({
       kind: 'history-search',
       query: '',
       before: this.state.history.entries.length,
@@ -3917,6 +3959,11 @@ export class AppController {
 
   /** Drops every cached frontend record for one server without touching other servers. */
   private forgetServer(serverID: string): void {
+    const route = this.state.route;
+    if (route.kind !== 'overview' && route.serverID === serverID) this.openOverview();
+    for (const key of this.inputRequestRevisions.keys()) {
+      if (parseSessionKey(key).serverID === serverID) this.inputRequestRevisions.delete(key);
+    }
     for (const key of this.jobRefreshEpoch.keys()) {
       if (parseSessionKey(key).serverID === serverID) this.invalidateJobRefresh(key);
     }
@@ -4582,6 +4629,7 @@ export class AppController {
       this.showNotice('Open a session to export it.', 'warn');
       return;
     }
+    const clientCwd = this.deps.clientCwd ?? this.deps.cwd;
     // Exports are always written to the LOCAL machine. Never derive the output location
     // from session.directory, which is a path on the (possibly remote) server and may use
     // a different OS's syntax (#89). Relative targets resolve against the local cwd;
@@ -4597,29 +4645,69 @@ export class AppController {
     ) {
       this.showNotice(
         `Refusing to export to "${target}": that looks like a ${serverPathShape(target)} path on the ` +
-          `remote server, but exports are written locally to ${this.deps.cwd}. Use a local path.`,
+          `remote server, but exports are written locally to ${clientCwd}. Use a local path.`,
         'warn',
       );
       return;
     }
     const paths = this.deps.platform === 'win32' ? win32 : posix;
     const fileName = target === '' ? `marg-${session.id}.json` : target;
-    const outputPath = paths.resolve(this.deps.cwd, fileName);
+    const outputPath = paths.resolve(clientCwd, fileName);
     try {
+      const backend = this.backendFor(session.serverID);
+      const originSession = structuredClone(unwrap(session));
+      const currentGoal = this.state.goals[this.keyFor(session.serverID, session.id)];
+      const goal = currentGoal === undefined ? undefined : structuredClone(unwrap(currentGoal));
       const pages: TranscriptMessage[][] = [];
+      const cursors = new Set<string>();
       let cursor: string | undefined;
       do {
-        const page = await this.backend.listMessages(session.id, exportPageSize, cursor);
+        const page = await backend.listMessages(originSession.id, exportPageSize, cursor);
         pages.unshift(page.messages);
-        cursor = page.olderCursor;
+        if (
+          (page.hasEarlier === true || page.retryable === true) &&
+          page.olderCursor === undefined
+        ) {
+          throw new Error('The server reported earlier messages without a continuation cursor.');
+        }
+        cursor =
+          page.hasEarlier === false && page.retryable !== true ? undefined : page.olderCursor;
+        if (cursor !== undefined) {
+          if (cursors.has(cursor)) throw new Error('The server repeated a transcript cursor.');
+          cursors.add(cursor);
+        }
       } while (cursor !== undefined);
-      const goal = this.state.goals[this.keyFor(session.serverID, session.id)];
+      // Repeated messages are only valid at an adjacent page boundary. Reject other
+      // overlaps because their order cannot be established from this pagination result.
+      const messages: TranscriptMessage[] = [];
+      const seen = new Set<string>();
+      for (const page of pages) {
+        if (new Set(page.map((message) => message.id)).size !== page.length) {
+          throw new Error('The server returned duplicate messages within a transcript page.');
+        }
+        let overlap = 0;
+        while (overlap < page.length && seen.has(page[overlap]?.id ?? '')) overlap += 1;
+        if (
+          page.slice(overlap).some((message) => seen.has(message.id)) ||
+          overlap > messages.length ||
+          page
+            .slice(0, overlap)
+            .some(
+              (message, index) => message.id !== messages[messages.length - overlap + index]?.id,
+            )
+        ) {
+          throw new Error('The server returned transcript pages in an inconsistent order.');
+        }
+        if (overlap > 0) messages.splice(messages.length - overlap, overlap);
+        messages.push(...page);
+        for (const message of page) seen.add(message.id);
+      }
       const log = {
         format: 'margarita.chatlog.v1',
         exportedAt: new Date(this.deps.now()).toISOString(),
-        server: this.backend.baseUrl,
-        session,
-        messages: pages.flat(),
+        server: backend.baseUrl,
+        session: originSession,
+        messages,
         ...(goal === undefined ? {} : { goal }),
       };
       const write =
@@ -4648,21 +4736,44 @@ export class AppController {
       return;
     }
     // A pending compaction is already in the inbox; requesting again would be a no-op.
-    const pending = (this.state.inbox[this.keyFor(session.serverID, session.id)] ?? []).some(
-      (item) => item.kind === 'compaction',
-    );
+    const key = this.keyFor(session.serverID, session.id);
+    const pending =
+      this.pendingCompactions.has(key) ||
+      (this.state.inbox[key] ?? []).some((item) => item.kind === 'compaction');
     if (pending) {
       this.showNotice('Compaction already pending', 'dim');
       return;
     }
+    this.pendingCompactions.add(key);
+    let backend: Backend;
     try {
-      await this.backend.compactSession(session.id);
+      backend = this.backendFor(session.serverID);
+      await backend.compactSession(session.id);
     } catch (error) {
-      this.showNotice(`Compaction not requested (connection problem): ${errorText(error)}`, 'warn');
+      this.pendingCompactions.delete(key);
+      this.showNotice(
+        `Compaction request could not be confirmed (connection problem): ${errorText(error)}`,
+        'warn',
+      );
       return;
     }
-    this.showNotice('Compaction requested', 'dim');
-    await this.refreshInbox(session.id);
+    const current = this.currentSession();
+    this.showNotice(
+      current?.serverID === session.serverID && current.id === session.id
+        ? 'Compaction requested'
+        : `Compaction requested for ${session.id} on ${session.serverID}`,
+      'dim',
+    );
+    try {
+      await this.refreshInbox(session.id, session.serverID, backend);
+    } catch (error) {
+      this.showNotice(
+        `Compaction requested, but inbox refresh failed: ${errorText(error)}`,
+        'warn',
+      );
+    } finally {
+      this.pendingCompactions.delete(key);
+    }
   }
 
   isRunning(): boolean {
@@ -5043,6 +5154,7 @@ export class AppController {
     }
     const base: DiffOverlay = {
       kind: 'diff',
+      serverID: session.serverID,
       sessionID: session.id,
       scope,
       loading: true,
@@ -5051,22 +5163,43 @@ export class AppController {
       open: false,
       offset: 0,
     };
-    this.setState('overlay', base);
+    const request = ++this.diffRequestSeq;
+    this.setOverlay(base);
+    const generation = this.interactionGeneration;
     try {
-      const files = await this.backend.sessionDiff(session.id, range);
-      if (this.isDiffOverlay(session.id, scope)) {
+      const files = await this.backendFor(session.serverID).sessionDiff(session.id, range);
+      if (this.isDiffOverlay(session.serverID, session.id, scope, request, generation)) {
         this.setState('overlay', { ...base, loading: false, files });
       }
     } catch (error) {
-      if (this.isDiffOverlay(session.id, scope)) {
+      if (this.isDiffOverlay(session.serverID, session.id, scope, request, generation)) {
         this.setState('overlay', { ...base, loading: false, error: errorText(error) });
       }
     }
   }
 
-  private isDiffOverlay(sessionID: string, scope: DiffScope): boolean {
+  private isDiffOverlay(
+    serverID: string,
+    sessionID: string,
+    scope: DiffScope,
+    request: number,
+    generation: number,
+  ): boolean {
     const overlay = this.state.overlay;
-    return overlay.kind === 'diff' && overlay.sessionID === sessionID && overlay.scope === scope;
+    const route = this.state.route;
+    return (
+      generation === this.interactionGeneration &&
+      request === this.diffRequestSeq &&
+      route.kind === 'conversation' &&
+      route.serverID === serverID &&
+      route.sessionID === sessionID &&
+      overlay.kind === 'diff' &&
+      overlay.serverID === serverID &&
+      overlay.sessionID === sessionID &&
+      overlay.scope === scope &&
+      this.state.sessions[this.keyFor(serverID, sessionID)] !== undefined &&
+      this.serverIDs().includes(serverID)
+    );
   }
 
   /** List: ↑↓ select, Enter open, t toggles turn/session. Patch: ↑↓/PgUp/PgDn scroll, ← back. */
@@ -5105,11 +5238,15 @@ export class AppController {
   }
 
   openForm(): void {
+    const session = this.currentSession();
     const form = this.pendingForm();
-    if (form === undefined) return;
-    this.setState('overlay', {
+    if (session === undefined || form === undefined) return;
+    this.formToken += 1;
+    this.setOverlay({
       kind: 'form',
-      sessionID: form.sessionID,
+      serverID: session.serverID,
+      sessionID: session.id,
+      requestToken: this.formToken,
       editor: startEditor(form),
     });
   }
@@ -5118,7 +5255,7 @@ export class AppController {
   openFormRequest(): FormRequest | undefined {
     const overlay = this.state.overlay;
     if (overlay.kind !== 'form') return undefined;
-    return (this.state.forms[this.keyFor(this.activeServerID(), overlay.sessionID)] ?? []).find(
+    return (this.state.forms[this.keyFor(overlay.serverID, overlay.sessionID)] ?? []).find(
       (form) => form.id === overlay.editor.formID,
     );
   }
@@ -5130,42 +5267,68 @@ export class AppController {
       this.closeOverlay();
       return;
     }
+    // Solid store objects are live proxies. Snapshot the request owner before replacing
+    // the overlay, since navigation may otherwise mutate the captured reference.
+    const origin = { ...overlay, editor: { ...overlay.editor } };
     const { editor, outcome } = editorKey(form, overlay.editor, key);
     if (outcome === 'close') {
       this.closeOverlay();
       return;
     }
-    this.setState('overlay', { kind: 'form', sessionID: overlay.sessionID, editor });
+    this.setState('overlay', { ...overlay, editor });
     if (outcome === 'submit') {
-      void this.finishForm(form, () =>
-        this.backend.replyForm(form.sessionID, form.id, buildAnswer(form, editor.answers)),
+      const answer = buildAnswer(form, editor.answers);
+      void this.finishForm(origin, (backend) =>
+        backend.replyForm(origin.sessionID, origin.editor.formID, answer),
       );
     } else if (outcome === 'decline') {
-      void this.finishForm(form, () => this.backend.cancelForm(form.sessionID, form.id));
+      void this.finishForm(origin, (backend) =>
+        backend.cancelForm(origin.sessionID, origin.editor.formID),
+      );
     }
   }
 
-  private async finishForm(form: FormRequest, send: () => Promise<void>): Promise<void> {
-    if (this.state.answering) return;
-    this.setState('answering', true);
+  private async finishForm(
+    origin: Extract<Overlay, { kind: 'form' }>,
+    send: (backend: Backend) => Promise<void>,
+  ): Promise<void> {
+    const formID = origin.editor.formID;
+    const key = JSON.stringify([origin.serverID, origin.sessionID, formID]);
+    if (this.answeringForms.has(key)) return;
+    this.answeringForms.add(key);
+    const closeOrigin = () => {
+      const current = this.state.overlay;
+      if (
+        current.kind === 'form' &&
+        current.serverID === origin.serverID &&
+        current.sessionID === origin.sessionID &&
+        current.editor.formID === formID &&
+        current.requestToken === origin.requestToken
+      ) {
+        this.closeOverlay();
+      }
+    };
     try {
-      await send();
-      this.closeOverlay();
+      const backend = this.backendFor(origin.serverID);
+      await send(backend);
+      closeOrigin();
     } catch (error) {
       if (
         error instanceof BackendError &&
         (error.kind === 'not-found' || error.kind === 'conflict')
       ) {
-        this.closeOverlay();
+        closeOrigin();
         this.showNotice('Already answered elsewhere.', 'dim');
       } else {
         this.showNotice(errorText(error), 'error');
       }
     }
     try {
-      await this.refreshInputRequests(form.sessionID);
+      await this.refreshInputRequests(origin.sessionID, origin.serverID);
+    } catch (error) {
+      this.showNotice(`Could not refresh form requests: ${errorText(error)}`, 'error');
     } finally {
-      this.setState('answering', false);
+      this.answeringForms.delete(key);
     }
   }
 
@@ -5315,6 +5478,7 @@ export class AppController {
   }
 
   setOverlay(overlay: Overlay): void {
+    this.interactionGeneration += 1;
     // Opening any overlay settles a pending footer open: the request that produced it already
     // succeeded, and a later close/Escape must not be mistaken for a toggle-off double click.
     if (overlay.kind !== 'none') this.pendingPickerOpen = undefined;
@@ -5322,6 +5486,7 @@ export class AppController {
   }
 
   closeOverlay(): void {
+    this.interactionGeneration += 1;
     const overlay = this.state.overlay;
     if (overlay.kind === 'rewind-picker' && this.state.rewindPending) {
       this.setState('rewindPending', false);
@@ -5850,25 +6015,49 @@ export class AppController {
   private async forkCurrent(): Promise<void> {
     const session = this.requireSession();
     if (session === undefined) return;
+    const { serverID, id: sessionID } = session;
+    const generation = this.interactionGeneration;
+    const currentGoal = this.state.goals[this.keyFor(serverID, sessionID)];
+    const doc = currentGoal === undefined ? undefined : structuredClone(unwrap(currentGoal));
     try {
-      const forked = await this.backend.forkSession(session.id);
-      const forkServerID = forked.serverID ?? session.serverID;
-      this.setState('sessions', this.keyFor(forkServerID, forked.id), {
-        ...forked,
-        serverID: forkServerID,
-      });
-      const doc = this.state.goals[this.keyFor(session.serverID, session.id)];
+      const backend = this.backendFor(serverID);
+      const forked = await backend.forkSession(sessionID);
+      const forkKey = this.keyFor(serverID, forked.id);
+      if (this.isRegisteredBackend(serverID, backend)) {
+        this.setState('sessions', forkKey, { ...forked, serverID });
+      }
+      let goalError: string | undefined;
       if (doc !== undefined) {
         // Copy, never alias: the fork gets its own sidecar file.
         const copy = forkGoalPlan(doc, forked.id);
-        this.setState(
-          'goals',
-          this.keyFor(forkServerID, forked.id),
-          await this.goalStore.save(copy).catch(() => copy),
-        );
+        try {
+          const saved = await this.goalStore.save(copy);
+          if (
+            this.isRegisteredBackend(serverID, backend) &&
+            this.state.sessions[forkKey] !== undefined
+          ) {
+            this.setState('goals', forkKey, saved);
+          }
+        } catch (error) {
+          goalError = errorText(error);
+        }
       }
-      this.openSession(forked.id, forkServerID);
-      this.showNotice('Forked into a new session', 'dim');
+      const current = this.currentSession();
+      if (
+        this.interactionGeneration === generation &&
+        current?.serverID === serverID &&
+        current.id === sessionID &&
+        this.isRegisteredBackend(serverID, backend) &&
+        this.state.sessions[forkKey] !== undefined
+      ) {
+        this.openSession(forked.id, serverID);
+      }
+      this.showNotice(
+        goalError === undefined
+          ? 'Forked into a new session'
+          : `Fork created, but its goal could not be saved: ${goalError}`,
+        goalError === undefined ? 'dim' : 'warn',
+      );
     } catch (error) {
       this.showNotice(`Fork failed: ${errorText(error)}`, 'error');
     }

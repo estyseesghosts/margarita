@@ -50,6 +50,8 @@ export type ProductionAssemblyInput = Readonly<{
   config: AppConfig;
   platform: NodeJS.Platform;
   cwd: string;
+  /** Real client launch directory, even when cwd names a remote project. */
+  clientCwd?: string;
   version: string;
   paths: AppPaths;
   env: NodeJS.ProcessEnv;
@@ -244,6 +246,7 @@ export async function createProductionAssembly(
     localState: input.localState,
     platform: input.platform,
     cwd: input.cwd,
+    clientCwd: input.clientCwd ?? process.cwd(),
     version: input.version,
     now: input.now ?? Date.now,
     saveLocalState: (state) =>

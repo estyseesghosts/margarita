@@ -117,6 +117,53 @@ describe('sentence punctuation around mentions (#164)', () => {
       'other',
     ]);
   });
+
+  test('comma-adjacent references have independent spans and completion', () => {
+    for (const text of [
+      '@reviewer,@other',
+      '(@reviewer,@other)',
+      '😀 @reviewer,@src/a.ts#2-4,@C:\\work\\b.ts',
+    ]) {
+      const mentions = findFileMentions(text);
+      const expected = text.includes('src/')
+        ? ['reviewer', 'src/a.ts', 'C:\\work\\b.ts']
+        : ['reviewer', 'other'];
+      expect(mentions.map((mention) => mention.path)).toEqual(expected);
+      for (const mention of mentions) {
+        expect(text.slice(mention.start, mention.end)).toBe(mention.text);
+      }
+      if (text.includes('src/')) {
+        expect(mentions[1]?.range).toEqual({ start: 2, end: 4 });
+        expect(
+          agentMentions(mentions, new Set(['reviewer', 'src/a.ts'])).map((m) => m.path),
+        ).toEqual(['reviewer']);
+      }
+    }
+    expect(activeMention('@reviewer,@oth', '@reviewer,@oth'.length)).toEqual({
+      path: 'oth',
+      start: 10,
+      end: 14,
+      text: '@oth',
+    });
+  });
+
+  test('quoted commas and following punctuation remain separate from adjacent mentions', () => {
+    const text = '😀 "@docs/a,b.md",@reviewer and `@src/x,y.ts`,@other';
+    const mentions = findFileMentions(text);
+    expect(mentions.map((mention) => mention.path)).toEqual([
+      'docs/a,b.md',
+      'reviewer',
+      'src/x,y.ts',
+      'other',
+    ]);
+    for (const mention of mentions) {
+      expect(text.slice(mention.start, mention.end)).toBe(mention.text);
+    }
+    expect(findFileMentions('mail a@b.com,@reviewer')).toEqual([
+      { path: 'reviewer', start: 13, end: 22, text: '@reviewer' },
+    ]);
+    expect(findFileMentions('punctuation @, and @.')).toEqual([]);
+  });
 });
 
 describe('agent mention classification (issue #99)', () => {

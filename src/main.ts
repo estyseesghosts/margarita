@@ -242,6 +242,7 @@ async function execute(options: CliOptions, debugLog: DebugLog): Promise<number>
     config: configLoad.config,
     platform,
     cwd,
+    clientCwd: process.cwd(),
     version,
     paths: { stateFile: paths.stateFile, serversFile: paths.serversFile, stateDir: paths.stateDir },
     env,

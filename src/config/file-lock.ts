@@ -1,29 +1,22 @@
-/**
- * Cross-process advisory lockfiles for Margarita's own state files.
- *
- * A lock carries a unique owner token and the owning PID. A lock is never stolen merely
- * because it is old: a live-but-paused writer keeps its lock (#157). Only a lock whose owner
- * process is confirmed dead may be recovered, and release removes only a lock still carrying
- * our own token, so a stale writer can never delete a replacement lock.
- */
-
+/** SQLite's OS-backed writer lock serializes Margarita state updates across processes. */
+import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
-import { readFile, unlink, writeFile } from 'node:fs/promises';
+import { link, lstat, unlink, writeFile } from 'node:fs/promises';
 
 import { isRecord } from '../domain/backend-event.ts';
+
+const applicationID = 1_296_126_535;
 
 export type FileLockOptions = Readonly<{
   timeoutMs?: number;
   retryMs?: number;
   now?: () => number;
-  /** Injectable for deterministic tests; defaults to a POSIX/Windows process check. */
-  isAlive?: (pid: number) => boolean;
 }>;
 
 export type FileLock = Readonly<{
   /** Unique to this acquisition; safe to use in temp paths. */
   token: string;
-  /** Removes the lock only if we still own it. */
+  /** Releases this acquisition without removing the shared lock file. */
   release: () => Promise<void>;
 }>;
 
@@ -34,36 +27,57 @@ export class LockTimeoutError extends Error {
   }
 }
 
-type LockRecord = Readonly<{ pid: number; token: string; acquiredAt: number }>;
-
-function defaultIsAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (cause) {
-    // EPERM means the process exists but cannot be signalled — still alive.
-    if (isRecord(cause) && cause['code'] === 'EPERM') return true;
-    return false;
+export class InvalidLockError extends Error {
+  constructor(
+    readonly lockPath: string,
+    cause?: unknown,
+  ) {
+    super(
+      `Invalid or legacy lock file ${lockPath}. Stop all Margarita processes, remove this lock file, and restart.`,
+      { cause },
+    );
+    this.name = 'InvalidLockError';
   }
 }
 
-async function readRecord(lockPath: string): Promise<LockRecord | undefined> {
+function hasCode(error: unknown, code: string): boolean {
+  return isRecord(error) && error['code'] === code;
+}
+
+/** Publish a complete database atomically, so no contender sees a partially initialized file. */
+async function ensureLockFile(lockPath: string): Promise<void> {
   try {
-    const parsed: unknown = JSON.parse(await readFile(lockPath, 'utf8'));
-    if (!isRecord(parsed)) return undefined;
-    const { pid, token, acquiredAt } = parsed;
-    if (typeof pid !== 'number' || typeof token !== 'string' || typeof acquiredAt !== 'number')
-      return undefined;
-    return { pid, token, acquiredAt };
-  } catch {
-    return undefined;
+    await lstat(lockPath);
+    return;
+  } catch (cause) {
+    if (!hasCode(cause, 'ENOENT')) throw cause;
+  }
+
+  const memory = new Database(':memory:');
+  let image: Buffer;
+  try {
+    memory.exec(`PRAGMA application_id = ${applicationID}`);
+    image = memory.serialize();
+  } finally {
+    memory.close(true);
+  }
+  const stagingPath = `${lockPath}.${randomUUID()}.tmp`;
+  await writeFile(stagingPath, image, { flag: 'wx', mode: 0o600 });
+  try {
+    try {
+      await link(stagingPath, lockPath);
+    } catch (cause) {
+      if (!hasCode(cause, 'EEXIST')) throw cause;
+    }
+  } finally {
+    await unlink(stagingPath);
   }
 }
 
 /**
- * Acquires the lock at `lockPath`, retrying with a bounded timeout. Inject `now`/`isAlive`
- * in tests so live-lock and dead-owner recovery are deterministic.
+ * Acquire a SQLite writer transaction with a bounded, asynchronously retried wait. SQLite
+ * retains the operating-system lock for the lifetime of this connection and releases it on
+ * close or process exit. The pathname is never removed during acquisition or release.
  */
 export async function acquireFileLock(
   lockPath: string,
@@ -71,36 +85,46 @@ export async function acquireFileLock(
 ): Promise<FileLock> {
   const timeoutMs = options.timeoutMs ?? 5_000;
   const retryMs = options.retryMs ?? 25;
-  const now = options.now ?? Date.now;
-  const isAlive = options.isAlive ?? defaultIsAlive;
-  const token = randomUUID();
+  const now = options.now ?? (() => performance.now());
   const deadline = now() + timeoutMs;
+  await ensureLockFile(lockPath);
+  const database = new Database(lockPath, { readwrite: true, create: false });
 
-  for (;;) {
-    const record: LockRecord = { pid: process.pid, token, acquiredAt: now() };
+  try {
+    database.exec('PRAGMA busy_timeout = 0');
+    let identity: unknown;
     try {
-      await writeFile(lockPath, `${JSON.stringify(record)}\n`, { flag: 'wx', mode: 0o600 });
+      identity = database.query('PRAGMA application_id').get();
     } catch (cause) {
-      if (!isRecord(cause) || cause['code'] !== 'EEXIST') throw cause;
-      const seen = await readRecord(lockPath);
-      // A live owner — even one paused far past any age threshold — is never displaced.
-      if (seen !== undefined && !isAlive(seen.pid)) {
-        // Re-check before removing so a concurrently replaced lock is left alone.
-        const current = await readRecord(lockPath);
-        if (current?.token === seen.token) await unlink(lockPath).catch(() => {});
-        continue;
+      if (hasCode(cause, 'SQLITE_NOTADB') || hasCode(cause, 'SQLITE_CORRUPT')) {
+        throw new InvalidLockError(lockPath, cause);
       }
-      if (now() >= deadline) throw new LockTimeoutError(lockPath);
-      await Bun.sleep(retryMs);
-      continue;
+      throw cause;
     }
-    return {
-      token,
-      async release() {
-        const current = await readRecord(lockPath);
-        if (current?.token !== token) return;
-        await unlink(lockPath).catch(() => {});
-      },
-    };
+    if (!isRecord(identity) || identity['application_id'] !== applicationID) {
+      throw new InvalidLockError(lockPath);
+    }
+
+    for (;;) {
+      try {
+        database.exec('BEGIN IMMEDIATE');
+        break;
+      } catch (cause) {
+        if (!hasCode(cause, 'SQLITE_BUSY')) throw cause;
+        const remaining = deadline - now();
+        if (remaining <= 0) throw new LockTimeoutError(lockPath);
+        await Bun.sleep(Math.min(retryMs, remaining));
+      }
+    }
+  } catch (cause) {
+    database.close(true);
+    throw cause;
   }
+
+  return {
+    token: randomUUID(),
+    async release() {
+      database.close(true);
+    },
+  };
 }

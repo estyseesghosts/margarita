@@ -15,7 +15,8 @@ export type FileMention = Readonly<{
 // A mention may follow prose punctuation (e.g. `(@reviewer)` or `@a,@b`). Quoting/backtick
 // delimiters additionally let a filename contain its own punctuation (#164).
 const mentionPrefix = '[\\s(\\[{`"\',;:]';
-const mentionPattern = new RegExp(`(^|${mentionPrefix})@([^\\s@]+)`, 'g');
+// Keep the prefix available to the next match when it separates adjacent mentions.
+const mentionPattern = new RegExp(`(?=(^|${mentionPrefix})@([^\\s@]+))`, 'g');
 const activeMentionPattern = new RegExp(`(^|${mentionPrefix})@([^\\s@]*)$`);
 const rangeSuffix = /#(\d+)-(\d+)$/;
 
@@ -31,10 +32,14 @@ const closingDelimiter: Readonly<Record<string, string>> = {
 
 function mentionIdentity(prefix: string, raw: string): string {
   const closing = closingDelimiter[prefix];
-  if (closing !== undefined && raw.endsWith(closing)) return raw.slice(0, -closing.length);
+  if (closing !== undefined) {
+    const closingIndex = raw.lastIndexOf(closing);
+    if (closingIndex >= 0 && /^[,;:!?)\]}.]*$/.test(raw.slice(closingIndex + 1))) {
+      return raw.slice(0, closingIndex);
+    }
+  }
   // Deterministic rule: these trailing marks are prose, never part of a bare mention.
-  // A sentence-ending period is dropped only as the final character (extensions survive).
-  return raw.replace(/[,;:!?)\]}]+$/, '').replace(/\.$/, '');
+  return raw.replace(/[,.;:!?)\]}]+$/, '');
 }
 
 /** Parse an optional, unambiguous `#start-end` line-range suffix (1-based, start <= end). */
@@ -78,6 +83,7 @@ export function findFileMentions(text: string): FileMention[] {
   for (const match of text.matchAll(mentionPattern)) {
     const prefix = match[1] ?? '';
     const identity = mentionIdentity(prefix, match[2] ?? '');
+    if (identity === '') continue;
     const start = match.index + prefix.length;
     // The span covers only the real mention (`@` + identity), never trailing prose.
     mentions.push(mentionFrom(identity, start, start + identity.length + 1));

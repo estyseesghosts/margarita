@@ -87,6 +87,9 @@ Terminals that cannot deliver clipboard images (for example Windows Terminal pas
 `/goal <objective>` · `/criteria a; b` · `/plan step one; step two` · `/plan propose` · `/plan adopt` ·
 `/rename` · `/fork` · `/revert` · `/diff [turn]` · `/export [file]` · `/compact`
 
+`/export` writes a JSON chat log on the client. Its default filename and relative paths
+resolve from the directory where Margarita was launched, including for remote sessions.
+
 `/goal` talks to the native OpenCode `opencode.goal` plugin (the same one OpenCode's own TUI drives): `/goal <objective>`, `/goal` status, `/goal pause|resume|clear`. Plans and acceptance criteria stay local under margarita's state directory and are supplemental; they are never mirrored to the agent.
 
 `/compact` asks OpenCode to compact the session's context through the same native v2 endpoint its own clients use. The request works while the session is idle or mid-turn; no prompt is sent to the agent, and the session's pending items are untouched. The request is only an acceptance — compaction progress and its result show up in the transcript ("Compacting conversation" → "Conversation compacted" or "Compaction failed").
@@ -157,6 +160,14 @@ names always come with their owning host attached.
 Profiles and goal/history data survive restarts; secrets live in Windows DPAPI, macOS
 Keychain, or the Linux Secret Service. If secure storage is unavailable, margarita refuses
 to persist a secret and asks you to re-pair or use the env var instead of writing plaintext.
+
+Margarita serializes local state writes using SQLite locks on persistent `.lock` files. The
+operating system releases a lock when its process exits, including after a crash. Keep the
+state directory on a local filesystem that supports SQLite locking and hard links. Do not
+delete or replace a lock file while Margarita is running. Stop all instances before switching
+to or from a version that uses JSON locks. Before starting the older version, remove the
+persistent SQLite `.lock` files. If a legacy or incomplete lock file prevents a state update,
+stop all instances, remove the specific `.lock` file named in the error, and restart.
 
 Paired credentials are not the same as server-side token revocation: `/unpair` removes local
 access only, and remote sessions keep running. Margarita never starts or stops remote

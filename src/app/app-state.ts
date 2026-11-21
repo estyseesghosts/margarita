@@ -49,7 +49,7 @@ export type Overlay =
   | { kind: 'history-search'; query: string; before: number }
   | { kind: 'servers'; index: number }
   | { kind: 'unpair-confirm'; serverID: string; label: string }
-  | { kind: 'form'; sessionID: string; editor: FormEditor }
+  | { kind: 'form'; serverID: string; sessionID: string; requestToken: number; editor: FormEditor }
   | { kind: 'tasks'; index: number; target?: { serverID: string; sessionID: string } }
   | {
       kind: 'rewind-picker';
@@ -76,6 +76,7 @@ export type Overlay =
 /** Read-only viewer over server-reported `session.diff` results. */
 export type DiffOverlay = {
   kind: 'diff';
+  serverID: string;
   sessionID: string;
   scope: DiffScope;
   loading: boolean;
@@ -138,7 +139,7 @@ export type AppState = {
     text: string;
     attachments?: Attachment[];
   }[];
-  /** True while a permission or form reply is in flight; blocks double submits. */
+  /** True while a permission reply is in flight; blocks double submits. */
   answering: boolean;
   /** Index of the focused permission choice in the permission card. */
   permissionChoice: number;

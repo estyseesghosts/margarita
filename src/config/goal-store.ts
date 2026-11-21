@@ -50,8 +50,8 @@ export function fileGoalStore(dir: string, now: () => string): GoalStore {
       const path = pathOf(ref);
       const lock = `${path}.lock`;
       await mkdir(dirname(path), { recursive: true });
-      // An owned lock makes read-compare-rename atomic across processes. A live holder is
-      // never displaced by age, and release removes only our own lock (#157).
+      // The SQLite lock makes read-compare-rename atomic across processes. The operating
+      // system releases the holder's lock on close or process exit.
       const owner = await acquireFileLock(lock);
       try {
         const current = await read(ref);
