@@ -86,7 +86,12 @@ import {
 import { greetingPeriod } from '../domain/greeting-time.ts';
 import { selectGreeting } from '../domain/greetings.ts';
 import { formatModelRef, type ModelSelection, sameModel } from '../domain/model-ref.ts';
-import { type CatalogModel, resolveModel } from '../domain/model-resolution.ts';
+import {
+  type CatalogModel,
+  type EffectiveModel,
+  resolveEffectiveModel,
+  resolveModel,
+} from '../domain/model-resolution.ts';
 import { sortModelCatalogForPicker } from '../domain/model-sort.ts';
 import {
   type GoalQueryFailure,
@@ -437,6 +442,8 @@ export class AppController {
     this.persisted = deps.localState;
     this.goalStore = deps.goalStore ?? memoryGoalStore();
     setState('recentModels', [...deps.localState.recentModels]);
+    setState('pinnedModels', { ...deps.localState.pinnedModels });
+    setState('lastModels', { ...deps.localState.lastModels });
     this.loadHistoryFor(deps.cwd);
   }
 
@@ -1546,7 +1553,6 @@ export class AppController {
     } catch (error) {
       return { ok: false, message: `could not apply the requested selection: ${errorText(error)}` };
     }
-    if (model !== undefined) this.rememberModel(model);
     await this.refreshSummary(ref.sessionID, serverID);
     return { ok: true };
   }
@@ -3337,24 +3343,22 @@ export class AppController {
     // A catalog model describes its available variants, not a selected variant:
     // comparing it with sameModel() falsely rejects every explicit #variant.
     // Never replace an explicit choice with a default: that could bill a different provider.
-    const scopedModel = model ?? this.state.defaultModel;
-    if (
-      scopedModel !== undefined &&
-      !this.state.models.some(
-        (available) =>
-          available.enabled &&
-          available.providerID === scopedModel.providerID &&
-          available.modelID === scopedModel.modelID &&
-          (scopedModel.variant === undefined || available.variants.includes(scopedModel.variant)),
-      )
-    ) {
+    const resolution = this.resolveModelFor(serverID, directory, model);
+    if (resolution.kind === 'blocked') {
       this.setState('admitting', false);
       this.showNotice(
-        `Model ${formatModelRef(scopedModel)} is unavailable for ${directory} on ${serverID}. No prompt sent.`,
+        `Model ${formatModelRef(resolution.model)} is unavailable for ${directory} on ${serverID}. No prompt sent.`,
         'error',
       );
       return undefined;
     }
+    const scopedModel = resolution.kind === 'model' ? resolution.model : undefined;
+    // The server default is passed through as before; every other source is a deliberate
+    // choice and must be confirmed by the server before anything billable is admitted.
+    const confirmModel =
+      resolution.kind === 'model' && resolution.source !== 'server-default'
+        ? resolution.model
+        : undefined;
     let session: SessionSummary;
     try {
       session = await this.backendFor(serverID).createSession({
@@ -3373,27 +3377,28 @@ export class AppController {
       this.showNotice(errorText(error), 'error');
       return undefined;
     }
-    if (model !== undefined) {
+    if (confirmModel !== undefined) {
       // V2 resolves a missing model at first prompt. Verify the server actually stored
       // our explicit selection before admitting anything billable. Repair an ignored
       // create-time selection once, and fail closed if it still does not match.
       const backend = this.backendFor(serverID);
       try {
         let confirmed = await backend.getSession(session.id);
-        if (confirmed.model === undefined || !sameModel(confirmed.model, model)) {
-          await backend.switchModel(session.id, model);
+        if (confirmed.model === undefined || !sameModel(confirmed.model, confirmModel)) {
+          await backend.switchModel(session.id, confirmModel);
           confirmed = await backend.getSession(session.id);
         }
-        if (confirmed.model === undefined || !sameModel(confirmed.model, model)) {
+        if (confirmed.model === undefined || !sameModel(confirmed.model, confirmModel)) {
           throw new Error(
             `server reported ${confirmed.model === undefined ? 'no model' : formatModelRef(confirmed.model)}`,
           );
         }
         session = confirmed;
+        this.recordConfirmedModel(serverID, directory, confirmModel);
       } catch (error) {
         this.setState('admitting', false);
         this.showNotice(
-          `Session ${session.id} created, but model ${formatModelRef(model)} was not confirmed. Prompt not sent: ${errorText(error)}`,
+          `Session ${session.id} created, but model ${formatModelRef(confirmModel)} was not confirmed. Prompt not sent: ${errorText(error)}`,
           'error',
         );
         return session.id;
@@ -3727,6 +3732,7 @@ export class AppController {
         return;
       case 'model':
         if (args === '') await this.openModelPicker();
+        else if (/^default(\s|$)/.test(args)) await this.modelDefaultCommand(args.slice(7).trim());
         else await this.setModelFromRef(args);
         return;
       case 'effort':
@@ -4303,7 +4309,9 @@ export class AppController {
 
   /** The model whose variants the effort picker edits: conversation first, overview default next. */
   private effectiveModel(): ModelSelection | undefined {
-    return this.currentSession()?.model ?? this.state.overview.model ?? this.state.defaultModel;
+    const session = this.currentSession();
+    if (session?.model !== undefined) return session.model;
+    return this.modelFor(this.activeServerID(), this.currentDirectory()).model;
   }
 
   /** Currently effective variant; `undefined` means the server-defined default. */
@@ -4390,8 +4398,7 @@ export class AppController {
 
   private async setEffort(variant: string): Promise<void> {
     if (!(await this.ensureCurrentModelCatalog())) return;
-    const current =
-      this.currentSession()?.model ?? this.state.overview.model ?? this.state.defaultModel;
+    const current = this.effectiveModel();
     if (current === undefined) {
       this.showNotice('No model selected.', 'warn');
       return;
@@ -4444,15 +4451,163 @@ export class AppController {
         'dim',
       );
     }
-    this.rememberModel(reconciled);
     const session = this.currentSession();
     if (session === undefined) {
+      // An unsent draft selection is a preference, not confirmed usage: it is remembered only
+      // once the server confirms it on a created session (#191).
       // Solid merges objects on assignment; clear first so a dropped variant really disappears.
       this.setState('overview', 'model', undefined);
       this.setState('overview', 'model', reconciled);
       return;
     }
     await this.switchSessionModel(session, reconciled);
+  }
+
+  // ---------------------------------------------------------------- effective model
+
+  /** Stable per-host, per-project scope for remembered and pinned models (#189). */
+  private modelScope(serverID: string, directory: string): string {
+    return `${serverID}|${directoryKey(directory, this.platformFor(serverID))}`;
+  }
+
+  /**
+   * The one resolver behind the welcome panel, footer, pickers and createSession: it only
+   * trusts a catalog verified for this exact (server, directory) scope.
+   */
+  private resolveModelFor(
+    serverID: string,
+    directory: string,
+    selection?: ModelSelection,
+  ): EffectiveModel {
+    const directoryID = directoryKey(directory, this.platformFor(serverID));
+    const scope = `${serverID}|${directoryID}`;
+    const ready =
+      this.state.catalogServerID === serverID &&
+      this.state.catalogDirectory === directoryID &&
+      !this.state.catalogLoading &&
+      this.state.catalogError === undefined;
+    const project = this.state.overview.project;
+    const draft =
+      selection ??
+      (project.serverID === serverID && project.directory === directory
+        ? this.state.overview.model
+        : undefined);
+    return resolveEffectiveModel({
+      catalogReady: ready,
+      catalog: this.state.models,
+      selection: draft,
+      pinnedProject: this.state.pinnedModels[`project:${scope}`],
+      pinnedUser: this.state.pinnedModels['user'],
+      lastUsed: this.state.lastModels[scope],
+      serverDefault: this.state.defaultModel,
+    });
+  }
+
+  /**
+   * What the UI shows as the model for a conversation in this scope. Existing sessions show
+   * only the server-confirmed model; a new session shows the model that would be sent.
+   */
+  modelFor(
+    serverID: string,
+    directory: string,
+    existing = false,
+  ): { model?: ModelSelection; status?: 'loading' | 'unavailable' } {
+    const resolution = this.resolveModelFor(serverID, directory);
+    if (resolution.kind === 'loading') {
+      return { status: this.state.catalogError === undefined ? 'loading' : 'unavailable' };
+    }
+    if (existing) {
+      return this.state.defaultModel === undefined ? {} : { model: this.state.defaultModel };
+    }
+    if (resolution.kind === 'blocked') return { status: 'unavailable' };
+    return resolution.kind === 'model' ? { model: resolution.model } : {};
+  }
+
+  /** Records a server-confirmed model as last used for its scope and in the recents (#191). */
+  private recordConfirmedModel(serverID: string, directory: string, model: ModelSelection): void {
+    this.rememberModel(model);
+    const lastModels = {
+      ...this.state.lastModels,
+      [this.modelScope(serverID, directory)]: model,
+    };
+    this.setState('lastModels', reconcile(lastModels));
+    this.persist({ lastModels });
+  }
+
+  private async modelDefaultCommand(args: string): Promise<void> {
+    const [action = 'show', scopeWord, ...extra] = args.split(/\s+/).filter((word) => word !== '');
+    const projectScope = scopeWord === 'project';
+    if (
+      !['set', 'clear', 'show'].includes(action) ||
+      extra.length > 0 ||
+      (scopeWord !== undefined && scopeWord !== 'user' && !projectScope)
+    ) {
+      this.showNotice(
+        'Usage: /model default [show] | set [user|project] | clear [user|project]',
+        'warn',
+      );
+      return;
+    }
+    if (!(await this.ensureCurrentModelCatalog())) return;
+    const serverID = this.activeServerID();
+    const directory = this.currentDirectory();
+    const pinProjectKey = `project:${this.modelScope(serverID, directory)}`;
+    const key = projectScope ? pinProjectKey : 'user';
+    const label = projectScope ? 'this project' : 'all projects';
+    if (action === 'show') {
+      const resolution = this.resolveModelFor(serverID, directory);
+      const pins = this.state.pinnedModels;
+      const userPin = pins['user'];
+      const projectPin = pins[pinProjectKey];
+      const pinText = [
+        userPin === undefined ? undefined : `user pin ${formatModelRef(userPin)}`,
+        projectPin === undefined ? undefined : `project pin ${formatModelRef(projectPin)}`,
+      ].filter((part) => part !== undefined);
+      const current =
+        resolution.kind === 'model'
+          ? `${formatModelRef(resolution.model)} (${resolution.source})`
+          : resolution.kind === 'blocked'
+            ? `${formatModelRef(resolution.model)} is unavailable (${resolution.source})`
+            : 'no model yet';
+      this.showNotice(
+        `New sessions use: ${current} · ${pinText.length === 0 ? 'nothing pinned' : pinText.join(' · ')}`,
+        'dim',
+      );
+      return;
+    }
+    if (action === 'clear') {
+      if (this.state.pinnedModels[key] === undefined) {
+        this.showNotice(`No model is pinned for ${label}.`, 'dim');
+        return;
+      }
+      const next = { ...this.state.pinnedModels };
+      delete next[key];
+      this.setState('pinnedModels', reconcile(next));
+      this.persist({ pinnedModels: next });
+      this.showNotice(
+        `Cleared the pinned model for ${label}; automatic selection restored.`,
+        'dim',
+      );
+      return;
+    }
+    const session = this.currentSession();
+    if (session !== undefined) {
+      const switchKey = this.keyFor(session.serverID, session.id);
+      if (this.modelSwitches.has(switchKey) || this.failedModelSwitches.has(switchKey)) {
+        this.showNotice('A model selection is unconfirmed. Wait for it before pinning.', 'warn');
+        return;
+      }
+    }
+    const resolution = this.resolveModelFor(serverID, directory);
+    const model = session?.model ?? (resolution.kind === 'model' ? resolution.model : undefined);
+    if (model === undefined) {
+      this.showNotice('No confirmed model to pin yet. Select one with /model first.', 'warn');
+      return;
+    }
+    const pinned = { ...this.state.pinnedModels, [key]: model };
+    this.setState('pinnedModels', reconcile(pinned));
+    this.persist({ pinnedModels: pinned });
+    this.showNotice(`Pinned ${formatModelRef(model)} as the default for ${label}.`, 'dim');
   }
 
   private modelDispatchBlocked(serverID: string, sessionID: string): boolean {
@@ -4518,7 +4673,10 @@ export class AppController {
     if (this.modelSwitches.get(key) === operation) {
       this.modelSwitches.delete(key);
       this.modelSwitchRevisions.set(key, (this.modelSwitchRevisions.get(key) ?? 0) + 1);
-      if (confirmed) this.showNotice(`Model confirmed: ${formatModelRef(model)}`, 'dim');
+      if (confirmed) {
+        this.recordConfirmedModel(session.serverID, session.directory, model);
+        this.showNotice(`Model confirmed: ${formatModelRef(model)}`, 'dim');
+      }
     }
     return confirmed;
   }
@@ -4526,7 +4684,7 @@ export class AppController {
   /** F2: next recently used model still present in the catalog. */
   async nextRecentModel(): Promise<void> {
     if (!(await this.ensureCurrentModelCatalog())) return;
-    const current = this.currentSession()?.model ?? this.state.overview.model;
+    const current = this.effectiveModel();
     const available = this.state.recentModels.filter((recent) =>
       this.state.models.some(
         (model) =>

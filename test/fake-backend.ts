@@ -332,8 +332,11 @@ export class FakeBackend implements Backend {
       session.id === sessionID ? { ...session, agent } : session,
     );
   }
+  /** When set, switchModel rejects with it (unconfirmed-selection tests). */
+  switchModelError?: Error;
   async switchModel(sessionID: string, model: ModelSelection): Promise<void> {
     this.calls.push({ name: 'switchModel', args: [sessionID, model] });
+    if (this.switchModelError !== undefined) throw this.switchModelError;
     this.sessions = this.sessions.map((session) =>
       session.id === sessionID ? { ...session, model } : session,
     );
@@ -345,8 +348,10 @@ export class FakeBackend implements Backend {
   async listModels(): Promise<CatalogModel[]> {
     return this.models;
   }
+  /** The concrete model the server reports as its default for any project. */
+  serverDefaultModel?: ModelSelection;
   async defaultModel(): Promise<ModelSelection | undefined> {
-    return undefined;
+    return this.serverDefaultModel;
   }
   /** Configurable server-side command catalog returned by listCommands. */
   serverCommands: ServerCommand[] = [];

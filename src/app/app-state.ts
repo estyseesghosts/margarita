@@ -220,6 +220,9 @@ export type AppState = {
   /** Bumped on every history load so a late admission cannot retarget a newer project (#160). */
   historyGeneration: number;
   recentModels: ModelSelection[];
+  /** Explicit pins and last server-confirmed models, keyed by scope (#189, #190). */
+  pinnedModels: Record<string, ModelSelection>;
+  lastModels: Record<string, ModelSelection>;
   /** Pending confirmation for Ctrl+C / Ctrl+D exit. */
   exitArmed: boolean;
   /**
@@ -289,6 +292,8 @@ export function initialState(directory: string, serverID: string = localServerID
     historyScope: { serverID, directory },
     historyGeneration: 0,
     recentModels: [],
+    pinnedModels: {},
+    lastModels: {},
     exitArmed: false,
     rewindPending: false,
     sessionsComplete: false,

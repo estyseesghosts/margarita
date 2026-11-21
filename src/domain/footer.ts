@@ -6,6 +6,8 @@ export type FooterFacts = Readonly<{
   agent?: string;
   model?: ModelSelection;
   state: string;
+  /** Why no model is shown: the scoped catalog is still loading or could not provide one. */
+  modelStatus?: 'loading' | 'unavailable';
   tokens?: TokenUsage;
   cost?: number;
   queued: number;
@@ -42,24 +44,37 @@ type Part = Readonly<{
 /** Single-line footer fields, degrading with width. Token figures are cumulative session usage. */
 function partsFor(facts: FooterFacts): (Part | undefined)[][] {
   const mark = facts.stale ? '~' : '';
-  const tokensLong =
+  // Unknown data produces no segment at all; a confirmed zero is still shown (#193).
+  const tokensLongPart: Part | undefined =
     facts.tokens === undefined
-      ? '— tokens'
-      : `${mark}${formatTokenCount(facts.tokens.input)} in · ${formatTokenCount(facts.tokens.output)} out`;
-  const tokensShort =
+      ? undefined
+      : {
+          text: `${mark}${formatTokenCount(facts.tokens.input)} in · ${formatTokenCount(facts.tokens.output)} out`,
+          kind: 'tokens',
+        };
+  const tokensShortPart: Part | undefined =
     facts.tokens === undefined
-      ? '—'
-      : `${mark}${formatTokenCount(facts.tokens.input + facts.tokens.output)}`;
-  const cost = `${mark}${formatCost(facts.cost)}`;
-  const agent: Part = { text: facts.agent ?? '—', kind: 'agent', action: 'agent' };
-  const model: Part = {
-    text:
-      facts.model === undefined
-        ? 'default model'
-        : `${facts.model.modelID}${facts.model.variant === undefined ? '' : `#${facts.model.variant}`}`,
-    kind: 'model',
-    action: 'model',
-  };
+      ? undefined
+      : {
+          text: `${mark}${formatTokenCount(facts.tokens.input + facts.tokens.output)}`,
+          kind: 'tokens',
+        };
+  const costPart: Part | undefined =
+    facts.cost === undefined
+      ? undefined
+      : { text: `${mark}${formatCost(facts.cost)}`, kind: 'cost' };
+  const agent: Part | undefined =
+    facts.agent === undefined ? undefined : { text: facts.agent, kind: 'agent', action: 'agent' };
+  const model: Part | undefined =
+    facts.model !== undefined
+      ? {
+          text: `${facts.model.modelID}${facts.model.variant === undefined ? '' : `#${facts.model.variant}`}`,
+          kind: 'model',
+          action: 'model',
+        }
+      : facts.modelStatus === undefined
+        ? undefined
+        : { text: modelStatusText[facts.modelStatus], kind: 'model', action: 'model' };
   const variant: Part | undefined =
     facts.model?.variant === undefined
       ? undefined
@@ -83,9 +98,6 @@ function partsFor(facts: FooterFacts): (Part | undefined)[][] {
             kind: 'context',
             action: 'context',
           };
-  const tokensLongPart: Part = { text: tokensLong, kind: 'tokens' };
-  const tokensShortPart: Part = { text: tokensShort, kind: 'tokens' };
-  const costPart: Part = { text: cost, kind: 'cost' };
 
   return [
     [agent, model, state, queued, goal, context, tokensLongPart, costPart],
@@ -98,8 +110,17 @@ function partsFor(facts: FooterFacts): (Part | undefined)[][] {
     [agent, variant, state, tokensShortPart, costPart],
     [agent, tokensShortPart, costPart],
     [tokensShortPart, costPart],
+    [agent, model, state],
+    [agent, state],
+    [agent],
+    [state],
   ];
 }
+
+const modelStatusText = {
+  loading: 'Loading model…',
+  unavailable: 'model unavailable',
+} as const;
 
 function join(parts: readonly Part[]): FooterSegment[] {
   const segments: FooterSegment[] = [];
@@ -112,23 +133,21 @@ function join(parts: readonly Part[]): FooterSegment[] {
 
 /** Semantic segments for styled rendering; identical text to `formatFooter`. */
 export function footerSegments(facts: FooterFacts, width: number): FooterSegment[] {
+  let last: Part[] = [];
   for (const parts of partsFor(facts)) {
     const present = parts.filter((part): part is Part => part !== undefined && part.text !== '');
+    if (present.length === 0) continue;
+    // Rows that drop the state exist to keep usage figures; with no usage they would only
+    // lose information, so the state-bearing rows below take over (#193).
+    const keepsUsage = present.some((part) => part.kind === 'tokens' || part.kind === 'cost');
+    if (!keepsUsage && !present.some((part) => part.kind === 'state')) continue;
+    last = present;
     if (present.map((part) => part.text).join(' · ').length <= width) return join(present);
   }
-  const tokensShort =
-    facts.tokens === undefined
-      ? '—'
-      : `${facts.stale ? '~' : ''}${formatTokenCount(facts.tokens.input + facts.tokens.output)}`;
-  const cost = `${facts.stale ? '~' : ''}${formatCost(facts.cost)}`;
-  const line = `${tokensShort} · ${cost}`.slice(0, Math.max(0, width));
-  const split = line.indexOf(' · ');
-  if (split < 0) return [{ text: line, kind: 'tokens' }];
-  return [
-    { text: line.slice(0, split), kind: 'tokens' },
-    { text: ' · ', kind: 'separator' },
-    { text: line.slice(split + 3), kind: 'cost' },
-  ];
+  // Nothing fits: keep the highest-priority remaining field, truncated to the width.
+  const first = last[0];
+  if (first === undefined) return [];
+  return [{ ...first, text: first.text.slice(0, Math.max(0, width)) }];
 }
 
 /** Single-line footer, degrading with width. */

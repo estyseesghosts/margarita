@@ -92,15 +92,22 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
     // One server-qualified view; never reconstruct identity from a bare session id (#78).
     const view = props.controller.currentView();
     if (view === undefined) {
+      const project = state.overview.project;
+      const newModel = props.controller.modelFor(project.serverID, project.directory);
       return {
         ...(state.overview.agent === undefined ? {} : { agent: state.overview.agent }),
-        ...(state.overview.model === undefined ? {} : { model: state.overview.model }),
+        ...(newModel.model === undefined ? {} : { model: newModel.model }),
+        ...(newModel.status === undefined ? {} : { modelStatus: newModel.status }),
         state: state.stream === 'live' ? 'overview' : state.stream,
         queued: 0,
         stale: false,
       };
     }
     const session = view.session;
+    const sessionModel =
+      session?.model !== undefined || session === undefined
+        ? {}
+        : props.controller.modelFor(session.serverID, session.directory, true);
     const badge = goalBadge(view.nativeGoal, view.awaitingSteer);
     // The context meter is the latest step's occupancy, never cumulative session tokens.
     // While a compaction is pending there is no confirmed reading, so show no meter.
@@ -108,6 +115,8 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
     return {
       ...(session?.agent === undefined ? {} : { agent: session.agent }),
       ...(session?.model === undefined ? {} : { model: session.model }),
+      ...(sessionModel.model === undefined ? {} : { model: sessionModel.model }),
+      ...(sessionModel.status === undefined ? {} : { modelStatus: sessionModel.status }),
       state: executionLabel(view.execution),
       ...(session?.tokens === undefined ? {} : { tokens: session.tokens }),
       ...(session?.cost === undefined ? {} : { cost: session.cost }),

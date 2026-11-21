@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { formatModelRef, parseModelRef } from './model-ref.ts';
-import { type CatalogModel, resolveModel } from './model-resolution.ts';
+import { type CatalogModel, resolveEffectiveModel, resolveModel } from './model-resolution.ts';
 
 const catalog: CatalogModel[] = [
   {
@@ -120,5 +120,77 @@ describe('resolveModel', () => {
   });
   test('unknown model is an error', () => {
     expect(resolveModel({ model: 'nope' }, catalog).kind).toBe('error');
+  });
+});
+
+describe('resolveEffectiveModel (#189)', () => {
+  const models: CatalogModel[] = [
+    { providerID: 'a', modelID: 'm1', name: 'M1', enabled: true, variants: ['high'] },
+    { providerID: 'a', modelID: 'm2', name: 'M2', enabled: true, variants: [] },
+    { providerID: 'b', modelID: 'off', name: 'Off', enabled: false, variants: [] },
+  ];
+  const m1 = { providerID: 'a', modelID: 'm1', variant: 'high' };
+  const m2 = { providerID: 'a', modelID: 'm2' };
+  const gone = { providerID: 'z', modelID: 'gone' };
+  const base = { catalogReady: true, catalog: models };
+
+  test('loading until the scoped catalog is verified', () => {
+    expect(resolveEffectiveModel({ ...base, catalogReady: false, lastUsed: m1 })).toEqual({
+      kind: 'loading',
+    });
+  });
+
+  test('precedence: selection, pinned project, pinned user, last used, server default', () => {
+    const all = {
+      ...base,
+      selection: m2,
+      pinnedProject: m1,
+      pinnedUser: { providerID: 'a', modelID: 'm1' },
+      lastUsed: m1,
+      serverDefault: m2,
+    };
+    expect(resolveEffectiveModel(all)).toEqual({ kind: 'model', model: m2, source: 'selection' });
+    const { selection: _s, ...noSelection } = all;
+    expect(resolveEffectiveModel(noSelection)).toMatchObject({ source: 'pinned-project' });
+    const { pinnedProject: _p, ...noProject } = noSelection;
+    expect(resolveEffectiveModel(noProject)).toMatchObject({ source: 'pinned-user' });
+    const { pinnedUser: _u, ...noUser } = noProject;
+    expect(resolveEffectiveModel(noUser)).toMatchObject({ source: 'last-used', model: m1 });
+    const { lastUsed: _l, ...onlyDefault } = noUser;
+    expect(resolveEffectiveModel(onlyDefault)).toMatchObject({
+      source: 'server-default',
+      model: m2,
+    });
+    expect(resolveEffectiveModel(base)).toEqual({ kind: 'none' });
+  });
+
+  test('an unavailable pin or selection blocks instead of falling through', () => {
+    for (const key of ['selection', 'pinnedProject', 'pinnedUser'] as const) {
+      const result = resolveEffectiveModel({
+        ...base,
+        [key]: gone,
+        lastUsed: m1,
+        serverDefault: m2,
+      });
+      expect(result.kind).toBe('blocked');
+    }
+    expect(
+      resolveEffectiveModel({
+        ...base,
+        pinnedUser: { providerID: 'a', modelID: 'm1', variant: 'x' },
+      }).kind,
+    ).toBe('blocked');
+    expect(
+      resolveEffectiveModel({ ...base, pinnedUser: { providerID: 'b', modelID: 'off' } }).kind,
+    ).toBe('blocked');
+  });
+
+  test('a stale remembered model is skipped in favour of the visible server default', () => {
+    expect(resolveEffectiveModel({ ...base, lastUsed: gone, serverDefault: m2 })).toEqual({
+      kind: 'model',
+      model: m2,
+      source: 'server-default',
+    });
+    expect(resolveEffectiveModel({ ...base, lastUsed: gone })).toEqual({ kind: 'none' });
   });
 });

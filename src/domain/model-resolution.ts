@@ -157,3 +157,76 @@ function listFor(catalog: readonly CatalogModel[], provider: string): string {
   const shown = models.slice(0, 8).join(', ');
   return models.length > 8 ? `${shown}, …` : shown;
 }
+
+/** Where an effective new-session model came from, highest precedence first (#189). */
+export type ModelSource =
+  'selection' | 'pinned-project' | 'pinned-user' | 'last-used' | 'server-default';
+
+export type EffectiveModel =
+  /** The catalog for this scope has not been verified yet. */
+  | { kind: 'loading' }
+  /** A concrete model that is present in the verified scoped catalog. */
+  | { kind: 'model'; model: ModelSelection; source: ModelSource }
+  /**
+   * A model the user explicitly asked for is not available. It is never replaced silently:
+   * the caller must report it and require user action (#190).
+   */
+  | { kind: 'blocked'; model: ModelSelection; source: ModelSource; reason: string }
+  /** The scope is verified but offers no model at all. */
+  | { kind: 'none' };
+
+export type EffectiveModelInput = Readonly<{
+  /** False until the catalog for the exact (server, directory) scope has loaded. */
+  catalogReady: boolean;
+  catalog: readonly CatalogModel[];
+  /** A choice made in this client for the new session (picker, F2 or CLI flags). */
+  selection?: ModelSelection | undefined;
+  pinnedProject?: ModelSelection | undefined;
+  pinnedUser?: ModelSelection | undefined;
+  lastUsed?: ModelSelection | undefined;
+  serverDefault?: ModelSelection | undefined;
+}>;
+
+/** True when the catalog offers the model, enabled, and supports the requested variant. */
+export function isModelAvailable(catalog: readonly CatalogModel[], model: ModelSelection): boolean {
+  return catalog.some(
+    (entry) =>
+      entry.enabled &&
+      entry.providerID === model.providerID &&
+      entry.modelID === model.modelID &&
+      (model.variant === undefined || entry.variants.includes(model.variant)),
+  );
+}
+
+/**
+ * Single effective-model resolver for a brand-new session. Explicit choices (selection,
+ * pins) that the catalog cannot satisfy block instead of falling through; only the
+ * automatic last-used memory is skipped when stale. OpenCode's own project configuration
+ * is not distinguishable from its general default on the wire, so it ranks as the server
+ * default.
+ */
+export function resolveEffectiveModel(input: EffectiveModelInput): EffectiveModel {
+  if (!input.catalogReady) return { kind: 'loading' };
+  const explicit: ReadonlyArray<[ModelSelection | undefined, ModelSource]> = [
+    [input.selection, 'selection'],
+    [input.pinnedProject, 'pinned-project'],
+    [input.pinnedUser, 'pinned-user'],
+  ];
+  for (const [model, source] of explicit) {
+    if (model === undefined) continue;
+    if (isModelAvailable(input.catalog, model)) return { kind: 'model', model, source };
+    return {
+      kind: 'blocked',
+      model,
+      source,
+      reason: `${source === 'selection' ? 'Selected' : 'Pinned'} model is not available for this project`,
+    };
+  }
+  if (input.lastUsed !== undefined && isModelAvailable(input.catalog, input.lastUsed)) {
+    return { kind: 'model', model: input.lastUsed, source: 'last-used' };
+  }
+  if (input.serverDefault !== undefined) {
+    return { kind: 'model', model: input.serverDefault, source: 'server-default' };
+  }
+  return { kind: 'none' };
+}

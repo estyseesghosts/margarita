@@ -18,6 +18,13 @@ export type LocalState = Readonly<{
   /** Prompt history keyed by canonical project directory key. */
   history: Readonly<Record<string, readonly string[]>>;
   recentModels: readonly ModelSelection[];
+  /**
+   * Models the user explicitly pinned as the new-session default (#190). Keys are `user` or
+   * `project:<scopeKey>`; absent when nothing is pinned. Older builds ignore this field.
+   */
+  pinnedModels?: Readonly<Record<string, ModelSelection>>;
+  /** Last server-confirmed model per `<scopeKey>` (server + canonical project) (#189). */
+  lastModels?: Readonly<Record<string, ModelSelection>>;
 }>;
 
 export const emptyState: LocalState = { schemaVersion: 1, history: {}, recentModels: [] };
@@ -95,17 +102,36 @@ export function parseState(raw: unknown): LocalState {
   const recentModels: ModelSelection[] = [];
   if (Array.isArray(raw['recentModels'])) {
     for (const entry of raw['recentModels']) {
-      if (!isRecord(entry)) continue;
-      const { providerID, modelID, variant } = entry;
-      if (typeof providerID !== 'string' || typeof modelID !== 'string') continue;
-      recentModels.push({
-        providerID,
-        modelID,
-        ...(typeof variant === 'string' ? { variant } : {}),
-      });
+      const model = parseModelEntry(entry);
+      if (model !== undefined) recentModels.push(model);
     }
   }
-  return { schemaVersion: 1, history, recentModels };
+  const pinnedModels = parseModelMap(raw['pinnedModels']);
+  const lastModels = parseModelMap(raw['lastModels']);
+  return {
+    schemaVersion: 1,
+    history,
+    recentModels,
+    ...(pinnedModels === undefined ? {} : { pinnedModels }),
+    ...(lastModels === undefined ? {} : { lastModels }),
+  };
+}
+
+function parseModelEntry(entry: unknown): ModelSelection | undefined {
+  if (!isRecord(entry)) return undefined;
+  const { providerID, modelID, variant } = entry;
+  if (typeof providerID !== 'string' || typeof modelID !== 'string') return undefined;
+  return { providerID, modelID, ...(typeof variant === 'string' ? { variant } : {}) };
+}
+
+function parseModelMap(raw: unknown): Record<string, ModelSelection> | undefined {
+  if (!isRecord(raw)) return undefined;
+  const result: Record<string, ModelSelection> = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    const model = parseModelEntry(entry);
+    if (model !== undefined) result[key] = model;
+  }
+  return Object.keys(result).length === 0 ? undefined : result;
 }
 
 /** Bounds used when merging two snapshots written by different processes. */
@@ -140,7 +166,20 @@ export function mergeState(
     recentModels.push(entry);
     if (recentModels.length >= limits.recentLimit) break;
   }
-  return { schemaVersion: 1, history, recentModels };
+  // Pins are explicit user state: when the writer holds a pin map (even an empty one after
+  // /model default clear) it is authoritative, so a cleared pin is never resurrected from
+  // disk; a writer that never touched pins leaves another process's pins alone.
+  const pinnedModels = ours.pinnedModels ?? theirs.pinnedModels;
+  const lastModels = { ...theirs.lastModels, ...ours.lastModels };
+  return {
+    schemaVersion: 1,
+    history,
+    recentModels,
+    ...(pinnedModels === undefined || Object.keys(pinnedModels).length === 0
+      ? {}
+      : { pinnedModels }),
+    ...(Object.keys(lastModels).length === 0 ? {} : { lastModels }),
+  };
 }
 
 // In-process serialization: saves to one path run one at a time, latest state wins per run.

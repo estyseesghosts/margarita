@@ -194,6 +194,14 @@ export function Transcript(props: TranscriptProps) {
   });
   onCleanup(() => props.onScrollHandle?.(undefined));
 
+  const sessionModel = (): { model?: ModelSelection; status?: 'loading' | 'unavailable' } => {
+    const session = state.sessions[sessionKeyValue()];
+    if (session?.model !== undefined) return { model: session.model };
+    return session === undefined
+      ? {}
+      : props.controller.modelFor(session.serverID, session.directory, true);
+  };
+
   return (
     <box flexGrow={1} flexDirection="column">
       <scrollbox
@@ -215,7 +223,8 @@ export function Transcript(props: TranscriptProps) {
             `conversation:${props.serverID}:${props.sessionID}`,
           )}
           agent={state.sessions[sessionKeyValue()]?.agent}
-          model={state.sessions[sessionKeyValue()]?.model}
+          model={sessionModel().model}
+          modelStatus={sessionModel().status}
           directory={state.sessions[sessionKeyValue()]?.directory}
         />
         <Show when={windowed().hidden > 0 || transcript()?.olderCursor !== undefined}>
@@ -307,48 +316,54 @@ export type WelcomeProps = Readonly<{
   greeting: string;
   agent: string | undefined;
   model: ModelSelection | undefined;
+  /** Shown instead of a model while the scoped catalog loads or cannot provide one (#192). */
+  modelStatus?: 'loading' | 'unavailable' | undefined;
   directory: string | undefined;
 }>;
 
 /** Inline welcome panel; it scrolls away with the conversation (docs/13). */
 export function WelcomePanel(props: WelcomeProps) {
   const model = () =>
-    props.model === undefined ? 'server default model' : formatModelRef(props.model);
-  const detail = () => `${props.agent ?? 'build'} · ${model()}`;
+    props.model !== undefined
+      ? formatModelRef(props.model)
+      : props.modelStatus === 'loading'
+        ? 'Loading model…'
+        : props.modelStatus === 'unavailable'
+          ? 'model unavailable'
+          : undefined;
+  const detail = () => {
+    const current = model();
+    return current === undefined
+      ? (props.agent ?? 'build')
+      : `${props.agent ?? 'build'} · ${current}`;
+  };
   const directory = () => props.directory ?? props.controller.cwd;
   /** The hints only appear when the cat, the details and the hints all fit unsqueezed. */
   const wide = () =>
-    props.width >=
-    4 + catWidth + 2 + Math.max(detail().length, directory().length, 16) + 2 + hintWidth;
+    props.width >= catWidth + 2 + Math.max(detail().length, directory().length, 16) + 2 + hintWidth;
+  // Borderless on purpose (#194): the version is a subdued row above the content.
   return (
-    <box
-      border
-      borderStyle="rounded"
-      borderColor={props.theme.border}
-      title={` margarita v${props.controller.version} `}
-      flexDirection="row"
-      paddingLeft={1}
-      paddingRight={1}
-      marginBottom={1}
-      flexShrink={0}
-    >
-      <box flexDirection="column" marginRight={2} width={catWidth} flexShrink={0}>
-        <For each={cat}>{(line) => <text fg={props.theme.accent}>{line}</text>}</For>
-      </box>
-      <box flexDirection="column" flexGrow={1}>
-        <text fg={props.theme.text}>
-          <b>{props.greeting}</b>
-        </text>
-        <text fg={props.theme.dim}>{detail()}</text>
-        <text fg={props.theme.dim}>{directory()}</text>
-      </box>
-      <Show when={wide()}>
-        <box flexDirection="column" marginLeft={2} flexShrink={0}>
-          <text fg={props.theme.dim}>← overview (empty prompt)</text>
-          <text fg={props.theme.dim}>Alt+P model</text>
-          <text fg={props.theme.dim}>Ctrl+O details · F1 help</text>
+    <box flexDirection="column" marginBottom={1} flexShrink={0}>
+      <text fg={props.theme.dim}>{`margarita v${props.controller.version}`}</text>
+      <box flexDirection="row">
+        <box flexDirection="column" marginRight={2} width={catWidth} flexShrink={0}>
+          <For each={cat}>{(line) => <text fg={props.theme.accent}>{line}</text>}</For>
         </box>
-      </Show>
+        <box flexDirection="column" flexGrow={1}>
+          <text fg={props.theme.text}>
+            <b>{props.greeting}</b>
+          </text>
+          <text fg={props.theme.dim}>{detail()}</text>
+          <text fg={props.theme.dim}>{directory()}</text>
+        </box>
+        <Show when={wide()}>
+          <box flexDirection="column" marginLeft={2} flexShrink={0}>
+            <text fg={props.theme.dim}>← overview (empty prompt)</text>
+            <text fg={props.theme.dim}>Alt+P model</text>
+            <text fg={props.theme.dim}>Ctrl+O details · F1 help</text>
+          </box>
+        </Show>
+      </box>
     </box>
   );
 }
@@ -925,6 +940,7 @@ export function NewSessionView(props: {
   width: number;
 }) {
   const overview = () => props.controller.state.overview;
+  const newModel = () => props.controller.modelFor(props.serverID, props.directory);
   return (
     <scrollbox flexGrow={1} stickyScroll stickyStart="bottom" paddingLeft={1} paddingRight={1}>
       <WelcomePanel
@@ -933,7 +949,8 @@ export function NewSessionView(props: {
         width={props.width}
         greeting={props.controller.greetingFor(`new:${props.serverID}:${props.directory}`)}
         agent={overview().agent}
-        model={overview().model}
+        model={newModel().model}
+        modelStatus={newModel().status}
         directory={props.directory}
       />
     </scrollbox>

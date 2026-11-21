@@ -30,8 +30,43 @@ describe('formatFooter', () => {
     expect(formatFooter(facts, 40)).toBe('build · high · working · 47k · $0.38');
   });
   const { cost: _cost, ...withoutCost } = facts;
-  test('unknown cost is a dash, not zero', () => {
-    expect(formatFooter(withoutCost, 120)).toContain('· —');
+  test('unknown cost is omitted, never a dash or zero (#193)', () => {
+    const line = formatFooter(withoutCost, 120);
+    expect(line).not.toContain('—');
+    expect(line).not.toContain('$');
+    expect(line.endsWith(' · ')).toBe(false);
+  });
+  test('a confirmed zero cost and zero tokens stay visible (#193)', () => {
+    const zero = {
+      ...facts,
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    };
+    expect(formatFooter(zero, 120)).toContain('$0');
+    expect(formatFooter(zero, 120)).toContain('0 in · 0 out');
+  });
+  test('a fresh session shows only agent, model and state with no placeholders (#193)', () => {
+    const { tokens: _tokens, cost: _unused, ...fresh } = facts;
+    for (const width of [120, 60, 30, 12, 6]) {
+      const line = formatFooter(fresh, width);
+      expect(line.length).toBeLessThanOrEqual(width);
+      expect(line).not.toContain('—');
+      expect(line).not.toContain('tokens');
+      expect(line).not.toContain('$');
+    }
+    expect(formatFooter(fresh, 120)).toBe('build · gpt-6.1-sol#high · working');
+    expect(formatFooter(fresh, 20)).toBe('build · working');
+    expect(footerSegments(fresh, 120).some((segment) => segment.kind === 'context')).toBe(false);
+  });
+  test('a missing model shows a truthful loading or unavailable state, never "default model"', () => {
+    const { model: _model, tokens: _t, cost: _c, ...bare } = facts;
+    expect(formatFooter({ ...bare, modelStatus: 'loading' }, 120)).toBe(
+      'build · Loading model… · working',
+    );
+    expect(formatFooter({ ...bare, modelStatus: 'unavailable' }, 120)).toContain(
+      'model unavailable',
+    );
+    expect(formatFooter(bare, 120)).toBe('build · working');
   });
   test('stale values are marked', () => {
     expect(formatFooter({ ...facts, stale: true }, 120)).toContain('~$0.38');

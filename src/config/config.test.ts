@@ -237,3 +237,36 @@ describe('paths', () => {
     }
   });
 });
+
+const m = (modelID: string) => ({ providerID: 'p', modelID });
+
+describe('pinned and last-used model state (#189, #190)', () => {
+  test('round-trips through parseState and tolerates old files', () => {
+    const parsed = parseState({
+      schemaVersion: 1,
+      history: {},
+      recentModels: [],
+      pinnedModels: { user: { ...m('a'), variant: 'high' }, bad: { providerID: 1 } },
+      lastModels: { 'local|/work': m('b') },
+    });
+    expect(parsed.pinnedModels).toEqual({ user: { ...m('a'), variant: 'high' } });
+    expect(parsed.lastModels).toEqual({ 'local|/work': m('b') });
+    expect(parseState({ schemaVersion: 1, history: {}, recentModels: [] }).pinnedModels).toBe(
+      undefined,
+    );
+  });
+  test('a cleared pin is not resurrected from disk, an untouched writer keeps foreign pins', () => {
+    const base = { schemaVersion: 1 as const, history: {}, recentModels: [] };
+    const onDisk = { ...base, pinnedModels: { user: m('a') } };
+    expect(mergeState({ ...base, pinnedModels: {} }, onDisk).pinnedModels).toBeUndefined();
+    expect(mergeState(base, onDisk).pinnedModels).toEqual({ user: m('a') });
+  });
+  test('last-used merges per scope with the writer winning', () => {
+    const base = { schemaVersion: 1 as const, history: {}, recentModels: [] };
+    const merged = mergeState(
+      { ...base, lastModels: { s1: m('ours') } },
+      { ...base, lastModels: { s1: m('theirs'), s2: m('other') } },
+    );
+    expect(merged.lastModels).toEqual({ s1: m('ours'), s2: m('other') });
+  });
+});
