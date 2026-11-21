@@ -214,6 +214,10 @@ export type AppState = {
   /** When this frontend last opened each session; counts as use for recency sorting. */
   openedAt: Record<string, number>;
   history: PromptHistory;
+  /** Canonical scope of the history bucket currently shown (#160). */
+  historyScope?: ProjectRef;
+  /** Bumped on every history load so a late admission cannot retarget a newer project (#160). */
+  historyGeneration: number;
   recentModels: ModelSelection[];
   /** Pending confirmation for Ctrl+C / Ctrl+D exit. */
   exitArmed: boolean;
@@ -281,6 +285,8 @@ export function initialState(directory: string, serverID: string = localServerID
     },
     openedAt: {},
     history: createHistory([]),
+    historyScope: { serverID, directory },
+    historyGeneration: 0,
     recentModels: [],
     exitArmed: false,
     rewindPending: false,

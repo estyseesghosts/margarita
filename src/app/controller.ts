@@ -2810,9 +2810,18 @@ export class AppController {
       index: undefined,
       savedDraft: '',
     });
+    // Remember which bucket is on screen and invalidate admissions captured before the
+    // switch (#160). A late send from A must never repaint B's visible history.
+    this.setState('historyScope', { serverID, directory });
+    this.setState('historyGeneration', (generation) => generation + 1);
   }
 
-  private rememberPrompt(text: string, directory: string, serverID: string = this.serverID): void {
+  private rememberPrompt(
+    text: string,
+    directory: string,
+    serverID: string = this.serverID,
+    expectedGeneration?: number,
+  ): void {
     const key = this.projectKeyOf(directory, serverID);
     // Derive prior entries from the target project's persisted bucket, never from whichever
     // project's state.history happens to be in memory (issue #107).
@@ -2822,8 +2831,17 @@ export class AppController {
       text,
       this.deps.config.history.limit,
     );
-    this.setState('history', history);
+    // Persist to the owning project unconditionally, but only repaint the visible history
+    // when its scope still matches and no newer load has happened in the meantime (#160).
     this.persist({ history: { ...this.persisted.history, [key]: history.entries } });
+    const scope = this.state.historyScope;
+    if (
+      scope !== undefined &&
+      this.projectKeyOf(scope.directory, scope.serverID) === key &&
+      (expectedGeneration === undefined || this.state.historyGeneration === expectedGeneration)
+    ) {
+      this.setState('history', history);
+    }
   }
 
   // ---------------------------------------------------------------- submit
@@ -2990,10 +3008,14 @@ export class AppController {
     )
       return false;
     this.admittingSessions.add(admitKey);
+    // Captured before the async send: navigation can load another project's history while
+    // the server responds, and that newer load must not be repainted by this admission (#160).
+    const historyGeneration = this.state.historyGeneration;
     try {
       if (!(await send())) return false;
       this.debugLog.write('action', { action: 'submit', ok: true });
-      if (text.trim() !== '') this.rememberPrompt(text, directory, origin.serverID);
+      if (text.trim() !== '')
+        this.rememberPrompt(text, directory, origin.serverID, historyGeneration);
       // Only clear the composer if we are still on the originating session: a route change
       // mid-request means the composer now belongs to another session and must not be wiped.
       const route = this.state.route;

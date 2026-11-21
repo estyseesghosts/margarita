@@ -2359,6 +2359,55 @@ describe('overview selection reloads project-scoped history (issue #107)', () =>
   });
 });
 
+describe('late prompt admission cannot retarget visible history (#160)', () => {
+  test('a held send from A never repaints B, but still persists to A', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [
+      { ...fakeSession('ses_a'), directory: '/proj-a' },
+      { ...fakeSession('ses_b'), directory: '/proj-b' },
+    ];
+    const { controller, saved } = historyController(
+      { ...emptyState, history: { '/proj-a': ['A prompt'], '/proj-b': ['B prompt'] } },
+      backend,
+    );
+    const held = deferred<void>();
+    const prompt = backend.prompt.bind(backend);
+    backend.prompt = async (...args: Parameters<typeof backend.prompt>) => {
+      await held.promise;
+      return prompt(...args);
+    };
+    try {
+      await controller.bootstrap();
+      controller.openSession('ses_a');
+      expect(controller.state.history.entries).toEqual(['A prompt']);
+      controller.setComposer(composerFrom('late A'));
+      const sending = controller.submit();
+      await flush();
+
+      // Navigate to B while A's server response is still in flight.
+      controller.openOverview();
+      selectRowForDirectory(controller, '/proj-b');
+      expect(controller.state.history.entries).toEqual(['B prompt']);
+
+      held.resolve();
+      await sending;
+      await flush();
+
+      expect(controller.state.history.entries).toEqual(['B prompt']);
+      expect(saved.value?.history['/proj-a']).toEqual(['A prompt', 'late A']);
+      expect(saved.value?.history['/proj-b']).toEqual(['B prompt']);
+
+      // Returning to A exposes its new entry; browsing B still agrees with its own bucket.
+      selectRowForDirectory(controller, '/proj-a');
+      expect(controller.state.history.entries).toEqual(['A prompt', 'late A']);
+      expect(controller.historyUp()).toBe(true);
+      expect(controller.state.composer.text).toBe('late A');
+    } finally {
+      controller.dispose();
+    }
+  });
+});
+
 describe('createSession scopes agent/model to the target project (issue #108)', () => {
   test("switching hosts resets defaults and never carries another host's agent/model into createSession", async () => {
     const { controller, backendA, backendB, agentA, modelA, modelB } = catalogController();
