@@ -105,13 +105,8 @@ describe('recoverable unpair (#156)', () => {
   test('a credential deletion failure removes the profile and queues durable recovery', async () => {
     const setup = await harness({ deleteFails: true });
     try {
-      let message = '';
-      try {
-        await setup.assembly.serverAdmin.unpair('srv_1');
-      } catch (cause) {
-        message = cause instanceof Error ? cause.message : String(cause);
-      }
-      expect(message).toContain('credential cleanup failed');
+      const outcome = await setup.assembly.serverAdmin.unpair('srv_1');
+      expect(outcome).toMatchObject({ credentialCleanup: 'pending' });
       expect((await loadServerProfiles(setup.serversFile)).profiles.profiles).toEqual([]);
       expect(setup.assembly.servers.get('srv_1')).toBeUndefined();
 

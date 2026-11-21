@@ -225,17 +225,14 @@ export async function createProductionAssembly(
         profiles.profiles.find((profile) => profile.serverID === targetID)?.auth === 'none';
       keepFresh(await removeServerProfile(input.paths.serversFile, targetID));
       await servers.remove(targetID);
-      if (!anonymous) {
-        try {
-          await input.credentials.delete(targetID);
-        } catch (error) {
-          await enqueueCredentialCleanup(input.paths.stateDir, targetID);
-          throw new Error(
-            `Server ${targetID} was unpaired, but its credential cleanup failed and will be retried on next launch: ${errorText(error)}`,
-            { cause: error },
-          );
-        }
+      if (anonymous) return { credentialCleanup: 'done' };
+      try {
+        await input.credentials.delete(targetID);
+      } catch (error) {
+        await enqueueCredentialCleanup(input.paths.stateDir, targetID);
+        return { credentialCleanup: 'pending', error: errorText(error) };
       }
+      return { credentialCleanup: 'done' };
     },
   };
 

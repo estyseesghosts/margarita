@@ -138,6 +138,33 @@ describe('ServerConnectionManager', () => {
     expect(batches).toEqual([]);
   });
 
+  test('a restarted stream discards late callbacks from the old subscription (#198)', async () => {
+    const manager = new ServerConnectionManager();
+    const fake = server('srv_1', 'http://one:4096');
+    manager.add({ serverID: 'srv_1', ...fake });
+    const releases: (() => void)[] = [];
+    fake.backend.eventsHook = () =>
+      (async function* () {
+        // A slow source: it only ends (and honors abort) when the test releases it.
+        await new Promise<void>((resolve) => releases.push(resolve));
+        yield { kind: 'connected' };
+      })();
+    const seen: string[] = [];
+    const handlersFor = (label: string) => ({
+      onBatch: () => seen.push(`${label}:batch`),
+      onStatus: (_id: string, status: string) => seen.push(`${label}:${status}`),
+    });
+    manager.startStream('srv_1', handlersFor('old'));
+    for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
+    manager.startStream('srv_1', handlersFor('new'));
+    seen.length = 0;
+    for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
+    for (const release of releases) release();
+    await Bun.sleep(30);
+    expect(seen.filter((entry) => entry.startsWith('old:'))).toEqual([]);
+    await manager.dispose();
+  });
+
   test('a cheaper label change keeps identity and sessions', () => {
     const manager = new ServerConnectionManager();
     manager.add({ serverID: 'srv_1', label: 'work', ...server('srv_1', 'http://one:4096') });

@@ -241,11 +241,20 @@ export type ConversationView = Readonly<{
 /** Where a copy operation actually landed; the UI always reports this truthfully. */
 export type CopyResult = Readonly<{ method: 'clipboard' | 'file'; path?: string }>;
 
+export type UnpairOutcome = Readonly<{
+  credentialCleanup: 'done' | 'pending';
+  error?: string;
+}>;
+
 export type ServerAdmin = Readonly<{
   list(): readonly ServerListing[];
   rename(serverID: string, label: string): Promise<readonly ServerListing[]>;
-  /** Forgets the server and its local credentials; never stops remote work. */
-  unpair(serverID: string): Promise<void>;
+  /**
+   * Forgets the server and its local credentials; never stops remote work. Rejects only when
+   * the profile was NOT removed. A removed profile whose secret cleanup failed resolves with
+   * `credentialCleanup: 'pending'` (retry is queued durably).
+   */
+  unpair(serverID: string): Promise<UnpairOutcome | void>;
 }>;
 
 export type ControllerDeps = Readonly<{
@@ -1421,14 +1430,27 @@ export class AppController {
       this.setState('sessionsLoading', false);
       this.setState('sessionsError', anyError);
     });
-    for (const result of results) {
-      if ('error' in result) continue;
-      await Promise.all(
-        [...result.active].map((sessionID) =>
-          this.refreshInputRequests(sessionID, result.serverID),
-        ),
-      );
-    }
+    // Follow-ups run only for applied (still registered, current-epoch) successful snapshots,
+    // and each failure is isolated so one host cannot abort or mask a healthy one (#196).
+    const followUps = applied.flatMap((result) =>
+      result.ok
+        ? [...result.active].map(async (sessionID) => {
+            if (!this.serverIDs().includes(result.serverID)) return;
+            try {
+              await this.refreshInputRequests(sessionID, result.serverID);
+            } catch (error) {
+              if (this.serverIDs().includes(result.serverID)) {
+                this.debugLog.write('action', {
+                  action: 'load-more-sessions-input-refresh',
+                  ok: false,
+                  error: errorText(error),
+                });
+              }
+            }
+          })
+        : [],
+    );
+    await Promise.all(followUps);
     this.debugLog.write('action', { action: 'load-more-sessions', ok: true });
     if (this.state.sessionsComplete && this.state.overview.selectedRow === loadMoreRowKey) {
       const rows = this.overviewRows();
@@ -2031,7 +2053,7 @@ export class AppController {
       this.refreshInbox(sessionID, serverID),
       this.refreshInputRequests(sessionID, serverID),
       this.refreshSummary(sessionID, serverID),
-      this.refreshNativeGoal(sessionID),
+      this.refreshNativeGoal(sessionID, serverID),
     ]);
   }
 
@@ -3932,18 +3954,25 @@ export class AppController {
       this.saveDraft();
       this.openOverview();
     }
+    let outcome;
     try {
-      await admin.unpair(target.serverID);
+      outcome = await admin.unpair(target.serverID);
     } catch (error) {
       this.showNotice(errorText(error), 'error');
-      // If unpair itself failed, do not attempt further cleanup that would be
-      // based on a now-absent admin state.
+      // The profile was not removed: leave the host and its UI state intact.
       return;
     }
-    // Forget all cached frontend records bound to this server so no route,
-    // in-flight request, stream, or overview selection remains attached to
-    // a removed host.
+    // Once the profile is removed, forget all cached frontend records bound to this server
+    // so no route, in-flight request, stream, or overview selection remains attached to a
+    // removed host, even when secret cleanup is only queued (#195).
     this.forgetServer(target.serverID);
+    if (outcome?.credentialCleanup === 'pending') {
+      this.showNotice(
+        `Unpaired ${target.label}, but its stored credential could not be deleted (${outcome.error ?? 'unknown error'}); deletion will be retried on next launch.`,
+        'error',
+      );
+      return;
+    }
     this.showNotice(
       `Unpaired ${target.label}. Remote sessions keep running; this only removed local access.`,
       'dim',
@@ -6189,9 +6218,37 @@ export class AppController {
     this.setOverlay({ ...overlay, busy: true });
     // Verify the stage is still the one the dialog was opened for before acting on it.
     void this.verifyAndRunRevert(overlay, confirm).catch((error: unknown) => {
-      this.setOverlay({ ...overlay, busy: false });
+      this.releaseRevertOverlay(overlay);
       this.showNotice(`Revert failed: ${errorText(error)}`, 'error');
     });
+  }
+
+  /** True only while the exact busy dialog this operation was started from is displayed. */
+  private isRevertOverlayShown(origin: {
+    serverID: string;
+    sessionID: string;
+    messageID: string;
+  }): boolean {
+    const current = this.state.overlay;
+    return (
+      current.kind === 'revert' &&
+      current.busy &&
+      current.serverID === origin.serverID &&
+      current.sessionID === origin.sessionID &&
+      current.messageID === origin.messageID
+    );
+  }
+
+  /** Re-enables the originating dialog; never touches a different overlay (#197). */
+  private releaseRevertOverlay(origin: {
+    serverID: string;
+    sessionID: string;
+    messageID: string;
+  }): void {
+    if (!this.isRevertOverlayShown(origin)) return;
+    this.setState('overlay', (current) =>
+      current.kind === 'revert' ? { ...current, busy: false } : current,
+    );
   }
 
   private async verifyAndRunRevert(
@@ -6212,7 +6269,7 @@ export class AppController {
       summary = await backend.getSession(overlay.sessionID);
     } catch (error) {
       // Can't verify: do not act blindly on the worktree.
-      this.setOverlay({ ...overlay, busy: false });
+      this.releaseRevertOverlay(overlay);
       this.showNotice(
         `Revert not ${confirm ? 'committed' : 'cancelled'}: could not verify the staged revert (${errorText(error)}).`,
         'error',
@@ -6227,7 +6284,7 @@ export class AppController {
     );
     if (staged?.messageID !== overlay.messageID) {
       // The stage changed or vanished under us (another client committed/cleared it).
-      this.closeOverlay();
+      if (this.isRevertOverlayShown(overlay)) this.closeOverlay();
       this.showNotice(
         'The staged revert changed or was resolved elsewhere. Nothing was applied by this dialog.',
         'warn',
@@ -6238,17 +6295,11 @@ export class AppController {
       if (confirm) await backend.commitRevert(overlay.sessionID);
       else await backend.clearRevert(overlay.sessionID);
     } catch (error) {
-      this.setState('overlay', (current) =>
-        current.kind === 'revert' &&
-        current.serverID === overlay.serverID &&
-        current.sessionID === overlay.sessionID
-          ? { ...current, busy: false }
-          : current,
-      );
+      this.releaseRevertOverlay(overlay);
       this.showNotice(`Revert failed: ${errorText(error)}`, 'error');
       return;
     }
-    this.closeOverlay();
+    if (this.isRevertOverlayShown(overlay)) this.closeOverlay();
     this.showNotice(confirm ? 'Reverted' : 'Revert cancelled; files restored', 'dim');
     if (confirm)
       void this.track('refresh', this.loadConversation(overlay.sessionID, overlay.serverID));

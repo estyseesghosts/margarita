@@ -65,6 +65,7 @@ export type StreamState = Readonly<{ serverID: string; status: StreamStatus }>;
 export class ServerConnectionManager {
   private readonly servers = new Map<string, ManagedServer>();
   private readonly streams = new Map<string, () => Promise<void>>();
+  private readonly streamEpochs = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
   private registrationSequence = 0;
   private disposed = false;
@@ -162,9 +163,13 @@ export class ServerConnectionManager {
     this.assertOpen();
     const server = this.servers.get(serverID);
     if (server === undefined) return;
+    // Invalidate the previous subscription synchronously, before its (possibly slow) stop
+    // settles, so its late callbacks can never pass `current()` (#198).
     void this.stopStream(serverID);
+    const epoch = this.bumpStreamEpoch(serverID);
     const registration = server.registration;
     const current = (): ManagedServer | undefined => {
+      if (this.disposed || this.streamEpochs.get(serverID) !== epoch) return undefined;
       const managed = this.servers.get(serverID);
       return managed !== undefined && managed.registration === registration ? managed : undefined;
     };
@@ -206,7 +211,15 @@ export class ServerConnectionManager {
     this.listeners.clear();
   }
 
+  /** Monotonic and never deleted, so an epoch value is never reused after removal. */
+  private bumpStreamEpoch(serverID: string): number {
+    const next = (this.streamEpochs.get(serverID) ?? 0) + 1;
+    this.streamEpochs.set(serverID, next);
+    return next;
+  }
+
   private async stopStream(serverID: string): Promise<void> {
+    this.bumpStreamEpoch(serverID);
     const stop = this.streams.get(serverID);
     if (stop === undefined) return;
     this.streams.delete(serverID);
