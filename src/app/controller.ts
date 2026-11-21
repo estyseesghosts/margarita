@@ -4734,7 +4734,8 @@ export class AppController {
     const session = this.currentSession();
     if (session === undefined) return;
     try {
-      const interrupted = await this.backend.interrupt(session.id);
+      // Bound to the session's owning host, never the launch backend (#178).
+      const interrupted = await this.backendFor(session.serverID).interrupt(session.id);
       this.debugLog.write('action', { action: 'interrupt', ok: interrupted });
       this.showNotice(interrupted ? 'Interrupted' : 'Nothing was running', 'dim');
       if (interrupted) await this.captureInterruptSteerIntent(session.id, session.serverID);
@@ -6204,7 +6205,10 @@ export class AppController {
       return;
     }
     try {
-      await this.backend.renameSession(session.id, title);
+      const backend = this.backendFor(session.serverID);
+      await backend.renameSession(session.id, title);
+      // A host unpaired during the RPC must not get its row resurrected.
+      if (!this.isRegisteredBackend(session.serverID, backend)) return;
       // The server's session event carries the authoritative title; reflect it now too.
       this.setState('sessions', this.keyFor(session.serverID, session.id), { ...session, title });
       this.showNotice(`Renamed to ${title}`, 'dim');

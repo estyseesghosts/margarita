@@ -222,3 +222,22 @@ describe('pagination follow-ups (#196)', () => {
     controller.dispose();
   });
 });
+
+describe('actions on a remote session never use the launch backend (#178)', () => {
+  test('interrupt and rename go to the owning host only', async () => {
+    const { local, remote, controller } = await harness();
+    controller.openSession(sessionID, 'remote');
+    await flush();
+    const localBefore = local.calls.length;
+    await controller.interrupt();
+    controller.setComposer(composerFrom('/rename new title'));
+    await controller.submit();
+    await flush();
+    const names = (calls: typeof remote.calls) => calls.map((call) => call.name);
+    expect(names(remote.calls)).toContain('interrupt');
+    expect(names(remote.calls)).toContain('renameSession');
+    expect(names(local.calls.slice(localBefore))).not.toContain('interrupt');
+    expect(names(local.calls.slice(localBefore))).not.toContain('renameSession');
+    controller.dispose();
+  });
+});
