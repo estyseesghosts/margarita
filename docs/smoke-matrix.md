@@ -56,9 +56,13 @@ Run these under an actual terminal; where CI has no terminal, report the host as
 ## Server version compatibility (opt-in, disposable servers)
 
 The offline wire-shape audit and per-version/per-feature matrix run in CI via
-`test/compat-matrix.test.ts` (see [25-compatibility](25-compatibility.md)). Live verification of
-the v2.3.1 timed-out-shell and background-compaction behavior still needs disposable servers with
-a provider/model and is gated by `MARGARITA_LIVE=1`:
+`test/compat-matrix.test.ts` (see [25-compatibility](25-compatibility.md)). The opt-in live
+harness `test/live-compat-smoke.test.ts` records C1–C3 plus reconnect and permission/form reads
+against explicit disposable v2.3.1/v2.3.2 URLs, with results classified as `offline fixture
+pass`, `live pass`, `live failure`, or `not run` (version + redacted detail). It is inert by
+default and is gated by `MARGARITA_LIVE=1` plus `MARGARITA_COMPAT_V23{1,2}_URL`,
+`MARGARITA_COMPAT_DIRECTORY`, `MARGARITA_COMPAT_MODEL`, and optionally
+`MARGARITA_COMPAT_RESULTS`:
 
 | # | Trigger | Observe | Automated coverage |
 |---|---------|---------|-------------------|

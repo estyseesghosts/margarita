@@ -56,8 +56,25 @@ This gives CI a meaningful per-version, per-feature result and catches a silent 
 ## What was NOT verified
 
 This is a static wire-shape audit plus fixture replay, **not** a live run against disposable
-v2.3.1/v2.3.2 servers. A live matrix needs a disposable server with a provider/model and is
-opt-in (`MARGARITA_LIVE=1`); it is documented in [smoke-matrix](smoke-matrix.md) and must not use
-the user's running service. Until that run happens, do not claim live end-to-end coverage of
-compaction timing or background-shell completion on v2.3.1/v2.3.2 — only that the wire contract
-Margarita depends on is unchanged and the recorded divergence is handled.
+v2.3.1/v2.3.2 servers. The opt-in live harness (`test/live-compat-smoke.test.ts`, driven by
+`test/live-compat-harness.ts`) records every case as `offline fixture pass`, `live pass`,
+`live failure`, or `not run` with the exact server version and a redacted detail line. By
+default it records `not run` and touches nothing. To execute it, provide **disposable** isolated
+services and an isolated workdir/model:
+
+```sh
+MARGARITA_LIVE=1 \
+MARGARITA_COMPAT_V231_URL=http://127.0.0.1:5101 \
+MARGARITA_COMPAT_V232_URL=http://127.0.0.1:5102 \
+MARGARITA_COMPAT_DIRECTORY=/tmp/opencode-disposable \
+MARGARITA_COMPAT_MODEL=openai/gpt-6.2-astra \
+MARGARITA_COMPAT_RESULTS=./live-compat-results.jsonl \
+bun run test test/live-compat-smoke.test.ts
+```
+
+The harness only connects to the explicit URLs (`connect({ server, startServer: false })`),
+never calls service discovery, and refuses duplicate/default endpoints or a missing isolated
+workdir/model. It must never point at the user's running service. Until a live run is recorded,
+do not claim live end-to-end coverage of compaction timing or background-shell completion on
+v2.3.1/v2.3.2 — only that the wire contract Margarita depends on is unchanged and the recorded
+divergence is handled.
