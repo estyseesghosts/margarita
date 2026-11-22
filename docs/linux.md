@@ -15,7 +15,7 @@ This page separates what is **CI-verified**, **manually verified** and **unteste
 | Secret Service credentials (`secret-tool`) round trip | Manually verified against a private gnome-keyring (Fedora 44) | `scripts/test-keyring.sh` |
 | Real terminal emulators (Ghostty, kitty, GNOME Terminal), SSH | **Untested**; record observations in `docs/smoke-matrix.md` | #181, #182, #184 |
 | Failed save on a full filesystem keeps previous state | CI-verified on a 128 KiB tmpfs (Ubuntu) and manually verified (Fedora 44) | `scripts/test-low-disk.sh` |
-| XDG paths, `0700` state dir, `0600` files, concurrent/killed lock recovery | CI-verified (Ubuntu) and manually verified natively (Fedora 44: 9 pass, 1 skip) | `test/linux/persistence.test.ts` |
+| XDG paths, `0700` state dir, `0600` files, concurrent/killed lock recovery, lock timeout, legacy/partial lock rejection | CI-verified (Ubuntu) and manually verified natively (Fedora 44: 11 pass, 1 skip) | `test/linux/persistence.test.ts` |
 | ARM64 and musl builds | **Unsupported**: build refuses them (native packages not installed); evaluation recorded in ADR-0006 | #188 |
 | Ubuntu/Debian native run | **Untested** | – |
 | Local OpenCode v2.3.0 sessions end to end on Linux | Manually verified (Fedora 44 under WSL2): `bun run test:writable` passes 15/15 against a disposable `opencode serve` 2.3.0 (prompt flow, permissions, forms, fork/revert, events, directories) | #186 |
