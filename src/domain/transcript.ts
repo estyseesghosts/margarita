@@ -611,10 +611,43 @@ export function createTranscriptProjector(): TranscriptProjector {
       endOffsetByMessage = [];
     }
 
+    // Only the messages that can have changed need cache/format work. A live page refresh
+    // keeps cached history objects beyond the page, so the differing region is bounded by
+    // the page rather than by loaded history (#283).
+    let firstDifference = 0;
+    const comparable = Math.min(previousMessages.length, messages.length);
+    while (
+      firstDifference < comparable &&
+      previousMessages[firstDifference] === messages[firstDifference]
+    ) {
+      firstDifference += 1;
+    }
+
+    // Never reuse the final open turn: its marker (running phase, activity) can change
+    // without any message changing. The previous projection's open turn is excluded too,
+    // because appending its idle (or a later message) closes it and rewrites that marker.
+    const openTurnStart = lastIdleIndex(messages) + 1;
+    const previousOpenTurnStart = lastIdleIndex(previousMessages) + 1;
+    let reusableEnd = -1;
+    const reuseLimit = Math.min(firstDifference, openTurnStart, previousOpenTurnStart);
+    for (let index = reuseLimit - 1; index >= 0; index -= 1) {
+      const nodes = baseLists[index];
+      if (nodes !== undefined && endsSegment(nodes)) {
+        reusableEnd = index;
+        break;
+      }
+    }
+
     let messagesFolded = 0;
-    let messagesReused = 0;
+    let messagesReused = reusableEnd + 1;
     const nextBaseLists: (readonly TranscriptNode[])[] = [];
-    for (const [index, message] of messages.entries()) {
+    for (let index = 0; index <= reusableEnd; index += 1) {
+      const nodes = baseLists[index];
+      if (nodes !== undefined) nextBaseLists.push(nodes);
+    }
+    for (let index = reusableEnd + 1; index < messages.length; index += 1) {
+      const message = messages[index];
+      if (message === undefined) continue;
       const marker = options.markers?.get(message.id);
       const markerKey = marker === undefined ? '' : markerFingerprint(marker);
       // A server page arrives as fresh objects even when its content is unchanged, so a
@@ -650,10 +683,10 @@ export function createTranscriptProjector(): TranscriptProjector {
       messagesFolded += 1;
     }
 
-    // Longest unchanged prefix, cut only where a segment has definitively ended.
-    let cut = -1;
+    // Extend reuse only across matching lists that also end a segment.
+    let cut = reusableEnd;
     const shared = Math.min(baseLists.length, nextBaseLists.length);
-    for (let index = 0; index < shared; index += 1) {
+    for (let index = reusableEnd + 1; index < shared; index += 1) {
       if (baseLists[index] !== nextBaseLists[index]) break;
       const nodes = nextBaseLists[index];
       if (nodes !== undefined && endsSegment(nodes)) cut = index;
@@ -709,6 +742,14 @@ export function createTranscriptProjector(): TranscriptProjector {
 function endsSegment(nodes: readonly TranscriptNode[]): boolean {
   const last = nodes.at(-1);
   return last !== undefined && last.kind === 'execution';
+}
+
+/** Index of the newest idle message; everything after it belongs to the open turn. */
+function lastIdleIndex(messages: readonly TranscriptMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.kind === 'idle') return index;
+  }
+  return -1;
 }
 
 /** Normalizes a candidate interruption banner without touching the source text. */
