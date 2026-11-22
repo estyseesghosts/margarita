@@ -22,8 +22,30 @@ const server = Bun.serve({
 `,
       );
     if (pathname.endsWith('/event') || pathname.includes('/stream')) {
-      return new Response(new ReadableStream({ start() {} }), {
-        headers: { 'content-type': 'text/event-stream' },
+      const encoder = new TextEncoder();
+      let timer: ReturnType<typeof setInterval> | undefined;
+      const stream = new ReadableStream({
+        start(controller) {
+          // Announce the connection and keep it alive like the real service. Without a
+          // heartbeat the client treats silence as a dropped stream and reconnects, which
+          // makes interactive smoke assertions race against a resync.
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({ type: 'server.connected', data: {} })}\n\n`),
+          );
+          timer = setInterval(() => {
+            try {
+              controller.enqueue(encoder.encode(': keepalive\n\n'));
+            } catch {
+              if (timer !== undefined) clearInterval(timer);
+            }
+          }, 1000);
+        },
+        cancel() {
+          if (timer !== undefined) clearInterval(timer);
+        },
+      });
+      return new Response(stream, {
+        headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
       });
     }
     const listLike = /(list|agent|model|command|session|mcp|job|permission|form)s?$/.test(pathname);

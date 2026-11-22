@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { loadState } from '../../src/config/local-state.ts';
+import { emptyState, loadState, saveState } from '../../src/config/local-state.ts';
 import { appPaths } from '../../src/config/paths.ts';
 
 const dirs: string[] = [];
@@ -41,6 +42,32 @@ describe.skipIf(process.platform === 'win32')('XDG paths (#185)', () => {
     expect(appPaths({ XDG_STATE_HOME: '/s/App' }, 'linux').stateDir).not.toBe(
       appPaths({ XDG_STATE_HOME: '/s/app' }, 'linux').stateDir,
     );
+  });
+
+  test('defaults follow the XDG spec under the real HOME', () => {
+    const paths = appPaths({}, 'linux');
+    expect(paths.configFile).toBe(join(homedir(), '.config', 'margarita', 'config.jsonc'));
+    expect(paths.stateFile).toBe(join(homedir(), '.local', 'state', 'margarita', 'state.json'));
+    expect(paths.serversFile).toBe(join(homedir(), '.local', 'state', 'margarita', 'servers.json'));
+  });
+
+  test('saving creates only Margarita-owned paths, with private permissions', async () => {
+    const root = await temp();
+    const paths = appPaths(
+      {
+        XDG_CONFIG_HOME: join(root, 'config'),
+        XDG_STATE_HOME: join(root, 'state'),
+      },
+      'linux',
+    );
+    await saveState(paths.stateFile, { ...emptyState, history: { '/proj': ['kept'] } });
+    expect((await stat(paths.stateDir)).mode & 0o777).toBe(0o700);
+    expect((await stat(paths.stateFile)).mode & 0o777).toBe(0o600);
+    expect(await readdir(paths.stateDir)).toEqual(expect.arrayContaining(['state.json']));
+    // Nothing appears under OpenCode's own XDG locations, and no config dir is invented.
+    expect(existsSync(join(root, 'config'))).toBe(false);
+    expect(existsSync(join(root, '.local', 'share', 'opencode'))).toBe(false);
+    expect(existsSync(join(root, 'state', 'opencode'))).toBe(false);
   });
 });
 
@@ -86,7 +113,6 @@ describe.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
   () => {
     test('a read-only state directory surfaces an error and keeps the previous file', async () => {
       const { chmod, mkdir } = await import('node:fs/promises');
-      const { emptyState, saveState } = await import('../../src/config/local-state.ts');
       const dir = await temp();
       const stateDir = join(dir, 'state');
       await mkdir(stateDir);
@@ -109,7 +135,6 @@ describe.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
 
     test('an unreadable state file is reported, not treated as empty and rewritten', async () => {
       const { chmod } = await import('node:fs/promises');
-      const { emptyState, saveState } = await import('../../src/config/local-state.ts');
       const dir = await temp();
       const path = join(dir, 'state.json');
       await saveState(path, { ...emptyState, history: { '/p': ['kept'] } });
@@ -130,7 +155,6 @@ const tinyDir = process.env['MARGARITA_TINY_DIR'];
 describe.skipIf(tinyDir === undefined)('low disk space (#185)', () => {
   test('a failed save on a full filesystem is reported and the previous state survives', async () => {
     const { mkdir, writeFile } = await import('node:fs/promises');
-    const { emptyState, saveState } = await import('../../src/config/local-state.ts');
     const dir = join(tinyDir ?? '', `case-${Date.now()}`);
     dirs.push(dir);
     await mkdir(dir);

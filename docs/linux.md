@@ -6,14 +6,16 @@ This page separates what is **CI-verified**, **manually verified** and **unteste
 
 | Area | Status | Evidence |
 | --- | --- | --- |
-| Source gate (`bun run verify`) on x86_64 glibc | CI-verified (Ubuntu) and manually verified (Fedora 44 under WSL2) | `.github/workflows/verify.yml`, 1013 tests passing on Fedora |
+| Source gate (`bun run verify`) on x86_64 glibc | CI-verified (Ubuntu) and manually verified (Fedora 44 under WSL2) | `.github/workflows/verify.yml` |
 | `bun run build bun-linux-x64` produces a standalone binary | CI-verified (Ubuntu, `verify.yml` and the tagged `release.yml`) and manually verified (Fedora 44) | ADR-0006 |
 | Binary starts outside the checkout without Bun or `node_modules` | Manually verified (Fedora 44) | `--version`, `--help`, PTY smoke |
-| Interactive renderer paints and exits 0 under a PTY, terminal restored | CI-verified (Ubuntu) and manually verified (Fedora 44, xterm-256color via a scripted PTY) | `test/smoke/pty-smoke.py` |
+| Interactive renderer paints and exits 0 under a PTY, terminal restored | CI-verified (Ubuntu) and manually verified (Fedora 44) | `scripts/test-pty-smoke.sh`, `test/smoke/pty-smoke.py` |
+| PTY scenarios: Unicode typing, bracketed paste, mouse SGR, Ctrl+G editor round trip/failure, SIGTERM, repeated resize, SIGKILL harness | CI-verified (Ubuntu) and manually verified (Fedora 44 under WSL2) | `scripts/test-pty-smoke.sh` |
+| tmux 3.x semantic smoke: Unicode typing and grapheme backspace, Ctrl+J, bracketed paste, F1 help, modified keys, resize, Ctrl+C | CI-verified (Ubuntu) and manually verified (Fedora 44 under WSL2) | `scripts/test-tmux.sh` |
 | Secret Service credentials (`secret-tool`) round trip | Manually verified against a private gnome-keyring (Fedora 44) | `scripts/test-keyring.sh` |
-| tmux 3.x (paint, Unicode typing, resize 100x30→40x12→120x40 with draft kept, Ctrl+C exit 0) | Manually verified (Fedora 44 under WSL2) | `scripts/test-tmux.sh` |
 | Real terminal emulators (Ghostty, kitty, GNOME Terminal), SSH | **Untested**; record observations in `docs/smoke-matrix.md` | #181, #182, #184 |
-| Failed save on a full filesystem keeps previous state | Manually verified on a 128 KiB tmpfs (`MARGARITA_TINY_DIR=/mnt/tiny bun test test/linux/persistence.test.ts`) | #185 |
+| Failed save on a full filesystem keeps previous state | CI-verified on a 128 KiB tmpfs (Ubuntu) and manually verified (Fedora 44) | `scripts/test-low-disk.sh` |
+| XDG paths, `0700` state dir, `0600` files, concurrent/killed lock recovery | CI-verified (Ubuntu) and manually verified natively (Fedora 44: 9 pass, 1 skip) | `test/linux/persistence.test.ts` |
 | ARM64 and musl builds | **Unsupported**: build refuses them (native packages not installed); evaluation recorded in ADR-0006 | #188 |
 | Ubuntu/Debian native run | **Untested** | – |
 | Local OpenCode v2.3.0 sessions end to end on Linux | Manually verified (Fedora 44 under WSL2): `bun run test:writable` passes 15/15 against a disposable `opencode serve` 2.3.0 (prompt flow, permissions, forms, fork/revert, events, directories) | #186 |
@@ -43,7 +45,7 @@ marg --version
 
 ## Where state lives
 
-Config and state follow the XDG base directories: `$XDG_CONFIG_HOME` (default `~/.config`) and `$XDG_STATE_HOME` (default `~/.local/state`). Margarita does not read or write OpenCode's own directories. Files are created with mode `0600`.
+Config and state follow the XDG base directories: `$XDG_CONFIG_HOME` (default `~/.config`) and `$XDG_STATE_HOME` (default `~/.local/state`). Margarita does not read or write OpenCode's own directories. The state directory is created `0700`; state files are created `0600`.
 
 ## Troubleshooting
 
@@ -60,7 +62,9 @@ WSL2 is a good place to build and run the source gate, but it does not replace n
 
 ## Tests specific to Linux
 
-- `test/smoke/pty-smoke.py` and `test/smoke/stub-server.ts`: the executable smoke used by CI.
+- `scripts/test-pty-smoke.sh` and `test/smoke/pty-smoke.py`: every PTY scenario against a disposable stub (paint, keys/paste, mouse, editor round trip and failure, SIGTERM, resize, SIGKILL harness). CI-verified on Ubuntu.
+- `scripts/test-tmux.sh`: semantic screen assertions inside tmux (typing, grapheme backspace, Ctrl+J, bracketed paste, F1, modified keys, resize, Ctrl+C). CI-verified on Ubuntu.
+- `scripts/test-low-disk.sh`: mounts a 128 KiB tmpfs and exercises the failed-save path. CI-verified on Ubuntu.
 - `scripts/test-keyring.sh`: opt-in Secret Service round trip against a throwaway session bus and keyring (needs `dbus-run-session`, `gnome-keyring-daemon`, `secret-tool`).
 
 ## Clipboard (OSC 52) and attachments
@@ -74,11 +78,11 @@ WSL2 is a good place to build and run the source gate, but it does not replace n
 
 ## Keyboard and paste
 
-The PTY smoke (`keys` scenario) drives the compiled binary under a real POSIX PTY with `TERM=xterm-256color`: typing Unicode, grapheme-wise backspace, a bracketed multi-line paste, F1 (help) and Esc must paint correctly and must not cause any server write (nothing is submitted). Alt/Shift+Tab, semantic effects of mouse clicks, kitty-versus-legacy negotiation (the `mouse` scenario only proves SGR mouse, wheel, kitty Ctrl+Enter and F6 input neither crash the app nor submit), and Ghostty, kitty, GNOME Terminal and tmux/SSH behaviour are **untested**; record observations (TERM, protocol, version, deviations) in `docs/smoke-matrix.md` before adding any terminal-specific branch.
+The PTY `keys` scenario drives the compiled binary under a real POSIX PTY with `TERM=xterm-256color`: Unicode typing, grapheme-wise backspace, Ctrl+J multi-line editing, a bracketed multi-line paste, Escape/Alt+P dismissal, Ctrl+O/R/S/T/B and F6 must paint correctly and must not cause any server write. The tmux smoke additionally asserts the *current screen* for Unicode typing and backspace, bracketed paste, F1 help, modified keys, resize with the draft kept, and Ctrl+C exit 0. Kitty-versus-legacy negotiation is exercised only through tmux's own key translation; Ghostty, kitty, GNOME Terminal and SSH behaviour remain **untested** and must be recorded (TERM, protocol, version, deviations) in `docs/smoke-matrix.md` before adding any terminal-specific branch.
 
 ## Terminal lifecycle
 
-PTY scenarios (`ctrl-c`, `sigterm`, `resize`, `editor`) verify on Fedora 44 that the renderer exits, the cursor is re-shown, mouse reporting is disabled and the alternate screen is left; that repeated SIGWINCH down to 8 columns does not crash; and that Ctrl+G with an `EDITOR` path containing spaces round-trips the draft and removes its temp file. An editor that exits non-zero keeps the draft and the composer usable (`editor-fail`). Not covered: interactive `vi`/`nano`, SIGKILL recovery (modes cannot be restored by the process), tmux and SSH.
+`scripts/test-pty-smoke.sh` covers: clean Ctrl+C exit, SIGTERM, repeated SIGWINCH down to 8 columns and back with the draft intact, Ctrl+G with an `EDITOR` path containing spaces and `$` (draft round-trips, temp directory removed), an editor that exits non-zero (notice shown, draft kept), and a SIGKILL harness case where terminal modes cannot be restored by definition. Every non-crash scenario checks that the cursor is re-shown and mouse reporting is disabled. Not covered: interactive `vi`/`nano`, tmux/SSH lifecycle, and real emulator behaviour.
 
 ## Manual scenario: remote servers (#186)
 

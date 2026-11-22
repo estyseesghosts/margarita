@@ -48,15 +48,17 @@ jobs:
         run: |
           ./marg --version
           ./marg --help > /dev/null
-      - name: Interactive PTY smoke against a disposable stub service
+      - name: POSIX PTY scenarios (keys, mouse, editor, signals, resize)
+        run: sh scripts/test-pty-smoke.sh "$RUNNER_TEMP/exe/marg"
+      - name: tmux semantic smoke (Unicode, paste, F1, resize)
         run: |
-          export STUB_LOG="$RUNNER_TEMP/stub.log"
-          bun test/smoke/stub-server.ts "$RUNNER_TEMP/port" &
-          for _ in $(seq 1 50); do [ -s "$RUNNER_TEMP/port" ] && break; sleep 0.2; done
-          url="http://127.0.0.1:$(cat "$RUNNER_TEMP/port")"
-          for scenario in ctrl-c keys mouse editor editor-fail sigterm resize; do
-            python3 test/smoke/pty-smoke.py "$RUNNER_TEMP/exe/marg" "$url" "$scenario"
-          done
+          if ! command -v tmux >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y tmux
+          fi
+          sh scripts/test-tmux.sh "$RUNNER_TEMP/exe/marg"
+      - name: Low-disk state write on a tiny tmpfs
+        run: sh scripts/test-low-disk.sh
       - uses: actions/upload-artifact@v4
         with:
           name: marg-linux-x64

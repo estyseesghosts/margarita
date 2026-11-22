@@ -252,7 +252,7 @@ export async function saveState(
   );
   await previous;
   try {
-    await mkdir(dirname(path), { recursive: true });
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const lockPath = `${path}.lock`;
     const lock = await acquireFileLock(lockPath, {
       timeoutMs: lockTimeoutMs,
