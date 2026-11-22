@@ -87,6 +87,17 @@ async function settle(setup: Setup) {
   await setup.renderOnce();
 }
 
+/** Goal edits save through an async disk CAS, so poll rather than assuming a fixed settle covers it. */
+async function waitFor<T>(what: string, read: () => T | undefined, timeoutMs = 5_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = read();
+    if (value !== undefined) return value;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await Bun.sleep(10);
+  }
+}
+
 const navigationSideEffects = ['interrupt', 'backgroundTools', 'deleteSession'];
 
 describe('acceptance', () => {
@@ -203,9 +214,11 @@ describe('acceptance', () => {
     first.setup.mockInput.pressKey('t', { ctrl: true });
     await settle(first.setup);
     first.setup.mockInput.pressKey(' ');
+    const saved = await waitFor('the first task to move to in-progress', () => {
+      const doc = first.controller.goalOf('ses_b');
+      return doc?.plan?.tasks[0]?.state === 'in-progress' ? doc : undefined;
+    });
     await settle(first.setup);
-    const saved = first.controller.goalOf('ses_b');
-    expect(saved?.plan?.tasks[0]?.state).toBe('in-progress');
 
     const second = await mount(twoSessions(), store());
     second.controller.openSession('ses_b');
