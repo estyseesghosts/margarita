@@ -391,6 +391,12 @@ type AgentEvidence = Readonly<{
   observedAt: number;
 }>;
 
+/** Outcome of walking authoritative parent links for one uncached child question (#274). */
+type DescendantCheck =
+  | Readonly<{ status: 'verified' }>
+  | Readonly<{ status: 'unrelated' }>
+  | Readonly<{ status: 'unresolved'; error: string }>;
+
 /**
  * Owns all frontend state and every server interaction. Views read `state` and call
  * methods; they never talk to the backend. Leaving a session is a pure view change:
@@ -510,6 +516,17 @@ export class AppController {
   private readonly goalRevisions = new Map<string, number>();
   /** Local goal edits, serialized per session so overlapping changes rebase deterministically. */
   private readonly goalEditChains = new Map<string, Promise<void>>();
+  /**
+   * Server-verified child→viewing-ancestor relationships, keyed by the child's
+   * server-qualified session key (#274). Both session lifetimes are stored so deletion,
+   * recreation or unpair/re-pair invalidates the association instead of leaking a form.
+   */
+  private readonly verifiedDescendants = new Map<
+    string,
+    Readonly<{ ancestor: string; childEpoch: number; ancestorEpoch: number }>
+  >();
+  /** In-flight ancestry walks, deduplicated across concurrent form refreshes. */
+  private readonly ancestryLookups = new Map<string, Promise<DescendantCheck>>();
   /** Identity of the server this controller talks to; part of every session key. */
   readonly serverID: string;
 
@@ -1273,16 +1290,25 @@ export class AppController {
       this.setState('sessionsError', applied.find((result) => !result.ok)?.error);
     });
 
-    // Running sessions are the ones that can be blocked on input right now.
-    await Promise.all(
-      servers.flatMap((targetID) =>
-        [...(activeByServer.get(targetID) ?? [])].map((sessionID) =>
-          this.refreshInputRequests(sessionID, targetID).catch(() => {
-            // Unreachable host: its stale permission/form state stays as-is.
-          }),
-        ),
+    // Running sessions are the ones that can be blocked on input right now. The attached
+    // conversation is refreshed even when idle: a child that just appeared in this listing
+    // may own a question the location route already reported (#274).
+    const requestRefreshes = servers.flatMap((targetID) =>
+      [...(activeByServer.get(targetID) ?? [])].map((sessionID) =>
+        this.refreshInputRequests(sessionID, targetID).catch(() => {
+          // Unreachable host: its stale permission/form state stays as-is.
+        }),
       ),
     );
+    const route = this.state.route;
+    if (route.kind === 'conversation' && committed.includes(route.serverID)) {
+      requestRefreshes.push(
+        this.refreshInputRequests(route.sessionID, route.serverID).catch(() => {
+          // The transcript remains usable and the existing retry route stays available.
+        }),
+      );
+    }
+    await Promise.all(requestRefreshes);
   }
 
   /** Per-host refresh epochs: a host whose load starts a newer refresh retires the older. */
@@ -1432,6 +1458,7 @@ export class AppController {
     this.modelSwitches.delete(key);
     this.failedModelSwitches.delete(key);
     this.modelSwitchRevisions.delete(key);
+    this.verifiedDescendants.delete(key);
     const route = this.state.route;
     if (
       route.kind === 'conversation' &&
@@ -2004,17 +2031,45 @@ export class AppController {
     }
     const sessionForms = formsResult.status === 'fulfilled' ? formsResult.value : undefined;
     if (formsResult.status === 'rejected') errors.forms = errorText(formsResult.reason);
+    const locationForms =
+      locationFormsResult.status === 'fulfilled' ? locationFormsResult.value : undefined;
+    const locationFormsError =
+      locationFormsResult.status === 'rejected' ? locationFormsResult.reason : undefined;
     const cachedForms = this.state.forms[key] ?? [];
     const allowed = this.requestSessionScope(sessionID, serverID);
+    // A location snapshot may contain a question from an actively running child that the
+    // session index has not caught up with yet. Walk the server's authoritative parent links
+    // before filtering, so the parent sees a verified descendant but never a sibling (#274).
+    let ownershipError: string | undefined;
+    if (locationForms !== undefined) {
+      const checked = new Set<string>();
+      for (const form of locationForms) {
+        const childID = form.sessionID;
+        if (childID === 'global' || childID === sessionID || allowed.has(childID)) continue;
+        if (checked.has(childID)) continue;
+        checked.add(childID);
+        const result = await this.verifyDescendant(childID, sessionID, serverID);
+        if (result.status === 'verified') allowed.add(childID);
+        else if (result.status === 'unresolved') ownershipError ??= result.error;
+      }
+      // The ancestry walk is another await: a newer refresh, deletion or unpair may have
+      // happened while it ran, and its result must not be committed.
+      if (this.inputRequestRevisions.get(key) !== revision) return;
+      if (!this.isSessionCurrent(key, epoch)) return;
+      if (!this.isRegisteredBackend(serverID, backend)) return;
+    }
+    if (ownershipError !== undefined) {
+      errors.forms ??= `Could not verify a child question's owner: ${ownershipError}`;
+    }
     // A successful per-session listing is authoritative for the attached session's own
     // forms. A failed one proves nothing, so keep cached forms owned by that session.
     let forms = sessionForms ?? cachedForms.filter((form) => form.sessionID === sessionID);
-    if (locationFormsResult.status === 'fulfilled') {
+    if (locationForms !== undefined) {
       // Only the location-wide forms that belong to this conversation may appear:
-      // the global MCP sentinel, or a descendant (child-session) form. Never leak a
-      // sibling session's question into this transcript (#209).
+      // the global MCP sentinel, or a verified descendant (child-session) form. Never
+      // leak a sibling session's question into this transcript (#209, #274).
       const merged = new Map(forms.map((form) => [form.id, form]));
-      for (const form of locationFormsResult.value) {
+      for (const form of locationForms) {
         // With a successful per-session listing, that route is authoritative for the
         // attached session; merging the same forms again could revive one it just removed.
         // When the session route failed, the location snapshot is the only available
@@ -2047,7 +2102,7 @@ export class AppController {
         if (!merged.has(form.id)) merged.set(form.id, form);
       }
       forms = [...merged.values()];
-      errors.forms ??= errorText(locationFormsResult.reason);
+      errors.forms ??= errorText(locationFormsError);
     }
 
     batch(() => {
@@ -2122,7 +2177,111 @@ export class AppController {
         }
       }
     }
+    // Include children verified from server ancestry even when the local index has not
+    // listed them yet. Lifetime epochs keep the association from surviving deletion or
+    // ID reuse (#274).
+    const ancestorKey = this.keyFor(serverID, sessionID);
+    const ancestorEpoch = this.sessionEpoch(ancestorKey);
+    for (const [childKey, verified] of this.verifiedDescendants) {
+      if (verified.ancestor !== sessionID || verified.ancestorEpoch !== ancestorEpoch) continue;
+      const child = parseSessionKey(childKey);
+      if (child.serverID !== serverID) continue;
+      if (this.sessionEpoch(childKey) !== verified.childEpoch) continue;
+      scope.add(child.sessionID);
+    }
     return scope;
+  }
+
+  /**
+   * Walks authoritative `parentID` links to decide whether `childID` is a descendant of
+   * `ancestorID` on one host. Successful walks are cached with both lifetimes; unrelated
+   * chains are not cached so a later re-parent or delayed index can resolve. A transport
+   * failure is reported as unresolved so the UI can retry instead of settling the form.
+   */
+  private verifyDescendant(
+    childID: string,
+    ancestorID: string,
+    serverID: string,
+  ): Promise<DescendantCheck> {
+    const childKey = this.keyFor(serverID, childID);
+    const ancestorKey = this.keyFor(serverID, ancestorID);
+    const childEpoch = this.sessionEpoch(childKey);
+    const ancestorEpoch = this.sessionEpoch(ancestorKey);
+    const cached = this.verifiedDescendants.get(childKey);
+    if (
+      cached !== undefined &&
+      cached.ancestor === ancestorID &&
+      cached.childEpoch === childEpoch &&
+      cached.ancestorEpoch === ancestorEpoch
+    ) {
+      return Promise.resolve({ status: 'verified' });
+    }
+    const lookupKey = `${childKey}|${ancestorKey}|${childEpoch}|${ancestorEpoch}`;
+    const existing = this.ancestryLookups.get(lookupKey);
+    if (existing !== undefined) return existing;
+    const work = this.walkAncestry(
+      childID,
+      ancestorID,
+      serverID,
+      childKey,
+      childEpoch,
+      ancestorEpoch,
+    )
+      .then((result) => {
+        if (result.status === 'verified') {
+          this.verifiedDescendants.set(childKey, {
+            ancestor: ancestorID,
+            childEpoch,
+            ancestorEpoch,
+          });
+        }
+        return result;
+      })
+      .finally(() => {
+        this.ancestryLookups.delete(lookupKey);
+      });
+    this.ancestryLookups.set(lookupKey, work);
+    return work;
+  }
+
+  private async walkAncestry(
+    childID: string,
+    ancestorID: string,
+    serverID: string,
+    childKey: string,
+    childEpoch: number,
+    ancestorEpoch: number,
+  ): Promise<DescendantCheck> {
+    const backend = this.backendFor(serverID);
+    const ancestorKey = this.keyFor(serverID, ancestorID);
+    const stillCurrent = (): boolean =>
+      this.isRegisteredBackend(serverID, backend) &&
+      this.isSessionCurrent(childKey, childEpoch) &&
+      this.isSessionCurrent(ancestorKey, ancestorEpoch);
+    const seen = new Set<string>();
+    let current = childID;
+    for (let depth = 0; depth < 32; depth += 1) {
+      if (seen.has(current)) {
+        return { status: 'unresolved', error: 'the session ancestry contains a cycle' };
+      }
+      seen.add(current);
+      let parentID: string | undefined;
+      try {
+        const currentKey = this.keyFor(serverID, current);
+        // The child itself may still be absent from the index; parents are usually cached.
+        const summary = this.state.sessions[currentKey] ?? (await backend.getSession(current));
+        if (!stillCurrent()) {
+          return { status: 'unresolved', error: 'the session lifetime changed during lookup' };
+        }
+        parentID = summary.parentID;
+      } catch (error) {
+        return { status: 'unresolved', error: errorText(error) };
+      }
+      if (parentID === undefined) return { status: 'unrelated' };
+      if (parentID === ancestorID) return { status: 'verified' };
+      current = parentID;
+    }
+    return { status: 'unresolved', error: 'the session ancestry is too deep' };
   }
 
   /** Retries input requests for the attached conversation after a partial failure. */
@@ -4610,6 +4769,9 @@ export class AppController {
     // an unpair/re-pair cannot resurrect a late summary, transcript or switch (#252, #253).
     for (const key of this.sessionEpochs.keys()) {
       if (parseSessionKey(key).serverID === serverID) this.invalidateSession(key);
+    }
+    for (const key of this.verifiedDescendants.keys()) {
+      if (parseSessionKey(key).serverID === serverID) this.verifiedDescendants.delete(key);
     }
     for (const cache of [
       this.confirmedAgents,

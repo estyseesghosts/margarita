@@ -100,6 +100,100 @@ function choiceForm(): FormRequest {
   };
 }
 
+function childSession(id: string, parentID: string, serverID = 'local'): SessionSummary {
+  return { ...session(serverID), id, parentID };
+}
+
+function formFor(id: string, owner: string, title: string): FormRequest {
+  return {
+    id,
+    sessionID: owner,
+    title,
+    fields: [
+      { kind: 'text', key: 'answer', title: 'Answer', required: false, hidden: false, when: [] },
+    ],
+  };
+}
+
+describe('uncached child questions resolve from server ancestry (#274)', () => {
+  test('a direct and a deep child appear in the parent while a sibling does not', async () => {
+    const { controller, local } = harness();
+    const child = childSession('ses_child', sessionID);
+    const grandchild = childSession('ses_grandchild', child.id);
+    const sibling = { ...session('local'), id: 'ses_sibling' };
+    local.sessions = [session('local'), sibling];
+    local.forms = [
+      formFor('form_child', child.id, 'child'),
+      formFor('form_grandchild', grandchild.id, 'grandchild'),
+      formFor('form_sibling', sibling.id, 'sibling'),
+    ];
+    const realGet = local.getSession.bind(local);
+    local.getSession = async (id) => {
+      if (id === child.id) return child;
+      if (id === grandchild.id) return grandchild;
+      return realGet(id);
+    };
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    const titles = (controller.state.forms[sessionID] ?? []).map((entry) => entry.title);
+    expect(titles).toContain('child');
+    expect(titles).toContain('grandchild');
+    expect(titles).not.toContain('sibling');
+  });
+
+  test('a child listed after the event becomes answerable without an unpublished ID', async () => {
+    const { controller, local } = harness();
+    const child = childSession('ses_child', sessionID);
+    local.forms = [formFor('form_child', child.id, 'child')];
+    const realGet = local.getSession.bind(local);
+    local.getSession = async (id) => {
+      if (id === child.id) throw new BackendError('not-found', 'session.get', 'not indexed');
+      return realGet(id);
+    };
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    expect(controller.state.forms[sessionID] ?? []).toEqual([]);
+    expect(controller.currentRequestError()?.forms).toContain('verify');
+
+    // The listing now includes the parent link; a resync refreshes the attached view.
+    local.sessions = [session('local'), child];
+    await controller.loadSessions('local');
+    await flush();
+    const titles = (controller.state.forms[sessionID] ?? []).map((entry) => entry.title);
+    expect(titles).toEqual(['child']);
+    expect(controller.currentRequestError()).toBeUndefined();
+  });
+
+  test('two hosts with the same child ID keep their own questions', async () => {
+    const { controller, local, remote } = harness();
+    const localChild = childSession('ses_child', sessionID, 'local');
+    const remoteChild = childSession('ses_child', sessionID, 'remote');
+    local.forms = [formFor('form_local_child', localChild.id, 'local child')];
+    remote.forms = [formFor('form_remote_child', remoteChild.id, 'remote child')];
+    const realLocalGet = local.getSession.bind(local);
+    const realRemoteGet = remote.getSession.bind(remote);
+    local.getSession = async (id) => (id === localChild.id ? localChild : realLocalGet(id));
+    remote.getSession = async (id) => (id === remoteChild.id ? remoteChild : realRemoteGet(id));
+
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    expect((controller.state.forms[sessionID] ?? []).map((entry) => entry.title)).toEqual([
+      'local child',
+    ]);
+    controller.openSession(sessionID, 'remote');
+    await flush();
+    expect((controller.state.forms[remoteKey] ?? []).map((entry) => entry.title)).toEqual([
+      'remote child',
+    ]);
+    expect(
+      (controller.state.forms[remoteKey] ?? []).some((entry) => entry.id === 'form_local_child'),
+    ).toBe(false);
+  });
+});
+
 describe('custom-choice focus stays separate from the reply source (#269)', () => {
   test('caret movement over a listed option still replies with that option', async () => {
     const { controller, local } = harness();
