@@ -6028,25 +6028,33 @@ export class AppController {
   /** Rows per PageUp/PageDown inside the inspector; the view windows by viewport height. */
   private static readonly INSPECTOR_PAGE_ROWS = 20;
 
-  /** The focused tool, or the last tool when nothing tool-like is selected. */
+  /** The focused tool result, if the current selection names one. */
   private inspectableTool(): { tool: ToolCall; messageID: string } | undefined {
     const nodes = this.conversationNodes();
     const tools = nodes.flatMap((node) =>
       node.kind === 'tool' ? [node.tool] : node.kind === 'tool-group' ? [...node.tools] : [],
     );
     const focused = this.state.focusedGroup;
+    if (focused === undefined) return undefined;
     let candidate: ToolCall | undefined;
-    if (focused !== undefined && (focused.startsWith('tool:') || focused.startsWith('diff:'))) {
+    if (focused.startsWith('tool:') || focused.startsWith('diff:')) {
       const id = focused.slice(focused.indexOf(':') + 1);
       candidate = tools.find((tool) => tool.id === id);
-    } else if (focused !== undefined && focused.startsWith('group:')) {
+    } else if (focused.startsWith('group:')) {
       const group = nodes.find((node) => node.kind === 'tool-group' && node.key === focused);
       candidate = group?.kind === 'tool-group' ? group.tools.at(-1) : undefined;
     }
-    candidate ??= tools.at(-1);
     if (candidate === undefined) return undefined;
     const found = findToolMessage(this.loadedMessages(), candidate.id);
     return found === undefined ? undefined : { tool: found.tool, messageID: found.messageID };
+  }
+
+  /**
+   * True when the focused transcript row has a result the inspector can open. Plain `i`
+   * stays ordinary text otherwise, so a first-character "i" is never hijacked (#222).
+   */
+  canInspectFocusedTool(): boolean {
+    return this.inspectableTool() !== undefined;
   }
 
   /**

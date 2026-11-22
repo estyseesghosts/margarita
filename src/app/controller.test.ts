@@ -2104,6 +2104,7 @@ describe('output inspector (#221, #222)', () => {
   test('opens the focused tool with cached content, then the complete server result', async () => {
     const { controller, preview, full } = inspectorFixture();
     await attach(controller, 'ses_a');
+    controller.moveGroupFocus(1);
 
     expect(controller.openInspector()).toBe(true);
     const overlay = () => {
@@ -2125,6 +2126,7 @@ describe('output inspector (#221, #222)', () => {
     const { backend, controller } = inspectorFixture();
     await attach(controller, 'ses_a');
     backend.toolResultError = new BackendError('not-found', 'message.get', 'expired');
+    controller.moveGroupFocus(1);
     controller.openInspector();
     await flush();
     const overlay = controller.state.overlay;
@@ -2148,6 +2150,7 @@ describe('output inspector (#221, #222)', () => {
       },
     });
     await attach(controller, 'ses_a');
+    controller.moveGroupFocus(1);
     controller.openInspector();
     await flush();
 
@@ -2174,6 +2177,7 @@ describe('output inspector (#221, #222)', () => {
   test('windowed view exposes only the requested rows and preserves the offset', async () => {
     const { controller } = inspectorFixture();
     await attach(controller, 'ses_a');
+    controller.moveGroupFocus(1);
     controller.openInspector();
     await flush();
     controller.inspectorKey({ name: 'end', ctrl: false, alt: false, shift: false });
@@ -2189,6 +2193,7 @@ describe('output inspector (#221, #222)', () => {
   test('search keeps literal slashes and edits whole graphemes (#236)', async () => {
     const { controller } = inspectorFixture();
     await attach(controller, 'ses_a');
+    controller.moveGroupFocus(1);
     controller.openInspector();
     await flush();
     const overlay = () => {
@@ -2236,6 +2241,7 @@ describe('output inspector (#221, #222)', () => {
   test('horizontal scrolling never changes the logical window (#228)', async () => {
     const { controller } = inspectorFixture();
     await attach(controller, 'ses_a');
+    controller.moveGroupFocus(1);
     controller.openInspector();
     await flush();
     const overlay = () => {

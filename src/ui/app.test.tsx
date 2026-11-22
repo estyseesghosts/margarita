@@ -1609,6 +1609,44 @@ describe('full-result inspector (#222)', () => {
     expect(controller.state.overlay.kind).toBe('none');
     expect(controller.state.composer.text).toBe('i');
   });
+
+  test('plain i keeps typing when a tool exists but no row is focused', async () => {
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'run it', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'b1',
+                name: 'bash',
+                status: 'completed',
+                input: { command: 'make test' },
+                output: 'ok',
+                startedAt: 2,
+                completedAt: 3,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressKey('i');
+    await settle(setup);
+    expect(controller.state.overlay.kind).toBe('none');
+    expect(controller.state.composer.text).toBe('i');
+  });
 });
 
 describe('transcript rendering (docs/22, docs/23)', () => {

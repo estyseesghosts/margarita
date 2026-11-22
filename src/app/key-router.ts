@@ -109,8 +109,10 @@ function runAction(controller: AppController, action: ActionID, services: Router
       controller.moveGroupFocus(1);
       return true;
     case 'transcript.inspect':
-      // `i` stays ordinary text unless the conversation has a focused row and no draft.
+      // `i` stays ordinary text unless a tool row is focused and no draft exists. Without
+      // the focus check it would inspect the last tool on the first letter of a message.
       if (controller.state.composer.text !== '') return false;
+      if (!controller.canInspectFocusedTool()) return false;
       return controller.openInspector();
     case 'form.open':
       if (controller.pendingForm() !== undefined) controller.openForm();
