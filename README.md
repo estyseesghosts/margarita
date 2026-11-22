@@ -32,6 +32,15 @@ bun run build bun-linux-x64    # cross-compile for another target
 The result bundles the Bun runtime and OpenTUI's native library, so you can copy it anywhere on your `PATH`
 (for example `%USERPROFILE%\.local\bin` on Windows or `~/.local/bin` elsewhere). More in [ADR-0006](adr/0006-packaging.md).
 
+### Option C: download a release
+
+[Releases](https://github.com/estyseesghosts/margarita/releases) publish one binary per target
+(`marg-windows-x64.exe`, `marg-linux-x64`) with a matching `.sha256` file. Tags use the build
+identity: `v26-11-<short commit>` matches what that binary prints for `marg --version`. Verify a
+download with `sha256sum --check marg-linux-x64.sha256` (or `Get-FileHash` on Windows), then put the
+binary on your `PATH`. A release is built and published only after the same `bun run verify` gate as
+a normal push.
+
 ## Using `marg`
 
 ```sh

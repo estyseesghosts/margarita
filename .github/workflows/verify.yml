@@ -1,6 +1,9 @@
 name: Verify
 on:
   push:
+    # Tags go through release.yml, which runs this same gate before publishing.
+    tags-ignore:
+      - '**'
   pull_request:
 
 jobs:
