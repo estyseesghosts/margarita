@@ -13,6 +13,15 @@ customized/disabled: [Agents docs](https://opencode.ai/docs/agents/). Server age
 
 Agent cycle is ordered by explicit config first (`build`, `plan`, then stable alphabetical custom agent IDs), not backend response ordering, and wraps around. `Shift+Tab` after a session reattach should use the actual selected agent from server, not frontend's remembered value. If agent switched while running, selection applies to **subsequent provider turns**; show a tiny `Agent: plan (next turn)` hint if not immediate. Do not interrupt execution implicitly.
 
+**Switch acknowledgement (#256).** The pinned `@opencode/protocol` 2.3.x contract defines
+`session.switchAgent` as `POST /api/session/:sessionID/agent` with `success: NoContent` and
+`SessionNotFoundError` as the only declared error. A resolved promise therefore means the
+server accepted and committed the selection for subsequent provider turns, even though the
+optional `agent` field on `session.get` may still be absent. Margarita keeps prompt admission
+blocked until that acknowledgement and a fresh session read complete; an absent summary field
+is not treated as a different agent, while a reported different agent fails the switch. The
+disposable writable suite asserts that the next assistant message uses the selected agent.
+
 Custom agents are supported through the searchable **F3 / `/agent` picker**, which lists every
 selectable agent returned by the server's location-scoped `agent.list` (built-ins, global and
 project-local, including nested IDs). Rows show the agent ID and description; the current

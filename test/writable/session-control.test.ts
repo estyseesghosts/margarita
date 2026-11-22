@@ -22,6 +22,20 @@ describe.skipIf(!enabled)('writable service: permissions, forms, switching, fork
   const newSession = () =>
     service.backend.createSession({ directory: service.workspace, model: service.modelRef });
 
+  /**
+   * The idle marker and `activeSessionIDs` can clear just before the server accepts a revert
+   * stage. Retry only the documented busy conflict, never other failures.
+   */
+  const stageRevertWhenReady = (sessionID: string, messageID: string) =>
+    waitFor('revert stage to stop being busy', async () => {
+      try {
+        return await service.backend.stageRevert(sessionID, messageID);
+      } catch (error) {
+        if (error instanceof BackendError && error.kind === 'conflict') return undefined;
+        throw error;
+      }
+    });
+
   test('permission ask: listed, answered once, and the tool then runs', async () => {
     const session = await newSession();
     await service.backend.prompt(session.id, { text: bashCall('echo permitted'), files: [] });
@@ -121,6 +135,27 @@ describe.skipIf(!enabled)('writable service: permissions, forms, switching, fork
     expect(reply?.kind === 'assistant' && reply.model.modelID).toBe('mock-2');
   }, 30_000);
 
+  test('agent switch applies to the next provider turn even when the summary omits agent', async () => {
+    const session = await newSession();
+    const agents = (await service.backend.listAgents(service.workspace)).filter(
+      (agent) => !agent.hidden && agent.mode !== 'subagent',
+    );
+    const current = (await service.backend.getSession(session.id)).agent;
+    const target = agents.find((agent) => agent.id !== current)?.id;
+    if (target === undefined) throw new Error('no second selectable agent in disposable service');
+
+    // `session.switchAgent` is a POST with 204 NoContent, so success is authoritative even
+    // when the optional summary field is omitted (#256). The next assistant message must
+    // name the selected agent.
+    await service.backend.switchAgent(session.id, target);
+    const summary = await service.backend.getSession(session.id);
+    if (summary.agent !== undefined) expect(summary.agent).toBe(target);
+    await service.backend.prompt(session.id, { text: 'after agent switch', files: [] });
+    const messages = await waitForIdleMarkers(service.backend, session.id, 1);
+    const reply = messages.findLast((message) => message.kind === 'assistant');
+    expect(reply?.kind === 'assistant' && reply.agent).toBe(target);
+  }, 30_000);
+
   test('fork copies history up to a message; revert stages, clears and commits', async () => {
     const session = await newSession();
     await service.backend.prompt(session.id, { text: 'one', files: [] });
@@ -142,10 +177,10 @@ describe.skipIf(!enabled)('writable service: permissions, forms, switching, fork
       forked.filter((m) => m.kind === 'user').map((m) => (m.kind === 'user' ? m.text : '')),
     ).toEqual(['one']);
 
-    const files = await service.backend.stageRevert(session.id, secondUser.id);
+    const files = await stageRevertWhenReady(session.id, secondUser.id);
     expect(Array.isArray(files)).toBe(true);
     await service.backend.clearRevert(session.id);
-    await service.backend.stageRevert(session.id, secondUser.id);
+    await stageRevertWhenReady(session.id, secondUser.id);
     await service.backend.commitRevert(session.id);
     const after = await allMessages(service.backend, session.id);
     expect(after.filter((m) => m.kind === 'user')).toHaveLength(1);

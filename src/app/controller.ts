@@ -5117,8 +5117,9 @@ export class AppController {
         ) {
           return false;
         }
-        // The summary's `agent` is optional in v2. A successful switch is still a confirmed
-        // selection when the field is omitted; only a *different* reported agent is a failure.
+        // The summary's `agent` is optional in v2. `session.switchAgent` is a 204 NoContent
+        // command, so a resolved RPC is the acknowledgement; only a *different* reported
+        // agent is a failure (#256).
         if (confirmed.agent !== undefined && confirmed.agent !== agentID) {
           throw new Error('Server did not confirm the requested agent');
         }
