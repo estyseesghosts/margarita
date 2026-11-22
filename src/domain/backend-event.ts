@@ -16,7 +16,12 @@ export type BackendEvent =
       state: 'started' | 'succeeded' | 'failed' | 'interrupted';
       error?: string;
     }
-  | { kind: 'transcript-changed'; sessionID: string }
+  | {
+      kind: 'transcript-changed';
+      sessionID: string;
+      /** This event may have changed worker/shell jobs, so reconcile them too (#284). */
+      jobs?: true;
+    }
   | { kind: 'inbox-changed'; sessionID: string }
   | { kind: 'input-requests-changed'; sessionID: string }
   | { kind: 'goal-changed'; sessionID: string; goal: NativeGoal | null }
@@ -52,6 +57,20 @@ const transcriptEvents = new Set([
   'session.synthetic',
   'session.retry.scheduled',
   'session.message.content.updated',
+  'session.idle',
+]);
+
+/**
+ * Transcript events that can change the server-authoritative job lists. Text deltas and
+ * token updates cannot, so they must not trigger two extra RPCs each (#284).
+ */
+const jobHintEvents = new Set([
+  'session.shell.started',
+  'session.shell.ended',
+  'session.tool.success',
+  'session.tool.failed',
+  'session.step.ended',
+  'session.step.failed',
   'session.idle',
 ]);
 
@@ -130,7 +149,13 @@ export function normalizeEvent(raw: unknown): BackendEvent | undefined {
       ...(typeof error === 'string' ? { error } : {}),
     };
   }
-  if (transcriptEvents.has(type)) return { kind: 'transcript-changed', sessionID };
+  if (transcriptEvents.has(type)) {
+    return {
+      kind: 'transcript-changed',
+      sessionID,
+      ...(jobHintEvents.has(type) ? { jobs: true as const } : {}),
+    };
+  }
   if (summaryEvents.has(type)) return { kind: 'session-changed', sessionID };
   if (type === 'session.revert.staged') {
     return { kind: 'revert-changed', sessionID, action: 'staged' };

@@ -33,10 +33,27 @@ describe('normalizeEvent', () => {
       }),
     ).toEqual({ kind: 'execution', sessionID: 's', state: 'failed', error: 'boom' });
   });
-  test('streaming events mark the transcript dirty', () => {
+  test('streaming events mark the transcript dirty without requesting jobs (#284)', () => {
     expect(
       normalizeEvent({ type: 'session.text.delta', data: { sessionID: 's', delta: 'x' } }),
     ).toEqual({ kind: 'transcript-changed', sessionID: 's' });
+    expect(normalizeEvent({ type: 'session.tool.progress', data: { sessionID: 's' } })).toEqual({
+      kind: 'transcript-changed',
+      sessionID: 's',
+    });
+  });
+
+  test('shell/completion events also reconcile server job lists (#284)', () => {
+    expect(normalizeEvent({ type: 'session.shell.started', data: { sessionID: 's' } })).toEqual({
+      kind: 'transcript-changed',
+      sessionID: 's',
+      jobs: true,
+    });
+    expect(normalizeEvent({ type: 'session.step.ended', data: { sessionID: 's' } })).toEqual({
+      kind: 'transcript-changed',
+      sessionID: 's',
+      jobs: true,
+    });
   });
   test('permission events', () => {
     expect(normalizeEvent({ type: 'permission.asked', data: { sessionID: 's' } })).toEqual({

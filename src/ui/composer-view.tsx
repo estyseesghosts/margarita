@@ -1,5 +1,5 @@
 import type { Accessor } from 'solid-js';
-import { createSignal, For, onCleanup, Show } from 'solid-js';
+import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 
 import type { Completion, Notice } from '../app/app-state.ts';
 import type { AppController } from '../app/controller.ts';
@@ -88,7 +88,9 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
 /** The only persistent chrome: one line under the composer (docs/13). */
 export function Footer(props: { controller: AppController; theme: Theme; width: number }) {
   const state = props.controller.state;
-  const facts = (): FooterFacts => {
+  // One projection per reactive revision: segments and their colours share this value
+  // instead of scanning usage/history for every segment (#285).
+  const facts = createMemo<FooterFacts>(() => {
     // One server-qualified view; never reconstruct identity from a bare session id (#78).
     const view = props.controller.currentView();
     if (view === undefined) {
@@ -132,8 +134,8 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
             ...(context.tokens === undefined ? {} : { contextTokens: context.tokens }),
           }),
     };
-  };
-  const segments = () => footerSegments(facts(), props.width - 2);
+  });
+  const segments = createMemo(() => footerSegments(facts(), props.width - 2));
   const segmentColor = (segment: FooterSegment): string => {
     if (segment.kind === 'agent') return agentColor(facts().agent, props.theme);
     if (segment.kind === 'context') {

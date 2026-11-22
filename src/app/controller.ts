@@ -174,7 +174,7 @@ import {
   serverPathShape,
 } from '../domain/server-path.ts';
 import { classifySessionStatus, type SessionStatus } from '../domain/session-status.ts';
-import type { Execution, SessionSummary } from '../domain/session.ts';
+import type { Execution, SessionSummary, TokenUsage } from '../domain/session.ts';
 import {
   type ShellBackgroundState,
   shellBackgroundState as projectShellBackgroundState,
@@ -496,6 +496,32 @@ export class AppController {
   /** Materialized inspector document for the current payload, reused across renders (#234). */
   private inspectorCache:
     { payload: ToolResultPayload | undefined; index: InspectorIndex } | undefined;
+  /** Bumped only when overview grouping/tab inputs change, never on selection/focus (#288). */
+  private overviewRevision = 0;
+  private overviewGroupsCache:
+    { revision: number; serverKey: string; groups: ProjectGroup[] } | undefined;
+  private overviewRowsCache:
+    { revision: number; serverKey: string; complete: boolean; rows: OverviewRow[] } | undefined;
+  private overviewTabCountsCache:
+    { revision: number; serverKey: string; counts: Record<OverviewTab, number> } | undefined;
+  /** Reuses one analytics projection until transcript/usage/catalog evidence changes (#285). */
+  private usageAnalyticsCache:
+    | {
+        serverID: string;
+        sessionID: string;
+        messages: readonly TranscriptMessage[];
+        tokens: TokenUsage | undefined;
+        cost: number | undefined;
+        catalog: readonly CatalogModel[];
+        mcpServers: readonly string[];
+        stale: boolean;
+        result: UsageAnalytics;
+      }
+    | undefined;
+  /** Single-flight coalescing for worker/shell refreshes (#284). */
+  private readonly jobRefreshes = new Map<string, Promise<void>>();
+  private readonly jobRefreshDirty = new Set<string>();
+  private readonly transcriptJobsDirty = new Set<string>();
   private readonly debugLog: DebugLog;
 
   /**
@@ -562,7 +588,34 @@ export class AppController {
     this.debugLog = deps.debugLog ?? noDebugLog;
     const [state, setState] = createStore<AppState>(initialState(deps.cwd, this.serverID));
     this.state = state;
-    this.setState = setState;
+    // Track only inputs that can change grouped rows or tab counts. Selection, focus,
+    // composer and notice updates must not invalidate the overview projection (#288).
+    const overviewInputs = new Set([
+      'sessions',
+      'sessionsComplete',
+      'openedAt',
+      'running',
+      'permissions',
+      'forms',
+    ]);
+    this.setState = (...args: unknown[]) => {
+      // The store setter is overloaded; forward the captured arguments unchanged. This
+      // wrapper exists only to observe which state paths changed (#288).
+      Reflect.apply(setState, undefined, args);
+      const first: unknown = args[0];
+      if (typeof first === 'function') {
+        this.overviewRevision += 1;
+      } else if (typeof first === 'string') {
+        if (first === 'overview') {
+          const second: unknown = args[1];
+          if (second === 'tab' || second === 'expanded' || typeof second === 'function') {
+            this.overviewRevision += 1;
+          }
+        } else if (overviewInputs.has(first)) {
+          this.overviewRevision += 1;
+        }
+      }
+    };
     this.persisted = deps.localState;
     this.pinOperations = deps.localState.pinnedModelOps ?? {};
     this.goalStore = deps.goalStore ?? memoryGoalStore();
@@ -722,16 +775,46 @@ export class AppController {
     const key = this.keyFor(serverID, sessionID);
     const session = this.state.sessions[key];
     const view = this.currentView();
-    return projectUsage({
+    const messages = this.state.transcripts[key]?.messages ?? [];
+    const catalog = this.scopedModelsFor(serverID, session?.directory ?? this.deps.cwd);
+    const mcpServers = this.mcpServersFor(serverID, session?.directory ?? '');
+    const stale = view?.stream !== 'live';
+    const cached = this.usageAnalyticsCache;
+    if (
+      cached !== undefined &&
+      cached.serverID === serverID &&
+      cached.sessionID === sessionID &&
+      cached.messages === messages &&
+      cached.tokens === session?.tokens &&
+      cached.cost === session?.cost &&
+      cached.catalog === catalog &&
+      cached.mcpServers === mcpServers &&
+      cached.stale === stale
+    ) {
+      return cached.result;
+    }
+    const result = projectUsage({
       serverID,
       sessionID,
-      messages: this.state.transcripts[key]?.messages ?? [],
+      messages,
       ...(session?.tokens === undefined ? {} : { tokens: session.tokens }),
       ...(session?.cost === undefined ? {} : { cost: session.cost }),
-      catalog: this.scopedModelsFor(serverID, session?.directory ?? this.deps.cwd),
-      mcpServers: this.mcpServersFor(serverID, session?.directory ?? ''),
-      stale: view?.stream !== 'live',
+      catalog,
+      mcpServers,
+      stale,
     });
+    this.usageAnalyticsCache = {
+      serverID,
+      sessionID,
+      messages,
+      tokens: session?.tokens,
+      cost: session?.cost,
+      catalog,
+      mcpServers,
+      stale,
+      result,
+    };
+    return result;
   }
 
   openUsage(): void {
@@ -817,12 +900,32 @@ export class AppController {
     this.pendingPickerOpen = undefined;
   }
 
+  /** Health/label inputs outside the store; cheap per host, never per session. */
+  /**
+   * Health/label inputs outside the store; cheap per host, never per session. Stream status is
+   * included because a remote host's liveness changes its execution classification (#288).
+   */
+  private overviewServerKey(): string {
+    return this.serverIDs()
+      .map((serverID) => {
+        const info = this.deps.serverInfo?.(serverID);
+        return `${serverID}\u0000${info?.online ?? true}\u0000${info?.label ?? ''}\u0000${this.streamStatusOf(serverID)}`;
+      })
+      .join('\u0001');
+  }
+
   /** Counts for the tab bar, based on the same classifier as the dot. */
   tabCounts(): Record<OverviewTab, number> {
-    return tabCounts(Object.values(this.state.sessions), {
+    const revision = this.overviewRevision;
+    const serverKey = this.overviewServerKey();
+    const cached = this.overviewTabCountsCache;
+    if (cached?.revision === revision && cached.serverKey === serverKey) return cached.counts;
+    const counts = tabCounts(Object.values(this.state.sessions), {
       statusOf: (session) => this.statusOf(session),
       online: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
     });
+    this.overviewTabCountsCache = { revision, serverKey, counts };
+    return counts;
   }
 
   overviewTab(): OverviewTab {
@@ -844,11 +947,15 @@ export class AppController {
   }
 
   groups(): ProjectGroup[] {
+    const revision = this.overviewRevision;
+    const serverKey = this.overviewServerKey();
+    const cached = this.overviewGroupsCache;
+    if (cached?.revision === revision && cached.serverKey === serverKey) return cached.groups;
     const filtered = filterSessions(Object.values(this.state.sessions), this.state.overview.tab, {
       statusOf: (session) => this.statusOf(session),
       online: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
     });
-    return groupSessions(filtered, {
+    const groups = groupSessions(filtered, {
       platformFor: (serverID) => this.platformFor(serverID),
       showArchived: this.deps.config.sessions.showArchived,
       showChildren: this.deps.config.sessions.showChildren,
@@ -856,6 +963,8 @@ export class AppController {
       serverLabelOf: (serverID) => this.deps.serverInfo?.(serverID)?.label,
       serverOnline: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
     });
+    this.overviewGroupsCache = { revision, serverKey, groups };
+    return groups;
   }
 
   /** Most recent use: server activity or this frontend opening the session. */
@@ -868,11 +977,23 @@ export class AppController {
 
   /** Flattened selectable overview rows in display order, for keyboard navigation. */
   overviewRows(): OverviewRow[] {
+    const revision = this.overviewRevision;
+    const serverKey = this.overviewServerKey();
+    const complete = this.state.sessionsComplete;
+    const cached = this.overviewRowsCache;
+    if (
+      cached?.revision === revision &&
+      cached.serverKey === serverKey &&
+      cached.complete === complete
+    ) {
+      return cached.rows;
+    }
     const rows = this.groups().flatMap((group) =>
       groupRows(group, this.state.overview.expanded[group.key] === true),
     );
     // Offer pagination once the server says the first pages are not everything.
-    if (!this.state.sessionsComplete) rows.push({ kind: 'loadmore', key: loadMoreRowKey });
+    if (!complete) rows.push({ kind: 'loadmore', key: loadMoreRowKey });
+    this.overviewRowsCache = { revision, serverKey, complete, rows };
     return rows;
   }
 
@@ -1949,7 +2070,7 @@ export class AppController {
         // that produced it. Any execution transition (including a new turn) retires it (#135).
         this.setState('backgrounded', key, []);
         this.scheduleSummary(event.sessionID, serverID);
-        if (attached === event.sessionID) this.scheduleTranscript(event.sessionID, serverID);
+        if (attached === event.sessionID) this.scheduleTranscript(event.sessionID, serverID, true);
         else this.markStale(event.sessionID, serverID);
         if (event.state !== 'started')
           void this.track('requests', this.refreshInputRequests(event.sessionID, serverID));
@@ -1958,7 +2079,8 @@ export class AppController {
       case 'transcript-changed':
         if (this.state.sessions[this.keyFor(serverID, event.sessionID)] === undefined)
           this.scheduleSummary(event.sessionID, serverID);
-        if (attached === event.sessionID) this.scheduleTranscript(event.sessionID, serverID);
+        if (attached === event.sessionID)
+          this.scheduleTranscript(event.sessionID, serverID, event.jobs === true);
         else this.markStale(event.sessionID, serverID);
         return;
       case 'inbox-changed':
@@ -2485,24 +2607,56 @@ export class AppController {
     );
   }
 
+  /**
+   * Refreshes worker and shell jobs off the transcript critical path (#284). One request
+   * pair runs per session at a time; hints arriving while it is in flight coalesce into one
+   * follow-up. A slow job RPC can never delay painting the newer transcript.
+   */
+  private scheduleJobRefresh(sessionID: string, serverID: string = this.activeServerID()): void {
+    const key = this.keyFor(serverID, sessionID);
+    if (this.jobRefreshes.has(key)) {
+      this.jobRefreshDirty.add(key);
+      return;
+    }
+    const run = (async () => {
+      do {
+        this.jobRefreshDirty.delete(key);
+        await Promise.all([
+          this.refreshWorkers(sessionID, serverID),
+          this.refreshShellJobs(sessionID, serverID),
+        ]);
+      } while (this.jobRefreshDirty.delete(key) && !this.disposed);
+    })();
+    this.jobRefreshes.set(key, run);
+    void run.finally(() => {
+      if (this.jobRefreshes.get(key) === run) this.jobRefreshes.delete(key);
+    });
+    void this.track('jobs', run);
+  }
+
   /** Throttled canonical refetch: at most one request in flight per session. */
-  private scheduleTranscript(sessionID: string, serverID: string = this.activeServerID()): void {
+  private scheduleTranscript(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+    refreshJobs = false,
+  ): void {
     const key = `${serverID} ${sessionID}`;
     if (this.transcriptInFlight.has(key)) {
       this.transcriptDirty.add(key);
+      if (refreshJobs) this.transcriptJobsDirty.add(key);
       return;
     }
     const run = (async () => {
       try {
         await this.fetchLatest(sessionID, serverID);
-        await this.refreshWorkers(sessionID, serverID);
-        await this.refreshShellJobs(sessionID, serverID);
+        if (refreshJobs) this.scheduleJobRefresh(sessionID, serverID);
         await delay(80);
       } finally {
         this.transcriptInFlight.delete(key);
       }
-      if (this.transcriptDirty.delete(key) && !this.disposed)
-        this.scheduleTranscript(sessionID, serverID);
+      const dirty = this.transcriptDirty.delete(key);
+      const dirtyJobs = this.transcriptJobsDirty.delete(key);
+      if (dirty && !this.disposed) this.scheduleTranscript(sessionID, serverID, dirtyJobs);
     })();
     this.transcriptInFlight.set(key, run);
     void this.track('transcript', run);

@@ -1,13 +1,13 @@
 import type { Accessor } from 'solid-js';
-import { createSignal, For, onCleanup, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 
 import { graphemes } from '../domain/composer.ts';
 import {
   describeThrobber,
   frameAt,
-  frameIntervalMs,
   shimmerWeights,
   type ThrobberFacts,
+  throbberTickMs,
   tipFor,
 } from '../domain/throbber.ts';
 import { blend, type Theme } from './theme.ts';
@@ -28,24 +28,29 @@ const timeFormat = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute:
  */
 export function Throbber(props: ThrobberProps) {
   const [now, setNow] = createSignal(Date.now());
-  const timer = setInterval(() => {
-    if (props.facts.phase === 'running') setNow(Date.now());
-  }, frameIntervalMs);
-  onCleanup(() => clearInterval(timer));
+  // A finished turn owns no timer; non-animated running turns still refresh the visible
+  // elapsed counter, but at one second rather than the 150 ms shimmer cadence (#290).
+  createEffect(() => {
+    const running = props.facts.phase === 'running';
+    const tickMs = throbberTickMs(running, props.animate);
+    if (tickMs === undefined) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), tickMs);
+    onCleanup(() => clearInterval(timer));
+  });
 
-  const line = () =>
-    describeThrobber(props.facts, now(), props.width, (at) => timeFormat.format(new Date(at)));
+  const line = createMemo(() =>
+    describeThrobber(props.facts, now(), props.width, (at) => timeFormat.format(new Date(at))),
+  );
   const elapsed = () => now() - props.facts.startedAt;
-  // Without animation, only the elapsed counter changes (once per second via the meta text).
-  const glyph = () =>
-    !line().animated
-      ? '◌'
-      : props.animate
-        ? frameAt(elapsed(), props.ascii)
-        : props.ascii
-          ? '*'
-          : '◜';
-  const weights = () => (props.animate ? shimmerWeights(line().label.length, now()) : []);
+  const glyph = () => {
+    if (!line().animated) return '◌';
+    if (props.animate) return frameAt(elapsed(), props.ascii);
+    return props.ascii ? '*' : '◜';
+  };
+  const weights = createMemo(() =>
+    props.animate ? shimmerWeights(line().label.length, now()) : [],
+  );
   const colour = (index: number) =>
     blend(props.theme.accent, props.theme.accentLight, weights()[index] ?? 0);
   const tip = () => (line().animated ? tipFor(props.facts.startedAt, elapsed()) : undefined);
@@ -54,9 +59,14 @@ export function Throbber(props: ThrobberProps) {
     <box flexDirection="column" marginTop={1}>
       <text>
         <span style={{ fg: line().animated ? colour(0) : props.theme.dim }}>{glyph()} </span>
-        <For each={graphemes(line().label)}>
-          {(char, index) => <span style={{ fg: colour(index()) }}>{char}</span>}
-        </For>
+        <Show
+          when={props.animate}
+          fallback={<span style={{ fg: props.theme.dim }}>{line().label}</span>}
+        >
+          <For each={graphemes(line().label)}>
+            {(char, index) => <span style={{ fg: colour(index()) }}>{char}</span>}
+          </For>
+        </Show>
         <span style={{ fg: props.theme.dim }}>
           {line().label === '' ? line().meta : ` ${line().meta}`}
         </span>

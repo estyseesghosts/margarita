@@ -2,7 +2,15 @@
 export const orbitFrames = ['◜', '◝', '◞', '◟'] as const;
 export const asciiFrames = ['-', '\\', '|', '/'] as const;
 export const frameIntervalMs = 150;
+/** Elapsed-time cadence when animation is disabled: one visible tick per second. */
+export const idleTickMs = 1000;
 export const shimmerPeriodMs = 1800;
+
+/** Timer cadence for one mounted indicator; `undefined` means no timer should exist. */
+export function throbberTickMs(running: boolean, animate: boolean): number | undefined {
+  if (!running) return undefined;
+  return animate ? frameIntervalMs : idleTickMs;
+}
 const verbRotationMs = 20_000;
 
 const decorativeVerbs = [

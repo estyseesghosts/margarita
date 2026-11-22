@@ -9,6 +9,7 @@
   "scripts": {
     "build": "bun run scripts/build.ts",
     "capture:fixtures": "bun run scripts/capture-fixtures.ts",
+    "bench": "bun run scripts/bench.ts",
     "start": "bun run src/main.ts",
     "format": "bun fmt --no-script",
     "format:check": "bun fmt --no-script --check",

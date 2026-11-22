@@ -1,8 +1,24 @@
 import { describe, expect, test } from 'bun:test';
 
-import { describeThrobber, formatElapsed, frameAt, shimmerWeights, tipFor } from './throbber.ts';
+import {
+  describeThrobber,
+  formatElapsed,
+  frameAt,
+  shimmerWeights,
+  throbberTickMs,
+  tipFor,
+} from './throbber.ts';
 
 const clock = (at: number): string => `t${at}`;
+
+describe('throbber timer cadence (#290)', () => {
+  test('only running turns own a timer, and disabled animation ticks once per second', () => {
+    expect(throbberTickMs(false, false)).toBeUndefined();
+    expect(throbberTickMs(false, true)).toBeUndefined();
+    expect(throbberTickMs(true, true)).toBe(150);
+    expect(throbberTickMs(true, false)).toBe(1000);
+  });
+});
 
 describe('throbber', () => {
   test('cycles four single-cell frames every 150ms', () => {

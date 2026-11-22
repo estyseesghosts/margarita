@@ -1851,6 +1851,54 @@ describe('session pagination', () => {
     controller.dispose();
   });
 
+  test('overview projections survive selection moves and invalidate on session data (#288)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = ['ses_a', 'ses_b', 'ses_c'].map((id, index) => ({
+      ...fakeSession(id),
+      updatedAt: index + 1,
+    }));
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.openOverview();
+
+    const groups = controller.groups();
+    const tabs = controller.tabCounts();
+    const rows = controller.overviewRows();
+    controller.moveOverviewSelection(1);
+    controller.moveOverviewSelection(1);
+    expect(controller.groups()).toBe(groups);
+    expect(controller.tabCounts()).toBe(tabs);
+    expect(controller.overviewRows()).toBe(rows);
+
+    // Connectivity is external evidence, not a store revision: it must still invalidate.
+    controller.onStreamStatus('local', 'reconnecting');
+    expect(controller.groups()).not.toBe(groups);
+    controller.onStreamStatus('local', 'live');
+    const reconnected = controller.groups();
+    const reconnectedTabs = controller.tabCounts();
+    const reconnectedRows = controller.overviewRows();
+    expect(controller.groups()).toBe(reconnected);
+    expect(controller.tabCounts()).toBe(reconnectedTabs);
+    expect(controller.overviewRows()).toBe(reconnectedRows);
+
+    controller.onEvents(
+      'local',
+      [
+        {
+          kind: 'usage',
+          sessionID: 'ses_a',
+          cost: 1.5,
+          tokens: { input: 1, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+        },
+      ],
+      false,
+    );
+    expect(controller.groups()).not.toBe(groups);
+    expect(controller.tabCounts()).not.toBe(tabs);
+    expect(controller.overviewRows()).not.toBe(rows);
+    controller.dispose();
+  });
+
   test('loading more pages preserves the draft and expanded project groups', async () => {
     const backend = new FakeBackend();
     backend.listSessionsHook = onePerPageHook(pagedSessions(6));
@@ -5762,14 +5810,22 @@ describe('background worker lifecycle (#101)', () => {
     backend.listSubagentJobs = async () => {
       throw new Error('timed out after 10000ms');
     };
-    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    controller.onEvents(
+      'local',
+      [{ kind: 'transcript-changed', sessionID: 'ses_a', jobs: true }],
+      false,
+    );
     await flush();
     expect(controller.workerNodes('ses_a', 'local')).toHaveLength(2);
     expect(controller.workerJobStatus('ses_a', 'local')?.state).toBe('stale');
     expect(controller.workerJobStatus('ses_a', 'local')?.detail).toContain('timed out');
 
     backend.listSubagentJobs = async () => [];
-    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    controller.onEvents(
+      'local',
+      [{ kind: 'transcript-changed', sessionID: 'ses_a', jobs: true }],
+      false,
+    );
     // The previous transcript refresh is inside its coalescing delay; let the dirty rerun start.
     await Bun.sleep(120);
     await flush();
@@ -5798,10 +5854,44 @@ describe('background worker lifecycle (#101)', () => {
     backend.listShellJobs = async () => {
       throw new Error('connection reset');
     };
-    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    controller.onEvents(
+      'local',
+      [{ kind: 'transcript-changed', sessionID: 'ses_a', jobs: true }],
+      false,
+    );
     await flush();
     expect(controller.state.shellJobs['ses_a']).toHaveLength(1);
     expect(controller.shellJobStatus('ses_a', 'local')?.state).toBe('stale');
+    controller.dispose();
+  });
+
+  test('text-only transcript updates do not re-list jobs; job hints do (#284)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    const calls = (name: string) => backend.calls.filter((call) => call.name === name).length;
+    const workers = calls('listSubagentJobs');
+    const shells = calls('listShellJobs');
+
+    for (let index = 0; index < 5; index += 1) {
+      controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    }
+    await Bun.sleep(250);
+    await flush();
+    expect(calls('listSubagentJobs')).toBe(workers);
+    expect(calls('listShellJobs')).toBe(shells);
+
+    controller.onEvents(
+      'local',
+      [{ kind: 'transcript-changed', sessionID: 'ses_a', jobs: true }],
+      false,
+    );
+    await Bun.sleep(150);
+    await flush();
+    expect(calls('listSubagentJobs')).toBeGreaterThan(workers);
+    expect(calls('listShellJobs')).toBeGreaterThan(shells);
     controller.dispose();
   });
 
@@ -6232,6 +6322,32 @@ describe('session usage analytics and footer actions (#124)', () => {
     expect(analytics.cost).toBe(0.5);
     expect(analytics.toolCalls).toBe(1);
     expect(analytics.toolCategories.read).toBe(1);
+    controller.dispose();
+  });
+
+  test('analytics projection is reused across unrelated updates (#285)', async () => {
+    const { controller } = usageHarness();
+    await attach(controller, 'ses_a');
+    const first = controller.usageAnalytics();
+    controller.setComposer(composerFrom('unrelated draft'));
+    expect(controller.usageAnalytics()).toBe(first);
+
+    controller.onEvents(
+      'local',
+      [
+        {
+          kind: 'usage',
+          sessionID: 'ses_a',
+          cost: 0.75,
+          tokens: { input: 1, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+        },
+      ],
+      false,
+    );
+    const second = controller.usageAnalytics();
+    expect(second).not.toBe(first);
+    expect(second.cost).toBe(0.75);
+    expect(controller.usageAnalytics()).toBe(second);
     controller.dispose();
   });
 
