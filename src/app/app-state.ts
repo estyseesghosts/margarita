@@ -56,6 +56,8 @@ export type Overlay =
       sessionID: string;
       /** The form's own wire session; replies and cancels must use this exact owner. */
       formSessionID: string;
+      /** Canonical location for a `global` form; passed as the owning-location header. */
+      formDirectory: string;
       requestToken: number;
       editor: FormEditor;
     }

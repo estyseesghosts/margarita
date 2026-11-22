@@ -108,12 +108,14 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
       session?.model !== undefined || session === undefined
         ? {}
         : props.controller.modelFor(session.serverID, session.directory, true);
+    const sessionAgent =
+      session === undefined ? undefined : props.controller.effectiveAgentID(session);
     const badge = goalBadge(view.nativeGoal, view.awaitingSteer);
     // The context meter is the latest step's occupancy, never cumulative session tokens.
     // While a compaction is pending there is no confirmed reading, so show no meter.
     const context = props.controller.usageAnalytics().context;
     return {
-      ...(session?.agent === undefined ? {} : { agent: session.agent }),
+      ...(sessionAgent === undefined ? {} : { agent: sessionAgent }),
       ...(session?.model === undefined ? {} : { model: session.model }),
       ...(sessionModel.model === undefined ? {} : { model: sessionModel.model }),
       ...(sessionModel.status === undefined ? {} : { modelStatus: sessionModel.status }),

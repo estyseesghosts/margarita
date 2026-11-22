@@ -268,7 +268,99 @@ describe('form reply ownership (issue #171)', () => {
     await flush();
     const reply = local.calls.find((call) => call.name === 'replyForm');
     expect(reply?.args[0]).toBe('global');
+    // A location-owned form must carry its directory; the SDK sends it as a header (#227).
+    expect(reply?.args[3]).toBe('/work');
     expect(controller.state.forms[sessionID]).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('a declined global form cancels with its owning location (#227)', async () => {
+    const { controller, local } = harness();
+    local.forms = [{ ...form('global question'), id: 'form_global', sessionID: 'global' }];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    controller.openForm();
+    controller.formKey(decline);
+    await flush();
+    const cancel = local.calls.find((call) => call.name === 'cancelForm');
+    expect(cancel?.args).toEqual(['global', 'form_global', '/work']);
+    controller.dispose();
+  });
+
+  test('global and child form events refresh the viewed parent conversation (#226)', async () => {
+    const local = new FakeBackend();
+    local.sessions = [
+      session('local'),
+      { ...session('local'), id: 'ses_child', parentID: sessionID },
+    ];
+    local.forms = [];
+    const controller = new AppController({
+      backend: local,
+      config: defaultConfig,
+      localState: emptyState,
+      platform: 'linux',
+      cwd: '/work',
+      version: 'test',
+      now: () => 100,
+      saveLocalState: async () => {},
+      listFiles: async () => [],
+      requestExit: () => {},
+    });
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    expect(controller.pendingForm()).toBeUndefined();
+
+    // A global elicitation arrives while the conversation is already open.
+    local.forms = [{ ...form('global'), id: 'form_global', sessionID: 'global' }];
+    controller.onEvents('local', [{ kind: 'input-requests-changed', sessionID: 'global' }], false);
+    await flush();
+    expect(controller.pendingForm()?.id).toBe('form_global');
+    expect(controller.state.forms[sessionID]?.map((entry) => entry.id)).toContain('form_global');
+
+    // A descendant's question is presented by the attached parent, not its own bucket.
+    local.forms = [{ ...form('child'), id: 'form_child', sessionID: 'ses_child' }];
+    controller.onEvents(
+      'local',
+      [{ kind: 'input-requests-changed', sessionID: 'ses_child' }],
+      false,
+    );
+    await flush();
+    expect(controller.state.forms[sessionID]?.map((entry) => entry.id)).toEqual(['form_child']);
+    expect(controller.pendingForm()?.id).toBe('form_child');
+    controller.dispose();
+  });
+
+  test('a queued paste stays bound to the form active when it arrived (#229)', async () => {
+    const { controller, local } = harness();
+    const first = { ...form('first question'), id: 'form_first' };
+    const second = { ...form('second question'), id: 'form_second' };
+    local.forms = [first, second];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+
+    controller.openForm();
+    expect(controller.state.overlay.kind === 'form' && controller.state.overlay.editor.formID).toBe(
+      'form_first',
+    );
+    // Capture synchronously, then replace the active question before the queue runs.
+    const pending = controller.pasteBytes(new TextEncoder().encode('must not move'));
+    controller.closeOverlay();
+    local.forms = [second];
+    controller.retryInputRequests();
+    await flush();
+    await pending;
+    controller.openForm();
+    expect(controller.state.overlay.kind === 'form' && controller.state.overlay.editor.formID).toBe(
+      'form_second',
+    );
+    const overlay = controller.state.overlay;
+    expect(overlay.kind === 'form' && overlay.editor.text).toBe('');
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.notice?.text).toContain('Question changed');
+    expect(local.calls.filter((call) => call.name === 'replyForm')).toHaveLength(0);
     controller.dispose();
   });
 

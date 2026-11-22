@@ -567,6 +567,67 @@ describe('agent switch confirmation, picker admission and session isolation (#13
     controller.dispose();
   });
 
+  test('an omitted summary agent resolves from the latest transcript evidence (#225)', async () => {
+    const backend = new FakeBackend();
+    backend.agents = [agentFor('build'), agentFor('plan')];
+    backend.sessions = [agentlessSession('ses_a')];
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'u1', createdAt: 1, text: 'switch', attachments: [] },
+        { kind: 'agent-switched', id: 's1', createdAt: 2, agent: 'plan' },
+        {
+          kind: 'assistant',
+          id: 'a1',
+          createdAt: 3,
+          agent: 'plan',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [],
+        },
+      ],
+    };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    expect(controller.currentAgentID()).toBe('plan');
+    // Shift+Tab advances from the resolved agent, not from "unknown".
+    await controller.cycleAgent(1);
+    expect(backend.calls.find((call) => call.name === 'switchAgent')?.args).toEqual([
+      'ses_a',
+      'build',
+    ]);
+    expect(controller.currentAgentID()).toBe('build');
+    controller.dispose();
+  });
+
+  test('an unknown agent is not invented as Build (#225)', async () => {
+    const backend = new FakeBackend();
+    backend.agents = [agentFor('build'), agentFor('plan')];
+    backend.sessions = [agentlessSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    expect(controller.currentAgentID()).toBeUndefined();
+    expect(controller.currentAgentID()).not.toBe('build');
+    controller.dispose();
+  });
+
+  test('a successful switch is accepted when the summary omits the optional agent (#225)', async () => {
+    const backend = new FakeBackend();
+    backend.agents = [agentFor('build'), agentFor('plan')];
+    const withoutAgent = agentlessSession('ses_a');
+    backend.sessions = [withoutAgent];
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    backend.getSession = async () => withoutAgent;
+    await controller.cycleAgent(1);
+    expect(backend.calls.find((call) => call.name === 'switchAgent')?.args).toEqual([
+      'ses_a',
+      'build',
+    ]);
+    expect(controller.currentAgentID()).toBe('build');
+    expect(controller.state.notice?.text ?? '').not.toContain('unconfirmed');
+    controller.dispose();
+  });
+
   test('a delayed keyboard picker open is dropped after navigation (#146)', async () => {
     const backend = new FakeBackend();
     backend.agents = [agentFor('build')];
@@ -1744,6 +1805,22 @@ function fakeSession(id: string): SessionSummary {
     directory: '/work/kohjoh',
     title: `Session ${id}`,
     agent: 'build',
+    tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    cost: 0,
+    createdAt: 1,
+    updatedAt: 1,
+    archived: false,
+  };
+}
+
+/** v2 may omit `agent` until a switch or the first prompt (#225). */
+function agentlessSession(id: string): SessionSummary {
+  return {
+    id,
+    serverID: 'local',
+    projectID: 'p',
+    directory: '/work/kohjoh',
+    title: `Session ${id}`,
     tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
     cost: 0,
     createdAt: 1,

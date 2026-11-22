@@ -425,12 +425,13 @@ export class FakeBackend implements Backend {
     sessionID: string,
     formID: string,
     answer: Record<string, FormValue>,
+    directory?: string,
   ): Promise<void> {
-    this.calls.push({ name: 'replyForm', args: [sessionID, formID, answer] });
+    this.calls.push({ name: 'replyForm', args: [sessionID, formID, answer, directory] });
     this.forms = this.forms.filter((form) => form.id !== formID);
   }
-  async cancelForm(sessionID: string, formID: string): Promise<void> {
-    this.calls.push({ name: 'cancelForm', args: [sessionID, formID] });
+  async cancelForm(sessionID: string, formID: string, directory?: string): Promise<void> {
+    this.calls.push({ name: 'cancelForm', args: [sessionID, formID, directory] });
     this.forms = this.forms.filter((form) => form.id !== formID);
   }
   async replyPermission(

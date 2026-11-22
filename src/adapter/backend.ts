@@ -50,6 +50,20 @@ export class BackendError extends Error {
   }
 }
 
+/**
+ * `global` MCP elicitations are location-owned: their reply/cancel routes need the owning
+ * directory as a header, exactly as OpenCode's own client does. Session-owned forms must
+ * not send it, and a missing location fails visibly instead of answering the wrong project.
+ */
+function formRequestOptions(
+  sessionID: string,
+  directory: string | undefined,
+): { headers: Record<string, string> } | undefined {
+  return sessionID === 'global' && directory !== undefined
+    ? { headers: { 'x-opencode-directory': encodeURIComponent(directory) } }
+    : undefined;
+}
+
 export type SessionPage = Readonly<{ sessions: SessionSummary[]; nextCursor?: string }>;
 export type MessagePage = Readonly<{
   messages: TranscriptMessage[];
@@ -189,10 +203,15 @@ export interface Backend {
    * because test/older backends may not expose the location route (#209).
    */
   listLocationForms?(directory: string): Promise<FormRequest[]>;
-  replyForm(sessionID: string, formID: string, answer: Record<string, FormValue>): Promise<void>;
+  replyForm(
+    sessionID: string,
+    formID: string,
+    answer: Record<string, FormValue>,
+    directory?: string,
+  ): Promise<void>;
   /** Native OpenCode goal for the session (plugin RPC `opencode.goal/get`); null when unset. */
   getGoal(sessionID: string, directory?: string): Promise<NativeGoal | null>;
-  cancelForm(sessionID: string, formID: string): Promise<void>;
+  cancelForm(sessionID: string, formID: string, directory?: string): Promise<void>;
   replyPermission(
     sessionID: string,
     requestID: string,
@@ -581,14 +600,23 @@ class OpenCodeBackend implements Backend {
     sessionID: string,
     formID: string,
     answer: Record<string, FormValue>,
+    directory?: string,
   ): Promise<void> {
     await call('session.form.reply', () =>
-      this.client.session.form.reply({ sessionID, formID, answer }),
+      this.client.session.form.reply(
+        { sessionID, formID, answer },
+        formRequestOptions(sessionID, directory),
+      ),
     );
   }
 
-  async cancelForm(sessionID: string, formID: string): Promise<void> {
-    await call('session.form.cancel', () => this.client.session.form.cancel({ sessionID, formID }));
+  async cancelForm(sessionID: string, formID: string, directory?: string): Promise<void> {
+    await call('session.form.cancel', () =>
+      this.client.session.form.cancel(
+        { sessionID, formID },
+        formRequestOptions(sessionID, directory),
+      ),
+    );
   }
 
   async replyPermission(

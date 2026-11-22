@@ -478,7 +478,9 @@ describe('app', () => {
     await settle(setup);
     const replies = backend.calls.filter((call) => call.name === 'replyForm');
     expect(replies).toHaveLength(1);
-    expect(replies[0]?.args).toEqual(['ses_a', 'frm_1', { branch: 'dev' }]);
+    // The owning location travels with the reply; the backend only sends it as a header for
+    // `global` forms, but the controller always binds the answer to one location (#227).
+    expect(replies[0]?.args).toEqual(['ses_a', 'frm_1', { branch: 'dev' }, '/work/kohjoh']);
     expect(controller.state.overlay.kind).toBe('none');
     expect(setup.captureCharFrame()).not.toContain('Question from the agent');
   });

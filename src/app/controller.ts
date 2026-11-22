@@ -392,6 +392,11 @@ export class AppController {
   /** Per server-qualified session agent switches, serialized with revision checks (#132). */
   private readonly agentSwitches = new Map<string, Promise<boolean>>();
   private readonly failedAgentSwitches = new Set<string>();
+  /**
+   * Last locally confirmed agent per session. v2 summaries may omit `agent`; without this,
+   * an in-flight summary refresh (also agentless) can erase a just-confirmed selection.
+   */
+  private readonly confirmedAgents = new Map<string, string>();
   /** In-flight prompt admissions keyed by server-qualified session (#163). */
   private readonly admittingSessions = new Set<string>();
   /** Each open form has a unique token, and replies are guarded per server/session/form. */
@@ -1742,9 +1747,15 @@ export class AppController {
         if (attached === event.sessionID)
           void this.track('inbox', this.refreshInbox(event.sessionID, serverID));
         return;
-      case 'input-requests-changed':
-        void this.track('requests', this.refreshInputRequests(event.sessionID, serverID));
+      case 'input-requests-changed': {
+        // A `global` elicitation and a child-session form both belong to the viewed
+        // parent, whose bucket is the one that presents the card (#226). Refreshing only
+        // the event's own ID would update a bucket nobody is looking at.
+        for (const target of this.inputRequestRefreshTargets(event.sessionID, serverID)) {
+          void this.track('requests', this.refreshInputRequests(target, serverID));
+        }
         return;
+      }
       case 'goal-changed':
         this.bumpGoalVersion(event.sessionID, serverID);
         this.setNativeGoalState(
@@ -1794,6 +1805,7 @@ export class AppController {
         key,
         reconcile(this.withConfirmedModel(key, { ...session, serverID })),
       );
+      if (session.agent !== undefined) this.confirmedAgents.set(key, session.agent);
       this.reconcileStagedRevert(sessionID, serverID);
     } catch (error) {
       if (error instanceof BackendError && error.kind === 'not-found') return;
@@ -1886,6 +1898,27 @@ export class AppController {
         this.setState('permissionChoice', 0);
       }
     });
+  }
+
+  /**
+   * Buckets that must be refreshed for one request event. Global and child events belong to
+   * the viewed parent conversation (#226); a normal session event refreshes itself. An event
+   * whose session is not in the loaded index may be a child, so the attached conversation is
+   * refreshed too — the location merge still filters out sibling forms.
+   */
+  private inputRequestRefreshTargets(eventSessionID: string, serverID: string): string[] {
+    const targets = new Set<string>();
+    const known = this.state.sessions[this.keyFor(serverID, eventSessionID)] !== undefined;
+    if (eventSessionID !== 'global' && known) targets.add(eventSessionID);
+    const route = this.state.route;
+    if (route.kind !== 'conversation' || route.serverID !== serverID) return [...targets];
+    const attached = route.sessionID;
+    if (eventSessionID === 'global' || !known) {
+      targets.add(attached);
+    } else if (this.requestSessionScope(attached, serverID).has(eventSessionID)) {
+      targets.add(attached);
+    }
+    return [...targets];
   }
 
   /** The attached session plus its descendants on the same server. */
@@ -2383,11 +2416,13 @@ export class AppController {
     // switch while files are read cannot retarget the paste (issues #87, #154).
     if (this.disposed) return;
     const originKey = this.routeKey(this.state.route);
+    // Bind the paste to the question that is active *now*, before the ordered paste queue
+    // defers it. A later close/reopen must drop this paste, never retarget it (#229).
+    const formOrigin = this.pasteFormOrigin();
 
     const run = async (): Promise<void> => {
       if (this.disposed) return;
 
-      const formOrigin = this.pasteFormOrigin();
       const declaredMime = metadata?.mimeType?.toLowerCase();
       const textDeclared =
         metadata?.kind === 'text' ||
@@ -4200,7 +4235,8 @@ export class AppController {
   async cycleAgent(direction: 1 | -1): Promise<void> {
     if (!(await this.ensureCatalog(this.currentDirectory()))) return;
     const session = this.currentSession();
-    const current = session === undefined ? this.state.overview.agent : session.agent;
+    const current =
+      session === undefined ? this.state.overview.agent : this.effectiveAgentID(session);
     // `state.agents` is already the de-duplicated, deterministically ordered selectable set
     // from `loadCatalog`. The server does not expose project/global/built-in provenance, so
     // quick cycle safely uses that full set rather than a guessed project-only subset (#123).
@@ -4259,10 +4295,17 @@ export class AppController {
         const backend = this.backendFor(session.serverID);
         await backend.switchAgent(session.id, agentID);
         const confirmed = await backend.getSession(session.id);
-        if (confirmed.agent !== agentID) {
+        // The summary's `agent` is optional in v2. A successful switch is still a confirmed
+        // selection when the field is omitted; only a *different* reported agent is a failure.
+        if (confirmed.agent !== undefined && confirmed.agent !== agentID) {
           throw new Error('Server did not confirm the requested agent');
         }
-        this.setState('sessions', key, { ...confirmed, serverID: session.serverID });
+        this.setState('sessions', key, {
+          ...confirmed,
+          serverID: session.serverID,
+          agent: confirmed.agent ?? agentID,
+        });
+        this.confirmedAgents.set(key, confirmed.agent ?? agentID);
         this.failedAgentSwitches.delete(key);
         if (this.state.running[key] === true)
           this.showNotice(`Agent: ${agentID} (next turn)`, 'dim');
@@ -4304,7 +4347,29 @@ export class AppController {
 
   /** The agent shown as current in the picker, for both sessions and new-session defaults. */
   currentAgentID(): string | undefined {
-    return this.currentSession()?.agent ?? this.state.overview.agent;
+    const session = this.currentSession();
+    if (session !== undefined) return this.effectiveAgentID(session);
+    return this.state.overview.agent;
+  }
+
+  /**
+   * The effective agent for one session. The summary is authoritative when it reports one;
+   * OpenCode v2 may omit it, so the latest `agent-switched` or assistant message in that
+   * session's loaded transcript is the next-best evidence (#225). Never borrow the overview
+   * draft or another project's selection.
+   */
+  effectiveAgentID(session: SessionSummary): string | undefined {
+    if (session.agent !== undefined) return session.agent;
+    const key = this.keyFor(session.serverID, session.id);
+    const confirmed = this.confirmedAgents.get(key);
+    if (confirmed !== undefined) return confirmed;
+    const messages = this.state.transcripts[key]?.messages;
+    let agent: string | undefined;
+    for (const message of messages ?? []) {
+      if (message.kind === 'agent-switched') agent = message.agent;
+      else if (message.kind === 'assistant' && message.agent !== '') agent = message.agent;
+    }
+    return agent;
   }
 
   setAgentPickerQuery(query: string): void {
@@ -5583,6 +5648,7 @@ export class AppController {
       serverID: session.serverID,
       sessionID: session.id,
       formSessionID: form.sessionID,
+      formDirectory: session.directory,
       requestToken: this.formToken,
       editor: startEditor(form),
     });
@@ -5616,11 +5682,11 @@ export class AppController {
     if (outcome === 'submit') {
       const answer = buildAnswer(form, editor.answers);
       void this.finishForm(origin, (backend) =>
-        backend.replyForm(origin.formSessionID, origin.editor.formID, answer),
+        backend.replyForm(origin.formSessionID, origin.editor.formID, answer, origin.formDirectory),
       );
     } else if (outcome === 'decline') {
       void this.finishForm(origin, (backend) =>
-        backend.cancelForm(origin.formSessionID, origin.editor.formID),
+        backend.cancelForm(origin.formSessionID, origin.editor.formID, origin.formDirectory),
       );
     }
   }

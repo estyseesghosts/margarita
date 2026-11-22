@@ -227,7 +227,7 @@ export function Transcript(props: TranscriptProps) {
           greeting={props.controller.greetingFor(
             `conversation:${props.serverID}:${props.sessionID}`,
           )}
-          agent={state.sessions[sessionKeyValue()]?.agent}
+          agent={props.controller.currentAgentID()}
           model={sessionModel().model}
           modelStatus={sessionModel().status}
           directory={state.sessions[sessionKeyValue()]?.directory}
@@ -338,9 +338,9 @@ export function WelcomePanel(props: WelcomeProps) {
           : undefined;
   const detail = () => {
     const current = model();
-    return current === undefined
-      ? (props.agent ?? 'build')
-      : `${props.agent ?? 'build'} · ${current}`;
+    const agent = props.agent;
+    if (agent === undefined) return current ?? 'agent unavailable';
+    return current === undefined ? agent : `${agent} · ${current}`;
   };
   const directory = () => props.directory ?? props.controller.cwd;
   /** The hints only appear when the cat, the details and the hints all fit unsqueezed. */
