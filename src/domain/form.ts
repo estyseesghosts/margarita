@@ -301,6 +301,19 @@ export function currentField(form: FormRequest, editor: FormEditor): FormField |
   return visibleFields(form, editor.answers)[editor.index];
 }
 
+/**
+ * User-facing fields in the form's initial state, using the same hidden/`when` rules as the
+ * editor. Pending cards must not count protocol-hidden fields (#235).
+ */
+export function initialVisibleFields(form: FormRequest): FormField[] {
+  const answers: Record<string, FormValue> = {};
+  for (const field of form.fields) {
+    const value = initialValue(field);
+    if (value !== undefined) answers[field.key] = value;
+  }
+  return visibleFields(form, answers);
+}
+
 function optionCount(field: FormField, answers: FormAnswers): number {
   if (field.kind === 'choice') return field.options.length;
   if (field.kind === 'multi') {

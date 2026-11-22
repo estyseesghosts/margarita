@@ -485,6 +485,86 @@ describe('app', () => {
     expect(setup.captureCharFrame()).not.toContain('Question from the agent');
   });
 
+  test('the pending card counts only fields the editor will show (#235)', async () => {
+    const backend = backendWithSession();
+    const base = { required: false, hidden: false, when: [] as const };
+    backend.forms = [
+      {
+        id: 'frm_1',
+        sessionID: 'ses_a',
+        title: 'Deploy?',
+        fields: [
+          {
+            ...base,
+            key: 'branch',
+            title: 'Branch',
+            required: true,
+            kind: 'choice',
+            custom: false,
+            options: [{ value: 'main', label: 'main' }],
+          },
+          {
+            ...base,
+            key: 'token',
+            title: 'Internal token',
+            kind: 'text',
+            hidden: true,
+          },
+          {
+            ...base,
+            key: 'reason',
+            title: 'Why main?',
+            kind: 'text',
+            when: [{ key: 'branch', op: 'eq' as const, value: 'nope' }],
+          },
+        ],
+      },
+    ];
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const card = setup.captureCharFrame();
+    expect(card).toContain('1 field');
+    expect(card).not.toContain('3 fields');
+
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    const dialog = setup.captureCharFrame();
+    expect(dialog).toContain('Branch');
+    expect(dialog).not.toContain('Internal token');
+    expect(dialog).not.toContain('Why main?');
+    controller.dispose();
+  });
+
+  test('an all-hidden question reports no questions instead of a false field count (#235)', async () => {
+    const backend = backendWithSession();
+    backend.forms = [
+      {
+        id: 'frm_1',
+        sessionID: 'ses_a',
+        title: 'Acknowledge',
+        fields: [
+          {
+            key: 'token',
+            title: 'Internal',
+            required: false,
+            hidden: true,
+            when: [],
+            kind: 'text',
+            default: 'server-value',
+          },
+        ],
+      },
+    ];
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const card = setup.captureCharFrame();
+    expect(card).toContain('No questions to answer');
+    expect(card).not.toContain('0 fields');
+    controller.dispose();
+  });
+
   test('permission answered by another client resolves without a fake success', async () => {
     const backend = backendWithSession();
     backend.permissions = [

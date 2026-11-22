@@ -7,6 +7,7 @@ import {
   firstInvalid,
   type FormField,
   type FormRequest,
+  initialVisibleFields,
   multiChoices,
   parseNumber,
   pasteFormText,
@@ -182,6 +183,27 @@ describe('forms', () => {
       env: 'staging',
       token: 'server-value',
     });
+  });
+
+  test('initial visible fields exclude hidden and unmet conditional fields (#235)', () => {
+    expect(form.fields).toHaveLength(3);
+    // `reason` is conditional on env=prod and `env` starts empty, so the initial dialog is
+    // the choice plus the external runbook; the card must count the same two.
+    expect(initialVisibleFields(form).map((field) => field.key)).toEqual(['env', 'docs']);
+    const hidden = {
+      ...form,
+      fields: [
+        ...form.fields,
+        { ...base, key: 'token', title: 'Internal', kind: 'text' as const, hidden: true },
+      ],
+    };
+    expect(initialVisibleFields(hidden).map((field) => field.key)).toEqual(['env', 'docs']);
+    expect(
+      initialVisibleFields({
+        ...form,
+        fields: form.fields.map((field) => ({ ...field, hidden: true })),
+      }),
+    ).toEqual([]);
   });
 
   test('custom multiselect values can be added, preserved and removed (#212)', () => {

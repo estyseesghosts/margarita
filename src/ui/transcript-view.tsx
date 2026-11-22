@@ -22,7 +22,7 @@ import type { ScrollMove } from '../app/key-router.ts';
 import type { PatchLine } from '../domain/diff.ts';
 import { clampDiffPatch, diffCounts, editDiff, isEditLike, toolPath } from '../domain/edit-diff.ts';
 import { type ExecutionMarker, executionMarkers } from '../domain/execution-segment.ts';
-import type { FormRequest } from '../domain/form.ts';
+import { type FormRequest, initialVisibleFields } from '../domain/form.ts';
 import { actionHint, type Keymap } from '../domain/keymap.ts';
 import { formatModelRef, type ModelSelection } from '../domain/model-ref.ts';
 import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
@@ -1088,6 +1088,11 @@ function FormCard(props: { controller: AppController; theme: Theme; keymap: Keym
   const pending = () =>
     props.controller.pendingPermission() === undefined ? props.controller.pendingForm() : undefined;
   const openHint = () => actionHint(props.keymap, 'form.open') ?? 'Alt+Q';
+  /** Count with the editor's own hidden/conditional rules, not the wire field list (#235). */
+  const fieldCount = () => {
+    const form = pending();
+    return form === undefined ? 0 : initialVisibleFields(form).length;
+  };
   return (
     <Show when={pending()}>
       {(form: Accessor<FormRequest>) => (
@@ -1106,7 +1111,9 @@ function FormCard(props: { controller: AppController; theme: Theme; keymap: Keym
             <b>{form().title}</b>
           </text>
           <text fg={props.theme.dim}>
-            {`${form().fields.length} field${form().fields.length === 1 ? '' : 's'} · ${openHint()} to answer · Enter on an empty prompt also opens it`}
+            {fieldCount() === 0
+              ? `No questions to answer · ${openHint()} to acknowledge · Enter on an empty prompt also opens it`
+              : `${fieldCount()} field${fieldCount() === 1 ? '' : 's'} · ${openHint()} to answer · Enter on an empty prompt also opens it`}
           </text>
         </box>
       )}
