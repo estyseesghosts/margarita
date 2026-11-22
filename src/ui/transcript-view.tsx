@@ -283,11 +283,13 @@ export function Transcript(props: TranscriptProps) {
   // then scroll the semantic row into view after layout (#242). Only a focus change may
   // move the viewport; streaming updates keep the reader's own scroll anchor.
   let scrolledFocus: string | undefined;
+  let focusRevealToken = 0;
   createEffect(() => {
     const focused = state.focusedGroup;
     windowed();
     if (focused === undefined || box === undefined) {
       scrolledFocus = undefined;
+      focusRevealToken += 1;
       return;
     }
     if (scrolledFocus === focused) return;
@@ -297,21 +299,50 @@ export function Transcript(props: TranscriptProps) {
       props.controller.ensureTranscriptNodeVisible(props.sessionID, key, props.serverID);
     });
     const scrollbox = box;
+    const token = ++focusRevealToken;
     scrollbox.afterLayout(() => {
+      // A delayed callback belongs to the focus that queued it (#296).
+      if (token !== focusRevealToken) return;
+      if (state.focusedGroup === undefined || focusedNodeKey(state.focusedGroup) !== key) {
+        return;
+      }
       scrollbox.scrollChildIntoView(nodeID(key), { align: 'nearest' });
     });
   });
 
   // Expanding the already-focused row adds rows below it after the focus effect above has
-  // already run. Re-reveal the same semantic row so its new detail does not grow out of the
-  // viewport (#281). Streaming updates do not touch this map, so tail-follow never re-anchors.
+  // already run. Re-reveal that same row when its own disclosure or child page changes, but
+  // an unrelated stream update must not pull a reader back to a tool they scrolled away from
+  // (#296). The signature names the focused row's own disclosure state, so ordinary window
+  // refreshes do not schedule a new scroll. A signature change gets a few bounded layout
+  // passes because culling may mount the target one pass later; explicit navigation cancels
+  // any remaining passes.
+  let revealedFocus: string | undefined;
+  let revealPasses = 0;
   createEffect(() => {
     const focused = state.focusedGroup;
-    Object.keys(state.expandedTools);
     windowed();
-    if (focused === undefined || box === undefined) return;
-    const scrollbox = box;
+    if (focused === undefined || box === undefined) {
+      revealedFocus = undefined;
+      revealPasses = 0;
+      return;
+    }
     const key = focusedNodeKey(focused);
+    const expanded = props.controller.expandedSets();
+    const isExpanded = focused.startsWith('group:')
+      ? expanded.groups.has(focused)
+      : focused.startsWith('diff:')
+        ? expanded.diffs.has(key)
+        : expanded.tools.has(key);
+    // Child paging changes this row's height too (#260).
+    const signature = `${key}\u0000${isExpanded ? 'open' : 'closed'}\u0000${props.controller.childPageFor(key)}`;
+    if (revealedFocus !== signature) {
+      revealedFocus = signature;
+      revealPasses = 4;
+    }
+    if (revealPasses <= 0) return;
+    revealPasses -= 1;
+    const scrollbox = box;
     scrollbox.afterLayout(() => {
       scrollbox.scrollChildIntoView(nodeID(key), { align: 'nearest' });
     });
@@ -319,6 +350,9 @@ export function Transcript(props: TranscriptProps) {
 
   const scroll = (move: ScrollMove) => {
     if (box === undefined) return;
+    // Explicit navigation supersedes a queued focus/expansion reveal.
+    revealPasses = 0;
+    focusRevealToken += 1;
     const page = Math.max(1, box.height - 2);
     switch (move) {
       case 'pageUp': {

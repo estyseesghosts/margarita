@@ -3390,6 +3390,109 @@ describe('individual tool disclosure (#281)', () => {
   });
 });
 
+describe('streaming does not recenter a scrolled-away focused tool (#296)', () => {
+  test('a new tail message keeps the viewport while an expanded focused group stays put', async () => {
+    const backend = backendWithSession();
+    const messages: TranscriptMessage[] = [
+      { kind: 'user', id: 'u0', createdAt: 1, text: 'please read both', attachments: [] },
+      {
+        kind: 'assistant',
+        id: 'a0',
+        createdAt: 2,
+        completedAt: 3,
+        agent: 'build',
+        model: { providerID: 'opencode', modelID: 'longcat' },
+        parts: [
+          {
+            kind: 'tool',
+            tool: {
+              id: 'r1',
+              name: 'read',
+              status: 'completed',
+              input: { filePath: 'a.ts' },
+              output: 'a output',
+              startedAt: 1,
+              completedAt: 2,
+            },
+          },
+          {
+            kind: 'tool',
+            tool: {
+              id: 'r2',
+              name: 'read',
+              status: 'completed',
+              input: { filePath: 'b.ts' },
+              output: 'b output',
+              startedAt: 2,
+              completedAt: 3,
+            },
+          },
+        ],
+      },
+      ...Array.from({ length: 12 }, (_unused, index): TranscriptMessage[] => [
+        {
+          kind: 'user',
+          id: `u${index + 1}`,
+          createdAt: 10 + index * 2,
+          text: `follow-up ${index}`,
+          attachments: [],
+        },
+        {
+          kind: 'assistant',
+          id: `a${index + 1}`,
+          createdAt: 11 + index * 2,
+          completedAt: 12 + index * 2,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'text',
+              text: `answer ${index}\n${Array.from({ length: 20 }, (_, row) => `row ${index}.${row}`).join('\n')}`,
+            },
+          ],
+        },
+      ]).flat(),
+    ];
+    backend.messages = { ses_a: messages };
+    const { controller, setup } = await mount(backend, { width: 80, height: 18 });
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    // Focus and expand the read group near the top, then deliberately scroll away.
+    controller.moveGroupFocus(1);
+    await settle(setup);
+    expect(controller.state.focusedGroup).toBe('group:r1');
+    controller.toggleFocusedGroup();
+    await settle(setup);
+    for (let step = 0; step < 4; step += 1) {
+      setup.mockInput.pressKey(pageDown);
+      await settle(setup);
+    }
+    expect(setup.captureCharFrame()).not.toContain('Read 2 files');
+
+    // A streamed tail update must not pull the old focused group back into view.
+    backend.messages = {
+      ses_a: [
+        ...messages,
+        { kind: 'user', id: 'u-new', createdAt: 99, text: 'new tail', attachments: [] },
+      ],
+    };
+    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    await Bun.sleep(200);
+    await settle(setup);
+    const after = setup.captureCharFrame();
+    expect(after).not.toContain('Read 2 files');
+    expect(after).not.toContain('new tail');
+
+    // Navigating focus back to the group reveals it once, as before (#242, #281).
+    controller.clearGroupFocus();
+    controller.moveGroupFocus(1);
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('Read 2 files');
+    controller.dispose();
+  });
+});
+
 describe('Code Mode child diagnostics (#231)', () => {
   test('compact names the failed child and detailed mode shows its available reason', async () => {
     const backend = backendWithSession();

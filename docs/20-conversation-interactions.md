@@ -39,6 +39,8 @@ During an active conversation a server permission request appears above input. F
 
 `Ctrl+O` expands all visible tool activity and reasoning parts where available. To keep it useful at scale, expansion should be lazy in viewport (not materialize a million rows). Press `Ctrl+O` again returns compact mode with same transcript anchor.
 
+Scrolling never follows streaming on its own. A focused tool/group is revealed when focus moves to it or when that same row's own disclosure or child page changes; an unrelated streamed tail update, marker change or render-window refresh must leave the reader's viewport where they put it (#296). `Ctrl+Up/Down` and an explicit expand still make the focused row discoverable once.
+
 `Alt+C` or `/copy` opens the copy picker: a searchable list of exact payloads in the loaded session — tool output, diffs, errors, shell output and fenced Markdown code blocks. Type to filter, Up/Down to move, Enter or click to copy. The copied bytes are the underlying sanitized source text (newlines and code preserved), never styled/wrapped terminal rows or UI prefixes. Copy uses local OSC 52 (no network service); when the terminal cannot receive it, the exact bytes are written to a timestamped local file and the path is shown. Rows are labelled when a payload hit the frontend UI cap or was truncated by the server, so a shortened payload is never presented as complete. The full server-side text, when only a cursor RPC retained it, is not silently fetched — the label says where the boundary is.
 
 ## Rewind and recovery
