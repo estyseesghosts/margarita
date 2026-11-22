@@ -67,6 +67,18 @@ eight 1,000-message sessions, heap/RSS before and after allocation/GC/release, a
 samples. Native OpenTUI retained memory and attached heap-snapshot reports are not exposed by
 the pinned renderer; they are listed as unavailable rather than approximated.
 
+## Overview invalidation (#288, #293)
+
+The overview cache is keyed by a **reactive** invalidation clock plus the external host
+health/label/stream key. The controller wraps the Solid store setter so only `sessions`,
+`sessionsComplete`, `openedAt`, `running`, `permissions`, `forms`, `stream`, tab selection and
+expansion bump the clock. The store write and clock bump settle in one `batch`, so an observer
+notified by the write cannot read a cache entry keyed by the previous revision. Any host's
+stream-status transition bumps the clock explicitly, including a remote transition that writes
+no store field. Selection, focus, composer typing and notices do not invalidate, so moving over
+100 rows or typing keeps the cached projection. A mounted overview regression covers rename,
+new-session, running-count and disjoint tab membership without a keypress.
+
 ## Startup before indexing (#287)
 
 Interactive mode creates the renderer and paints the shell **before** awaiting
@@ -108,6 +120,7 @@ dispose the server manager exactly once.
 - #285 — memoized usage analytics and footer facts.
 - #287 — interactive shell before catalog/session indexing.
 - #288 — cached overview grouping/tab counts.
+- #293 — reactive overview invalidation ordering.
 - #289 — retained-byte transcript cache budget and the bench memory report.
 - #290 — animation-off timer cadence.
 - #291 — composer editing under large drafts.

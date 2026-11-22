@@ -1,7 +1,7 @@
 import { isAbsolute, join, posix, resolve, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { batch } from 'solid-js';
+import { batch, createSignal } from 'solid-js';
 import { createStore, produce, reconcile, type SetStoreFunction, unwrap } from 'solid-js/store';
 
 import {
@@ -504,8 +504,13 @@ export class AppController {
   /** Materialized inspector document for the current payload, reused across renders (#234). */
   private inspectorCache:
     { payload: ToolResultPayload | undefined; index: InspectorIndex } | undefined;
-  /** Bumped only when overview grouping/tab inputs change, never on selection/focus (#288). */
-  private overviewRevision = 0;
+  /**
+   * Reactive invalidation clock for overview projections (#288, #293). The getters read the
+   * accessor, so a mounted Solid observer subscribes to invalidation itself rather than only
+   * to the session fields touched during a cache miss. Writes bump it in the same batch as
+   * the store update.
+   */
+  private readonly overviewRevision = createSignal(0);
   private overviewGroupsCache:
     { revision: number; serverKey: string; groups: ProjectGroup[] } | undefined;
   private overviewRowsCache:
@@ -605,24 +610,28 @@ export class AppController {
       'running',
       'permissions',
       'forms',
+      'stream',
     ]);
     this.setState = (...args: unknown[]) => {
       // The store setter is overloaded; forward the captured arguments unchanged. This
       // wrapper exists only to observe which state paths changed (#288).
-      Reflect.apply(setState, undefined, args);
       const first: unknown = args[0];
-      if (typeof first === 'function') {
-        this.overviewRevision += 1;
-      } else if (typeof first === 'string') {
-        if (first === 'overview') {
-          const second: unknown = args[1];
-          if (second === 'tab' || second === 'expanded' || typeof second === 'function') {
-            this.overviewRevision += 1;
-          }
-        } else if (overviewInputs.has(first)) {
-          this.overviewRevision += 1;
-        }
+      const changed =
+        typeof first === 'function' ||
+        (typeof first === 'string' &&
+          (first === 'overview'
+            ? args[1] === 'tab' || args[1] === 'expanded' || typeof args[1] === 'function'
+            : overviewInputs.has(first)));
+      if (!changed) {
+        Reflect.apply(setState, undefined, args);
+        return;
       }
+      // One batch: a store notification must never reach an observer while the revision
+      // still names the previous projection's cache entry (#293).
+      batch(() => {
+        Reflect.apply(setState, undefined, args);
+        this.overviewRevision[1]((value) => value + 1);
+      });
     };
     this.persisted = deps.localState;
     this.pinOperations = deps.localState.pinnedModelOps ?? {};
@@ -924,7 +933,7 @@ export class AppController {
 
   /** Counts for the tab bar, based on the same classifier as the dot. */
   tabCounts(): Record<OverviewTab, number> {
-    const revision = this.overviewRevision;
+    const revision = this.overviewRevision[0]();
     const serverKey = this.overviewServerKey();
     const cached = this.overviewTabCountsCache;
     if (cached?.revision === revision && cached.serverKey === serverKey) return cached.counts;
@@ -955,7 +964,7 @@ export class AppController {
   }
 
   groups(): ProjectGroup[] {
-    const revision = this.overviewRevision;
+    const revision = this.overviewRevision[0]();
     const serverKey = this.overviewServerKey();
     const cached = this.overviewGroupsCache;
     if (cached?.revision === revision && cached.serverKey === serverKey) return cached.groups;
@@ -985,7 +994,7 @@ export class AppController {
 
   /** Flattened selectable overview rows in display order, for keyboard navigation. */
   overviewRows(): OverviewRow[] {
-    const revision = this.overviewRevision;
+    const revision = this.overviewRevision[0]();
     const serverKey = this.overviewServerKey();
     const complete = this.state.sessionsComplete;
     const cached = this.overviewRowsCache;
@@ -1903,13 +1912,18 @@ export class AppController {
 
   onStreamStatus(serverID: string, status: StreamStatus): void {
     this.debugLog.write('stream-status', { serverID, status });
-    // Track every host's stream so the viewed conversation's footer reflects its own host,
-    // not the launch server's badge (issue #109).
-    this.streamByServer.set(serverID, status);
-    // Every host, not just the launch one: a remote disconnect must drop that host's live-
-    // looking job rows and transient background confirmations (#136). Only this host's keys
-    // are touched, so other servers keep their server-confirmed state.
-    if (status === 'reconnecting') this.clearRuntimeStateForServer(serverID);
+    batch(() => {
+      // Track every host's stream so the viewed conversation's footer reflects its own host,
+      // not the launch server's badge (issue #109).
+      this.streamByServer.set(serverID, status);
+      // Any host's liveness changes status dots and tab counts. A remote transition writes
+      // no other store field, so bump the reactive overview clock explicitly (#293).
+      this.overviewRevision[1]((value) => value + 1);
+      // Every host, not just the launch one: a remote disconnect must drop that host's live-
+      // looking job rows and transient background confirmations (#136). Only this host's keys
+      // are touched, so other servers keep their server-confirmed state.
+      if (status === 'reconnecting') this.clearRuntimeStateForServer(serverID);
+    });
     // The single stream badge belongs to the launch server; per-server health lives on the
     // manager. A remote reconnect resyncs that host through onEvents and never touches the
     // badge here.

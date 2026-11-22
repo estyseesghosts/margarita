@@ -69,6 +69,10 @@ async function mount(
     editText?: typeof editExternally;
     /** Render the first frame while bootstrap is still indexing (#287). */
     startup?: 'loading';
+    /** Extra hosts for overview invalidation tests (#293). */
+    serverIDs?: () => readonly string[];
+    backendFor?: (serverID: string) => FakeBackend | undefined;
+    serverInfo?: (serverID: string) => { label?: string; online: boolean } | undefined;
   } = {},
 ) {
   const controller = new AppController({
@@ -82,6 +86,9 @@ async function mount(
     saveLocalState: async () => {},
     listFiles: async () => [],
     requestExit: () => {},
+    ...(options.serverIDs === undefined ? {} : { serverIDs: options.serverIDs }),
+    ...(options.backendFor === undefined ? {} : { backendFor: options.backendFor }),
+    ...(options.serverInfo === undefined ? {} : { serverInfo: options.serverInfo }),
   });
   if (options.startup === 'loading') {
     // Production renders the shell while `bootstrap()` is still awaiting the catalog and
@@ -1371,6 +1378,86 @@ describe('startup shell before indexing (#287)', () => {
     const frame = setup.captureCharFrame();
     expect(frame).toContain('Loading sessions and project catalog');
     expect(frame).not.toContain('No sessions yet');
+  });
+});
+
+describe('overview reactive invalidation (#293)', () => {
+  test('a mounted overview reflects session, status and tab changes without a keypress', async () => {
+    const local = backendWithSession();
+    const remote = new FakeBackend();
+    remote.serverID = 'srv_r';
+    remote.sessions = [
+      {
+        id: 'ses_r',
+        serverID: 'srv_r',
+        projectID: 'p',
+        directory: '/srv/remote',
+        title: 'Remote session',
+        agent: 'build',
+        createdAt: 1,
+        updatedAt: 1,
+        archived: false,
+      },
+    ];
+    const { controller, setup } = await mount(local, {
+      serverIDs: () => ['local', 'srv_r'],
+      backendFor: (serverID) => (serverID === 'srv_r' ? remote : local),
+      serverInfo: (serverID) =>
+        serverID === 'srv_r' ? { label: 'bravo', online: true } : undefined,
+    });
+
+    const first = setup.captureCharFrame();
+    expect(first).toContain('Renderer stalled near Goldenrod');
+    expect(first).toContain('Remote session');
+    expect(first).toContain('All 2');
+
+    // Equal-sized tabs with disjoint members must show their own rows, not a stale cache.
+    controller.setOverviewTab('local');
+    await settle(setup);
+    const localTab = setup.captureCharFrame();
+    expect(localTab).toContain('Renderer stalled near Goldenrod');
+    expect(localTab).not.toContain('Remote session');
+    expect(localTab).toContain('Local 1');
+
+    controller.setOverviewTab('remotes');
+    await settle(setup);
+    const remoteTab = setup.captureCharFrame();
+    expect(remoteTab).toContain('Remote session');
+    expect(remoteTab).not.toContain('Renderer stalled near Goldenrod');
+    expect(remoteTab).toContain('Remotes 1');
+
+    controller.setOverviewTab('all');
+    await settle(setup);
+
+    // A rename arrives asynchronously through the summary debounce, with no user action.
+    local.sessions = [{ ...local.sessions[0]!, title: 'Renamed from the server' }];
+    controller.onEvents('local', [{ kind: 'session-changed', sessionID: 'ses_a' }], false);
+    await Bun.sleep(200);
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('Renamed from the server');
+
+    // Running state changes the Active count and its row dot through the same clock.
+    controller.onEvents(
+      'local',
+      [{ kind: 'execution', sessionID: 'ses_a', state: 'started' }],
+      false,
+    );
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('Active 1');
+
+    // A newly listed session appears without remounting or pressing a key.
+    local.sessions.push({
+      ...local.sessions[0]!,
+      id: 'ses_b',
+      title: 'Second local session',
+      updatedAt: 9,
+    });
+    controller.onEvents('local', [{ kind: 'session-changed', sessionID: 'ses_b' }], false);
+    await Bun.sleep(200);
+    await settle(setup);
+    const added = setup.captureCharFrame();
+    expect(added).toContain('Second local session');
+    expect(added).toContain('All 3');
   });
 });
 

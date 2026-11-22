@@ -2035,6 +2035,47 @@ describe('session pagination', () => {
     controller.dispose();
   });
 
+  test('a remote status change invalidates counts even without a store write (#293)', async () => {
+    const local = new FakeBackend();
+    local.sessions = [fakeSession('ses_a')];
+    const remote = new FakeBackend();
+    remote.serverID = 'srv_r';
+    remote.sessions = [{ ...fakeSession('ses_r'), serverID: 'srv_r' }];
+    let online = true;
+    const controller = makeController(
+      async () => [],
+      local,
+      () => 10_000,
+      {
+        serverIDs: () => ['local', 'srv_r'],
+        backendFor: (serverID) => (serverID === 'srv_r' ? remote : local),
+        serverInfo: (serverID) => (serverID === 'srv_r' ? { label: 'bravo', online } : undefined),
+      },
+    );
+    await controller.bootstrap();
+    controller.onEvents(
+      'srv_r',
+      [{ kind: 'execution', sessionID: 'ses_r', state: 'started' }],
+      false,
+    );
+    expect(controller.tabCounts().active).toBe(1);
+    const groups = controller.groups();
+    const rows = controller.overviewRows();
+
+    online = false;
+    controller.onStreamStatus('srv_r', 'reconnecting');
+    expect(controller.groups()).not.toBe(groups);
+    expect(controller.overviewRows()).not.toBe(rows);
+    // The remote transition changes only external health, not a store field: the reactive
+    // clock still has to invalidate the cached classification.
+    expect(controller.tabCounts().active).toBe(0);
+
+    online = true;
+    controller.onStreamStatus('srv_r', 'live');
+    expect(controller.tabCounts().active).toBe(1);
+    controller.dispose();
+  });
+
   test('loading more pages preserves the draft and expanded project groups', async () => {
     const backend = new FakeBackend();
     backend.listSessionsHook = onePerPageHook(pagedSessions(6));
