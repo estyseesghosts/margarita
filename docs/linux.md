@@ -7,9 +7,9 @@ This page separates what is **CI-verified**, **manually verified** and **unteste
 | Area | Status | Evidence |
 | --- | --- | --- |
 | Source gate (`bun run verify`) on x86_64 glibc | CI-verified (Ubuntu) and manually verified (Fedora 44 under WSL2) | `.github/workflows/verify.yml`, 1013 tests passing on Fedora |
-| `bun run build bun-linux-x64` produces a standalone binary | Manually verified (Fedora 44); CI job `executable-linux` added, not yet observed green | ADR-0006 |
+| `bun run build bun-linux-x64` produces a standalone binary | CI-verified (Ubuntu, `verify.yml` and the tagged `release.yml`) and manually verified (Fedora 44) | ADR-0006 |
 | Binary starts outside the checkout without Bun or `node_modules` | Manually verified (Fedora 44) | `--version`, `--help`, PTY smoke |
-| Interactive renderer paints and exits 0 under a PTY, terminal restored | Manually verified (Fedora 44, xterm-256color via a scripted PTY); CI job added | `test/smoke/pty-smoke.py` |
+| Interactive renderer paints and exits 0 under a PTY, terminal restored | CI-verified (Ubuntu) and manually verified (Fedora 44, xterm-256color via a scripted PTY) | `test/smoke/pty-smoke.py` |
 | Secret Service credentials (`secret-tool`) round trip | Manually verified against a private gnome-keyring (Fedora 44) | `scripts/test-keyring.sh` |
 | tmux 3.x (paint, Unicode typing, resize 100x30→40x12→120x40 with draft kept, Ctrl+C exit 0) | Manually verified (Fedora 44 under WSL2) | `scripts/test-tmux.sh` |
 | Real terminal emulators (Ghostty, kitty, GNOME Terminal), SSH | **Untested**; record observations in `docs/smoke-matrix.md` | #181, #182, #184 |
