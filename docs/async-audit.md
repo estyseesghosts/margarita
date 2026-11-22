@@ -109,13 +109,14 @@ Legend: **origin** = value captured before the first `await` (a `SessionRef`/`se
 | #263 two ordinary summaries of one live session could commit out of order | fixed with a per-session admission sequence: a newer admitted read always wins, and a failed newer read leaves the last confirmed snapshot untouched; regression test in `async-audit-regressions.test.ts` |
 | #264 a failed location-wide form listing discarded confirmed global/child requests | fixed by retaining location-owned cached forms with the existing partial-error marker; regression test in `form-routing.test.ts` |
 | #253 an older confirmed-agent cache outranked a newer external switch, and survived deletion | fixed with evidence + transcript watermark and lifetime-scoped caches; regression tests in `controller.test.ts` |
+| #272 a summary snapshot could roll back a live usage event received while it was in flight | fixed with a per-session usage-event watermark; summaries and session listings preserve the newer cost/tokens; regression test in `async-audit-regressions.test.ts` |
 | `this.backend` is a getter over the *current route's* server | intentional; every post-`await` use in the file goes through `backendFor(owner)`; `interrupt` and `rename` were made explicit as hardening |
 
 ## Ownership policy (intentional behaviour)
 
 - Backend calls are bound to the `serverID` captured before the first `await`; `backendFor` fails closed for unknown hosts.
 - Session-scoped writes additionally capture a monotonic *session lifetime* epoch. Deletion, host removal and ID reuse bump it; a response that started in an earlier lifetime is a no-op even when the host is still registered.
-- Within one lifetime, `session.get` summaries are ordered by admission: the newest admitted read wins and an older response that resolves later is dropped. Transcript page reads carry a separate commit watermark, so overlapping live fetches cannot replace a newer accepted page. A newer read that fails leaves the last confirmed snapshot in place; it does not revive an older pending one.
+- Within one lifetime, `session.get` summaries are ordered by admission: the newest admitted read wins and an older response that resolves later is dropped. Transcript page reads carry a separate commit watermark, so overlapping live fetches cannot replace a newer accepted page. A newer read that fails leaves the last confirmed snapshot in place; it does not revive an older pending one. Usage events carry their own watermark: a summary or session listing that began before a live usage event keeps the event's cost/tokens while still accepting the snapshot's other fields.
 - A late result may update origin-scoped cached state if the host is still registered and the request epoch is current, but never takes focus, closes a different overlay or writes another route's composer.
 - Client-local paths and files are never derived from a remote server's directory.
 

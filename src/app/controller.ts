@@ -436,6 +436,9 @@ export class AppController {
    */
   private summaryReadSeq = 0;
   private readonly summaryAdmitted = new Map<string, number>();
+  /** Monotonic order of live usage events; lets a summary snapshot keep newer usage (#272). */
+  private usageEventSequence = 0;
+  private readonly usageEvidence = new Map<string, number>();
   private readonly summaryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private transcriptOrder: string[] = [];
   /** Per-host stream status: the viewed conversation's footer must reflect its own host,
@@ -1171,6 +1174,7 @@ export class AppController {
       active: Set<string>;
       cursor: string | undefined;
       snapshotSeq: number;
+      usageSeq: number;
     }>;
     const results = await Promise.all<SessionLoadResult>(
       servers.map(async (targetID): Promise<SessionLoadResult> => {
@@ -1178,6 +1182,7 @@ export class AppController {
         // Captured before the first request: any execution event stamped after this point is
         // newer than the snapshot and must not be overwritten by it.
         const snapshotSeq = this.runningEventSequence;
+        const usageSeq = this.usageEventSequence;
         try {
           const loaded = await this.loadServerSessions(targetID, epoch);
           return {
@@ -1190,6 +1195,7 @@ export class AppController {
             active: loaded.active,
             cursor: loaded.cursor ?? undefined,
             snapshotSeq,
+            usageSeq,
           };
         } catch (error) {
           this.debugLog.write('load-sessions-failed', {
@@ -1207,6 +1213,7 @@ export class AppController {
             active: new Set<string>(),
             cursor: undefined,
             snapshotSeq,
+            usageSeq,
           };
         }
       }),
@@ -1248,11 +1255,22 @@ export class AppController {
         continue;
 
       batch(() => {
-        this.setState('sessions', (current) => ({
-          ...current,
-          ...reconciled.found,
-          ...result.fresh,
-        }));
+        this.setState('sessions', (current) => {
+          const fresh: Record<string, SessionSummary> = {};
+          for (const [key, summary] of Object.entries(result.fresh)) {
+            const existing = current[key];
+            const liveUsageAdvanced = (this.usageEvidence.get(key) ?? 0) > result.usageSeq;
+            fresh[key] =
+              liveUsageAdvanced && existing !== undefined
+                ? {
+                    ...summary,
+                    ...(existing.cost === undefined ? {} : { cost: existing.cost }),
+                    ...(existing.tokens === undefined ? {} : { tokens: existing.tokens }),
+                  }
+                : summary;
+          }
+          return { ...current, ...reconciled.found, ...fresh };
+        });
         for (const ref of reconciled.deleted) this.forgetSession(ref.sessionID, ref.serverID);
         const page: { cursor?: string; complete: boolean; loading: boolean; error?: string } = {
           ...(result.cursor === undefined ? {} : { cursor: result.cursor }),
@@ -1459,6 +1477,8 @@ export class AppController {
     this.failedModelSwitches.delete(key);
     this.modelSwitchRevisions.delete(key);
     this.verifiedDescendants.delete(key);
+    // A recreated ID starts without usage evidence, so a new summary can establish usage.
+    this.usageEvidence.delete(key);
     const route = this.state.route;
     if (
       route.kind === 'conversation' &&
@@ -1855,14 +1875,16 @@ export class AppController {
         this.setState('shellJobs', this.keyFor(serverID, event.sessionID), []);
         this.forgetSession(event.sessionID, serverID);
         return;
-      case 'usage':
-        if (this.state.sessions[this.keyFor(serverID, event.sessionID)] !== undefined) {
-          this.setState('sessions', this.keyFor(serverID, event.sessionID), {
-            cost: event.cost,
-            tokens: event.tokens,
-          });
+      case 'usage': {
+        const key = this.keyFor(serverID, event.sessionID);
+        // Only a listed session can display usage, but the evidence stamp is what keeps a
+        // summary snapshot that began earlier from rolling it back (#272).
+        if (this.state.sessions[key] !== undefined) {
+          this.usageEvidence.set(key, (this.usageEventSequence += 1));
+          this.setState('sessions', key, { cost: event.cost, tokens: event.tokens });
         }
         return;
+      }
       case 'execution': {
         const key = this.keyFor(serverID, event.sessionID);
         // Stamp the event so a snapshot that began before it can never overwrite it.
@@ -1940,6 +1962,8 @@ export class AppController {
     const revision = this.modelSwitchRevisions.get(key);
     const sequence = ++this.summaryReadSeq;
     this.summaryAdmitted.set(key, sequence);
+    // Usage events stamped after this point are newer than the snapshot being fetched.
+    const usageAtStart = this.usageEvidence.get(key) ?? 0;
     try {
       const session = await backend.getSession(sessionID);
       // A deleted/unpaired/recreated session must not be recreated by a late summary read.
@@ -1952,11 +1976,20 @@ export class AppController {
       if (this.summaryAdmitted.get(key) !== sequence) return;
       // reconcile replaces the stored summary wholesale: absent `revert` is removed again.
       // Never lose the server stamp: a backend that omits it must not orphan the row.
-      this.setState(
-        'sessions',
-        key,
-        reconcile(this.withConfirmedModel(key, { ...session, serverID })),
-      );
+      // A live usage event received while this read was pending is newer evidence than the
+      // snapshot, so keep its cost/tokens while accepting the snapshot's other fields (#272).
+      const current = this.state.sessions[key];
+      const liveUsageAdvanced = (this.usageEvidence.get(key) ?? 0) > usageAtStart;
+      const next = this.withConfirmedModel(key, { ...session, serverID });
+      const committed =
+        liveUsageAdvanced && current !== undefined
+          ? {
+              ...next,
+              ...(current.cost === undefined ? {} : { cost: current.cost }),
+              ...(current.tokens === undefined ? {} : { tokens: current.tokens }),
+            }
+          : next;
+      this.setState('sessions', key, reconcile(committed));
       if (session.agent !== undefined) this.acceptServerAgent(key, session.agent);
       else this.adoptTranscriptAgent(key);
       this.reconcileStagedRevert(sessionID, serverID);
@@ -4772,6 +4805,9 @@ export class AppController {
     }
     for (const key of this.verifiedDescendants.keys()) {
       if (parseSessionKey(key).serverID === serverID) this.verifiedDescendants.delete(key);
+    }
+    for (const key of this.usageEvidence.keys()) {
+      if (parseSessionKey(key).serverID === serverID) this.usageEvidence.delete(key);
     }
     for (const cache of [
       this.confirmedAgents,

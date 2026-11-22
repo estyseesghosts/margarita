@@ -340,6 +340,53 @@ describe('overlapping summary and transcript reads (#262, #263)', () => {
     controller.dispose();
   });
 
+  test('a usage event received during a summary read survives the older snapshot (#272)', async () => {
+    const { local, controller } = await harness();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    const held = Promise.withResolvers<SessionSummary>();
+    local.getSession = () => held.promise;
+    controller.openSession(sessionID, 'local');
+    await flush();
+
+    const liveTokens = {
+      input: 55,
+      output: 66,
+      reasoning: 0,
+      cacheRead: 7,
+      cacheWrite: 0,
+    };
+    controller.onEvents(
+      'local',
+      [{ kind: 'usage', sessionID, cost: 4.2, tokens: liveTokens }],
+      false,
+    );
+    expect(controller.state.sessions[key]?.cost).toBe(4.2);
+    expect(controller.state.sessions[key]?.tokens).toEqual(liveTokens);
+
+    const oldTokens = { input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+    held.resolve({ ...session('local'), cost: 0.1, tokens: oldTokens, title: 'server title' });
+    await flush();
+    // The snapshot still supplies non-usage fields, but cannot roll back newer usage.
+    expect(controller.state.sessions[key]?.title).toBe('server title');
+    expect(controller.state.sessions[key]?.cost).toBe(4.2);
+    expect(controller.state.sessions[key]?.tokens).toEqual(liveTokens);
+
+    // A snapshot that starts after the event is genuinely newer and may update usage.
+    const newerTokens = { input: 10, output: 20, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+    local.getSession = async () => ({
+      ...session('local'),
+      cost: 9.5,
+      tokens: newerTokens,
+      title: 'newer',
+    });
+    controller.openSession(sessionID, 'local');
+    await flush();
+    expect(controller.state.sessions[key]?.cost).toBe(9.5);
+    expect(controller.state.sessions[key]?.tokens).toEqual(newerTokens);
+    controller.dispose();
+  });
+
   test('an older overlapping transcript page cannot replace a newer page (#262)', async () => {
     const { local, controller } = await harness();
     const older = Promise.withResolvers<MessagePage>();
