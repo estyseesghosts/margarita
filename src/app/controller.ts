@@ -9,6 +9,7 @@ import {
   BackendError,
   type Delivery,
   type DiffRange,
+  type MessagePage,
   type PermissionDecision,
   type PromptFile,
   type QueuedInput,
@@ -72,8 +73,10 @@ import {
   editorKey,
   type FormKey,
   type FormRequest,
+  multiChoices,
   pasteFormText,
   startEditor,
+  toggleOption,
 } from '../domain/form.ts';
 import {
   acceptProposal,
@@ -171,13 +174,17 @@ import {
 } from '../domain/server-path.ts';
 import { classifySessionStatus, type SessionStatus } from '../domain/session-status.ts';
 import type { Execution, SessionSummary } from '../domain/session.ts';
-import { shellRunningInBackground } from '../domain/shell-job.ts';
+import {
+  type ShellBackgroundState,
+  shellBackgroundState as projectShellBackgroundState,
+} from '../domain/shell-job.ts';
 import {
   completeCommand,
   isLocalCommand,
   type LocalCommandName,
   parseInput,
 } from '../domain/slash-command.ts';
+import { boundedToolChildren } from '../domain/tool-children.ts';
 import {
   cachedToolResult,
   completenessLabel,
@@ -369,6 +376,20 @@ function sessionRefOf(target: SessionTarget, defaultServerID: string): SessionRe
   return typeof target === 'string' ? { serverID: defaultServerID, sessionID: target } : target;
 }
 
+/** Identity and server timestamp of the newest agent-bearing transcript message. */
+type TranscriptAgentMark = Readonly<{ id: string; createdAt: number }>;
+
+/**
+ * One session's accepted agent value plus the transcript evidence already accounted for.
+ * `observedAt` is only consulted when no transcript was loaded at acceptance, so a stale
+ * message fetched later cannot displace a freshly confirmed local switch.
+ */
+type AgentEvidence = Readonly<{
+  agent: string;
+  transcript?: TranscriptAgentMark;
+  observedAt: number;
+}>;
+
 /**
  * Owns all frontend state and every server interaction. Views read `state` and call
  * methods; they never talk to the backend. Leaving a session is a pure view change:
@@ -405,10 +426,13 @@ export class AppController {
   private readonly agentSwitches = new Map<string, Promise<boolean>>();
   private readonly failedAgentSwitches = new Set<string>();
   /**
-   * Last locally confirmed agent per session. v2 summaries may omit `agent`; without this,
-   * an in-flight summary refresh (also agentless) can erase a just-confirmed selection.
+   * Last accepted agent evidence per session with the transcript watermark it superseded.
+   * A local acknowledgement outranks every transcript message already loaded; a later
+   * server message (for example a switch made in another client) outranks the local value
+   * (#225, #253). Evidence and its watermark are stored together so a newer message can
+   * never be rejected merely because the summary omitted `agent`.
    */
-  private readonly confirmedAgents = new Map<string, string>();
+  private readonly confirmedAgents = new Map<string, AgentEvidence>();
   /** In-flight prompt admissions keyed by server-qualified session (#163). */
   private readonly admittingSessions = new Set<string>();
   /** Each open form has a unique token, and replies are guarded per server/session/form. */
@@ -1255,6 +1279,26 @@ export class AppController {
     return this.refreshEpoch.get(serverID) === epoch;
   }
 
+  /**
+   * Monotonic per-session lifetimes (#252). A read captures the epoch before its first
+   * await; deletion, host removal or ID reuse bumps it, so a late response can never
+   * resurrect or overwrite state that belonged to an earlier lifetime. The counter is
+   * bumped instead of deleted so it cannot restart at a value an old response still holds.
+   */
+  private readonly sessionEpochs = new Map<string, number>();
+
+  private sessionEpoch(key: string): number {
+    return this.sessionEpochs.get(key) ?? 0;
+  }
+
+  private isSessionCurrent(key: string, epoch: number): boolean {
+    return (this.sessionEpochs.get(key) ?? 0) === epoch;
+  }
+
+  private invalidateSession(key: string): void {
+    this.sessionEpochs.set(key, this.sessionEpoch(key) + 1);
+  }
+
   private async loadServerSessions(
     serverID: string,
     epoch?: number,
@@ -1317,6 +1361,8 @@ export class AppController {
   /** Drops every cached trace of a session the server no longer has. */
   private forgetSession(sessionID: string, serverID: string = this.activeServerID()): void {
     const key = this.keyFor(serverID, sessionID);
+    // Retire every in-flight read/refresh for this lifetime before deleting its state (#252).
+    this.invalidateSession(key);
     const expansionPrefix = `${key} `;
     this.setState(
       produce((state) => {
@@ -1345,6 +1391,9 @@ export class AppController {
         for (const expansionKey of Object.keys(state.expandedDiffs)) {
           if (expansionKey.startsWith(expansionPrefix)) delete state.expandedDiffs[expansionKey];
         }
+        for (const pageKey of Object.keys(state.childPages)) {
+          if (pageKey.startsWith(expansionPrefix)) delete state.childPages[pageKey];
+        }
       }),
     );
     this.transcriptOrder = this.transcriptOrder.filter((entry) => entry !== key);
@@ -1352,6 +1401,14 @@ export class AppController {
     this.runningEventSeq.delete(key);
     this.invalidateJobRefresh(key);
     this.inputRequestRevisions.delete(key);
+    // Selection caches belong to the session lifetime: a deleted or recreated ID must never
+    // inherit an earlier switch, failure marker or revision (#253).
+    this.confirmedAgents.delete(key);
+    this.agentSwitches.delete(key);
+    this.failedAgentSwitches.delete(key);
+    this.modelSwitches.delete(key);
+    this.failedModelSwitches.delete(key);
+    this.modelSwitchRevisions.delete(key);
     const route = this.state.route;
     if (
       route.kind === 'conversation' &&
@@ -1828,9 +1885,14 @@ export class AppController {
     serverID: string = this.activeServerID(),
   ): Promise<void> {
     const key = this.keyFor(serverID, sessionID);
+    const epoch = this.sessionEpoch(key);
+    const backend = this.backendFor(serverID);
     const revision = this.modelSwitchRevisions.get(key);
     try {
-      const session = await this.backendFor(serverID).getSession(sessionID);
+      const session = await backend.getSession(sessionID);
+      // A deleted/unpaired/recreated session must not be recreated by a late summary read.
+      if (!this.isSessionCurrent(key, epoch) || !this.isRegisteredBackend(serverID, backend))
+        return;
       if (this.modelSwitchRevisions.get(key) !== revision) return;
       // reconcile replaces the stored summary wholesale: absent `revert` is removed again.
       // Never lose the server stamp: a backend that omits it must not orphan the row.
@@ -1839,9 +1901,13 @@ export class AppController {
         key,
         reconcile(this.withConfirmedModel(key, { ...session, serverID })),
       );
-      if (session.agent !== undefined) this.confirmedAgents.set(key, session.agent);
+      if (session.agent !== undefined) this.acceptServerAgent(key, session.agent);
+      else this.adoptTranscriptAgent(key);
       this.reconcileStagedRevert(sessionID, serverID);
     } catch (error) {
+      if (!this.isSessionCurrent(key, epoch) || !this.isRegisteredBackend(serverID, backend)) {
+        return;
+      }
       if (error instanceof BackendError && error.kind === 'not-found') return;
       throw error;
     }
@@ -1856,8 +1922,21 @@ export class AppController {
     if (this.state.sessions[key] === undefined || !this.isRegisteredBackend(serverID, backend)) {
       return;
     }
-    const items = await backend.listInbox(sessionID);
-    if (this.state.sessions[key] !== undefined && this.isRegisteredBackend(serverID, backend)) {
+    const epoch = this.sessionEpoch(key);
+    let items: readonly QueuedInput[];
+    try {
+      items = await backend.listInbox(sessionID);
+    } catch (error) {
+      if (!this.isSessionCurrent(key, epoch) || !this.isRegisteredBackend(serverID, backend)) {
+        return;
+      }
+      throw error;
+    }
+    if (
+      this.isSessionCurrent(key, epoch) &&
+      this.state.sessions[key] !== undefined &&
+      this.isRegisteredBackend(serverID, backend)
+    ) {
       this.setState('inbox', key, items);
     }
   }
@@ -1872,9 +1951,11 @@ export class AppController {
   ): Promise<void> {
     const backend = this.backendFor(serverID);
     const key = this.keyFor(serverID, sessionID);
+    const epoch = this.sessionEpoch(key);
     const revision = ++this.inputRequestRevision;
     this.inputRequestRevisions.set(key, revision);
     const directory = this.state.sessions[key]?.directory;
+    const previousPermissionID = this.state.permissions[key]?.[0]?.id;
     // Permissions and forms reconcile independently: one failed endpoint must never
     // hide a valid request from the other (#214).
     const [permissionsResult, formsResult, locationFormsResult] = await Promise.allSettled([
@@ -1885,28 +1966,45 @@ export class AppController {
         : Promise.resolve<FormRequest[]>([]),
     ]);
     if (this.inputRequestRevisions.get(key) !== revision) return;
+    if (!this.isSessionCurrent(key, epoch)) return;
     if (!this.isRegisteredBackend(serverID, backend)) return;
 
     const errors: { permissions?: string; forms?: string } = {};
     if (permissionsResult.status === 'rejected') {
       errors.permissions = errorText(permissionsResult.reason);
     }
-    let forms: FormRequest[] | undefined;
-    if (formsResult.status === 'fulfilled') forms = formsResult.value;
+    const sessionForms = formsResult.status === 'fulfilled' ? formsResult.value : undefined;
     if (formsResult.status === 'rejected') errors.forms = errorText(formsResult.reason);
-    if (locationFormsResult.status === 'fulfilled' && forms !== undefined) {
+    const cachedForms = this.state.forms[key] ?? [];
+    // A successful per-session listing is authoritative and may remove an answered form.
+    // A failed one proves nothing, so keep cached forms owned by the attached session;
+    // location-only forms are replaced by the successful location listing below (#258).
+    let forms =
+      sessionForms ??
+      (locationFormsResult.status === 'fulfilled'
+        ? cachedForms.filter((form) => form.sessionID === sessionID)
+        : cachedForms);
+    if (locationFormsResult.status === 'fulfilled') {
       // Only the location-wide forms that belong to this conversation may appear:
       // the global MCP sentinel, or a descendant (child-session) form. Never leak a
       // sibling session's question into this transcript (#209).
       const allowed = this.requestSessionScope(sessionID, serverID);
       const merged = new Map(forms.map((form) => [form.id, form]));
       for (const form of locationFormsResult.value) {
-        // The attached session's own forms already came from the authoritative session
-        // route; merging them again would let an older location snapshot revive a form
-        // that a newer session refresh just removed.
-        if (form.sessionID === sessionID) continue;
-        if (form.sessionID === 'global' || allowed.has(form.sessionID)) {
-          if (!merged.has(form.id)) merged.set(form.id, form);
+        // With a successful per-session listing, that route is authoritative for the
+        // attached session; merging the same forms again could revive one it just removed.
+        // When the session route failed, the location snapshot is the only available
+        // source and may supply the attached session's own form (#258).
+        if (form.sessionID === sessionID && sessionForms !== undefined) continue;
+        if (
+          form.sessionID === 'global' ||
+          form.sessionID === sessionID ||
+          allowed.has(form.sessionID)
+        ) {
+          // With an authoritative session listing, a duplicate location entry must not
+          // overwrite it. Without one, the location snapshot is the only live source.
+          if (sessionForms !== undefined && merged.has(form.id)) continue;
+          merged.set(form.id, form);
         }
       }
       forms = [...merged.values()];
@@ -1923,13 +2021,20 @@ export class AppController {
       if (forms !== undefined) this.setState('forms', key, forms);
       this.setState('requestErrors', key, errors);
       const route = this.state.route;
+      const nextPermissionID =
+        permissionsResult.status === 'fulfilled' ? permissionsResult.value[0]?.id : undefined;
       if (
         route.kind === 'conversation' &&
         route.serverID === serverID &&
         route.sessionID === sessionID &&
-        (permissionsResult.status !== 'fulfilled' || permissionsResult.value.length === 0)
+        (permissionsResult.status !== 'fulfilled' ||
+          nextPermissionID === undefined ||
+          nextPermissionID !== previousPermissionID)
       ) {
+        // A different request needs a fresh deliberate focus; the same request keeps the
+        // user's selection across routine refreshes (#237).
         this.setState('permissionChoice', 0);
+        this.setState('permissionFocused', false);
       }
     });
   }
@@ -2065,15 +2170,20 @@ export class AppController {
     });
   }
 
-  /** True only when the server reports a running job for this timed-out shell. */
-  shellRunningInBackground(
+  /**
+   * Honest background state for a timed-out shell: confirmed while the job list is fresh,
+   * last-known after a failed refresh, never invented when nothing was reported (#259).
+   */
+  shellBackgroundState(
     shellID: string | undefined,
     sessionID: string,
     serverID = this.activeServerID(),
-  ): boolean {
-    return shellRunningInBackground(
-      this.state.shellJobs[this.keyFor(serverID, sessionID)],
+  ): ShellBackgroundState {
+    const key = this.keyFor(serverID, sessionID);
+    return projectShellBackgroundState(
+      this.state.shellJobs[key],
       shellID,
+      this.state.shellStatus[key]?.state,
     );
   }
 
@@ -2105,7 +2215,32 @@ export class AppController {
     serverID: string = this.activeServerID(),
   ): Promise<void> {
     const key = this.keyFor(serverID, sessionID);
-    const page = await this.backendFor(serverID).listMessages(sessionID, transcriptPageSize);
+    const epoch = this.sessionEpoch(key);
+    const backend = this.backendFor(serverID);
+    // A transcript read may outlive the session it was started for. Ownership is checked
+    // after the await, immediately before any cache write (#252).
+    if (this.state.sessions[key] === undefined) return;
+    let page: MessagePage;
+    try {
+      page = await backend.listMessages(sessionID, transcriptPageSize);
+    } catch (error) {
+      if (
+        !this.isSessionCurrent(key, epoch) ||
+        !this.isRegisteredBackend(serverID, backend) ||
+        this.state.sessions[key] === undefined
+      ) {
+        return;
+      }
+      throw error;
+    }
+    if (
+      this.disposed ||
+      !this.isSessionCurrent(key, epoch) ||
+      !this.isRegisteredBackend(serverID, backend) ||
+      this.state.sessions[key] === undefined
+    ) {
+      return;
+    }
     const existing = this.state.transcripts[key];
     const merged = mergeLatest(existing?.messages ?? [], page.messages);
     // Cached messages older than this page keep their own cursor/retry state; otherwise the
@@ -2131,20 +2266,37 @@ export class AppController {
       }),
     );
     this.touchTranscript(key);
+    // The latest page is canonical for the session's current agent. Adopt a genuinely
+    // newer switch (possibly made in another client) without letting an older cached
+    // transcript message displace a fresh local acknowledgement (#253).
+    this.adoptTranscriptAgent(key);
   }
 
   async loadOlder(sessionID: string, serverID: string = this.activeServerID()): Promise<void> {
     const key = this.keyFor(serverID, sessionID);
     const transcript = this.state.transcripts[key];
     if (transcript?.olderCursor === undefined || transcript.loading) return;
+    const epoch = this.sessionEpoch(key);
+    const backend = this.backendFor(serverID);
     this.setState('transcripts', key, 'loading', true);
     try {
-      const page = await this.backendFor(serverID).listMessages(
+      const page = await backend.listMessages(
         sessionID,
         transcriptPageSize,
         transcript.olderCursor,
       );
-      const known = new Set(transcript.messages.map((message) => message.id));
+      // Never recreate a transcript that was deleted, evicted or replaced while paging (#252).
+      if (
+        this.disposed ||
+        !this.isSessionCurrent(key, epoch) ||
+        !this.isRegisteredBackend(serverID, backend) ||
+        this.state.transcripts[key] === undefined
+      ) {
+        return;
+      }
+      const known = new Set(
+        (this.state.transcripts[key]?.messages ?? []).map((message) => message.id),
+      );
       const older = page.messages.filter((message) => !known.has(message.id));
       // Replace via produce: a merging setter would keep a stale cursor after the last page.
       this.setState(
@@ -2162,6 +2314,15 @@ export class AppController {
         }),
       );
     } catch (error) {
+      // A failure from a retired lifetime says nothing about the current one; do not
+      // surface it as a notice for a session the user no longer has.
+      if (
+        !this.isSessionCurrent(key, epoch) ||
+        !this.isRegisteredBackend(serverID, backend) ||
+        this.state.transcripts[key] === undefined
+      ) {
+        return;
+      }
       this.setState('transcripts', key, 'loading', false);
       throw error;
     }
@@ -2170,6 +2331,50 @@ export class AppController {
   /** Rendered node limit for a session's transcript. */
   transcriptWindow(sessionID: string, serverID: string = this.activeServerID()): number {
     return this.state.transcriptWindow[this.keyFor(serverID, sessionID)] ?? transcriptWindowStep;
+  }
+
+  /**
+   * Reveals every already-loaded node without fetching an older page. Ctrl+Home uses this
+   * so it reaches the earliest *loaded* message while the existing "earlier messages"
+   * marker still tells the reader when server history remains (#251).
+   */
+  revealAllLoaded(
+    sessionID: string,
+    hiddenNodes: number,
+    serverID: string = this.activeServerID(),
+  ): boolean {
+    if (hiddenNodes <= 0) return false;
+    const key = this.keyFor(serverID, sessionID);
+    this.setState(
+      'transcriptWindow',
+      key,
+      this.transcriptWindow(sessionID, serverID) + hiddenNodes,
+    );
+    return true;
+  }
+
+  /**
+   * Expands the render window far enough to include one semantic node. Keyboard focus can
+   * move to an item older than the current window; that item must be rendered and scrolled
+   * into view before Enter can act on it (#242). Only loaded nodes are changed.
+   */
+  ensureTranscriptNodeVisible(
+    sessionID: string,
+    nodeKey: string,
+    serverID: string = this.activeServerID(),
+  ): boolean {
+    const route = this.state.route;
+    if (route.kind !== 'conversation') return false;
+    if (route.serverID !== serverID || route.sessionID !== sessionID) return false;
+    const nodes = this.conversationNodes();
+    const index = nodes.findIndex((node) => node.key === nodeKey);
+    if (index < 0) return false;
+    // Leave a few rows of context around the target rather than pinning it to the edge.
+    const needed = nodes.length - index + 8;
+    if (this.transcriptWindow(sessionID, serverID) < needed) {
+      this.setState('transcriptWindow', this.keyFor(serverID, sessionID), needed);
+    }
+    return true;
   }
 
   /**
@@ -2244,6 +2449,7 @@ export class AppController {
       this.setState('completion', undefined);
       this.setState('focusedGroup', undefined);
       this.setState('permissionChoice', 0);
+      this.setState('permissionFocused', false);
       this.setState('openedAt', this.keyFor(serverID, sessionID), this.deps.now());
       this.restoreDraft(this.keyFor(serverID, sessionID));
       if (transcript === undefined) {
@@ -2431,6 +2637,32 @@ export class AppController {
     if (row !== undefined) batch(() => this.selectRow(row));
   }
 
+  /**
+   * Moves the overview selection by roughly one viewport (#238). Paging is a list
+   * gesture: it never moves focus into the composer, and an unfocused composer keeps
+   * its draft untouched. A missing selection starts from the nearest edge.
+   */
+  moveOverviewPage(direction: -1 | 1, pageRows: number): void {
+    if (this.state.overview.focus !== 'list') return;
+    const rows = this.overviewRows();
+    if (rows.length === 0) return;
+    const current = this.state.overview.selectedRow;
+    const index = current === undefined ? -1 : rows.findIndex((row) => row.key === current);
+    const start = index < 0 ? (direction === 1 ? -1 : rows.length) : index;
+    const step = Math.max(1, Math.floor(pageRows));
+    const next = Math.min(rows.length - 1, Math.max(0, start + direction * step));
+    const row = rows[next];
+    if (row !== undefined) batch(() => this.selectRow(row));
+  }
+
+  /** Ctrl+Home/Ctrl+End in the overview select the first/last available row (#238). */
+  selectOverviewEdge(edge: 'first' | 'last'): void {
+    if (this.state.overview.focus !== 'list') return;
+    const rows = this.overviewRows();
+    const row = edge === 'first' ? rows[0] : rows[rows.length - 1];
+    if (row !== undefined) batch(() => this.selectRow(row));
+  }
+
   focusOverviewComposer(): void {
     this.setState('overview', 'focus', 'composer');
   }
@@ -2570,6 +2802,74 @@ export class AppController {
     if (bounded.length < clean.length) {
       this.showNotice('Paste truncated to 65,536 characters.', 'warn');
     }
+  }
+
+  /**
+   * One paste into a searchable modal overlay (#239). Text only, sanitized and bounded;
+   * binary clipboard data is refused rather than retargeted to the composer or a draft.
+   * Returns true when the paste belonged to an overlay and must not reach the composer.
+   */
+  pasteIntoOverlay(
+    bytes: Uint8Array,
+    metadata?: { mimeType?: string; kind?: 'text' | 'binary' | 'unknown' },
+  ): boolean {
+    const overlay = this.state.overlay;
+    if (overlay.kind === 'none' || overlay.kind === 'form') return false;
+    if (overlay.kind === 'help') {
+      // Help is dismiss-on-paste; the same paste still belongs to the composer behind it.
+      this.closeOverlay();
+      return false;
+    }
+    const declaredMime = metadata?.mimeType?.toLowerCase();
+    const textDeclared =
+      metadata?.kind === 'text' || (declaredMime !== undefined && declaredMime.startsWith('text/'));
+    const binaryDeclared = metadata?.kind === 'binary';
+    if (binaryDeclared || (!textDeclared && declaredMime !== undefined)) {
+      this.showNotice('This dialog accepts pasted text only.', 'warn');
+      return true;
+    }
+    const text = decodePastedText(bytes);
+    if (text === undefined) {
+      this.showNotice('Pasted data is not text.', 'warn');
+      return true;
+    }
+    // Search fields are single-line: newlines become spaces, never submit anything.
+    const clean = sanitizeTerminalText(text)
+      .replace(/\s*\r?\n\s*/g, ' ')
+      .trim();
+    if (clean === '') return true;
+    const bounded = clean.slice(0, 4096);
+    switch (overlay.kind) {
+      case 'model-picker':
+        this.setModelPickerQuery(overlay.query + bounded);
+        break;
+      case 'effort-picker':
+        this.setEffortPickerQuery(overlay.query + bounded);
+        break;
+      case 'agent-picker':
+        this.setAgentPickerQuery(overlay.query + bounded);
+        break;
+      case 'copy-picker':
+        this.setCopyPickerQuery(overlay.query + bounded);
+        break;
+      case 'history-search':
+        this.setHistoryQuery(overlay.query + bounded);
+        break;
+      case 'inspector': {
+        const composer = overlay.searching
+          ? { text: overlay.query, cursor: overlay.queryCursor }
+          : { text: '', cursor: 0 };
+        this.setInspectorSearch(insertText(composer, bounded));
+        break;
+      }
+      default:
+        // Non-editable modal: consume the paste, leaving the draft untouched.
+        break;
+    }
+    if (bounded.length < clean.length) {
+      this.showNotice('Paste truncated to 4,096 characters.', 'warn');
+    }
+    return true;
   }
 
   /** True when no route or overlay change has occurred since `originKey` was captured. */
@@ -2734,6 +3034,25 @@ export class AppController {
         else state.overview.expanded[groupKey] = true;
       }),
     );
+    // Collapsing while a child row is selected would leave an invisible selection. Move
+    // it to the group's toggle, which remains on screen (#240).
+    if (this.state.overview.focus !== 'list') return;
+    const selected = this.state.overview.selectedRow;
+    const rows = this.overviewRows();
+    if (selected !== undefined && rows.some((row) => row.key === selected)) return;
+    const toggle = rows.find((row) => row.kind === 'toggle' && row.groupKey === groupKey);
+    if (toggle !== undefined) this.selectRow(toggle);
+    else this.setState('overview', 'selectedRow', undefined);
+  }
+
+  /** One click on an overview row selects and activates it, matching Enter (#247). */
+  clickOverviewRow(key: string): void {
+    const row = this.overviewRows().find((entry) => entry.key === key);
+    if (row === undefined) return;
+    batch(() => {
+      this.selectRow(row);
+      this.attachSelected();
+    });
   }
 
   // ---------------------------------------------------------------- composer
@@ -4229,6 +4548,25 @@ export class AppController {
     for (const key of this.jobRefreshEpoch.keys()) {
       if (parseSessionKey(key).serverID === serverID) this.invalidateJobRefresh(key);
     }
+    // Retire every session lifetime for the host and drop selection caches keyed to it, so
+    // an unpair/re-pair cannot resurrect a late summary, transcript or switch (#252, #253).
+    for (const key of this.sessionEpochs.keys()) {
+      if (parseSessionKey(key).serverID === serverID) this.invalidateSession(key);
+    }
+    for (const cache of [
+      this.confirmedAgents,
+      this.agentSwitches,
+      this.failedAgentSwitches,
+      this.modelSwitches,
+      this.failedModelSwitches,
+      this.modelSwitchRevisions,
+    ]) {
+      for (const key of cache.keys()) {
+        if (parseSessionKey(key).serverID !== serverID) continue;
+        this.invalidateSession(key);
+        cache.delete(key);
+      }
+    }
     this.setState(
       produce((state) => {
         delete state.mcpCatalogs[serverID];
@@ -4265,12 +4603,15 @@ export class AppController {
         }
         // Qualified expansion entries are `<server-qualified session key> <node key>`; match
         // them by the session-key prefix of this host only.
-        for (const map of [state.expandedGroups, state.expandedDiffs]) {
+        for (const map of [state.expandedGroups, state.expandedDiffs, state.childPages]) {
           for (const key of Object.keys(map)) {
             if (this.ownsKey(key, serverID)) delete map[key];
           }
         }
       }),
+    );
+    this.transcriptOrder = this.transcriptOrder.filter(
+      (key) => parseSessionKey(key).serverID !== serverID,
     );
     if (this.state.overview.selectedRow?.includes(sessionKey({ serverID, sessionID: '' }))) {
       this.setState('overview', 'selectedRow', undefined);
@@ -4334,14 +4675,22 @@ export class AppController {
     // confirms the agent via a fresh session read (#132). The optimistic footer value is never
     // described as confirmed; a rejection restores the whole pre-switch summary.
     const key = this.keyFor(session.serverID, session.id);
+    const epoch = this.sessionEpoch(key);
     const previous = this.agentSwitches.get(key);
     this.setState('sessions', key, { ...session, agent: agentID });
     const operation = (async (): Promise<boolean> => {
       if (previous !== undefined) await previous;
       try {
         const backend = this.backendFor(session.serverID);
+        if (!this.isSessionCurrent(key, epoch)) return false;
         await backend.switchAgent(session.id, agentID);
         const confirmed = await backend.getSession(session.id);
+        if (
+          !this.isSessionCurrent(key, epoch) ||
+          !this.isRegisteredBackend(session.serverID, backend)
+        ) {
+          return false;
+        }
         // The summary's `agent` is optional in v2. A successful switch is still a confirmed
         // selection when the field is omitted; only a *different* reported agent is a failure.
         if (confirmed.agent !== undefined && confirmed.agent !== agentID) {
@@ -4352,12 +4701,14 @@ export class AppController {
           serverID: session.serverID,
           agent: confirmed.agent ?? agentID,
         });
-        this.confirmedAgents.set(key, confirmed.agent ?? agentID);
+        this.acceptServerAgent(key, confirmed.agent ?? agentID);
         this.failedAgentSwitches.delete(key);
         if (this.state.running[key] === true)
           this.showNotice(`Agent: ${agentID} (next turn)`, 'dim');
         return true;
       } catch (error) {
+        // A failure from a retired lifetime is not evidence about the current one.
+        if (!this.isSessionCurrent(key, epoch)) return false;
         // `agent` is optional; restoring the whole captured summary avoids an absent-property
         // write under exactOptionalPropertyTypes. refreshSummary below reconciles with the server.
         this.setState('sessions', key, session);
@@ -4384,7 +4735,15 @@ export class AppController {
     const admission = admit ?? this.beginPickerOpen('agent');
     if (!(await this.ensureCatalog(this.currentDirectory()))) return;
     if (!admission()) return;
-    this.setOverlay({ kind: 'agent-picker', query: '', index: 0 });
+    const current = this.currentAgentID();
+    const index =
+      current === undefined
+        ? 0
+        : Math.max(
+            0,
+            this.agentChoices('').findIndex((agent) => agent.id === current),
+          );
+    this.setOverlay({ kind: 'agent-picker', query: '', index });
   }
 
   /** Every selectable agent, filtered by query; the picker never narrows to a guessed scope. */
@@ -4399,24 +4758,82 @@ export class AppController {
     return this.state.overview.agent;
   }
 
+  /** Newest agent-bearing message in the loaded transcript, with its ordering token. */
+  private latestTranscriptAgent(
+    key: string,
+  ): { agent: string; mark: TranscriptAgentMark } | undefined {
+    let latest: { agent: string; mark: TranscriptAgentMark } | undefined;
+    for (const message of this.state.transcripts[key]?.messages ?? []) {
+      let agent: string | undefined;
+      if (message.kind === 'agent-switched') agent = message.agent;
+      else if (message.kind === 'assistant' && message.agent !== '') agent = message.agent;
+      if (agent === undefined) continue;
+      if (latest === undefined || message.createdAt >= latest.mark.createdAt) {
+        latest = { agent, mark: { id: message.id, createdAt: message.createdAt } };
+      }
+    }
+    return latest;
+  }
+
+  /**
+   * True when transcript evidence is newer than what an accepted value already accounted
+   * for. Without a loaded-transcript watermark, the local observation time is the token;
+   * a newly fetched message must be genuinely later to outrank a fresh local confirmation.
+   */
+  private transcriptSupersedes(
+    evidence: { mark: TranscriptAgentMark },
+    accepted: AgentEvidence,
+  ): boolean {
+    if (accepted.transcript === undefined) return evidence.mark.createdAt > accepted.observedAt;
+    // Equal timestamps are ambiguous; a different message ID still proves new evidence and
+    // avoids letting a same-millisecond external switch look like the acknowledged one.
+    return (
+      evidence.mark.createdAt > accepted.transcript.createdAt ||
+      (evidence.mark.createdAt === accepted.transcript.createdAt &&
+        evidence.mark.id !== accepted.transcript.id)
+    );
+  }
+
+  /** Records an explicit server-reported agent as the current evidence for this session. */
+  private acceptServerAgent(key: string, agent: string): void {
+    const latest = this.latestTranscriptAgent(key);
+    this.confirmedAgents.set(key, {
+      agent,
+      observedAt: this.deps.now(),
+      ...(latest === undefined ? {} : { transcript: latest.mark }),
+    });
+  }
+
+  /** Promotes a genuinely newer transcript switch into the session's accepted evidence. */
+  private adoptTranscriptAgent(key: string): void {
+    const latest = this.latestTranscriptAgent(key);
+    if (latest === undefined) return;
+    const accepted = this.confirmedAgents.get(key);
+    if (accepted !== undefined && !this.transcriptSupersedes(latest, accepted)) return;
+    this.confirmedAgents.set(key, {
+      agent: latest.agent,
+      transcript: latest.mark,
+      observedAt: this.deps.now(),
+    });
+  }
+
   /**
    * The effective agent for one session. The summary is authoritative when it reports one;
-   * OpenCode v2 may omit it, so the latest `agent-switched` or assistant message in that
-   * session's loaded transcript is the next-best evidence (#225). Never borrow the overview
-   * draft or another project's selection.
+   * OpenCode v2 may omit it, so the newest `agent-switched` or assistant message competes
+   * with the last acknowledged switch by transcript order, not by which cache was written
+   * first (#225, #253). Never borrow the overview draft or another project's selection.
    */
   effectiveAgentID(session: SessionSummary): string | undefined {
     if (session.agent !== undefined) return session.agent;
     const key = this.keyFor(session.serverID, session.id);
-    const confirmed = this.confirmedAgents.get(key);
-    if (confirmed !== undefined) return confirmed;
-    const messages = this.state.transcripts[key]?.messages;
-    let agent: string | undefined;
-    for (const message of messages ?? []) {
-      if (message.kind === 'agent-switched') agent = message.agent;
-      else if (message.kind === 'assistant' && message.agent !== '') agent = message.agent;
-    }
-    return agent;
+    const accepted = this.confirmedAgents.get(key);
+    const latest = this.latestTranscriptAgent(key);
+    if (
+      latest !== undefined &&
+      (accepted === undefined || this.transcriptSupersedes(latest, accepted))
+    )
+      return latest.agent;
+    return accepted?.agent;
   }
 
   setAgentPickerQuery(query: string): void {
@@ -4526,7 +4943,18 @@ export class AppController {
     const admission = admit ?? this.beginPickerOpen('model');
     if (!(await this.ensureCurrentModelCatalog())) return;
     if (!admission()) return;
-    this.setOverlay({ kind: 'model-picker', query: '', index: 0 });
+    const current = this.effectiveModel();
+    const index =
+      current === undefined
+        ? 0
+        : Math.max(
+            0,
+            this.modelChoices('').findIndex(
+              (choice) =>
+                choice.providerID === current.providerID && choice.modelID === current.modelID,
+            ),
+          );
+    this.setOverlay({ kind: 'model-picker', query: '', index });
   }
 
   /** One row per enabled model, provider-grouped and release/tier ordered (#165, #166). */
@@ -4556,6 +4984,15 @@ export class AppController {
     const count = this.modelChoices(overlay.query).length;
     if (count === 0) return;
     this.setState('overlay', { ...overlay, index: (overlay.index + direction + count) % count });
+  }
+
+  /** Mouse row selection; acceptance still goes through the same server confirmation. */
+  selectModelPickerIndex(index: number): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'model-picker') return;
+    const count = this.modelChoices(overlay.query).length;
+    if (count === 0) return;
+    this.setState('overlay', { ...overlay, index: Math.max(0, Math.min(count - 1, index)) });
   }
 
   async acceptModelPicker(): Promise<void> {
@@ -4607,7 +5044,12 @@ export class AppController {
     const admission = admit ?? this.beginPickerOpen('effort');
     if (!(await this.ensureCurrentModelCatalog())) return;
     if (!admission()) return;
-    this.setOverlay({ kind: 'effort-picker', query: '', index: 0 });
+    const current = effectiveVariant(this.currentEffort());
+    const index = Math.max(
+      0,
+      this.effortChoices('').findIndex((choice) => effectiveVariant(choice.variant) === current),
+    );
+    this.setOverlay({ kind: 'effort-picker', query: '', index });
   }
 
   setEffortPickerQuery(query: string): void {
@@ -4620,6 +5062,15 @@ export class AppController {
     const count = this.effortChoices(overlay.query).length;
     if (count === 0) return;
     this.setState('overlay', { ...overlay, index: (overlay.index + direction + count) % count });
+  }
+
+  /** Mouse row selection; acceptance still uses the same verified model switch. */
+  selectEffortPickerIndex(index: number): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'effort-picker') return;
+    const count = this.effortChoices(overlay.query).length;
+    if (count === 0) return;
+    this.setState('overlay', { ...overlay, index: Math.max(0, Math.min(count - 1, index)) });
   }
 
   async acceptEffortPicker(): Promise<void> {
@@ -4909,6 +5360,7 @@ export class AppController {
     model: ModelSelection,
   ): Promise<boolean> {
     const key = this.keyFor(session.serverID, session.id);
+    const epoch = this.sessionEpoch(key);
     const previous = this.modelSwitches.get(key);
     this.modelSwitchRevisions.set(key, (this.modelSwitchRevisions.get(key) ?? 0) + 1);
     this.showNotice(`Confirming ${formatModelRef(model)} with the server…`, 'dim', false);
@@ -4916,8 +5368,15 @@ export class AppController {
       if (previous !== undefined) await previous;
       try {
         const backend = this.backendFor(session.serverID);
+        if (!this.isSessionCurrent(key, epoch)) return false;
         await backend.switchModel(session.id, model);
         const confirmed = await backend.getSession(session.id);
+        if (
+          !this.isSessionCurrent(key, epoch) ||
+          !this.isRegisteredBackend(session.serverID, backend)
+        ) {
+          return false;
+        }
         if (confirmed.model === undefined || !sameModel(confirmed.model, model)) {
           throw new Error('Server did not confirm the requested model');
         }
@@ -4925,6 +5384,8 @@ export class AppController {
         this.failedModelSwitches.delete(key);
         return true;
       } catch (error) {
+        // A failure from a retired lifetime is not evidence about the current one.
+        if (!this.isSessionCurrent(key, epoch)) return false;
         this.failedModelSwitches.add(key);
         this.showNotice(
           `Model selection failed: ${errorText(error)}. Select a model again before sending.`,
@@ -5544,9 +6005,16 @@ export class AppController {
     return pending.save.length > 0 ? ['once', 'always', 'reject'] : ['once', 'reject'];
   }
 
+  /** First deliberate interaction with the pending card; required before Enter answers it. */
+  focusPermission(): void {
+    if (this.pendingPermission() === undefined) return;
+    this.setState('permissionFocused', true);
+  }
+
   movePermissionChoice(direction: -1 | 1): void {
     const count = this.permissionChoices().length;
     if (count === 0) return;
+    this.setState('permissionFocused', true);
     this.setState('permissionChoice', (this.state.permissionChoice + direction + count) % count);
   }
 
@@ -5787,6 +6255,19 @@ export class AppController {
     }
     this.setState('overlay', { ...overlay, editor });
     if (outcome === 'submit') {
+      // An external-only elicitation is completed by the provider/browser flow. Enter,
+      // Tab or a click cannot prove that flow finished, so never send an empty answer (#257).
+      const hasAnswerableField = form.fields.some(
+        (field) => field.kind !== 'external' && !field.hidden,
+      );
+      if (!hasAnswerableField && form.fields.some((field) => field.kind === 'external')) {
+        this.showNotice(
+          'This question is completed in the browser. Opening or copying the URL is not an answer; it stays pending until the server finishes it.',
+          'warn',
+          false,
+        );
+        return;
+      }
       const answer = buildAnswer(form, editor.answers);
       void this.finishForm(origin, (backend) =>
         backend.replyForm(origin.formSessionID, origin.editor.formID, answer, origin.formDirectory),
@@ -5796,6 +6277,50 @@ export class AppController {
         backend.cancelForm(origin.formSessionID, origin.editor.formID, origin.formDirectory),
       );
     }
+  }
+
+  /**
+   * Click one visible choice row (#245). Choice fields highlight the row for a following
+   * Enter; multiselect rows toggle immediately, matching Space. The window offset is the
+   * caller's absolute row within the field's complete choice list.
+   */
+  clickFormChoice(index: number): void {
+    const overlay = this.state.overlay;
+    const form = this.openFormRequest();
+    if (overlay.kind !== 'form' || form === undefined) return;
+    const field = currentField(form, overlay.editor);
+    if (field === undefined) return;
+    if (field.kind === 'choice') {
+      if (index < 0 || index >= field.options.length) return;
+      this.setState('overlay', {
+        ...overlay,
+        editor: {
+          ...overlay.editor,
+          cursor: index,
+          text: '',
+          textCursor: 0,
+          problem: undefined,
+        },
+      });
+      return;
+    }
+    if (field.kind !== 'multi') return;
+    const current = overlay.editor.answers[field.key];
+    const chosen = Array.isArray(current) ? current : [];
+    const choice = multiChoices(field, chosen)[index];
+    if (choice === undefined) return;
+    this.setState('overlay', {
+      ...overlay,
+      editor: {
+        ...overlay.editor,
+        cursor: index,
+        answers: {
+          ...overlay.editor.answers,
+          [field.key]: toggleOption(field, chosen, choice.value),
+        },
+        problem: undefined,
+      },
+    });
   }
 
   private async finishForm(
@@ -6023,6 +6548,69 @@ export class AppController {
     if (this.state.focusedGroup !== undefined) this.setState('focusedGroup', undefined);
   }
 
+  /** The focused row's tool, preferring the last child-bearing call inside a group. */
+  private focusedChildTool(): ToolCall | undefined {
+    const focused = this.state.focusedGroup;
+    if (focused === undefined) return undefined;
+    const nodes = this.conversationNodes();
+    if (focused.startsWith('tool:') || focused.startsWith('diff:')) {
+      const id = focused.slice(focused.indexOf(':') + 1);
+      return nodes
+        .flatMap((node) =>
+          node.kind === 'tool' ? [node.tool] : node.kind === 'tool-group' ? [...node.tools] : [],
+        )
+        .find((tool) => tool.id === id);
+    }
+    if (!focused.startsWith('group:')) return undefined;
+    const group = nodes.find((node) => node.kind === 'tool-group' && node.key === focused);
+    if (group?.kind !== 'tool-group') return undefined;
+    for (let index = group.tools.length - 1; index >= 0; index -= 1) {
+      const tool = group.tools[index];
+      if (tool !== undefined && (tool.children?.length ?? 0) > 0) return tool;
+    }
+    return group.tools.at(-1);
+  }
+
+  /** Child-page index for a tool; zero when the user has not paged it (#260). */
+  childPageFor(toolID: string): number {
+    const prefix = this.expansionPrefix();
+    return prefix === undefined ? 0 : (this.state.childPages[`${prefix}${toolID}`] ?? 0);
+  }
+
+  private childLimitFor(tool: ToolCall): number {
+    const prefix = this.expansionPrefix();
+    const userExpanded =
+      prefix !== undefined && this.state.expandedDiffs[`${prefix}${tool.id}`] === true;
+    const expanded =
+      this.state.detailed ||
+      userExpanded ||
+      tool.status === 'error' ||
+      tool.executionError !== undefined ||
+      tool.children?.some((child) => child.status === 'error') === true;
+    return userExpanded ? 40 : this.state.detailed ? 20 : expanded ? 10 : 5;
+  }
+
+  /**
+   * Page the focused execute call's nested child rows without exceeding the inline widget
+   * budget. Returns false when the key should remain ordinary composer text: no focused
+   * tool, no children, or a single page.
+   */
+  moveFocusedChildPage(direction: -1 | 1): boolean {
+    const tool = this.focusedChildTool();
+    if (tool?.children === undefined || tool.children.length === 0) return false;
+    const view = boundedToolChildren(
+      tool.children,
+      this.childLimitFor(tool),
+      this.childPageFor(tool.id),
+    );
+    if (view.pages <= 1) return false;
+    const prefix = this.expansionPrefix();
+    if (prefix === undefined) return false;
+    const next = (view.page + direction + view.pages) % view.pages;
+    this.setState('childPages', `${prefix}${tool.id}`, next);
+    return true;
+  }
+
   // ---------------------------------------------------------------- output inspector (#222)
 
   /** Rows per PageUp/PageDown inside the inspector; the view windows by viewport height. */
@@ -6227,7 +6815,9 @@ export class AppController {
     const matches = this.inspectorMatches();
     const overlay = this.state.overlay;
     if (overlay.kind !== 'inspector' || matches.length === 0) return;
-    const next = nextMatch(matches, overlay.offset + (previous ? -1 : 0), previous ? -1 : 1);
+    // Start strictly past the current match so repeated Enter/Shift+Enter advances exactly
+    // one match instead of landing on the line already shown (#254).
+    const next = nextMatch(matches, overlay.offset + (previous ? 0 : 1), previous ? -1 : 1);
     this.setInspectorState({ offset: next });
   }
 
@@ -6893,6 +7483,14 @@ export class AppController {
       this.setOverlay({ ...overlay, index: (overlay.index - 1 + count) % count });
     } else if (key.name === 'down' && count > 0) {
       this.setOverlay({ ...overlay, index: (overlay.index + 1) % count });
+    } else if (key.name === 'pageup' && count > 0) {
+      this.setOverlay({ ...overlay, index: Math.max(0, overlay.index - 10) });
+    } else if (key.name === 'pagedown' && count > 0) {
+      this.setOverlay({ ...overlay, index: Math.min(count - 1, overlay.index + 10) });
+    } else if (key.name === 'home' && count > 0) {
+      this.setOverlay({ ...overlay, index: 0 });
+    } else if (key.name === 'end' && count > 0) {
+      this.setOverlay({ ...overlay, index: count - 1 });
     } else if (doc?.proposal !== undefined) {
       if (key.text === 'a') void this.acceptPlan(session);
       else if (key.text === 'r') void this.rejectPlan(session);

@@ -9,6 +9,29 @@ import type {
 
 import { maxToolOutputChars, toTranscriptMessage, toWorkerJob } from './wire-mapping.ts';
 
+describe('user attachment labels (#249)', () => {
+  test('removes terminal controls and collapses line breaks in display labels', () => {
+    const message: SessionMessageInfo = {
+      type: 'user',
+      id: 'msg_user',
+      time: { created: 1 },
+      text: 'see attached',
+      files: [
+        {
+          data: '',
+          mime: 'image/png',
+          source: { type: 'inline' },
+          name: 'evil\u001b[31m\nname.png',
+        },
+        { data: '', mime: 'image/\npng', source: { type: 'inline' } },
+      ],
+    };
+    const mapped = toTranscriptMessage(message);
+    if (mapped?.kind !== 'user') throw new Error('expected a user message');
+    expect(mapped.attachments).toEqual(['evil name.png', 'image/ png']);
+  });
+});
+
 describe('subagent job mapping (#101)', () => {
   const rawJob = {
     kind: 'subagent',

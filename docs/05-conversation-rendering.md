@@ -65,6 +65,7 @@ A **mode toggle**, not a separate window manager or a tab. The same conversation
 - Per-group `Enter` expands just that group without changing global mode.
 - In detailed mode, add `Copy tool output` and `Copy message` contextual actions, but don't display a control bar by default.
 - Do not dump unbounded 50MB stdout into in-memory layout. Show a capped preview with offset-based lazy slices where supported, and explicit truncation notice.
+- Code Mode nested calls have their own aggregate paint budget, independent of per-child previews and character caps. Compact and detailed modes render a bounded window (failed children first, source order preserved inside the window) plus a `showing N of M` summary. A focused execute call pages the remaining children with `[` / `]`; every child identity is reachable exactly once, later pages keep source order, and a separate `page N of M` line prevents the status summary from truncating the page state. Full child metadata stays in the transcript model; the cap is rendering-only (#260).
 - Timestamps must come from actual server messages/events. If not available show none, not fabricated.
 
 ## Reasoning availability and privacy
@@ -84,6 +85,8 @@ Never call this a complete hidden internal thought trace; don't infer omitted th
 ## Scrolling and performance
 
 Virtualize transcripts by message and expandable group. Target 10,000+ message/tool parts without long input delays. While scrolled to bottom, stream new text smoothly at 30–60 Hz batched redraws; while scrolled up, freeze anchor and show subtle `↓ N new` hint. Never auto-jump because a background event arrives. On resize, reflow keeping logical anchor `{messageID, offset}`; don't anchor to raw row number. The compositor must not rerender every past line per token. Run a worst-case test with one streaming 1MB tool output and a concurrently editable composer.
+
+`PageUp` at the top prepends older history without moving the message already at the viewport top: the next frame restores the same semantic node at the same row, and the anchor stays alive while the history request is in flight rather than expiring on a timer (#243). `Ctrl+Home` reveals every already-loaded node and scrolls to the earliest of them; when server history remains, the existing `earlier messages · PageUp` marker stays visible so the shortcut never implies the start of an unbounded history was fetched (#251). Keyboard group focus (`Ctrl+Up/Down`) expands the render window to include a loaded target and scrolls that row into view before Enter can act on it (#242). A focused row is only auto-scrolled when focus changes; streaming updates never steal the reader's position. The sticky prompt is derived from the full folded conversation when the owning user node has left the render window, so a long tool run inside one turn does not blank the header (#244). Pending questions are pinned above the composer like permissions, so a question remains discoverable while the reader is far up the transcript; `Alt+Q` opens it without touching a nonempty draft (#213).
 
 ## Markdown and terminal text
 

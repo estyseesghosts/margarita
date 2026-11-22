@@ -13,6 +13,7 @@ import {
   onMount,
   Show,
   Switch,
+  untrack,
 } from 'solid-js';
 
 import type { PermissionPrompt } from '../adapter/backend.ts';
@@ -25,11 +26,17 @@ import { type ExecutionMarker, executionMarkers } from '../domain/execution-segm
 import { type FormRequest, initialVisibleFields } from '../domain/form.ts';
 import { actionHint, type Keymap } from '../domain/keymap.ts';
 import { formatModelRef, type ModelSelection } from '../domain/model-ref.ts';
-import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
+import {
+  sanitizeSingleLine,
+  sanitizeTerminalText as sanitizeText,
+} from '../domain/sanitize-text.ts';
 import { sessionKey } from '../domain/server-identity.ts';
 import { assertNever } from '../domain/session.ts';
+import type { ShellBackgroundState } from '../domain/shell-job.ts';
 import { stickyPrompt, truncatePrompt } from '../domain/sticky-prompt.ts';
+import { clipLineToCells } from '../domain/text-width.ts';
 import { type ThrobberFacts } from '../domain/throbber.ts';
+import { type BoundedToolChildren, boundedToolChildren } from '../domain/tool-children.ts';
 import {
   activeTool,
   attachBackgroundNotices,
@@ -161,6 +168,17 @@ export function Transcript(props: TranscriptProps) {
   const renderer = useRenderer();
   const syntax = createMemo(() => createSyntaxStyle(props.theme, renderer.nativeScene));
   const [sticky, setSticky] = createSignal<string | undefined>(undefined);
+  /**
+   * A semantic pagination anchor: the node key and its viewport offset before history was
+   * prepended. `<Index>` reuses row slots, so anchoring a renderable is not stable when a
+   * prepend changes which node occupies each slot (#243). The key is restored after layout.
+   */
+  const [pendingAnchor, setPendingAnchor] = createSignal<
+    { key: string; offset: number } | undefined
+  >(undefined);
+  const nodeIndex = createMemo(
+    () => new Map(nodes().map((node, index) => [node.key, index] as const)),
+  );
 
   /** Recomputes which earlier prompt, if any, has scrolled out above the viewport. */
   const updateSticky = () => {
@@ -176,11 +194,80 @@ export function Transcript(props: TranscriptProps) {
         { key: node.key, text: node.text, top, bottom: top + Math.max(1, element.height - 1) },
       ];
     });
-    setSticky(stickyPrompt(positions)?.text);
+    const found = stickyPrompt(positions);
+    if (found !== undefined) {
+      setSticky(found.text);
+      return;
+    }
+    // The user prompt may be older than every user node in the render window (#244).
+    // Resolve the latest preceding prompt from the full folded conversation, not only the
+    // mounted window, then require that the resolved node is actually above the viewport.
+    const top = windowed().visible.find((node) => {
+      const element = scrollbox.findDescendantById(nodeID(node.key));
+      return element !== undefined && element.y + element.height > scrollbox.y;
+    });
+    const index = top === undefined ? undefined : nodeIndex().get(top.key);
+    if (index !== undefined) {
+      for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+        const node = nodes()[cursor];
+        if (node?.kind === 'user') {
+          setSticky(node.text);
+          return;
+        }
+      }
+    }
+    setSticky(undefined);
   };
   createEffect(() => {
     windowed();
     box?.afterLayout(updateSticky);
+  });
+
+  /**
+   * Restores the semantic anchor after every layout while an older page is in flight.
+   * A fixed timeout cannot cover a slow history response (#243). The anchor is released
+   * once loading settles and the target has been positioned.
+   */
+  createEffect(() => {
+    const anchor = pendingAnchor();
+    const loading = transcript()?.loading === true;
+    // Read the window so a prepended page schedules another restoration.
+    windowed();
+    if (anchor === undefined || box === undefined) return;
+    const scrollbox = box;
+    scrollbox.afterLayout(() => {
+      const target = scrollbox.findDescendantById(nodeID(anchor.key));
+      if (target === undefined) {
+        if (!loading) setPendingAnchor(undefined);
+        return;
+      }
+      const offset = target.y - scrollbox.y;
+      if (offset !== anchor.offset) scrollbox.scrollBy(offset - anchor.offset);
+      if (!loading) setPendingAnchor(undefined);
+    });
+  });
+
+  // Ctrl+↑/↓ focuses an item even when it is outside the render window. Reveal it first,
+  // then scroll the semantic row into view after layout (#242). Only a focus change may
+  // move the viewport; streaming updates keep the reader's own scroll anchor.
+  let scrolledFocus: string | undefined;
+  createEffect(() => {
+    const focused = state.focusedGroup;
+    windowed();
+    if (focused === undefined || box === undefined) {
+      scrolledFocus = undefined;
+      return;
+    }
+    if (scrolledFocus === focused) return;
+    scrolledFocus = focused;
+    const key = focusedNodeKey(focused);
+    untrack(() => {
+      props.controller.ensureTranscriptNodeVisible(props.sessionID, key, props.serverID);
+    });
+    const scrollbox = box;
+    scrollbox.afterLayout(() => {
+      scrollbox.scrollChildIntoView(nodeID(key), { align: 'nearest' });
+    });
   });
 
   const scroll = (move: ScrollMove) => {
@@ -192,14 +279,15 @@ export function Transcript(props: TranscriptProps) {
           box.scrollBy(-page);
           return;
         }
-        // At the top: reveal earlier nodes while keeping the current first node in place.
+        // At the top: remember the first node and its row, reveal earlier nodes, then put
+        // that same semantic node back at the same viewport row after layout (#243).
         const first = windowed().visible[0];
-        const keep = first === undefined ? undefined : box.findDescendantById(nodeID(first.key));
+        const element = first === undefined ? undefined : box.findDescendantById(nodeID(first.key));
+        const offset = element === undefined ? undefined : element.y - box.y;
         if (!props.controller.revealEarlier(props.sessionID, windowed().hidden, props.serverID))
           return;
-        if (keep !== undefined) {
-          const release = box.anchor(keep);
-          setTimeout(release, 2000);
+        if (first !== undefined && offset !== undefined) {
+          setPendingAnchor({ key: first.key, offset });
         }
         return;
       }
@@ -207,7 +295,10 @@ export function Transcript(props: TranscriptProps) {
         box.scrollBy(page);
         return;
       case 'top':
-        box.scrollTo(0);
+        // Ctrl+Home reaches the earliest loaded node, not just the top of the current
+        // render window. Any remaining server history stays advertised above (#251).
+        props.controller.revealAllLoaded(props.sessionID, windowed().hidden, props.serverID);
+        box.afterLayout(() => box?.scrollTo(0));
         return;
       case 'bottom':
         box.scrollTo(box.scrollHeight);
@@ -274,7 +365,12 @@ export function Transcript(props: TranscriptProps) {
           {(node) => (
             <>
               <Show when={isRunningExecution(node()) && queued().length > 0}>
-                <QueuedPreview items={queued()} theme={props.theme} width={props.width} />
+                <QueuedPreview
+                  items={queued()}
+                  theme={props.theme}
+                  width={props.width}
+                  steerKey={actionHint(props.keymap, 'composer.steer')}
+                />
               </Show>
               <box id={nodeID(node().key)} flexDirection="column" flexShrink={0}>
                 <NodeView
@@ -289,12 +385,11 @@ export function Transcript(props: TranscriptProps) {
                   mcpServers={mcpServers()}
                   now={hintNow()}
                   backgroundKey={backgroundKey}
-                  backgroundShell={(shellID) =>
-                    props.controller.shellRunningInBackground(
-                      shellID,
-                      props.sessionID,
-                      props.serverID,
-                    )
+                  childPagePreviousKey={actionHint(props.keymap, 'transcript.childPrevious')}
+                  childPageNextKey={actionHint(props.keymap, 'transcript.childNext')}
+                  childPageFor={(toolID) => props.controller.childPageFor(toolID)}
+                  shellBackground={(shellID) =>
+                    props.controller.shellBackgroundState(shellID, props.sessionID, props.serverID)
                   }
                   workerStale={
                     props.controller.workerJobStatus(props.sessionID, props.serverID)?.state ===
@@ -307,11 +402,18 @@ export function Transcript(props: TranscriptProps) {
         </Index>
         {/* Fallback: no running marker to sit above (e.g. transcript not loaded). */}
         <Show when={!hasRunningMarker() && queued().length > 0}>
-          <QueuedPreview items={queued()} theme={props.theme} width={props.width} />
+          <QueuedPreview
+            items={queued()}
+            theme={props.theme}
+            width={props.width}
+            steerKey={actionHint(props.keymap, 'composer.steer')}
+          />
         </Show>
-        <PermissionCard controller={props.controller} theme={props.theme} />
-        <FormCard controller={props.controller} theme={props.theme} keymap={props.keymap} />
       </scrollbox>
+      {/* Pinned above the composer: permissions and questions must be visible even when
+          the reader is scrolled far up the transcript (#237, #213). */}
+      <PermissionCard controller={props.controller} theme={props.theme} />
+      <FormCard controller={props.controller} theme={props.theme} keymap={props.keymap} />
       <Show when={sticky()}>
         {(text: Accessor<string>) => (
           <box
@@ -406,6 +508,11 @@ function nodeID(key: string): string {
   return `node:${key}`;
 }
 
+/** The node key a focused group/diff/tool/worker row names. */
+function focusedNodeKey(key: string): string {
+  return key.startsWith('tool:') || key.startsWith('diff:') ? key.slice(key.indexOf(':') + 1) : key;
+}
+
 /** An execution marker in its streaming phase, the row the queued preview sits above. */
 function isRunningExecution(node: TranscriptNode): boolean {
   return node.kind === 'execution' && node.segment.phase === 'running';
@@ -445,8 +552,12 @@ function NodeView(props: {
   now: number;
   /** Label of the user's effective `tools.background` binding, absent when unbound. */
   backgroundKey: string | undefined;
-  /** True only when the server reports a running background job for this shell ID (#103). */
-  backgroundShell: (shellID: string | undefined) => boolean;
+  /** Effective bindings for paging a focused execute call's nested children (#260). */
+  childPagePreviousKey: string | undefined;
+  childPageNextKey: string | undefined;
+  childPageFor: (toolID: string) => number;
+  /** Freshness-aware background state for this shell ID (#103, #259). */
+  shellBackground: (shellID: string | undefined) => ShellBackgroundState;
   /** The retained worker rows were not re-confirmed on the last refresh (#230). */
   workerStale: boolean;
 }) {
@@ -531,6 +642,9 @@ function NodeView(props: {
             width={props.width}
             focused={props.focused}
             mcpServers={props.mcpServers}
+            childPagePreviousKey={props.childPagePreviousKey}
+            childPageNextKey={props.childPageNextKey}
+            childPageFor={props.childPageFor}
             userExpanded={node().userExpanded === true}
           />
         )}
@@ -540,6 +654,14 @@ function NodeView(props: {
           // The background hint describes the one running call. It follows that call's own
           // row when the group is expanded, so the action is never shown twice (issue #111).
           const activeID = () => activeTool(node().tools)?.id;
+          // Child paging follows the last child-bearing call, matching the controller.
+          const childToolID = (): string | undefined => {
+            for (let index = node().tools.length - 1; index >= 0; index -= 1) {
+              const tool = node().tools[index];
+              if (tool !== undefined && (tool.children?.length ?? 0) > 0) return tool.id;
+            }
+            return undefined;
+          };
           const hintText = (): string | undefined => {
             const key = props.backgroundKey;
             return key === undefined || !backgroundHint(node().live, props.now)
@@ -581,8 +703,11 @@ function NodeView(props: {
                         theme={theme()}
                         syntax={props.syntax}
                         width={props.width}
-                        focused={false}
+                        focused={props.focused && childToolID() === tool.id}
                         mcpServers={props.mcpServers}
+                        childPagePreviousKey={props.childPagePreviousKey}
+                        childPageNextKey={props.childPageNextKey}
+                        childPageFor={props.childPageFor}
                         userExpanded={false}
                       />
                       <Show when={activeID() === tool.id ? hintText() : undefined}>
@@ -606,6 +731,15 @@ function NodeView(props: {
               previewBudget('shell', props.detailed),
               Math.max(8, props.width - 4),
             );
+          const background = () => props.shellBackground(node().shellID);
+          const backgroundNote = () =>
+            node().status !== 'timeout'
+              ? ''
+              : background() === 'confirmed-running'
+                ? ' · still running in background'
+                : background() === 'last-known-running'
+                  ? ' · last reported running · connection unavailable'
+                  : '';
           return (
             <box flexDirection="column" marginTop={1}>
               <text fg={theme().text}>
@@ -615,12 +749,12 @@ function NodeView(props: {
                 fg={
                   node().exitCode !== undefined && node().exitCode !== 0
                     ? theme().error
-                    : node().status === 'timeout' && props.backgroundShell(node().shellID)
+                    : background() === 'confirmed-running'
                       ? theme().warn
                       : theme().dim
                 }
               >
-                {`  └ ${node().status}${node().exitCode === undefined ? '' : ` (exit ${node().exitCode})`}${node().status === 'timeout' && props.backgroundShell(node().shellID) ? ' · still running in background' : ''}`}
+                {`  └ ${node().status}${node().exitCode === undefined ? '' : ` (exit ${node().exitCode})`}${backgroundNote()}`}
               </text>
               <Show when={node().output}>
                 <box flexDirection="column">
@@ -768,6 +902,10 @@ function ToolView(props: {
   width: number;
   focused: boolean;
   mcpServers: readonly string[];
+  /** Effective bindings for paging nested children; absent when unbound (#260). */
+  childPagePreviousKey: string | undefined;
+  childPageNextKey: string | undefined;
+  childPageFor: (toolID: string) => number;
   /** The user explicitly grew this item beyond its mode default (#219). */
   userExpanded?: boolean;
 }) {
@@ -818,6 +956,14 @@ function ToolView(props: {
       failed() ||
       scriptFailed() ||
       props.tool.children.some((c) => c.status === 'error'));
+  // A nested execute can report hundreds of MCP calls. Bound the widgets independently
+  // of the per-child preview caps; failures are prioritized, and expanding or detailed
+  // mode only widens the window, never renders the whole list (#260).
+  const childLimit = () =>
+    props.userExpanded === true ? 40 : props.detailed ? 20 : props.expanded ? 10 : 5;
+  const childView = createMemo(() =>
+    boundedToolChildren(props.tool.children ?? [], childLimit(), props.childPageFor(props.tool.id)),
+  );
 
   const bullet = () =>
     failed()
@@ -863,9 +1009,9 @@ function ToolView(props: {
         </For>
       </Show>
       <Show when={childrenVisible() ? props.tool.children : undefined}>
-        {(children: Accessor<NonNullable<ToolCall['children']>>) => (
+        {() => (
           <box flexDirection="column" paddingLeft={2}>
-            <For each={children()}>
+            <For each={childView().visible}>
               {(child) => {
                 const color = () =>
                   child.status === 'error'
@@ -912,6 +1058,23 @@ function ToolView(props: {
                 );
               }}
             </For>
+            <Show when={childView().hidden > 0}>
+              <text fg={props.theme.dim}>{childSummaryLine(childView(), lineWidth())}</text>
+            </Show>
+            <Show when={childView().pages > 1}>
+              <text fg={props.theme.dim}>
+                {childPageLine(
+                  childView(),
+                  lineWidth(),
+                  props.focused
+                    ? {
+                        previous: props.childPagePreviousKey,
+                        next: props.childPageNextKey,
+                      }
+                    : undefined,
+                )}
+              </text>
+            </Show>
           </box>
         )}
       </Show>
@@ -1036,6 +1199,38 @@ function childInputSummary(input: ToolCallChild['input']): string {
   return `  ${truncatePrompt(sanitizeText(line), 72)}`;
 }
 
+/** One bounded row describing a capped child list; hidden identities stay in the domain. */
+function childSummaryLine(view: BoundedToolChildren, width: number): string {
+  const visibleFailed = view.visible.filter((child) => child.status === 'error').length;
+  const counts = [
+    view.summary.failed === 0
+      ? undefined
+      : visibleFailed === view.summary.failed
+        ? `${view.summary.failed} failed`
+        : `${view.summary.failed} failed (${visibleFailed} shown)`,
+    view.summary.running === 0 ? undefined : `${view.summary.running} running`,
+    view.summary.completed === 0 ? undefined : `${view.summary.completed} completed`,
+  ].filter((entry): entry is string => entry !== undefined);
+  const suffix = counts.length === 0 ? '' : ` · ${counts.join(' · ')}`;
+  return truncateToWidth(
+    `  … showing ${view.visible.length} of ${view.summary.total} nested calls${suffix}`,
+    Math.max(8, width),
+  );
+}
+
+/** Separate line so page controls are never truncated by the status counts. */
+function childPageLine(
+  view: BoundedToolChildren,
+  width: number,
+  paging?: { previous: string | undefined; next: string | undefined },
+): string {
+  const keys =
+    paging?.previous === undefined || paging.next === undefined
+      ? ''
+      : ` · ${paging.previous}/${paging.next} page`;
+  return truncateToWidth(`    page ${view.page + 1} of ${view.pages}${keys}`, Math.max(8, width));
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -1061,8 +1256,7 @@ function diffLineFg(kind: PatchLine['kind'], theme: Theme): string {
 
 /** Clip a pre-sanitized patch line to one terminal row; never wraps, so rows stay bounded. */
 function truncateToWidth(text: string, width: number): string {
-  if (text.length <= width) return text;
-  return `${text.slice(0, Math.max(0, width - 1))}…`;
+  return clipLineToCells(text, Math.max(0, width)).text;
 }
 
 function changeSummary(counts: { additions: number; deletions: number }): string {
@@ -1090,11 +1284,14 @@ function PermissionCard(props: { controller: AppController; theme: Theme }) {
           flexShrink={0}
         >
           <text fg={props.theme.text}>
-            <b>{sanitizeText(request().action)}</b>
+            <b>{sanitizeSingleLine(request().action)}</b>
           </text>
-          <For each={request().resources}>
-            {(resource) => <text fg={props.theme.dim}>{`  ${sanitizeText(resource)}`}</text>}
+          <For each={request().resources.slice(0, 6)}>
+            {(resource) => <text fg={props.theme.dim}>{`  ${sanitizeSingleLine(resource)}`}</text>}
           </For>
+          <Show when={request().resources.length > 6}>
+            <text fg={props.theme.dim}>{`  … and ${request().resources.length - 6} more`}</text>
+          </Show>
           <Show when={request().message}>
             {(message: Accessor<string>) => (
               <text fg={props.theme.dim}>{sanitizeText(message())}</text>
@@ -1119,7 +1316,11 @@ function PermissionCard(props: { controller: AppController; theme: Theme }) {
               )}
             </For>
           </text>
-          <text fg={props.theme.dim}>←/→ choose · Enter confirm · Esc reject</text>
+          <text fg={props.theme.dim}>
+            {props.controller.state.permissionFocused
+              ? '←/→ choose · Enter confirm · Esc reject'
+              : 'Enter to review · Esc reject'}
+          </text>
         </box>
       )}
     </Show>

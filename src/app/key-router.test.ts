@@ -6,7 +6,7 @@ import { emptyState } from '../config/local-state.ts';
 import { composerFrom } from '../domain/composer.ts';
 import { buildKeymap } from '../domain/keymap.ts';
 import { AppController } from './controller.ts';
-import { routeKey } from './key-router.ts';
+import { routeKey, type RouterServices } from './key-router.ts';
 
 test('remapped task shortcut toggles the task overlay in overview and conversation', async () => {
   const backend = new FakeBackend();
@@ -155,5 +155,72 @@ test('kill commands populate the buffer and Ctrl+Y yanks it back (#97)', async (
   expect(controller.state.composer.text.isWellFormed()).toBe(true);
   press('y', { ctrl: true });
   expect(controller.state.composer.text).toBe(text);
+  controller.dispose();
+});
+
+test('overview PageUp/PageDown and Ctrl+Home/End move the selected row (#238)', async () => {
+  const backend = new FakeBackend();
+  backend.sessions = Array.from({ length: 40 }, (_, index) => ({
+    id: `ses_${index}`,
+    serverID: 'local',
+    projectID: 'p',
+    // Distinct projects avoid a group toggle row; one matches the launch cwd so the
+    // overview opens with list focus instead of the new-session composer.
+    directory: index === 0 ? '/work' : `/work/p${index}`,
+    createdAt: 1,
+    updatedAt: index + 1,
+    archived: false,
+  }));
+  const controller = new AppController({
+    backend,
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work',
+    version: '0.0.1',
+    now: () => 1,
+    saveLocalState: async () => {},
+    listFiles: async () => [],
+    requestExit: () => {},
+  });
+  const scrolled: string[] = [];
+  const services: RouterServices = {
+    openEditor: () => {},
+    redraw: () => {},
+    scroll: (move) => {
+      scrolled.push(move);
+    },
+    overviewPageRows: 10,
+  };
+  const { keymap } = buildKeymap({});
+  const press = (name: string, ctrl = false) =>
+    routeKey(controller, keymap, { name, ctrl, alt: false, shift: false }, services);
+
+  await controller.bootstrap();
+  controller.openOverview();
+  const rows = controller.overviewRows();
+  expect(rows).toHaveLength(40);
+  controller.selectOverviewEdge('first');
+  expect(controller.state.overview.selectedRow).toBe(rows[0]?.key);
+
+  expect(press('pagedown')).toBe(true);
+  expect(controller.state.overview.selectedRow).toBe(rows[10]?.key);
+  expect(press('pagedown')).toBe(true);
+  expect(controller.state.overview.selectedRow).toBe(rows[20]?.key);
+  expect(press('pageup')).toBe(true);
+  expect(controller.state.overview.selectedRow).toBe(rows[10]?.key);
+  expect(press('end', true)).toBe(true);
+  expect(controller.state.overview.selectedRow).toBe(rows[39]?.key);
+  expect(press('home', true)).toBe(true);
+  expect(controller.state.overview.selectedRow).toBe(rows[0]?.key);
+  // The transcript-only scroll callback is never reached from the overview.
+  expect(scrolled).toEqual([]);
+
+  // Composer focus keeps its draft; paging is a list gesture, not a route-wide scroll.
+  controller.focusOverviewComposer();
+  controller.setComposer(composerFrom('keep this draft'));
+  expect(press('pagedown')).toBe(true);
+  expect(controller.state.overview.focus).toBe('composer');
+  expect(controller.state.composer.text).toBe('keep this draft');
   controller.dispose();
 });

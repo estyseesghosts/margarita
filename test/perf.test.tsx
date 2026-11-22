@@ -155,6 +155,9 @@ describe('performance', () => {
     };
     controller.openSession('ses_big');
     await Bun.sleep(30);
+    // The 90 paging calls are setup, not the measured frame budget below. On slower
+    // machines they can take close to 30s by themselves, so the harness timeout is
+    // generous while `firstFrame` and `steady` keep their strict budgets.
     for (let page = 0; page < 90; page += 1) await controller.loadOlder('ses_big');
     expect(controller.state.transcripts['ses_big']?.messages).toHaveLength(10_000);
     const start = performance.now();
@@ -165,5 +168,5 @@ describe('performance', () => {
     const steady = performance.now();
     await setup.renderOnce();
     expect(performance.now() - steady).toBeLessThan(200);
-  }, 30_000);
+  }, 60_000);
 });

@@ -28,8 +28,11 @@ export function Overview(props: {
   const selected = (key: string) =>
     state.overview.focus === 'list' && state.overview.selectedRow === key;
   let box: ScrollBoxRenderable | undefined;
+  /** Expansion changes row geometry without changing the selected key (#240). */
+  const expansion = () => Object.keys(state.overview.expanded).toSorted().join('|');
   /** Keeps the selected row visible; only scrolls when it has moved outside the viewport. */
   createEffect(() => {
+    expansion();
     const key = state.overview.focus === 'list' ? state.overview.selectedRow : undefined;
     if (key === undefined || box === undefined) return;
     const scrollbox = box;
@@ -49,19 +52,18 @@ export function Overview(props: {
       <text fg={props.theme.text} marginBottom={1}>
         <b>Sessions</b>
       </text>
-      <text marginBottom={1}>
+      <box flexDirection="row" marginBottom={1}>
         <For each={['all', 'local', 'remotes', 'active', 'needs-input'] as const}>
           {(tab) => (
-            <span
-              style={{
-                fg: state.overview.tab === tab ? props.theme.accent : props.theme.dim,
-              }}
+            <text
+              fg={state.overview.tab === tab ? props.theme.accent : props.theme.dim}
+              onMouseDown={() => props.controller.setOverviewTab(tab)}
             >
               {`${state.overview.tab === tab ? '[' : ' '}${props.controller.tabLabel(tab)} ${props.controller.tabCounts()[tab]}${state.overview.tab === tab ? ']' : ' '} `}
-            </span>
+            </text>
           )}
         </For>
-      </text>
+      </box>
       <Show when={groups().length === 0}>
         <text fg={props.theme.dim}>No sessions yet. Type below to start one.</text>
       </Show>
@@ -115,6 +117,7 @@ export function Overview(props: {
                         session={sessionRow().session}
                         selected={selected(row.key)}
                         id={rowID(row.key)}
+                        rowKey={row.key}
                         ascii={props.ascii}
                       />
                     )}
@@ -124,6 +127,7 @@ export function Overview(props: {
                       <text
                         id={rowID(row.key)}
                         fg={selected(row.key) ? props.theme.accent : props.theme.dim}
+                        onMouseDown={() => props.controller.clickOverviewRow(row.key)}
                       >
                         {`${selected(row.key) ? '  ❯ ' : '    '}${
                           toggle().expanded ? '[Show less]' : `[Show more] ${toggle().hidden}`
@@ -178,6 +182,7 @@ function SessionLine(props: {
   session: SessionSummary;
   selected: boolean;
   id: string;
+  rowKey: string;
   ascii?: boolean | undefined;
 }) {
   const execution = () => props.controller.executionOf(props.session.id, props.session.serverID);
@@ -202,7 +207,12 @@ function SessionLine(props: {
       unknown: props.theme.dim,
     })[state()];
   return (
-    <box id={props.id} flexDirection="row" flexShrink={0}>
+    <box
+      id={props.id}
+      flexDirection="row"
+      flexShrink={0}
+      onMouseDown={() => props.controller.clickOverviewRow(props.rowKey)}
+    >
       <text fg={props.selected ? props.theme.accent : props.theme.dim}>
         {props.selected ? '  ❯ ' : '    '}
       </text>

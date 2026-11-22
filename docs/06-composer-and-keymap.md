@@ -54,11 +54,26 @@ The mapping is deliberately not an exact Claude clone. `Shift+Tab` must never fl
 | Composer | `@` | File/agent reference completion |
 | Composer | `!` at start | User shell mode |
 | Overview list | `Up`/`Down` | Move among rows |
+| Overview list | `PageUp`/`PageDown` | Move the selection by about one viewport; no-op in the composer so the draft is untouched |
+| Overview list | `Ctrl+Home`/`Ctrl+End` | Select the first/last available row |
 | Overview list | `Enter`/`Right` | Attach selected session |
 | Overview list | any printable key | Focus and fill the new-session composer (including `n`) |
 | Overview list | `/` | Search list (not session prompt) |
 | Overview list | `Esc` | Clear filter or focus overview composer |
 | Overview composer | `Enter` | Create new session + send initial prompt |
+| Transcript | `PageUp`/`PageDown` | Scroll; at the top, reveal or fetch earlier history without moving the current top message |
+| Transcript | `Ctrl+Home`/`Ctrl+End` | Earliest **loaded** message / latest message; the `earlier messages` marker stays when server history remains |
+| Transcript | `Ctrl+Up`/`Ctrl+Down` | Focus the previous/next tool group or row, revealing it and scrolling it into view |
+| Transcript, focused execute | `[` / `]` | Page the nested Code Mode child window; with a nonempty draft the brackets remain ordinary text |
+| Pending question | `Alt+Q` | Open the question without clearing a nonempty draft; `Enter` on an empty prompt also opens it |
+| Form dialog | `Enter` / `Shift+Tab` | Validate and advance / go back; `Esc` leaves the question pending, `Ctrl+X` declines |
+| Form text/custom choice | `Left`/`Right`, `Home`/`End`, `Backspace`/`Delete` | Grapheme-safe caret editing; choices additionally use `Up`/`Down`, `PageUp`/`PageDown`, `Home`/`End` |
+| Form multiselect | `Space`, `a`, `x` | Toggle listed value, add custom value, remove selected custom value |
+| Help | `PageUp`/`PageDown` | Scroll the bounded key list; a printable key dismisses help |
+| Queue/tasks | `PageUp`/`PageDown`, `Home`/`End` | Move the selection through a bounded list; selected row stays visible |
+| Searchable overlay | paste | Text is inserted into the active query; binary paste is refused and never leaks to the composer |
+| Overview list | mouse click | Click a tab, session row or Show more/less toggle; keyboard remains complete |
+| Model/effort picker | mouse click | Activate that row through the same verified switch path as Enter |
 | Dialog | `Tab` / `Shift+Tab` | Move focus within dialog, **not** cycle agents |
 | Permission dialog | `Left` / `Right` | Navigate choices; never overview |
 | Global | `?` | Keybinding help when not editing |

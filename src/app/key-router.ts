@@ -31,6 +31,11 @@ export type RouterServices = Readonly<{
   redraw: () => void;
   /** Scrolls the visible transcript; paging past the top loads earlier history. */
   scroll: (move: ScrollMove) => void;
+  /**
+   * Rows one PageUp/PageDown moves the overview selection. Optional so non-UI callers
+   * and tests get a sensible page without supplying terminal dimensions.
+   */
+  overviewPageRows?: number;
 }>;
 
 /**
@@ -108,6 +113,12 @@ function runAction(controller: AppController, action: ActionID, services: Router
     case 'transcript.groupNext':
       controller.moveGroupFocus(1);
       return true;
+    case 'transcript.childPrevious':
+      if (controller.state.composer.text !== '') return false;
+      return controller.moveFocusedChildPage(-1);
+    case 'transcript.childNext':
+      if (controller.state.composer.text !== '') return false;
+      return controller.moveFocusedChildPage(1);
     case 'transcript.inspect':
       // `i` stays ordinary text unless a tool row is focused and no draft exists. Without
       // the focus check it would inspect the last tool on the first letter of a message.
@@ -118,15 +129,34 @@ function runAction(controller: AppController, action: ActionID, services: Router
       if (controller.pendingForm() !== undefined) controller.openForm();
       return true;
     case 'transcript.pageUp':
+      // The overview has its own scroller; never hand the key to the transcript's stale
+      // callback. Paging moves the selected row in list focus and is a no-op in the
+      // composer, so typing a draft is never redirected (#238).
+      if (controller.state.route.kind === 'overview') {
+        controller.moveOverviewPage(-1, services.overviewPageRows ?? 10);
+        return true;
+      }
       services.scroll('pageUp');
       return true;
     case 'transcript.pageDown':
+      if (controller.state.route.kind === 'overview') {
+        controller.moveOverviewPage(1, services.overviewPageRows ?? 10);
+        return true;
+      }
       services.scroll('pageDown');
       return true;
     case 'transcript.top':
+      if (controller.state.route.kind === 'overview') {
+        controller.selectOverviewEdge('first');
+        return true;
+      }
       services.scroll('top');
       return true;
     case 'transcript.bottom':
+      if (controller.state.route.kind === 'overview') {
+        controller.selectOverviewEdge('last');
+        return true;
+      }
       services.scroll('bottom');
       return true;
     case 'history.search':
@@ -271,7 +301,21 @@ function routeOverlay(controller: AppController, keymap: Keymap, key: KeyInput):
       else if (index < 0 || index >= items.length) index = items.length - 1;
       if (index !== overlay.index) controller.setOverlay({ kind: 'queue', index });
       const item = items[index];
-      if (key.name === 'up' && items.length > 0) {
+      if (key.name === 'pageup' && items.length > 0) {
+        controller.setOverlay({
+          kind: 'queue',
+          index: Math.max(0, index - 10),
+        });
+      } else if (key.name === 'pagedown' && items.length > 0) {
+        controller.setOverlay({
+          kind: 'queue',
+          index: Math.min(items.length - 1, index + 10),
+        });
+      } else if (key.name === 'home' && items.length > 0) {
+        controller.setOverlay({ kind: 'queue', index: 0 });
+      } else if (key.name === 'end' && items.length > 0) {
+        controller.setOverlay({ kind: 'queue', index: items.length - 1 });
+      } else if (key.name === 'up' && items.length > 0) {
         controller.setOverlay({
           kind: 'queue',
           index: (index - 1 + items.length) % items.length,
@@ -286,6 +330,12 @@ function routeOverlay(controller: AppController, keymap: Keymap, key: KeyInput):
       return true;
     }
     case 'help':
+      if (key.name === 'pageup' || key.name === 'pagedown') {
+        const offset = Math.max(0, (overlay.offset ?? 0) + (key.name === 'pageup' ? -10 : 10));
+        controller.setOverlay({ kind: 'help', offset });
+      } else if (key.name === 'home') controller.setOverlay({ kind: 'help', offset: 0 });
+      else if (key.name === 'return' || key.name === 'q') controller.closeOverlay();
+      return true;
     case 'usage':
     case 'status':
       if (key.name === 'return' || key.name === 'q') controller.closeOverlay();
@@ -314,6 +364,17 @@ function routePermission(controller: AppController, key: KeyInput): boolean {
   // The permission card owns arrows and Enter only while the draft is empty, so typing
   // a follow-up is never hijacked (docs/20).
   if (controller.state.composer.text !== '') return false;
+  // A newly arrived (or replaced) request starts unfocused. The first Enter/arrow is an
+  // explicit review step, never an approval the user could not see (#237).
+  if (!controller.state.permissionFocused) {
+    if (key.name === 'return' || key.name === 'enter') controller.focusPermission();
+    else if (key.name === 'left' || (key.shift && key.name === 'tab'))
+      controller.movePermissionChoice(-1);
+    else if (key.name === 'right' || key.name === 'tab') controller.movePermissionChoice(1);
+    else if (key.name === 'escape') void controller.answerPermission('reject');
+    else return false;
+    return true;
+  }
   if (key.name === 'left' || (key.shift && key.name === 'tab')) controller.movePermissionChoice(-1);
   else if (key.name === 'right' || key.name === 'tab') controller.movePermissionChoice(1);
   else if (key.name === 'return') void controller.answerPermission();

@@ -754,8 +754,10 @@ function statusOf(cause: ClientError): number | undefined {
     if (typeof status === 'number' && Number.isFinite(status)) return status;
   }
   const detail = cause.message.replace(/^UnexpectedStatus:\s*/, '');
-  const parsed = Number.parseInt(detail, 10);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  // Accept exactly a three-digit status followed by a boundary; never let trailing text
+  // ("503 upstream unavailable") be silently discarded as parseInt would.
+  const match = /^([1-5]\d{2})(?:\s|$)/.exec(detail);
+  return match?.[1] === undefined ? undefined : Number(match[1]);
 }
 
 function messageOf(cause: unknown): string | undefined {

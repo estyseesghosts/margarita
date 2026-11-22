@@ -268,6 +268,23 @@ export function toggleOption(
   return [...listed, ...custom];
 }
 
+/**
+ * Bounded window of choices around the highlighted row (#245). Long choice lists must not
+ * grow the dialog past the terminal; the selected option always remains visible.
+ */
+export function choiceWindow(
+  cursor: number,
+  count: number,
+  rows: number,
+): { start: number; end: number } {
+  const total = Math.max(0, count);
+  const size = Math.min(total, Math.max(1, rows));
+  if (size === 0) return { start: 0, end: 0 };
+  const selected = Math.max(0, Math.min(total - 1, cursor));
+  const start = Math.max(0, Math.min(selected - Math.floor(size / 2), total - size));
+  return { start, end: start + size };
+}
+
 /** All selectable multi values: predefined options then custom values still chosen. */
 export function multiChoices(
   field: FormField & { kind: 'multi' },
@@ -498,9 +515,38 @@ function editField(editor: FormEditor, field: FormField, key: FormKey): FormEdit
     }
     return editor;
   }
-  if (count > 0 && (key.name === 'up' || key.name === 'down')) {
-    const step = key.name === 'up' ? -1 : 1;
-    return { ...editor, cursor: (editor.cursor + step + count) % count };
+  if (
+    count > 0 &&
+    (key.name === 'up' ||
+      key.name === 'down' ||
+      key.name === 'pageup' ||
+      key.name === 'pagedown' ||
+      key.name === 'home' ||
+      key.name === 'end')
+  ) {
+    // Moving onto a listed choice is an explicit selection; stale custom text must not win
+    // at commit time (#255). Left/Right still edit that text while it is active.
+    const step =
+      key.name === 'up'
+        ? -1
+        : key.name === 'down'
+          ? 1
+          : key.name === 'pageup'
+            ? -10
+            : key.name === 'pagedown'
+              ? 10
+              : 0;
+    const next =
+      key.name === 'home'
+        ? 0
+        : key.name === 'end'
+          ? count - 1
+          : (editor.cursor + step + count) % count;
+    return {
+      ...editor,
+      cursor: next,
+      ...(field.kind === 'choice' ? { text: '', textCursor: 0 } : {}),
+    };
   }
   if (field.kind === 'multi') {
     if (field.custom && key.text === 'a' && !key.ctrl) {

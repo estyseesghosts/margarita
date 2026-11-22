@@ -18,7 +18,7 @@ import type { FileDiff } from '../domain/diff.ts';
 import type { FormField, FormRequest } from '../domain/form.ts';
 import { effectiveVariant, type ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
-import { sanitizeTerminalText } from '../domain/sanitize-text.ts';
+import { sanitizeSingleLine, sanitizeTerminalText } from '../domain/sanitize-text.ts';
 import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary, StagedRevert } from '../domain/session.ts';
 import type { ShellJob } from '../domain/shell-job.ts';
@@ -205,17 +205,17 @@ function toolFile(entry: Record<string, unknown>): ToolFileReference | undefined
     }
     const name = rawName !== '' ? rawName : (mime ?? 'file');
     return {
-      name: sanitizeTerminalText(name),
-      ...(mime === undefined ? {} : { mime: sanitizeTerminalText(mime) }),
+      name: sanitizeSingleLine(name),
+      ...(mime === undefined ? {} : { mime: sanitizeSingleLine(mime) }),
       ...(size === undefined ? {} : { size }),
     };
   }
-  const uri = rawUri === undefined ? '' : sanitizeTerminalText(rawUri);
+  const uri = rawUri === undefined ? '' : sanitizeSingleLine(rawUri);
   const fileName = uri === '' ? '' : (uri.split(/[\\/]/).at(-1) ?? '');
   const name = rawName !== '' ? rawName : fileName !== '' ? fileName : rawMime || 'file';
   return {
-    name: sanitizeTerminalText(name),
-    ...(rawMime === '' ? {} : { mime: sanitizeTerminalText(rawMime) }),
+    name: sanitizeSingleLine(name),
+    ...(rawMime === '' ? {} : { mime: sanitizeSingleLine(rawMime) }),
     ...(uri === '' ? {} : { uri }),
   };
 }
@@ -342,7 +342,7 @@ function toolChildren(
       id: `${parentID}:${index}`,
       parentID,
       index,
-      name: sanitizeTerminalText(name),
+      name: sanitizeSingleLine(name),
       status,
       ...(input === undefined ? {} : { input }),
       ...(error === undefined ? {} : { error }),
@@ -506,7 +506,10 @@ export function toTranscriptMessage(
         id: message.id,
         createdAt: message.time.created,
         text: sanitizeTerminalText(message.text),
-        attachments: (message.files ?? []).map((file) => file.name ?? file.mime),
+        // Attachment labels are untrusted display text, just like message bodies (#249).
+        attachments: (message.files ?? []).map((file) =>
+          sanitizeSingleLine(file.name ?? file.mime),
+        ),
       };
     case 'assistant': {
       const model = toModelSelection(message.model) ?? { providerID: '?', modelID: '?' };

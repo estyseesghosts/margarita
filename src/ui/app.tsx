@@ -85,13 +85,16 @@ export function App(props: AppProps) {
       openEditor,
       redraw: () => renderer.requestRender(),
       scroll: (move) => scrollTranscript?.(move),
+      // Overview chrome (title, tabs, composer, footer) is not part of the row viewport.
+      overviewPageRows: Math.max(3, dimensions().height - 8),
     });
     if (handled) event.preventDefault();
   });
 
   usePaste((event) => {
-    if (state.overlay.kind === 'help') controller.closeOverlay();
-    if (state.overlay.kind !== 'none' && state.overlay.kind !== 'form') return;
+    // Searchable overlays receive text in place; forms keep their token-bound async path.
+    // Non-editable modals consume the paste instead of mutating the composer (#239).
+    if (controller.pasteIntoOverlay(event.bytes, event.metadata)) return;
     void controller.pasteBytes(event.bytes, event.metadata);
   });
 

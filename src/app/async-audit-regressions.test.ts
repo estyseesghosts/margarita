@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 
 import { FakeBackend } from '../../test/fake-backend.ts';
+import type { MessagePage } from '../adapter/backend.ts';
 import { defaultConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
 import { composerFrom } from '../domain/composer.ts';
+import { sessionKey } from '../domain/server-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
+import type { TranscriptMessage } from '../domain/transcript.ts';
 import { AppController, type ServerAdmin } from './controller.ts';
 
 const sessionID = 'ses_same';
@@ -219,6 +222,73 @@ describe('pagination follow-ups (#196)', () => {
     await controller.loadMoreSessions();
     expect(controller.state.sessionsLoading).toBe(false);
     expect(controller.state.serverPages['remote']?.complete).toBe(true);
+    controller.dispose();
+  });
+});
+
+describe('session lifetime races (#252)', () => {
+  const key = sessionKey({ serverID: 'local', sessionID });
+
+  test('late summary and transcript reads cannot recreate a deleted session', async () => {
+    const { local, controller } = await harness();
+    const summary = Promise.withResolvers<SessionSummary>();
+    const messages = Promise.withResolvers<MessagePage>();
+    local.getSession = () => summary.promise;
+    local.listMessages = () => messages.promise;
+    controller.openSession(sessionID, 'local');
+    await flush();
+    expect(controller.state.sessions[key]).toBeDefined();
+
+    controller.onEvents('local', [{ kind: 'session-deleted', sessionID }], false);
+    expect(controller.state.sessions[key]).toBeUndefined();
+    expect(controller.state.transcripts[key]).toBeUndefined();
+
+    summary.resolve(session('local'));
+    messages.resolve({
+      messages: [{ kind: 'user', id: 'late', createdAt: 2, text: 'late', attachments: [] }],
+      hasEarlier: false,
+    });
+    await flush();
+    expect(controller.state.sessions[key]).toBeUndefined();
+    expect(controller.state.transcripts[key]).toBeUndefined();
+    expect(controller.state.route.kind).toBe('overview');
+    controller.dispose();
+  });
+
+  test('a late older page cannot recreate a deleted transcript', async () => {
+    const { local, controller } = await harness();
+    local.messages = {
+      [sessionID]: Array.from({ length: 300 }, (_, index): TranscriptMessage => ({
+        kind: 'user',
+        id: `m${index + 1}`,
+        createdAt: index + 1,
+        text: `message ${index + 1}`,
+        attachments: [],
+      })),
+    };
+    controller.openSession(sessionID, 'local');
+    await flush();
+    expect(controller.state.transcripts[key]?.messages.length).toBe(120);
+
+    const older = Promise.withResolvers<MessagePage>();
+    let calls = 0;
+    const realListMessages = local.listMessages.bind(local);
+    local.listMessages = async (id, limit, cursor) => {
+      calls += 1;
+      return calls === 1 ? older.promise : realListMessages(id, limit, cursor);
+    };
+    expect(controller.revealEarlier(sessionID, 0, 'local')).toBe(true);
+    await flush();
+    expect(calls).toBe(1);
+
+    controller.onEvents('local', [{ kind: 'session-deleted', sessionID }], false);
+    older.resolve({
+      messages: [{ kind: 'user', id: 'older', createdAt: 0, text: 'older', attachments: [] }],
+      hasEarlier: false,
+    });
+    await flush();
+    expect(controller.state.transcripts[key]).toBeUndefined();
+    expect(controller.state.route.kind).toBe('overview');
     controller.dispose();
   });
 });

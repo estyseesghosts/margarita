@@ -17,13 +17,13 @@ Legend: **origin** = value captured before the first `await` (a `SessionRef`/`se
 | 1340 | `loadMoreSessions` | 4 | `backendFor(serverID)` | – | fixed (#196) · test: async-audit-regressions |
 | 1516 | `applyCliOverrides` | 6 | `backendFor(serverID)` | `activeServerID()` | safe (pattern): explicit owner |
 | 1637 | `resync` | 3 | – | `state.route` | reviewed by reading: safe · post-await route reads are comparisons against the captured origin (guards); stale results are dropped |
-| 1768 | `refreshSummary` | 1 | `backendFor(serverID)` | `activeServerID()` | safe (pattern): explicit owner |
-| 1791 | `refreshInbox` | 1 | `backendFor(serverID)` | `activeServerID()` | safe (pattern): explicit owner |
-| 1810 | `refreshInputRequests` | 1 | `backendFor(serverID)` | `activeServerID()`, `state.route` | reviewed by reading: safe · post-await route reads are comparisons against the captured origin (guards); stale results are dropped |
+| 1768 | `refreshSummary` | 1 | `backendFor(serverID)` | `activeServerID()` | fixed (#252): session lifetime + backend check before write · test: async-audit-regressions |
+| 1791 | `refreshInbox` | 1 | `backendFor(serverID)` | `activeServerID()` | fixed (#252): session lifetime check before write |
+| 1810 | `refreshInputRequests` | 1 | `backendFor(serverID)` | `activeServerID()`, `state.route` | fixed (#252): session lifetime check before write · post-await route reads compare the captured origin |
 | 1871 | `refreshWorkers` | 1 | `backendFor(serverID)` | `activeServerID()` | safe (pattern): explicit owner |
 | 1892 | `refreshShellJobs` | 1 | `backendFor(serverID)` | `activeServerID()` | safe (pattern): explicit owner |
-| 1945 | `fetchLatest` | 1 | `backendFor(serverID)` | `activeServerID()` | safe (pattern): explicit owner |
-| 1978 | `loadOlder` | 1 | `backendFor(serverID)` | `activeServerID()` | safe (pattern): explicit owner |
+| 1945 | `fetchLatest` | 1 | `backendFor(serverID)` | `activeServerID()` | fixed (#252): session lifetime, backend and owner checks before write · test: async-audit-regressions |
+| 1978 | `loadOlder` | 1 | `backendFor(serverID)` | `activeServerID()` | fixed (#252): late pages cannot recreate a deleted/evicted transcript · test: async-audit-regressions |
 | 2059 | `loadConversation` | 1 | – | `activeServerID()` | fixed (#199) · test: async-audit-regressions |
 | 2297 | `pasteBytes` | 2 | – | `state.route` | reviewed by reading: safe · route/overlay/session reads happen synchronously before the first `await`; later calls use the captured owner |
 | 2449 | `attachPastedPaths` | 1 | – | – | safe (pattern): no backend selection |
@@ -48,7 +48,7 @@ Legend: **origin** = value captured before the first `await` (a `SessionRef`/`se
 | 3942 | `confirmUnpair` | 1 | – | `state.overlay` | reviewed by reading: safe · route/overlay/session reads happen synchronously before the first `await`; later calls use the captured owner |
 | 3968 | `performUnpair` | 1 | – | – | fixed (#195) · test: async-audit-regressions |
 | 4066 | `cycleAgent` | 2 | – | `currentSession()` | reviewed by reading: safe · route/overlay/session reads happen synchronously before the first `await`; later calls use the captured owner |
-| 4102 | `setAgent` | 5 | `backendFor(session.serverID)` | `currentSession()` | safe (pattern): explicit owner |
+| 4102 | `setAgent` | 5 | `backendFor(session.serverID)` | `currentSession()` | fixed (#253): lifetime check before switch and commit; evidence watermark · test: controller.test |
 | 4157 | `openAgentPicker` | 2 | – | – | safe (pattern): no backend selection |
 | 4194 | `acceptAgentPicker` | 1 | – | `state.overlay` | reviewed by reading: safe · route/overlay/session reads happen synchronously before the first `await`; later calls use the captured owner |
 | 4246 | `acceptCopyPicker` | 1 | – | `state.overlay` | reviewed by reading: safe · route/overlay/session reads happen synchronously before the first `await`; later calls use the captured owner |
@@ -104,11 +104,14 @@ Legend: **origin** = value captured before the first `await` (a `SessionRef`/`se
 | #197 stale revert completions closed or restored another overlay | fixed, regression test |
 | #198 stream callbacks from a replaced subscription | fixed, regression test (`server-manager.test.ts`) |
 | #199 `loadConversation` omitted the owner for the goal refresh | fixed, regression test |
+| #252 late summary/transcript/inbox/request reads resurrected deleted or recreated sessions | fixed with monotonic per-session lifetimes; regression tests in `async-audit-regressions.test.ts` |
+| #253 an older confirmed-agent cache outranked a newer external switch, and survived deletion | fixed with evidence + transcript watermark and lifetime-scoped caches; regression tests in `controller.test.ts` |
 | `this.backend` is a getter over the *current route's* server | intentional; every post-`await` use in the file goes through `backendFor(owner)`; `interrupt` and `rename` were made explicit as hardening |
 
 ## Ownership policy (intentional behaviour)
 
 - Backend calls are bound to the `serverID` captured before the first `await`; `backendFor` fails closed for unknown hosts.
+- Session-scoped writes additionally capture a monotonic *session lifetime* epoch. Deletion, host removal and ID reuse bump it; a response that started in an earlier lifetime is a no-op even when the host is still registered.
 - A late result may update origin-scoped cached state if the host is still registered and the request epoch is current, but never takes focus, closes a different overlay or writes another route's composer.
 - Client-local paths and files are never derived from a remote server's directory.
 

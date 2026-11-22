@@ -25,3 +25,26 @@ export function shellRunningInBackground(
   if (shellID === undefined || jobs === undefined) return false;
   return jobs.some((job) => job.shellID === shellID && job.status === 'running');
 }
+
+/** Freshness of the cached job list, supplied by the caller's last refresh outcome. */
+export type ShellJobFreshness = 'confirmed' | 'stale' | 'unavailable' | undefined;
+
+/**
+ * What the transcript may honestly say about a timed-out shell (#259). Only a confirmed
+ * list supports "still running"; retained rows after a failed refresh are last-known.
+ */
+export type ShellBackgroundState =
+  'confirmed-running' | 'last-known-running' | 'not-reported' | 'confirmed-not-running';
+
+export function shellBackgroundState(
+  jobs: readonly ShellJob[] | undefined,
+  shellID: string | undefined,
+  freshness: ShellJobFreshness,
+): ShellBackgroundState {
+  if (shellID === undefined || jobs === undefined) return 'not-reported';
+  const job = jobs.find((entry) => entry.shellID === shellID);
+  if (job === undefined)
+    return freshness === 'confirmed' ? 'confirmed-not-running' : 'not-reported';
+  if (job.status !== 'running') return 'confirmed-not-running';
+  return freshness === 'confirmed' ? 'confirmed-running' : 'last-known-running';
+}

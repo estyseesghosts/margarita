@@ -31,4 +31,12 @@ describe('truncatePrompt', () => {
   test('marks multi-line prompts', () => {
     expect(truncatePrompt('first\nsecond', 20)).toBe('first …');
   });
+
+  test('measures terminal cells and never splits a grapheme (#248)', () => {
+    expect(truncatePrompt('日本語', 6)).toBe('日本語');
+    expect(truncatePrompt('日本語', 4)).toBe('日…');
+    // One family emoji is a single two-cell grapheme; a one-cell budget keeps only an ellipsis.
+    expect(truncatePrompt('👨‍👩‍👧‍👦', 1)).toBe('…');
+    expect(truncatePrompt('e\u0301e\u0301e\u0301', 2)).toBe('e\u0301…');
+  });
 });

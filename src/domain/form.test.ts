@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   buildAnswer,
+  choiceWindow,
   currentField,
   editorKey,
   firstInvalid,
@@ -60,6 +61,39 @@ describe('forms', () => {
       'reason',
       'docs',
     ]);
+  });
+
+  test('long choice lists use a bounded window that always includes the cursor (#245)', () => {
+    expect(choiceWindow(0, 50, 10)).toEqual({ start: 0, end: 10 });
+    expect(choiceWindow(25, 50, 10)).toEqual({ start: 20, end: 30 });
+    expect(choiceWindow(49, 50, 10)).toEqual({ start: 40, end: 50 });
+    expect(choiceWindow(7, 4, 10)).toEqual({ start: 0, end: 4 });
+    expect(choiceWindow(0, 0, 10)).toEqual({ start: 0, end: 0 });
+  });
+
+  test('Home/End and PageUp/PageDown navigate a long choice field (#245)', () => {
+    const options = Array.from({ length: 30 }, (_, index) => ({
+      value: `v${index}`,
+      label: `Option ${index}`,
+    }));
+    const longForm: FormRequest = {
+      ...form,
+      fields: [
+        { ...base, key: 'env', title: 'Environment', kind: 'choice', custom: false, options },
+      ],
+    };
+    let editor = startEditor(longForm);
+    expect(editor.cursor).toBe(0);
+    editor = editorKey(longForm, editor, press('end')).editor;
+    expect(editor.cursor).toBe(29);
+    editor = editorKey(longForm, editor, press('pageup')).editor;
+    expect(editor.cursor).toBe(19);
+    editor = editorKey(longForm, editor, press('home')).editor;
+    expect(editor.cursor).toBe(0);
+    editor = editorKey(longForm, editor, press('pagedown')).editor;
+    expect(editor.cursor).toBe(10);
+    editor = editorKey(longForm, editor, press('return')).editor;
+    expect(editor.answers['env']).toBe('v10');
   });
 
   test('validation reports the first invalid visible field', () => {
@@ -283,6 +317,34 @@ describe('forms', () => {
     custom = editorKey(customForm, custom, press('left')).editor;
     custom = editorKey(customForm, custom, press('letter', 'X')).editor;
     expect(custom.text).toBe('featurXe');
+  });
+
+  test('selecting a listed option clears stale custom-choice text (#255)', () => {
+    const choiceForm: FormRequest = {
+      ...form,
+      fields: [
+        {
+          ...base,
+          key: 'branch',
+          title: 'Branch',
+          kind: 'choice',
+          custom: true,
+          options: [
+            { value: 'main', label: 'main' },
+            { value: 'release', label: 'release' },
+          ],
+        },
+      ],
+    };
+    let editor = startEditor(choiceForm);
+    for (const character of 'feature') {
+      editor = editorKey(choiceForm, editor, press('letter', character)).editor;
+    }
+    expect(editor.text).toBe('feature');
+    editor = editorKey(choiceForm, editor, press('down')).editor;
+    expect(editor.text).toBe('');
+    editor = editorKey(choiceForm, editor, press('return')).editor;
+    expect(editor.answers['branch']).toBe('release');
   });
 
   test('paste inserts at the active cursor and Shift+Tab restores the caret (#232)', () => {

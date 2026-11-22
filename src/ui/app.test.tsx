@@ -15,11 +15,12 @@ import { buildKeymap } from '../domain/keymap.ts';
 import { directoryKey } from '../domain/path-identity.ts';
 import { projectLabel } from '../domain/project-label.ts';
 import { cellWidth } from '../domain/text-width.ts';
-import type { TranscriptMessage } from '../domain/transcript.ts';
+import type { ToolCallChild, TranscriptMessage } from '../domain/transcript.ts';
 import { App } from './app.tsx';
 import { pickTheme } from './theme.ts';
 
 const pageUp = '\u001b[5~';
+const pageDown = '\u001b[6~';
 
 function expectWelcomeGreeting(frame: string): void {
   const all = Object.values(greetingCatalog).flat();
@@ -56,7 +57,12 @@ afterEach(() => {
 
 async function mount(
   backend: FakeBackend,
-  options: { kittyKeyboard?: boolean; now?: () => number; hintTickMs?: number } = {},
+  options: {
+    kittyKeyboard?: boolean;
+    now?: () => number;
+    hintTickMs?: number;
+    keymap?: ReturnType<typeof buildKeymap>['keymap'];
+  } = {},
 ) {
   const controller = new AppController({
     backend,
@@ -75,7 +81,7 @@ async function mount(
     () =>
       App({
         controller,
-        keymap: buildKeymap({}).keymap,
+        keymap: options.keymap ?? buildKeymap({}).keymap,
         theme: pickTheme({}),
         animate: false,
         ascii: false,
@@ -440,6 +446,36 @@ describe('app', () => {
     expect(setup.captureCharFrame()).not.toContain('Session number 0');
   });
 
+  test('expanding a large project keeps the selected Show less row visible (#240)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = Array.from({ length: 60 }, (_, index) => ({
+      id: `ses_${index}`,
+      serverID: 'local',
+      projectID: 'p',
+      directory: '/work/kohjoh',
+      title: `Session number ${index}`,
+      createdAt: 0,
+      updatedAt: index,
+      archived: false,
+    }));
+    const { controller, setup } = await mount(backend);
+    controller.openOverview();
+    await settle(setup);
+    // Six visible sessions precede the toggle.
+    for (let step = 0; step < 6; step += 1) setup.mockInput.pressArrow('down');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).toMatch(/❯\s+\[Show less\]/);
+    expect(controller.state.overview.selectedRow).toContain('toggle:');
+    // Collapsing while the toggle remains selected keeps a valid visible selection.
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    expect(setup.captureCharFrame()).toMatch(/❯\s+\[Show more\]/);
+    controller.dispose();
+  });
+
   test('agent question: card, Enter opens the form, answers are sent once', async () => {
     const backend = backendWithSession();
     backend.forms = [
@@ -566,6 +602,60 @@ describe('app', () => {
     controller.dispose();
   });
 
+  test('a long choice list is windowed and keeps the highlighted option visible (#245)', async () => {
+    const backend = backendWithSession();
+    backend.forms = [
+      {
+        id: 'frm_long',
+        sessionID: 'ses_a',
+        title: 'Pick one',
+        fields: [
+          {
+            key: 'target',
+            title: 'Target',
+            required: true,
+            hidden: false,
+            when: [],
+            kind: 'choice',
+            custom: false,
+            options: Array.from({ length: 50 }, (_, index) => ({
+              value: `target-${index}`,
+              label: `Target ${index}`,
+            })),
+          },
+        ],
+      },
+    ];
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    let frame = setup.captureCharFrame();
+    expect(frame).toContain('choice 1 of 50');
+    expect(frame).toContain('Target 0');
+    expect(frame).not.toContain('Target 49');
+
+    setup.mockInput.pressKey('END');
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('choice 50 of 50');
+    expect(frame).toContain('Target 49');
+
+    // A mouse click selects the visible row without submitting it (#245, #247).
+    const lines = frame.split('\n');
+    const y = lines.findIndex((line) => line.includes('Target 45'));
+    expect(y).toBeGreaterThanOrEqual(0);
+    await setup.mockMouse.click(5, y);
+    await settle(setup);
+    const active = controller.state.overlay;
+    expect(active.kind === 'form' && active.editor.cursor).toBe(45);
+    expect(setup.captureCharFrame()).toContain('choice 46 of 50');
+    // The dialog remains inside a 24-row terminal (capture may include a trailing newline).
+    expect(setup.captureCharFrame().trimEnd().split('\n').length).toBeLessThanOrEqual(24);
+    controller.dispose();
+  });
+
   test('an external question exposes open and copy controls without claiming completion (#233)', async () => {
     const backend = backendWithSession();
     backend.forms = [
@@ -608,14 +698,102 @@ describe('app', () => {
     controller.openSession('ses_a');
     await settle(setup);
     expect(setup.captureCharFrame()).toContain('Permission needed');
+    expect(setup.captureCharFrame()).toContain('Enter to review');
     backend.replyError = new BackendError('conflict', 'permission.reply', 'already replied');
     backend.permissions = [];
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    // First Enter only focuses the card (#237); the second answers the visible selection.
+    expect(backend.calls.filter((call) => call.name === 'replyPermission')).toHaveLength(0);
     setup.mockInput.pressEnter();
     await settle(setup);
     await settle(setup);
     expect(backend.calls.filter((call) => call.name === 'replyPermission')).toHaveLength(1);
     expect(controller.state.notice?.text).toBe('Already answered elsewhere.');
     expect(setup.captureCharFrame()).not.toContain('Permission needed');
+  });
+
+  test('a permission stays visible and needs a focus step while scrolled far up (#237)', async () => {
+    const backend = backendWithSession();
+    backend.messages['ses_a'] = Array.from({ length: 200 }, (_, index) => ({
+      kind: 'user' as const,
+      id: `m${index + 1}`,
+      createdAt: index + 1,
+      text: `message ${index + 1}`,
+      attachments: [],
+    }));
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    for (let page = 0; page < 12; page += 1) setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+
+    backend.permissions = [
+      { id: 'per_1', sessionID: 'ses_a', action: 'bash', resources: ['rm -rf build'], save: [] },
+    ];
+    controller.retryInputRequests();
+    await settle(setup);
+    // The card is pinned outside the scrollbox, so the reader sees it at the old position.
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('Permission needed');
+    expect(frame).toContain('Enter to review');
+
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    expect(backend.calls.filter((call) => call.name === 'replyPermission')).toHaveLength(0);
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    expect(backend.calls.filter((call) => call.name === 'replyPermission')).toHaveLength(1);
+    controller.dispose();
+  });
+
+  test('a pending question stays visible and opens without clearing the draft (#213)', async () => {
+    const backend = backendWithSession();
+    backend.messages['ses_a'] = Array.from({ length: 200 }, (_, index) => ({
+      kind: 'user' as const,
+      id: `m${index + 1}`,
+      createdAt: index + 1,
+      text: `message ${index + 1}`,
+      attachments: [],
+    }));
+    backend.forms = [
+      {
+        id: 'frm_1',
+        sessionID: 'ses_a',
+        title: 'Keep going?',
+        fields: [
+          {
+            key: 'choice',
+            title: 'Choice',
+            required: true,
+            hidden: false,
+            when: [],
+            kind: 'choice',
+            custom: false,
+            options: [{ value: 'yes', label: 'Yes' }],
+          },
+        ],
+      },
+    ];
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    await setup.mockInput.typeText('my draft');
+    for (let page = 0; page < 12; page += 1) setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('Question from the agent');
+    expect(frame).toContain('Alt+Q to answer');
+    setup.mockInput.pressKey('q', { meta: true });
+    await settle(setup);
+    expect(controller.state.overlay.kind).toBe('form');
+    expect(controller.state.composer.text).toBe('my draft');
+    setup.mockInput.pressEscape();
+    await settle(setup);
+    expect(controller.state.overlay.kind).toBe('none');
+    expect(controller.state.composer.text).toBe('my draft');
+    controller.dispose();
   });
 
   test('/diff turn lists server-reported files and opens a colored patch', async () => {
@@ -1678,6 +1856,164 @@ describe('transcript rendering (docs/22, docs/23)', () => {
     // At the very top the original prompts are visible, so nothing is duplicated.
     expect(top.split('question number 1').length).toBe(2);
   });
+
+  test('sticky prompt survives when the user node falls outside the render window (#244)', async () => {
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'u1', createdAt: 1, text: 'the original request', attachments: [] },
+        ...Array.from({ length: 400 }, (_, index) => ({
+          kind: 'assistant' as const,
+          id: `a${String(index).padStart(3, '0')}`,
+          createdAt: index + 2,
+          completedAt: index + 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [{ kind: 'text' as const, text: `assistant row ${index}` }],
+        })),
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    // Load all server pages, then let the 200-node render window hide the prompt.
+    await controller.loadOlder('ses_a');
+    await controller.loadOlder('ses_a');
+    await controller.loadOlder('ses_a');
+    await controller.loadOlder('ses_a');
+    await settle(setup);
+    expect(controller.state.transcripts['ses_a']?.messages.length).toBeGreaterThan(200);
+    const frame = setup.captureCharFrame();
+    const first = frame.split('\n')[0] ?? '';
+    expect(first).toContain('❯ the original request');
+    controller.dispose();
+  });
+
+  test('Ctrl+Home reveals every loaded node, not just the render window (#251)', async () => {
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'u1', createdAt: 1, text: 'first loaded prompt', attachments: [] },
+        ...Array.from({ length: 300 }, (_, index) => ({
+          kind: 'assistant' as const,
+          id: `a${String(index).padStart(3, '0')}`,
+          createdAt: index + 2,
+          completedAt: index + 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [{ kind: 'text' as const, text: `row ${index}` }],
+        })),
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    await controller.loadOlder('ses_a');
+    await controller.loadOlder('ses_a');
+    await controller.loadOlder('ses_a');
+    await settle(setup);
+    expect(controller.transcriptWindow('ses_a')).toBe(200);
+
+    setup.mockInput.pressKey('HOME', { ctrl: true });
+    await settle(setup);
+    // All 301 loaded nodes fit in the window; the earliest prompt is reachable.
+    expect(controller.transcriptWindow('ses_a')).toBeGreaterThanOrEqual(301);
+    expect(setup.captureCharFrame()).toContain('first loaded prompt');
+    controller.dispose();
+  });
+
+  test('a slow older page keeps the same message at the same viewport row (#243)', async () => {
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: Array.from({ length: 300 }, (_, index) => ({
+        kind: 'user' as const,
+        id: `m${String(index).padStart(3, '0')}`,
+        createdAt: index,
+        text: `message ${index}`,
+        attachments: [],
+      })),
+    };
+    let releaseOlder: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseOlder = resolve;
+    });
+    const immediate = backend.listMessages.bind(backend);
+    backend.listMessages = async (sessionID, limit, cursor) => {
+      if (cursor !== undefined) await gate;
+      return immediate(sessionID, limit, cursor);
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    // Ctrl+Home puts the earliest loaded message at the top; PageUp then fetches.
+    setup.mockInput.pressKey('HOME', { ctrl: true });
+    await settle(setup);
+    const before = setup.captureCharFrame().split('\n');
+    const row = before.findIndex((line) => line.includes('message 180'));
+    expect(row).toBeGreaterThanOrEqual(0);
+    expect(before.some((line) => line.includes('earlier messages'))).toBe(true);
+
+    setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    releaseOlder?.();
+    await settle(setup);
+    await settle(setup);
+    expect(controller.state.transcripts['ses_a']?.messages.length).toBe(240);
+    const after = setup.captureCharFrame().split('\n');
+    expect(after.findIndex((line) => line.includes('message 180'))).toBe(row);
+    controller.dispose();
+  });
+
+  test('keyboard focus reveals a tool row outside the current window (#242)', async () => {
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user' as const, id: 'u1', createdAt: 1, text: 'many calls', attachments: [] },
+        ...Array.from({ length: 230 }, (_, index) => ({
+          kind: 'assistant' as const,
+          id: `a${String(index).padStart(3, '0')}`,
+          createdAt: index + 2,
+          completedAt: index + 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            { kind: 'text' as const, text: `step ${index}` },
+            {
+              kind: 'tool' as const,
+              tool: {
+                id: `t${String(index).padStart(3, '0')}`,
+                name: 'read',
+                status: 'completed' as const,
+                input: { filePath: `src/file-${index}.ts` },
+                output: 'ok',
+                startedAt: index + 2,
+                completedAt: index + 3,
+              },
+            },
+          ],
+        })),
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    await controller.loadOlder('ses_a');
+    await controller.loadOlder('ses_a');
+    await controller.loadOlder('ses_a');
+    await settle(setup);
+    expect(controller.collapsibleItems().length).toBeGreaterThan(200);
+    expect(controller.transcriptWindow('ses_a')).toBe(200);
+
+    for (let step = 0; step < 120; step += 1) {
+      setup.mockInput.pressArrow('up', { ctrl: true });
+    }
+    await settle(setup);
+    const focused = controller.state.focusedGroup;
+    expect(focused).toBeDefined();
+    expect(controller.transcriptWindow('ses_a')).toBeGreaterThan(200);
+    expect(setup.captureCharFrame()).toContain('(Enter)');
+    controller.dispose();
+  }, 15_000);
 });
 
 function runningWithQueue(): FakeBackend {
@@ -1711,7 +2047,7 @@ describe('queued messages preview (issue #29)', () => {
 
     const queued1 = frame.indexOf('first follow-up');
     const queued2 = frame.indexOf('second follow-up');
-    const hint = frame.indexOf('f6 to steer now');
+    const hint = frame.indexOf('F6 to steer now');
     const marker = frame.search(verb);
     const composerPlaceholder = frame.lastIndexOf('← overview');
 
@@ -1724,9 +2060,22 @@ describe('queued messages preview (issue #29)', () => {
     expect(marker).toBeGreaterThan(queued2);
     expect(marker).toBeLessThan(composerPlaceholder);
     // The hint appears exactly once (only for the FIFO-next item).
-    expect(frame.match(/f6 to steer now/g)).toHaveLength(1);
+    expect(frame.match(/F6 to steer now/g)).toHaveLength(1);
     // The multiline item is clipped to one line.
     expect(frame).not.toContain('multiline note\n');
+    controller.dispose();
+  });
+
+  test('the queued hint follows the configured steer binding (#250)', async () => {
+    const backend = runningWithQueue();
+    const { controller, setup } = await mount(backend, {
+      keymap: buildKeymap({ 'composer.steer': 'f8' }).keymap,
+    });
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('F8 to steer now');
+    expect(frame).not.toContain('F6 to steer now');
     controller.dispose();
   });
 
@@ -1784,7 +2133,7 @@ describe('queued messages preview (issue #29)', () => {
     const frame = setup.captureCharFrame();
     expect(frame).toContain('first follow-up');
     expect(frame).toContain('second follow-up');
-    expect(frame.match(/f6 to steer now/g)).toHaveLength(1);
+    expect(frame.match(/F6 to steer now/g)).toHaveLength(1);
     // Existing in-flight delivery failure leaves the item queued.
     controller.dispose();
   });
@@ -1808,7 +2157,7 @@ describe('queued messages preview (issue #29)', () => {
     ]);
     const frame = setup.captureCharFrame();
     expect(frame).toContain('first follow-up');
-    expect(frame).toContain('f6 to steer now');
+    expect(frame).toContain('F6 to steer now');
     controller.dispose();
   });
 
@@ -1833,7 +2182,7 @@ describe('queued messages preview (issue #29)', () => {
     controller.openSession('ses_b');
     await settle(setup);
     const frame = setup.captureCharFrame();
-    expect(frame).not.toContain('f6 to steer now');
+    expect(frame).not.toContain('F6 to steer now');
     expect(frame).not.toContain('first follow-up');
     controller.dispose();
   });
@@ -1863,7 +2212,7 @@ describe('queued messages preview (issue #29)', () => {
     await settle(setup);
 
     const frame = setup.captureCharFrame();
-    expect(frame).not.toContain('f6 to steer now');
+    expect(frame).not.toContain('F6 to steer now');
     expect(frame).toContain('first follow-up');
     controller.dispose();
   });
@@ -2186,6 +2535,97 @@ describe('Code Mode child diagnostics (#231)', () => {
     const detailed = setup.captureCharFrame();
     expect(detailed).toContain('permission denied by the MCP server');
     expect(detailed).toContain('1.0s');
+    controller.dispose();
+  });
+
+  test('caps the child widget count and keeps failures visible (#260)', async () => {
+    const backend = backendWithSession();
+    backend.mcpServers = ['lotus'];
+    const children: ToolCallChild[] = Array.from({ length: 30 }, (_, index) => ({
+      id: `exec:${index}`,
+      parentID: 'exec',
+      index,
+      name: `lotus.op${index}`,
+      status: index === 25 ? 'error' : 'completed',
+      input: { n: index },
+      ...(index === 25 ? { error: 'remote exploded' } : {}),
+    }));
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'run all', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'exec',
+                name: 'execute',
+                status: 'completed',
+                input: { code: 'await lotus.many()' },
+                output: 'script output',
+                startedAt: 1,
+                completedAt: 2,
+                children,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const compact = setup.captureCharFrame();
+    // Ten widgets for an expanded tool, but the failure at index 25 takes a slot ahead
+    // of later successes.
+    expect(compact).toContain('showing 10 of 30 nested calls');
+    expect(compact).toContain('1 failed');
+    expect(compact).toContain('lotus.op25');
+    expect(compact).toContain('remote exploded');
+    expect(compact).not.toContain('lotus.op10');
+
+    controller.toggleDetails();
+    await settle(setup);
+    const detailed = setup.captureCharFrame();
+    expect(detailed).toContain('showing 20 of 30 nested calls');
+    expect(detailed).toContain('page 1 of 2');
+
+    // Focus the execute call, then page through the remaining nested children (#260).
+    setup.mockInput.pressArrow('down', { ctrl: true });
+    await settle(setup);
+    expect(controller.state.focusedGroup).toBe('tool:exec');
+    setup.mockInput.pressKey(']');
+    await settle(setup);
+    // The tool can be taller than the viewport; go to the bottom to read its page footer.
+    setup.mockInput.pressKey('END', { ctrl: true });
+    await settle(setup);
+    const second = setup.captureCharFrame();
+    expect(second).toContain('showing 10 of 30 nested calls');
+    expect(second).toContain('page 2 of 2');
+    expect(second).toContain('[/] page');
+    expect(second).toContain('lotus.op19');
+    expect(second).toContain('lotus.op29');
+    expect(second).not.toContain('lotus.op0 ');
+
+    setup.mockInput.pressKey('[');
+    await settle(setup);
+    setup.mockInput.pressKey('END', { ctrl: true });
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('page 1 of 2');
+    expect(setup.captureCharFrame()).toContain('lotus.op25');
+
+    // A nonempty draft keeps brackets as ordinary text; paging never hijacks typing.
+    controller.setComposer({ text: 'draft', cursor: 5 });
+    setup.mockInput.pressKey(']');
+    await settle(setup);
+    expect(controller.state.composer.text).toBe('draft]');
+    expect(controller.childPageFor('exec')).toBe(0);
     controller.dispose();
   });
 });
@@ -2806,6 +3246,160 @@ test('help dismisses and retains typed and pasted input', async () => {
   controller.dispose();
 });
 
+test('help is bounded and PageUp/PageDown reach every action (#241)', async () => {
+  const { controller, setup } = await mount(backendWithSession());
+  controller.openSession('ses_a');
+  await settle(setup);
+  controller.setOverlay({ kind: 'help' });
+  await settle(setup);
+  let frame = setup.captureCharFrame();
+  if (process.env['DUMP'] !== undefined) console.log(frame);
+  const first = /rows 1–(\d+) of (\d+) · PgUp\/PgDn/.exec(frame);
+  expect(first).not.toBeNull();
+  const total = Number(first?.[2]);
+  expect(Number(first?.[1])).toBeLessThan(total);
+  expect(frame).toContain('Keys · PgUp/PgDn scroll');
+
+  setup.mockInput.pressKey(pageUp);
+  await settle(setup);
+  frame = setup.captureCharFrame();
+  expect(frame).toContain('rows 1–');
+  setup.mockInput.pressKey(pageDown);
+  await settle(setup);
+  frame = setup.captureCharFrame();
+  expect(frame).toMatch(/rows 11–\d+ of \d+/);
+  controller.dispose();
+});
+
+test('pasted text edits a searchable picker instead of the composer (#239)', async () => {
+  const backend = backendWithSession();
+  backend.models = [
+    { providerID: 'opencode', modelID: 'longcat', name: 'Longcat', enabled: true, variants: [] },
+  ];
+  const { controller, setup } = await mount(backend);
+  controller.openSession('ses_a');
+  await settle(setup);
+  controller.setComposer({ text: 'draft survives', cursor: 0 });
+  void controller.openModelPicker();
+  await settle(setup);
+  await setup.mockInput.pasteBracketedText('Long\nCat');
+  await settle(setup);
+  const overlay = controller.state.overlay;
+  expect(overlay.kind).toBe('model-picker');
+  expect(overlay.kind === 'model-picker' && overlay.query).toBe('Long Cat');
+  expect(controller.state.composer.text).toBe('draft survives');
+  setup.mockInput.pressEscape();
+  await settle(setup);
+  expect(controller.state.overlay.kind).toBe('none');
+  expect(controller.state.composer.text).toBe('draft survives');
+  controller.dispose();
+});
+
+test('overview tabs, rows and toggles respond to the mouse (#247)', async () => {
+  const backend = new FakeBackend();
+  backend.sessions = Array.from({ length: 8 }, (_, index) => ({
+    id: `ses_${index}`,
+    serverID: 'local',
+    projectID: 'p',
+    directory: '/work/kohjoh',
+    title: `Session number ${index}`,
+    createdAt: 0,
+    updatedAt: index,
+    archived: false,
+  }));
+  const { controller, setup } = await mount(backend);
+  controller.openOverview();
+  await settle(setup);
+  let frame = setup.captureCharFrame();
+  let lines = frame.split('\n');
+  let y = lines.findIndex((line) => line.includes('Remotes') && line.includes('Needs input'));
+  expect(y).toBeGreaterThanOrEqual(0);
+  let x = lines[y]!.indexOf('Local');
+  await setup.mockMouse.click(x, y);
+  await settle(setup);
+  expect(controller.state.overview.tab).toBe('local');
+
+  frame = setup.captureCharFrame();
+  lines = frame.split('\n');
+  y = lines.findIndex((line) => line.includes('Session number 7'));
+  expect(y).toBeGreaterThanOrEqual(0);
+  await setup.mockMouse.click(4, y);
+  await settle(setup);
+  expect(controller.state.route).toMatchObject({
+    kind: 'conversation',
+    serverID: 'local',
+    sessionID: 'ses_7',
+  });
+
+  controller.openOverview();
+  await settle(setup);
+  frame = setup.captureCharFrame();
+  lines = frame.split('\n');
+  y = lines.findIndex((line) => line.includes('[Show more] 2'));
+  expect(y).toBeGreaterThanOrEqual(0);
+  x = lines[y]!.indexOf('[Show more]');
+  await setup.mockMouse.click(x, y);
+  await settle(setup);
+  expect(controller.state.overview.expanded['/work/kohjoh']).toBe(true);
+  expect(setup.captureCharFrame()).toContain('Session number 0');
+  controller.dispose();
+});
+
+test('model picker rows accept a click through the verified switch path (#247)', async () => {
+  const backend = backendWithSession();
+  backend.sessions = [
+    {
+      ...backend.sessions[0]!,
+      model: { providerID: 'opencode', modelID: 'longcat' },
+    },
+  ];
+  backend.models = [
+    { providerID: 'opencode', modelID: 'longcat', name: 'Longcat', enabled: true, variants: [] },
+    { providerID: 'opencode', modelID: 'othercat', name: 'Othercat', enabled: true, variants: [] },
+  ];
+  const { controller, setup } = await mount(backend);
+  controller.openSession('ses_a');
+  await settle(setup);
+  void controller.openModelPicker();
+  await settle(setup);
+  const lines = setup.captureCharFrame().split('\n');
+  const y = lines.findIndex((line) => line.includes('othercat'));
+  expect(y).toBeGreaterThanOrEqual(0);
+  await setup.mockMouse.click(4, y);
+  await settle(setup);
+  await settle(setup);
+  expect(controller.state.overlay.kind).toBe('none');
+  const switched = backend.calls.find((call) => call.name === 'switchModel');
+  expect(switched?.args[1]).toEqual({ providerID: 'opencode', modelID: 'othercat' });
+  controller.dispose();
+});
+
+test('a 100-item queue is windowed around the selected row (#241)', async () => {
+  const backend = backendWithSession();
+  backend.inbox = Array.from({ length: 100 }, (_, index) => ({
+    id: `in_${index}`,
+    kind: 'user' as const,
+    delivery: 'queue' as const,
+    text: `queued item ${index}`,
+    createdAt: index,
+  }));
+  const { controller, setup } = await mount(backend);
+  controller.openSession('ses_a');
+  await settle(setup);
+  await setup.mockInput.typeText('/queue');
+  setup.mockInput.pressEnter();
+  await settle(setup);
+  let frame = setup.captureCharFrame();
+  expect(frame).toContain('queued item 0');
+  expect(frame).not.toContain('queued item 99');
+  setup.mockInput.pressKey('END');
+  await settle(setup);
+  frame = setup.captureCharFrame();
+  expect(frame).toContain('queued item 99');
+  expect(frame).toContain('100 of 100');
+  controller.dispose();
+});
+
 test('Enter accepts a partial command before executing it', async () => {
   const backend = backendWithSession();
   const { controller, setup } = await mount(backend);
@@ -3088,6 +3682,33 @@ test('a timed-out shell shows background when the server reports a running job (
   controller.openSession('ses_a');
   await settle(setup);
   expect(setup.captureCharFrame()).toContain('timeout · still running in background');
+  controller.dispose();
+});
+
+test('a stale job list labels a timed-out shell as last-known, not confirmed (#259)', async () => {
+  const backend = backendWithSession();
+  backend.messages = { ses_a: [timedOutShell] };
+  backend.shellJobs = {
+    ses_a: [
+      {
+        id: 'job_shell_1',
+        shellID: 'sh_1',
+        sessionID: 'ses_a',
+        status: 'running',
+        startedAt: 1,
+      },
+    ],
+  };
+  const { controller, setup } = await mount(backend);
+  controller.openSession('ses_a');
+  await settle(setup);
+  expect(setup.captureCharFrame()).toContain('timeout · still running in background');
+
+  controller.onStreamStatus('local', 'reconnecting');
+  await settle(setup);
+  const stale = setup.captureCharFrame();
+  expect(stale).toContain('last reported running · connection unavailable');
+  expect(stale).not.toContain('timeout · still running in background');
   controller.dispose();
 });
 

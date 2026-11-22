@@ -21,6 +21,15 @@ export function sanitizeTerminalText(text: string): string {
     .replace(bidiControls, '');
 }
 
+/**
+ * A label that must stay on one terminal row: control sequences removed, any run of
+ * whitespace collapsed to a single space, trimmed. Use for filenames, MIME types, URIs and
+ * permission resources; keep `sanitizeTerminalText` where newlines are meaningful (#249).
+ */
+export function sanitizeSingleLine(text: string): string {
+  return sanitizeTerminalText(text).replaceAll(/\s+/g, ' ').trim();
+}
+
 /** First `maxLines` lines plus a count of what was cut, for capped previews. */
 export function previewLines(
   text: string,

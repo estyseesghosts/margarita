@@ -19,9 +19,14 @@ export function QueuedPreview(props: {
   items: readonly QueuedInput[];
   theme: Theme;
   width: number;
+  /** Effective `composer.steer` label, absent when the action is unbound (#250). */
+  steerKey: string | undefined;
 }) {
   const text = (item: QueuedInput) =>
     truncatePrompt(sanitizeText(item.text), Math.max(8, props.width - 6));
+  const steerHint = () => (props.steerKey === undefined ? '' : ` · ${props.steerKey} to steer now`);
+  const nextSteerHint = () =>
+    props.steerKey === undefined ? '' : ` · ${props.steerKey} to steer the next now`;
   const shown = () => props.items.slice(0, maxItems);
   const overflow = () => Math.max(0, props.items.length - maxItems);
   const hinted = () => nextQueuedUser(props.items);
@@ -41,14 +46,14 @@ export function QueuedPreview(props: {
               </text>
             </box>
             <Show when={item === hinted()}>
-              <text fg={props.theme.dim}>{'  └ Queued · f6 to steer now'}</text>
+              <text fg={props.theme.dim}>{`  └ Queued${steerHint()}`}</text>
             </Show>
           </box>
         )}
       </For>
       <Show when={overflow() > 0}>
         <text fg={props.theme.dim}>
-          {`  └ … and ${overflow()} more queued${hintHidden() ? ' · f6 to steer the next now' : ''}`}
+          {`  └ … and ${overflow()} more queued${hintHidden() ? nextSteerHint() : ''}`}
         </text>
       </Show>
     </box>

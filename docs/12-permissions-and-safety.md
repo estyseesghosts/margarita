@@ -25,11 +25,13 @@ Allow bash command?
   [ Allow once ]  [ Always allow matching ]  [ Reject ]
 ```
 
-Display resolved tool/command details, cwd and target files when supplied. Move focus with Tab/Left/Right; confirm with Enter; Escape should choose **reject** only if that is the documented safe behavior, otherwise close only after explaining the request remains pending. Avoid accidental default `Always` by placing `Allow once` first. For broad or destructive permissions include the exact scope and risk. `Always` is only shown if server supports durable/appropriate matching; don't implement unrestricted allow via frontend memory.
+Display resolved tool/command details, cwd and target files when supplied. The card is pinned above the composer so it stays visible even when the transcript is scrolled far up. A newly arrived or replaced request starts unfocused: the first Enter or arrow is a review step, and only the next Enter confirms the visible choice; Escape rejects. Move focus with Tab/Left/Right; confirm with Enter; Escape should choose **reject** only if that is the documented safe behavior, otherwise close only after explaining the request remains pending. Avoid accidental default `Always` by placing `Allow once` first. For broad or destructive permissions include the exact scope and risk. `Always` is only shown if server supports durable/appropriate matching; don't implement unrestricted allow via frontend memory.
 
 ## Server API and reply contract
 
 OpenCode v2 `GET /api/session/{id}/permission` returns pending requests; the reply operation `session.permission.reply` applies server-side decisions. OpenCode `Permission.Reply` includes `"once" | "always" | "reject"` [API schema](https://opencode.ai/docs/api). Confirm generated client request body shape on v2.3.0 before implementing. Form/question handling is independent: use `/session/{id}/form` listing and appropriate form reply endpoints; a form isn't a permission and must not accept `always`.
+
+A pending question is also pinned above the composer, so it stays visible while the transcript is scrolled up. `Alt+Q` opens it without changing a nonempty draft; Enter on an empty prompt remains the zero-learning path. A question does not take focus or steal typing. Long choice lists are windowed and keep the highlighted option visible; protocol-hidden fields are never shown, and external-only elicitations stay pending until the server reports settlement.
 
 ## Background session approvals
 

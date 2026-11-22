@@ -20,6 +20,8 @@ export const actionIDs = [
   'transcript.bottom',
   'transcript.groupPrevious',
   'transcript.groupNext',
+  'transcript.childPrevious',
+  'transcript.childNext',
   'transcript.inspect',
   'form.open',
   'history.search',
@@ -70,6 +72,10 @@ export const defaultBindings: Readonly<Record<ActionID, readonly string[]>> = {
   'transcript.bottom': ['ctrl+end'],
   'transcript.groupPrevious': ['ctrl+up'],
   'transcript.groupNext': ['ctrl+down'],
+  // Brackets page a focused execute call's nested child rows; outside that context they stay
+  // ordinary text (or the overview's tab keys).
+  'transcript.childPrevious': ['['],
+  'transcript.childNext': [']'],
   // Plain `i` only opens the inspector for a focused row with an empty composer; otherwise
   // the router lets it type normally (#222).
   'transcript.inspect': ['i'],

@@ -8,6 +8,7 @@ import { diffPageLines } from '../app/controller.ts';
 import { caretPaint } from '../domain/composer.ts';
 import { diffSummary, type FileDiff, type PatchLine, patchLines } from '../domain/diff.ts';
 import {
+  choiceWindow,
   currentField,
   type FormEditor,
   type FormField,
@@ -35,9 +36,28 @@ function analyticsPercent(value: number | undefined): string {
   return value === undefined ? 'N/A' : `${Math.round(value)}%`;
 }
 
+/** Bounded help rows: every action plus the two global fallbacks (#241). */
+function helpRows(keymap: Keymap): { label: string; detail: string }[] {
+  return [
+    ...actionIDs.map((action) => {
+      const bindings = keymap.get(action);
+      const label =
+        bindings === undefined || bindings.length === 0
+          ? 'unbound'
+          : bindings.map(formatBinding).join(' / ');
+      return { label, detail: action };
+    }),
+    { label: 'Left', detail: 'overview (empty prompt only)' },
+    { label: 'Ctrl+C', detail: 'interrupt · clear · exit' },
+  ];
+}
+
 /** Focused dialogs drawn above the composer. They are overlays, never routes. */
 export function OverlayView(props: { controller: AppController; keymap: Keymap; theme: Theme }) {
   const state = props.controller.state;
+  const terminal = useTerminalDimensions();
+  /** Body rows shared by variable-length dialogs; never grows past the terminal (#241). */
+  const bodyRows = () => Math.max(3, terminal().height - 12);
   const frame = (title: string) => ({
     border: true,
     borderStyle: 'rounded' as const,
@@ -47,6 +67,8 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
     paddingLeft: 1,
     paddingRight: 1,
     flexShrink: 0,
+    // Reserve the composer, footer and a little breathing room on every terminal size.
+    maxHeight: Math.max(6, terminal().height - 5),
   });
   const dim = () => props.theme.dim;
 
@@ -68,37 +90,38 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
 
   return (
     <Switch>
-      <Match when={state.overlay.kind === 'help'}>
-        <box {...frame('Keys · Esc to close')}>
-          <For each={actionIDs}>
-            {(action) => {
-              const bindings = props.keymap.get(action);
-              const label =
-                bindings === undefined || bindings.length === 0
-                  ? 'unbound'
-                  : bindings.map(formatBinding).join(' / ');
-              return (
-                <text fg={props.theme.text}>
-                  {label.padEnd(16)}
-                  <span style={{ fg: dim() }}>{action}</span>
-                </text>
-              );
-            }}
-          </For>
-          <text fg={props.theme.text}>
-            {'Left'.padEnd(16)}
-            <span style={{ fg: dim() }}>overview (empty prompt only)</span>
-          </text>
-          <text fg={props.theme.text}>
-            {'Ctrl+C'.padEnd(16)}
-            <span style={{ fg: dim() }}>interrupt · clear · exit</span>
-          </text>
-          <text fg={dim()} marginTop={1}>
-            {Object.keys(localCommands)
-              .map((name) => `/${name}`)
-              .join(' ')}
-          </text>
-        </box>
+      <Match when={state.overlay.kind === 'help' ? state.overlay : undefined}>
+        {(overlay: Accessor<Extract<Overlay, { kind: 'help' }>>) => {
+          const start = () =>
+            Math.max(
+              0,
+              Math.min(
+                overlay().offset ?? 0,
+                Math.max(0, helpRows(props.keymap).length - bodyRows()),
+              ),
+            );
+          const shown = () => helpRows(props.keymap).slice(start(), start() + bodyRows());
+          return (
+            <box {...frame('Keys · PgUp/PgDn scroll · Esc to close')}>
+              <For each={shown()}>
+                {(row) => (
+                  <text fg={props.theme.text}>
+                    {row.label.padEnd(16)}
+                    <span style={{ fg: dim() }}>{row.detail}</span>
+                  </text>
+                )}
+              </For>
+              <text fg={dim()}>
+                {`rows ${start() + 1}–${start() + shown().length} of ${helpRows(props.keymap).length} · PgUp/PgDn`}
+              </text>
+              <text fg={dim()} marginTop={1}>
+                {Object.keys(localCommands)
+                  .map((name) => `/${name}`)
+                  .join(' ')}
+              </text>
+            </box>
+          );
+        }}
       </Match>
       <Match when={state.overlay.kind === 'inspector' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'inspector' }>>) => {
@@ -265,19 +288,37 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
       </Match>
       <Match when={state.overlay.kind === 'queue' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'queue' }>>) => {
+          const start = () =>
+            Math.max(
+              0,
+              Math.min(
+                overlay().index - bodyRows() + 1,
+                queuedItems(props.controller).length - bodyRows(),
+              ),
+            );
+          const shown = () => queuedItems(props.controller).slice(start(), start() + bodyRows());
           return (
-            <box {...frame('Queue · ↑↓ select · x cancel · s steer · Esc close')}>
+            <box {...frame('Queue · ↑↓ PgUp/PgDn · x cancel · s steer · Esc close')}>
               <Show
                 when={queuedItems(props.controller).length > 0}
                 fallback={<text fg={dim()}>Nothing queued.</text>}
               >
-                <For each={queuedItems(props.controller)}>
-                  {(item, index) => (
-                    <text fg={index() === overlay().index ? props.theme.accent : props.theme.text}>
-                      {`${index() === overlay().index ? '❯' : ' '} [${item.delivery}] ${item.text.split('\n')[0] ?? ''}`}
-                    </text>
-                  )}
+                <For each={shown()}>
+                  {(item, index) => {
+                    const position = () => start() + index();
+                    const label = `${position() === overlay().index ? '❯' : ' '} [${item.delivery}] ${sanitizeTerminalText(item.text.split('\n')[0] ?? '')}`;
+                    return (
+                      <text
+                        fg={position() === overlay().index ? props.theme.accent : props.theme.text}
+                      >
+                        {sliceCells(label, 0, Math.max(10, terminal().width - 4)).text}
+                      </text>
+                    );
+                  }}
                 </For>
+                <text fg={dim()}>
+                  {`${overlay().index + 1} of ${queuedItems(props.controller).length} · PgUp/PgDn move ten`}
+                </text>
               </Show>
             </box>
           );
@@ -302,9 +343,16 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
               >
                 <For each={choices().slice(start(), start() + visibleRows)}>
                   {(choice, index) => {
-                    const selected = () => start() + index() === overlay().index;
+                    const absolute = () => start() + index();
+                    const selected = () => absolute() === overlay().index;
                     return (
-                      <text fg={selected() ? props.theme.accent : props.theme.text}>
+                      <text
+                        fg={selected() ? props.theme.accent : props.theme.text}
+                        onMouseDown={() => {
+                          props.controller.selectModelPickerIndex(absolute());
+                          void props.controller.acceptModelPicker();
+                        }}
+                      >
                         {`${selected() ? '❯' : ' '} ${formatModelRef(choice)}`}
                       </text>
                     );
@@ -329,10 +377,17 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
               >
                 <For each={choices().slice(start(), start() + visibleRows)}>
                   {(choice, index) => {
-                    const selected = () => start() + index() === overlay().index;
+                    const absolute = () => start() + index();
+                    const selected = () => absolute() === overlay().index;
                     const active = () => choice.variant === current();
                     return (
-                      <text fg={selected() ? props.theme.accent : props.theme.text}>
+                      <text
+                        fg={selected() ? props.theme.accent : props.theme.text}
+                        onMouseDown={() => {
+                          props.controller.selectEffortPickerIndex(absolute());
+                          void props.controller.acceptEffortPicker();
+                        }}
+                      >
                         {`${selected() ? '❯' : ' '} ${choice.label}${active() ? ' (current)' : ''}`}
                       </text>
                     );
@@ -668,6 +723,13 @@ function FormDialog(props: {
     const current = field();
     return current?.kind === 'multi' && current.custom ? current : undefined;
   };
+  const dimensions = useTerminalDimensions();
+  const choiceRows = () => Math.max(3, Math.min(12, dimensions().height - 18));
+  const choiceView = () => {
+    const all = choices();
+    const window = choiceWindow(props.editor.cursor, all.length, choiceRows());
+    return { items: all.slice(window.start, window.end), start: window.start, total: all.length };
+  };
   return (
     <box {...props.frame(`${props.form.title} · ${props.editor.index + 1}/${fields().length}`)}>
       <Show when={field()}>
@@ -680,21 +742,38 @@ function FormDialog(props: {
             <Show when={current().description}>
               {(description: Accessor<string>) => <text fg={props.theme.dim}>{description()}</text>}
             </Show>
-            <For each={choices()}>
+            <For each={choiceView().items}>
               {(choice, index) => {
-                const highlighted = () => index() === props.editor.cursor;
+                const position = () => choiceView().start + index();
+                const highlighted = () => position() === props.editor.cursor;
                 const mark = () =>
                   current().kind === 'multi' ? (choice.checked ? '[x] ' : '[ ] ') : '';
                 return (
-                  <text fg={highlighted() ? props.theme.accent : props.theme.text}>
-                    {`${highlighted() ? '❯' : ' '} ${mark()}${choice.label}`}
+                  <text
+                    fg={highlighted() ? props.theme.accent : props.theme.text}
+                    onMouseDown={() => props.controller.clickFormChoice(position())}
+                  >
+                    {
+                      sliceCells(
+                        `${highlighted() ? '❯' : ' '} ${mark()}${choice.label}`,
+                        0,
+                        Math.max(10, dimensions().width - 6),
+                      ).text
+                    }
                     <span style={{ fg: props.theme.dim }}>
-                      {choice.description === undefined ? '' : `  ${choice.description}`}
+                      {choice.description === undefined
+                        ? ''
+                        : `  ${sliceCells(choice.description, 0, 24).text}`}
                     </span>
                   </text>
                 );
               }}
             </For>
+            <Show when={choiceView().total > choiceView().items.length}>
+              <text fg={props.theme.dim}>
+                {`choice ${props.editor.cursor + 1} of ${choiceView().total} · ↑↓ PgUp/PgDn Home/End`}
+              </text>
+            </Show>
             <Show when={typed()}>
               <text fg={props.theme.text}>
                 {'> '}
@@ -765,6 +844,8 @@ function TasksDialog(props: {
   index: number;
   frame: (title: string) => Record<string, unknown>;
 }) {
+  const dimensions = useTerminalDimensions();
+  const taskRows = () => Math.max(3, dimensions().height - 16);
   const session = () => props.controller.tasksSession();
   const doc = () => {
     const current = session();
@@ -808,6 +889,10 @@ function TasksDialog(props: {
     return undefined;
   };
   const criteria = () => doc()?.criteria ?? doc()?.goal?.acceptance ?? [];
+  const tasks = () => shown()?.tasks ?? [];
+  const taskStart = () =>
+    Math.max(0, Math.min(props.index - taskRows() + 1, tasks().length - taskRows()));
+  const taskShown = () => tasks().slice(taskStart(), taskStart() + taskRows());
   return (
     <box {...props.frame(title())}>
       <Show when={nativeGoalObject() !== undefined || nativeGoal()?.status === 'unavailable'}>
@@ -827,16 +912,8 @@ function TasksDialog(props: {
           </box>
         )}
       </Show>
-      <Show when={criteria().length > 0}>
-        <box flexDirection="column">
-          <text fg={props.theme.dim}>Acceptance:</text>
-          <For each={criteria()}>
-            {(criterion) => <text fg={props.theme.dim}>{`  ✓ ${criterion}`}</text>}
-          </For>
-        </box>
-      </Show>
       <Show
-        when={(shown()?.tasks.length ?? 0) > 0}
+        when={tasks().length > 0}
         fallback={
           <text fg={props.theme.dim}>
             {session() === undefined
@@ -845,9 +922,10 @@ function TasksDialog(props: {
           </text>
         }
       >
-        <For each={shown()?.tasks ?? []}>
+        <For each={taskShown()}>
           {(task, index) => {
-            const selected = () => index() === props.index;
+            const selected = () => taskStart() + index() === props.index;
+            const label = `${selected() ? '❯' : ' '} ${taskMarks[task.state]} ${task.title}${task.evidence.length > 0 ? ` · ${task.evidence.length} evidence` : ''}`;
             return (
               <text
                 fg={
@@ -860,11 +938,28 @@ function TasksDialog(props: {
                         : props.theme.text
                 }
               >
-                {`${selected() ? '❯' : ' '} ${taskMarks[task.state]} ${task.title}${task.evidence.length > 0 ? ` · ${task.evidence.length} evidence` : ''}`}
+                {sliceCells(label, 0, Math.max(10, dimensions().width - 4)).text}
               </text>
             );
           }}
         </For>
+        <text fg={props.theme.dim}>{`${props.index + 1} of ${tasks().length} · ↑↓ PgUp/PgDn`}</text>
+      </Show>
+      {/* Criteria come after the task list so a short terminal never clips the selected
+          task behind a long acceptance section (#241). */}
+      <Show when={criteria().length > 0}>
+        <box flexDirection="column">
+          <text fg={props.theme.dim}>
+            {`Acceptance${criteria().length > 4 ? ` (${criteria().length}, first 4 shown)` : ''}:`}
+          </text>
+          <For each={criteria().slice(0, 4)}>
+            {(criterion) => (
+              <text fg={props.theme.dim}>
+                {sliceCells(`  ✓ ${criterion}`, 0, Math.max(10, dimensions().width - 4)).text}
+              </text>
+            )}
+          </For>
+        </box>
       </Show>
     </box>
   );

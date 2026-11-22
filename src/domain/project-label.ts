@@ -38,8 +38,17 @@ function hslToHex(hue: number, saturation: number, lightness: number): string {
   return `#${channel(r ?? 0)}${channel(g ?? 0)}${channel(b ?? 0)}`;
 }
 
+/** Parses one generated `#rrggbb` channel; the generator above makes this a local invariant. */
+function hexChannel(hex: string, offset: number): number {
+  const pair = hex.slice(offset, offset + 2);
+  if (!/^[0-9a-f]{2}$/i.test(pair)) {
+    throw new Error(`Invalid colour channel "${pair}" in "${hex}"`);
+  }
+  return Number.parseInt(pair, 16);
+}
+
 function luminance(hex: string): number {
-  const channels = [1, 3, 5].map((offset) => parseInt(hex.slice(offset, offset + 2), 16) / 255);
+  const channels = [1, 3, 5].map((offset) => hexChannel(hex, offset) / 255);
   const linear = channels.map((value) =>
     value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4,
   );

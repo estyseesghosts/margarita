@@ -127,5 +127,6 @@ export function blend(from: string, to: string, t: number): string {
 
 function parseHex(hex: string): number[] {
   const value = hex.replace('#', '');
+  if (!/^[0-9a-f]{6}$/i.test(value)) throw new Error(`Invalid colour "${hex}"`);
   return [0, 2, 4].map((offset) => Number.parseInt(value.slice(offset, offset + 2), 16));
 }

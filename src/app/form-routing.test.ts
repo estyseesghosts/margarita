@@ -262,6 +262,54 @@ describe('form reply ownership (issue #171)', () => {
     controller.dispose();
   });
 
+  test('location-wide forms survive a failed per-session listing (#258)', async () => {
+    const { controller, local } = harness();
+    local.sessions.push({ ...session('local'), id: 'ses_child', parentID: sessionID });
+    local.forms = [
+      { ...form('global question'), id: 'form_global', sessionID: 'global' },
+      { ...form('child question'), id: 'form_child', sessionID: 'ses_child' },
+    ];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    local.listForms = async () => {
+      throw new BackendError('transport', 'session.form.list', 'offline');
+    };
+    controller.onEvents('local', [{ kind: 'input-requests-changed', sessionID: 'global' }], false);
+    await flush();
+    expect(controller.state.forms[sessionID]?.map((entry) => entry.id)).toEqual([
+      'form_global',
+      'form_child',
+    ]);
+    expect(controller.pendingForm()?.id).toBe('form_global');
+    expect(controller.state.requestErrors[sessionID]?.forms).toContain('offline');
+    controller.dispose();
+  });
+
+  test('an empty location snapshot does not erase a cached form when session listing fails (#258)', async () => {
+    const { controller, local } = harness();
+    local.forms = [form('cached question')];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    expect(controller.state.forms[sessionID]?.map((entry) => entry.title)).toEqual([
+      'cached question',
+    ]);
+
+    local.listForms = async () => {
+      throw new BackendError('transport', 'session.form.list', 'offline');
+    };
+    local.forms = [];
+    controller.onEvents('local', [{ kind: 'input-requests-changed', sessionID }], false);
+    await flush();
+    expect(controller.state.forms[sessionID]?.map((entry) => entry.title)).toEqual([
+      'cached question',
+    ]);
+    expect(controller.pendingForm()?.title).toBe('cached question');
+    expect(controller.state.requestErrors[sessionID]?.forms).toContain('offline');
+    controller.dispose();
+  });
+
   test('a global MCP elicitation is surfaced and answered on its real session (#209)', async () => {
     const { controller, local } = harness();
     local.forms = [{ ...form('global question'), id: 'form_global', sessionID: 'global' }];
@@ -438,6 +486,22 @@ describe('external MCP elicitation actions (#233)', () => {
     expect(copied).toEqual([url]);
     expect(controller.state.overlay.kind).toBe('form');
     expect(local.calls.filter((call) => call.name === 'replyForm')).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('Enter on an external-only question never submits an empty answer (#257)', async () => {
+    const { controller, local } = harness();
+    local.forms = [externalForm('https://example.test/auth')];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    controller.openForm();
+
+    controller.formKey({ name: 'return', ctrl: false, shift: false });
+    await flush();
+    expect(local.calls.filter((call) => call.name === 'replyForm')).toHaveLength(0);
+    expect(controller.state.overlay.kind).toBe('form');
+    expect(controller.state.notice?.text).toContain('not an answer');
     controller.dispose();
   });
 

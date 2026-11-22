@@ -1,3 +1,5 @@
+import { clipLineToCells } from './text-width.ts';
+
 /** A user prompt's vertical span in the scrolled content, in rows from the viewport top. */
 export type PromptPosition = Readonly<{ key: string; text: string; top: number; bottom: number }>;
 
@@ -15,10 +17,9 @@ export function stickyPrompt(positions: readonly PromptPosition[]): PromptPositi
   return found;
 }
 
-/** One line: first line of the prompt, cut to `width` with an ellipsis. */
+/** One line: first line of the prompt, clipped to `width` terminal cells. */
 export function truncatePrompt(text: string, width: number): string {
   const first = (text.split('\n')[0] ?? '').trim();
   const full = text.trim().includes('\n') ? `${first} …` : first;
-  const room = Math.max(1, width);
-  return full.length <= room ? full : `${full.slice(0, room - 1)}…`;
+  return clipLineToCells(full, Math.max(1, width)).text;
 }

@@ -49,7 +49,7 @@ export type Route =
 
 export type Overlay =
   | { kind: 'none' }
-  | { kind: 'help' }
+  | { kind: 'help'; offset?: number }
   | { kind: 'usage' }
   | { kind: 'status' }
   | { kind: 'queue'; index: number }
@@ -194,6 +194,12 @@ export type AppState = {
   answering: boolean;
   /** Index of the focused permission choice in the permission card. */
   permissionChoice: number;
+  /**
+   * True only after a deliberate focus transition (Enter or an arrow on the card).
+   * A newly arrived permission starts unfocused so an unrelated Enter can never approve
+   * a request the user has not looked at (#237).
+   */
+  permissionFocused: boolean;
   transcripts: Record<string, TranscriptState>;
   /**
    * Client-local "moved to background" events per server-qualified session key (#135).
@@ -242,6 +248,8 @@ export type AppState = {
   expandedGroups: Record<string, true>;
   /** Tool IDs whose oversized inline diffs the user expanded; mirrors expandedGroups. */
   expandedDiffs: Record<string, true>;
+  /** Selected child page per qualified tool ID for dense Code Mode execute calls (#260). */
+  childPages: Record<string, number>;
   /** Group key of the tool group selected for per-group toggle; absent when composer has focus. */
   focusedGroup?: string;
   composer: Composer;
@@ -316,6 +324,7 @@ export function initialState(directory: string, serverID: string = localServerID
     recovered: [],
     answering: false,
     permissionChoice: 0,
+    permissionFocused: false,
     transcripts: {},
     backgrounded: {},
     workers: {},
@@ -333,6 +342,7 @@ export function initialState(directory: string, serverID: string = localServerID
     transcriptWindow: {},
     expandedGroups: {},
     expandedDiffs: {},
+    childPages: {},
     composer: { ...emptyComposer },
     attachments: [],
     drafts: {},

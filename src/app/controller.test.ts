@@ -639,6 +639,73 @@ describe('agent switch confirmation, picker admission and session isolation (#13
     controller.dispose();
   });
 
+  test('a newer external switch supersedes a locally confirmed agent (#253)', async () => {
+    const backend = new FakeBackend();
+    backend.agents = [agentFor('build'), agentFor('plan')];
+    backend.sessions = [agentlessSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    expect(controller.currentAgentID()).toBeUndefined();
+    // Keep the summary `agent`-less like a v2 server that omits the optional field.
+    backend.switchAgent = async (sessionID, agent) => {
+      backend.calls.push({ name: 'switchAgent', args: [sessionID, agent] });
+    };
+    await controller.cycleAgent(1);
+    expect(controller.currentAgentID()).toBe('build');
+
+    // Another client switches to Plan; the summary still omits `agent`, but the newest
+    // transcript evidence is newer than the one the local acknowledgement accounted for.
+    backend.messages = {
+      ses_a: [{ kind: 'agent-switched', id: 's2', createdAt: 20_000, agent: 'plan' }],
+    };
+    controller.openSession('ses_a');
+    await flush();
+    expect(controller.currentAgentID()).toBe('plan');
+    controller.dispose();
+  });
+
+  test('an older transcript message cannot undo a locally confirmed switch (#253)', async () => {
+    const backend = new FakeBackend();
+    backend.agents = [agentFor('build'), agentFor('plan')];
+    backend.sessions = [agentlessSession('ses_a')];
+    backend.messages = {
+      ses_a: [{ kind: 'agent-switched', id: 's1', createdAt: 2, agent: 'plan' }],
+    };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    expect(controller.currentAgentID()).toBe('plan');
+
+    // Confirm Build without letting the summary gain an `agent` field, then reload the
+    // same older transcript page. The acknowledgement must remain authoritative.
+    backend.switchAgent = async (sessionID, agent) => {
+      backend.calls.push({ name: 'switchAgent', args: [sessionID, agent] });
+    };
+    await controller.cycleAgent(1);
+    expect(controller.currentAgentID()).toBe('build');
+    controller.openSession('ses_a');
+    await flush();
+    expect(controller.currentAgentID()).toBe('build');
+    controller.dispose();
+  });
+
+  test('deleting and recreating a session does not leak its confirmed agent (#253)', async () => {
+    const backend = new FakeBackend();
+    backend.agents = [agentFor('build'), agentFor('plan')];
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    expect(controller.currentAgentID()).toBe('build');
+
+    controller.onEvents('local', [{ kind: 'session-deleted', sessionID: 'ses_a' }], false);
+    backend.sessions = [agentlessSession('ses_a')];
+    controller.openSession('ses_a');
+    await flush();
+    expect(controller.currentAgentID()).toBeUndefined();
+    controller.dispose();
+  });
+
   test('a delayed keyboard picker open is dropped after navigation (#146)', async () => {
     const backend = new FakeBackend();
     backend.agents = [agentFor('build')];
@@ -2238,6 +2305,28 @@ describe('output inspector (#221, #222)', () => {
     controller.dispose();
   });
 
+  test('Enter and Shift+Enter advance exactly one match (#254)', async () => {
+    const { controller } = inspectorFixture();
+    await attach(controller, 'ses_a');
+    controller.moveGroupFocus(1);
+    controller.openInspector();
+    await flush();
+    const offset = () => {
+      const value = controller.state.overlay;
+      if (value.kind !== 'inspector') throw new Error('inspector not open');
+      return value.offset;
+    };
+    controller.inspectorKey(inspectorKeyEvent('r', 'row'));
+    expect(offset()).toBe(0);
+    controller.inspectorKey(inspectorKeyEvent('return'));
+    expect(offset()).toBe(1);
+    controller.inspectorKey(inspectorKeyEvent('return'));
+    expect(offset()).toBe(2);
+    controller.inspectorKey({ name: 'return', ctrl: false, alt: false, shift: true });
+    expect(offset()).toBe(1);
+    controller.dispose();
+  });
+
   test('horizontal scrolling never changes the logical window (#228)', async () => {
     const { controller } = inspectorFixture();
     await attach(controller, 'ses_a');
@@ -2410,8 +2499,8 @@ describe('prompt history across project switches (issue #4)', () => {
   });
 
   test('a fresh controller restores the saved snapshot after a recorded prompt', async () => {
-    const saved: { value?: import('../config/local-state.ts').LocalState } = {};
-    const make = (localState: import('../config/local-state.ts').LocalState) =>
+    const saved: { value?: LocalState } = {};
+    const make = (localState: LocalState) =>
       new AppController({
         backend: new FakeBackend(),
         config: defaultConfig,
@@ -5446,6 +5535,42 @@ describe('agent picker and deterministic cycle (#123)', () => {
     controller.moveAgentPicker(1);
     expect(controller.state.overlay).toMatchObject({ index: 0 });
     expect(controller.state.composer.text).toBe('keep this draft');
+    controller.dispose();
+  });
+
+  test('pickers open on the current agent, model and effort instead of row zero (#246)', async () => {
+    const backend = pickerBackend();
+    backend.models = [
+      { providerID: 'p', modelID: 'aaa', name: 'AAA', enabled: true, variants: [] },
+      {
+        providerID: 'p',
+        modelID: 'bbb',
+        name: 'BBB',
+        enabled: true,
+        variants: ['low', 'high'],
+      },
+    ];
+    backend.sessions = [
+      {
+        ...fakeSession('ses_a'),
+        agent: 'zeta',
+        model: { providerID: 'p', modelID: 'bbb', variant: 'high' },
+      },
+    ];
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+
+    // Sorted choices are build, review, zeta; the active zeta must not open on row zero.
+    await controller.openAgentPicker();
+    expect(controller.state.overlay).toMatchObject({ kind: 'agent-picker', index: 2 });
+    controller.closeOverlay();
+
+    await controller.openModelPicker();
+    expect(controller.state.overlay).toMatchObject({ kind: 'model-picker', index: 1 });
+    controller.closeOverlay();
+
+    await controller.openEffortPicker();
+    expect(controller.state.overlay).toMatchObject({ kind: 'effort-picker', index: 2 });
     controller.dispose();
   });
 
