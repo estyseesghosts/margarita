@@ -432,7 +432,52 @@ export function foldTranscript(
     }
     appendBoundaryMarker(message.id);
   }
-  return options.detailed ? out : mergeAdjacentGroups(out, options);
+  const consolidated = consolidateInterruptions(out);
+  return options.detailed ? consolidated : mergeAdjacentGroups(consolidated, options);
+}
+
+/** Normalizes a candidate interruption banner without touching the source text. */
+function isInterruptionBanner(text: string): boolean {
+  const normalized = text
+    .trim()
+    .replace(/^[*_`]+|[*_`]+$/g, '')
+    .replace(/[.!]+$/, '')
+    .trim()
+    .toLowerCase();
+  return normalized === 'step interrupted' || normalized === 'interrupted';
+}
+
+/**
+ * One status row per interrupted segment (#207). The server can emit an assistant
+ * `Step interrupted` text part *and* an idle outcome, while we also render the timed
+ * execution marker. Collapse only exact banners inside a segment whose marker says
+ * `interrupted`; source messages are untouched, and extra detail prose is preserved.
+ */
+function consolidateInterruptions(nodes: readonly TranscriptNode[]): TranscriptNode[] {
+  const consolidated: TranscriptNode[] = [];
+  let segment: TranscriptNode[] = [];
+  const flush = (interrupted: boolean) => {
+    for (const node of segment) {
+      if (!interrupted) {
+        consolidated.push(node);
+        continue;
+      }
+      if (node.kind === 'notice' && isInterruptionBanner(node.text)) continue;
+      if (node.kind === 'text' && isInterruptionBanner(node.text)) continue;
+      consolidated.push(node);
+    }
+    segment = [];
+  };
+  for (const node of nodes) {
+    if (node.kind === 'execution') {
+      flush(node.segment.phase === 'interrupted');
+      consolidated.push(node);
+    } else {
+      segment.push(node);
+    }
+  }
+  flush(false);
+  return consolidated;
 }
 
 type GroupNode = Extract<TranscriptNode, { kind: 'tool-group' }>;

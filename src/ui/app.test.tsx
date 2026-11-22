@@ -887,6 +887,32 @@ describe('execution markers (issue #28)', () => {
     expect(frame).not.toMatch(/(Thinking|Tinkering)…/);
     controller.dispose();
   });
+
+  test('redundant Step interrupted rows collapse into one timed marker (#207)', async () => {
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'u1', createdAt: 1, text: 'work on it', attachments: [] },
+        {
+          kind: 'assistant' as const,
+          id: 'a1',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [{ kind: 'text' as const, text: 'Step interrupted' }],
+        },
+        { kind: 'idle' as const, id: 'i1', createdAt: 4, outcome: 'interrupted' as const },
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain('Step interrupted');
+    expect(frame.match(/Interrupted/g)).toHaveLength(1);
+    controller.dispose();
+  });
 });
 
 describe('live activity indicator (issues 24, 25)', () => {

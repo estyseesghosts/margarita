@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
+import type { ExecutionMarker } from './execution-segment.ts';
 import { sanitizeTerminalText } from './sanitize-text.ts';
 import {
   type AssistantPart,
@@ -1096,5 +1097,93 @@ describe('bounded preview policy (#219, #220)', () => {
     expect(semanticResultKind(call)).toBe('json');
     expect(semanticPreview(call).text).toContain('\n  "name": "resource"');
     expect(call.output).toBe('{"name":"resource","size":2}');
+  });
+});
+
+const interruptionMarker = (id: string, afterMessageId: string): ExecutionMarker => ({
+  id,
+  afterMessageId,
+  phase: 'interrupted',
+  startedAt: 0,
+  completedAt: 1500,
+  durationMs: 1500,
+});
+const interruptedIdle = (id: string): TranscriptMessage => ({
+  kind: 'idle',
+  id,
+  createdAt: 1500,
+  outcome: 'interrupted',
+});
+
+describe('interruption consolidation (#207)', () => {
+  test('one timed marker replaces the banner text and idle notice', () => {
+    const messages: TranscriptMessage[] = [
+      user('u1', 'go'),
+      { ...assistant([{ kind: 'text', text: 'Step interrupted' }]), id: 'a1' },
+      interruptedIdle('i1'),
+    ];
+    const markers = new Map([['i1', interruptionMarker('u1', 'i1')]]);
+    const nodes = foldTranscript(messages, { ...compact, markers });
+
+    expect(nodes.filter((node) => node.kind === 'execution')).toHaveLength(1);
+    expect(
+      nodes.some(
+        (node) =>
+          (node.kind === 'text' || node.kind === 'notice') && /interrupted/i.test(node.text),
+      ),
+    ).toBe(false);
+    expect(nodes.find((node) => node.kind === 'execution')).toMatchObject({
+      segment: { phase: 'interrupted', durationMs: 1500 },
+    });
+  });
+
+  test('consecutive interrupted steps keep one marker each', () => {
+    const messages: TranscriptMessage[] = [
+      user('u1', 'first'),
+      { ...assistant([{ kind: 'text', text: 'Interrupted' }]), id: 'a1' },
+      interruptedIdle('i1'),
+      user('u2', 'second'),
+      { ...assistant([{ kind: 'text', text: '**Step interrupted.**' }]), id: 'a2' },
+      interruptedIdle('i2'),
+    ];
+    const nodes = foldTranscript(messages, {
+      ...compact,
+      markers: new Map([
+        ['i1', interruptionMarker('u1', 'i1')],
+        ['i2', interruptionMarker('u2', 'i2')],
+      ]),
+    });
+    expect(kinds(nodes)).toEqual(['user', 'execution', 'user', 'execution']);
+  });
+
+  test('detail prose after the banner is preserved', () => {
+    const messages: TranscriptMessage[] = [
+      user('u1', 'go'),
+      {
+        ...assistant([{ kind: 'text', text: 'Step interrupted: the provider timed out.' }]),
+        id: 'a1',
+      },
+      interruptedIdle('i1'),
+    ];
+    const nodes = foldTranscript(messages, {
+      ...compact,
+      markers: new Map([['i1', interruptionMarker('u1', 'i1')]]),
+    });
+    expect(
+      nodes.some(
+        (node) => node.kind === 'text' && node.text === 'Step interrupted: the provider timed out.',
+      ),
+    ).toBe(true);
+  });
+
+  test('without a marker the idle notice remains the only status row', () => {
+    const messages: TranscriptMessage[] = [
+      user('u1', 'go'),
+      { ...assistant([{ kind: 'text', text: 'Step interrupted' }]), id: 'a1' },
+      interruptedIdle('i1'),
+    ];
+    const nodes = foldTranscript(messages, compact);
+    expect(kinds(nodes)).toEqual(['user', 'text', 'notice']);
+    expect(nodes.some((node) => node.kind === 'notice' && node.text === 'Interrupted')).toBe(true);
   });
 });
