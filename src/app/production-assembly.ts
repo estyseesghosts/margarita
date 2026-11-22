@@ -19,6 +19,7 @@ import { enqueueCredentialCleanup, reconcileCredentialCleanup } from '../config/
 import { copyToClipboard } from './clipboard.ts';
 import { AppController, errorText, type ServerAdmin, type ServerListing } from './controller.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
+import { openExternalUrl } from './open-url.ts';
 import { pairServer } from './pairing-service.ts';
 import { scanProjectFiles } from './project-files.ts';
 
@@ -282,6 +283,8 @@ export async function createProductionAssembly(
         stateDir: input.paths.stateDir,
         pid: process.pid,
       }),
+    // External MCP elicitations open in the client's browser only after http(s) validation.
+    openUrl: (url) => openExternalUrl(url, process.platform),
     goalStore:
       input.goalStore ??
       fileGoalStore(join(input.paths.stateDir, 'goals'), () => new Date().toISOString()),

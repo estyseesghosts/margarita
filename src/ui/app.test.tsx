@@ -565,6 +565,39 @@ describe('app', () => {
     controller.dispose();
   });
 
+  test('an external question exposes open and copy controls without claiming completion (#233)', async () => {
+    const backend = backendWithSession();
+    backend.forms = [
+      {
+        id: 'frm_1',
+        sessionID: 'ses_a',
+        title: 'Authorize',
+        fields: [
+          {
+            key: 'auth',
+            title: 'Authorize',
+            required: true,
+            hidden: false,
+            when: [],
+            kind: 'external',
+            url: 'https://example.test/auth',
+          },
+        ],
+      },
+    ];
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('[ Open URL ]');
+    expect(frame).toContain('[ Copy URL ]');
+    expect(frame).toContain('not an answer');
+    expect(frame).toContain('o open');
+    controller.dispose();
+  });
+
   test('permission answered by another client resolves without a fake success', async () => {
     const backend = backendWithSession();
     backend.permissions = [

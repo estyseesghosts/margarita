@@ -68,6 +68,7 @@ import {
 import { type FooterAction } from '../domain/footer.ts';
 import {
   buildAnswer,
+  currentField,
   editorKey,
   type FormKey,
   type FormRequest,
@@ -200,6 +201,7 @@ import {
   type Route,
 } from './app-state.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
+import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
 
 /** A point an edit can be undone/redone back to. Attachments are kept, never duplicated. */
 type UndoSnapshot = Readonly<{ composer: Composer }>;
@@ -322,6 +324,8 @@ export type ControllerDeps = Readonly<{
   copyText?: (text: string) => Promise<CopyResult>;
   /** Client-local directory for copy fallback files; never derived from a remote cwd (#153). */
   copyFallbackDir?: string;
+  /** Opens an explicitly validated http(s) URL in the client's browser (#233). */
+  openUrl?: (url: URL) => Promise<OpenUrlResult>;
   /** Goal/plan sidecar storage; defaults to memory (tests). */
   goalStore?: GoalStore;
   /** Frontend-local pairing; implemented by main so the controller owns no network setup. */
@@ -5706,6 +5710,54 @@ export class AppController {
     );
   }
 
+  /** Open the current external field's URL in a client-local browser; never a form reply. */
+  async openFormExternalUrl(): Promise<void> {
+    const overlay = this.state.overlay;
+    const form = this.openFormRequest();
+    if (overlay.kind !== 'form' || form === undefined) return;
+    const field = currentField(form, overlay.editor);
+    if (field?.kind !== 'external') return;
+    const url = parseExternalUrl(field.url);
+    if (url === undefined) {
+      this.showNotice('Only http(s) URLs can be opened. Press c to copy the address.', 'warn');
+      return;
+    }
+    const open =
+      this.deps.openUrl ?? ((target: URL) => openExternalUrl(target, this.deps.platform));
+    const result = await open(url);
+    if (result.ok) {
+      this.showNotice(
+        'Opened in your browser. Opening is not an answer; the question stays pending.',
+        'dim',
+      );
+    } else {
+      this.showNotice(
+        `Could not open a browser: ${result.error}. Press c to copy the URL.`,
+        'warn',
+      );
+    }
+  }
+
+  /** Copy the current external URL; the pending question is left untouched. */
+  async copyFormExternalUrl(): Promise<void> {
+    const overlay = this.state.overlay;
+    const form = this.openFormRequest();
+    if (overlay.kind !== 'form' || form === undefined) return;
+    const field = currentField(form, overlay.editor);
+    if (field?.kind !== 'external') return;
+    try {
+      const result = await this.copyToDestination(field.url);
+      this.showNotice(
+        result.method === 'clipboard'
+          ? 'External URL copied. The question stays pending until the server completes it.'
+          : `Clipboard unavailable; saved the URL to ${result.path ?? 'a local file'}.`,
+        'dim',
+      );
+    } catch (error) {
+      this.showNotice(`Copy failed: ${errorText(error)}`, 'error');
+    }
+  }
+
   formKey(key: FormKey): void {
     const overlay = this.state.overlay;
     const form = this.openFormRequest();
@@ -5716,6 +5768,18 @@ export class AppController {
     // Solid store objects are live proxies. Snapshot the request owner before replacing
     // the overlay, since navigation may otherwise mutate the captured reference.
     const origin = { ...overlay, editor: { ...overlay.editor } };
+    const activeField = currentField(form, overlay.editor);
+    if (activeField?.kind === 'external' && !key.ctrl) {
+      // Deliberate, explicit actions: opening/copying never submits or acknowledges (#233).
+      if (key.name === 'o') {
+        void this.openFormExternalUrl();
+        return;
+      }
+      if (key.name === 'c') {
+        void this.copyFormExternalUrl();
+        return;
+      }
+    }
     const { editor, outcome } = editorKey(form, overlay.editor, key);
     if (outcome === 'close') {
       this.closeOverlay();

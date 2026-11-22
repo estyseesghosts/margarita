@@ -39,7 +39,12 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 10; i += 1) await Bun.sleep(0);
 }
 
-function harness() {
+type HarnessOverrides = Partial<{
+  openUrl: (url: URL) => Promise<{ ok: true } | { ok: false; error: string }>;
+  copyText: (text: string) => Promise<{ method: 'clipboard' | 'file'; path?: string }>;
+}>;
+
+function harness(overrides: HarnessOverrides = {}) {
   const local = new FakeBackend();
   const remote = new FakeBackend();
   local.sessions = [session('local')];
@@ -63,6 +68,7 @@ function harness() {
     saveLocalState: async () => {},
     listFiles: async () => [],
     requestExit: () => {},
+    ...overrides,
   });
   return { controller, local, remote, backends };
 }
@@ -377,6 +383,99 @@ describe('form reply ownership (issue #171)', () => {
     );
     expect(controller.state.composer.text).toBe('');
     expect(local.calls.filter((call) => call.name === 'replyForm')).toHaveLength(0);
+    controller.dispose();
+  });
+});
+
+function externalForm(url: string): FormRequest {
+  return {
+    id: 'form_ext',
+    sessionID,
+    title: 'Authorize',
+    fields: [
+      {
+        kind: 'external',
+        key: 'auth',
+        title: 'Authorize',
+        required: true,
+        hidden: false,
+        when: [],
+        url,
+      },
+    ],
+  };
+}
+
+describe('external MCP elicitation actions (#233)', () => {
+  test('o and c act on the URL without submitting or closing the question', async () => {
+    const opened: string[] = [];
+    const copied: string[] = [];
+    const { controller, local } = harness({
+      openUrl: async (url) => {
+        opened.push(url.toString());
+        return { ok: true };
+      },
+      copyText: async (text) => {
+        copied.push(text);
+        return { method: 'clipboard' };
+      },
+    });
+    const url = 'https://example.test/auth?client=margarita&x=1';
+    local.forms = [externalForm(url)];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    controller.openForm();
+
+    controller.formKey({ name: 'o', text: 'o', ctrl: false, shift: false });
+    await flush();
+    expect(opened).toEqual([url]);
+    expect(controller.state.overlay.kind).toBe('form');
+    expect(local.calls.filter((call) => call.name === 'replyForm')).toHaveLength(0);
+
+    controller.formKey({ name: 'c', text: 'c', ctrl: false, shift: false });
+    await flush();
+    expect(copied).toEqual([url]);
+    expect(controller.state.overlay.kind).toBe('form');
+    expect(local.calls.filter((call) => call.name === 'replyForm')).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('non-http(s) addresses are refused without leaving the question', async () => {
+    const opened: string[] = [];
+    const { controller, local } = harness({
+      openUrl: async (url) => {
+        opened.push(url.toString());
+        return { ok: true };
+      },
+    });
+    local.forms = [externalForm('javascript:alert(1)')];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    controller.openForm();
+    controller.formKey({ name: 'o', text: 'o', ctrl: false, shift: false });
+    await flush();
+    expect(opened).toEqual([]);
+    expect(controller.state.notice?.text).toContain('http(s)');
+    expect(controller.state.overlay.kind).toBe('form');
+    controller.dispose();
+  });
+
+  test('a failed browser launch preserves the question and points to copy', async () => {
+    const { controller, local } = harness({
+      openUrl: async () => ({ ok: false, error: 'no browser' }),
+    });
+    local.forms = [externalForm('https://example.test/auth')];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    controller.openForm();
+    controller.formKey({ name: 'o', text: 'o', ctrl: false, shift: false });
+    await flush();
+    expect(controller.state.notice?.text).toContain('no browser');
+    expect(controller.state.notice?.text).toContain('copy');
+    expect(controller.state.overlay.kind).toBe('form');
     controller.dispose();
   });
 });

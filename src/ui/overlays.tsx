@@ -499,6 +499,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
           >
             {(form: Accessor<FormRequest>) => (
               <FormDialog
+                controller={props.controller}
                 form={form()}
                 editor={overlay().editor}
                 theme={props.theme}
@@ -603,7 +604,13 @@ function DiffDialog(props: { overlay: DiffOverlay; theme: Theme; frame: Frame })
 }
 
 /** One field at a time, with progress and the field's own controls. */
-function FormDialog(props: { form: FormRequest; editor: FormEditor; theme: Theme; frame: Frame }) {
+function FormDialog(props: {
+  controller: AppController;
+  form: FormRequest;
+  editor: FormEditor;
+  theme: Theme;
+  frame: Frame;
+}) {
   const fields = () => visibleFields(props.form, props.editor.answers);
   const field = () => currentField(props.form, props.editor);
   const value = () => {
@@ -689,7 +696,28 @@ function FormDialog(props: { form: FormRequest; editor: FormEditor; theme: Theme
             </Show>
             <Show when={current().kind === 'external' ? current() : undefined}>
               {(external: Accessor<FormField & { kind: 'external' }>) => (
-                <text fg={props.theme.accent}>{`Open in a browser: ${external().url}`}</text>
+                <box flexDirection="column">
+                  <text fg={props.theme.text}>{`External step: ${external().url}`}</text>
+                  <box flexDirection="row">
+                    <text
+                      fg={props.theme.accent}
+                      onMouseDown={() => void props.controller.openFormExternalUrl()}
+                    >
+                      {'[ Open URL ]'}
+                    </text>
+                    <text fg={props.theme.dim}>{'  '}</text>
+                    <text
+                      fg={props.theme.accent}
+                      onMouseDown={() => void props.controller.copyFormExternalUrl()}
+                    >
+                      {'[ Copy URL ]'}
+                    </text>
+                  </box>
+                  <text fg={props.theme.dim}>
+                    Opening or copying is not an answer; keep this pending until the server
+                    completes it.
+                  </text>
+                </box>
               )}
             </Show>
           </>
@@ -699,7 +727,9 @@ function FormDialog(props: { form: FormRequest; editor: FormEditor; theme: Theme
         {(problem: Accessor<string>) => <text fg={props.theme.error}>{problem()}</text>}
       </Show>
       <text fg={props.theme.dim}>
-        Enter next · Shift+Tab back · ↑↓ choose · Space toggle · Esc later · Ctrl+X decline
+        {field()?.kind === 'external'
+          ? 'o open · c copy · Enter next · Shift+Tab back · Esc later · Ctrl+X decline'
+          : 'Enter next · Shift+Tab back · ↑↓ choose · Space toggle · Esc later · Ctrl+X decline'}
       </text>
       <Show when={customMulti()}>
         <text fg={props.theme.dim}>a add custom value · x remove selected custom value</text>
