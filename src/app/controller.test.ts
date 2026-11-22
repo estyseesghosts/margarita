@@ -5449,7 +5449,7 @@ describe('background worker lifecycle (#101)', () => {
     controller.dispose();
   });
 
-  test('a failed or unsupported job RPC clears rows instead of showing a ghost worker', async () => {
+  test('a failed first refresh reports unavailable without inventing a ghost worker', async () => {
     const backend = new FakeBackend();
     backend.sessions = [fakeSession('ses_a')];
     backend.messages = { ses_a: [] };
@@ -5464,10 +5464,68 @@ describe('background worker lifecycle (#101)', () => {
 
     expect(attempts).toBeGreaterThan(0);
     expect(controller.workerNodes('ses_a', 'local')).toEqual([]);
+    expect(controller.workerJobStatus('ses_a', 'local')?.state).toBe('unavailable');
+    expect(controller.workerJobStatus('ses_a', 'local')?.detail).toContain('unsupported RPC');
     controller.dispose();
   });
 
-  test('detach clears workers and resync reconciles from the server', async () => {
+  test('a failed refresh retains the last confirmed crew and a later empty list removes it (#230)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    backend.jobs = { ses_a: jobs };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    expect(controller.workerNodes('ses_a', 'local')).toHaveLength(2);
+    expect(controller.workerJobStatus('ses_a', 'local')?.state).toBe('confirmed');
+
+    backend.listSubagentJobs = async () => {
+      throw new Error('timed out after 10000ms');
+    };
+    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    await flush();
+    expect(controller.workerNodes('ses_a', 'local')).toHaveLength(2);
+    expect(controller.workerJobStatus('ses_a', 'local')?.state).toBe('stale');
+    expect(controller.workerJobStatus('ses_a', 'local')?.detail).toContain('timed out');
+
+    backend.listSubagentJobs = async () => [];
+    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    // The previous transcript refresh is inside its coalescing delay; let the dirty rerun start.
+    await Bun.sleep(120);
+    await flush();
+    expect(controller.workerNodes('ses_a', 'local')).toEqual([]);
+    expect(controller.workerJobStatus('ses_a', 'local')?.state).toBe('confirmed');
+    controller.dispose();
+  });
+
+  test('a failed shell refresh keeps a still-running timed-out shell stale (#230)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    const shell = {
+      id: 'shell_1',
+      shellID: 'shell_a',
+      sessionID: 'ses_a',
+      status: 'running' as const,
+      startedAt: 1000,
+    };
+    backend.shellJobs = { ses_a: [shell] };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    expect(controller.state.shellJobs['ses_a']).toHaveLength(1);
+    expect(controller.shellJobStatus('ses_a', 'local')?.state).toBe('confirmed');
+
+    backend.listShellJobs = async () => {
+      throw new Error('connection reset');
+    };
+    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    await flush();
+    expect(controller.state.shellJobs['ses_a']).toHaveLength(1);
+    expect(controller.shellJobStatus('ses_a', 'local')?.state).toBe('stale');
+    controller.dispose();
+  });
+
+  test('detach keeps last confirmed workers stale and resync reconciles from the server', async () => {
     const backend = new FakeBackend();
     backend.sessions = [fakeSession('ses_a')];
     backend.messages = { ses_a: [] };
@@ -5477,7 +5535,8 @@ describe('background worker lifecycle (#101)', () => {
     expect(controller.workerNodes('ses_a', 'local')).toHaveLength(2);
 
     controller.onStreamStatus('local', 'reconnecting');
-    expect(controller.workerNodes('ses_a', 'local')).toEqual([]);
+    expect(controller.workerNodes('ses_a', 'local')).toHaveLength(2);
+    expect(controller.workerJobStatus('ses_a', 'local')?.state).toBe('stale');
 
     // The server finished one worker while we were detached; only the finished one returns.
     backend.jobs = { ses_a: [{ ...jobs[0]!, status: 'completed' as const }] };
@@ -5487,6 +5546,7 @@ describe('background worker lifecycle (#101)', () => {
     const rows = controller.workerNodes('ses_a', 'local');
     expect(rows).toHaveLength(1);
     expect(rows[0]?.worker.status).toBe('completed');
+    expect(controller.workerJobStatus('ses_a', 'local')?.state).toBe('confirmed');
     controller.dispose();
   });
 });
@@ -5514,8 +5574,11 @@ describe('job state lifecycle on disconnect and removal (#136)', () => {
     expect(controller.workerNodes('ses_b', 'srv_1')).toHaveLength(1);
 
     controller.onStreamStatus('srv_1', 'reconnecting');
-    expect(controller.workerNodes('ses_b', 'srv_1')).toEqual([]);
+    // The remote rows stay visible but are explicitly stale; the local host is untouched.
+    expect(controller.workerNodes('ses_b', 'srv_1')).toHaveLength(1);
+    expect(controller.workerJobStatus('ses_b', 'srv_1')?.state).toBe('stale');
     expect(controller.workerNodes('ses_a', 'local')).toHaveLength(1);
+    expect(controller.workerJobStatus('ses_a', 'local')?.state).toBe('confirmed');
     controller.dispose();
   });
 

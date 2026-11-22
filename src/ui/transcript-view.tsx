@@ -16,6 +16,7 @@ import {
 } from 'solid-js';
 
 import type { PermissionPrompt } from '../adapter/backend.ts';
+import type { JobListStatus } from '../app/app-state.ts';
 import type { AppController } from '../app/controller.ts';
 import type { ScrollMove } from '../app/key-router.ts';
 import type { PatchLine } from '../domain/diff.ts';
@@ -72,6 +73,22 @@ export type TranscriptProps = Readonly<{
 
 type NodeOf<K extends TranscriptNode['kind']> = Extract<TranscriptNode, { kind: K }>;
 
+/** One bounded warning for rows retained after a failed job refresh (#230). */
+function jobWarning(
+  worker: JobListStatus | undefined,
+  shell: JobListStatus | undefined,
+): string | undefined {
+  const failed = [worker, shell].filter(
+    (status): status is JobListStatus => status !== undefined && status.state !== 'confirmed',
+  );
+  if (failed.length === 0) return undefined;
+  const retained = failed.some((status) => status.state === 'stale');
+  const detail = failed.find((status) => status.detail !== undefined)?.detail ?? 'refresh failed';
+  return retained
+    ? `  background jobs may be out of date · ${detail}`
+    : `  background job state unavailable · ${detail}`;
+}
+
 export function Transcript(props: TranscriptProps) {
   const state = props.controller.state;
   const backgroundKey = actionHint(props.keymap, 'tools.background');
@@ -117,10 +134,16 @@ export function Transcript(props: TranscriptProps) {
         ? attachBackgroundNotices(folded, background)
         : folded;
     // Workers are server-confirmed rows (#101), appended after the turn so a still-running
-    // parent stays visible above them. No client timer contributes to their status.
+    // parent stays visible above them. No client timer contributes to their status. A failed
+    // refresh keeps the last confirmed rows and adds one bounded stale warning (#230).
+    const key = sessionKeyValue();
+    const warning = jobWarning(state.workerStatus[key], state.shellStatus[key]);
     return [
       ...withBackground,
-      ...workerNodes(state.workers[sessionKeyValue()] ?? [], expanded.groups),
+      ...workerNodes(state.workers[key] ?? [], expanded.groups),
+      ...(warning === undefined
+        ? []
+        : [{ kind: 'meta' as const, key: `job-status:${key}`, text: warning }]),
     ];
   });
   const windowed = createMemo(() =>
@@ -273,6 +296,10 @@ export function Transcript(props: TranscriptProps) {
                       props.serverID,
                     )
                   }
+                  workerStale={
+                    props.controller.workerJobStatus(props.sessionID, props.serverID)?.state ===
+                    'stale'
+                  }
                 />
               </box>
             </>
@@ -419,6 +446,8 @@ function NodeView(props: {
   backgroundKey: string | undefined;
   /** True only when the server reports a running background job for this shell ID (#103). */
   backgroundShell: (shellID: string | undefined) => boolean;
+  /** The retained worker rows were not re-confirmed on the last refresh (#230). */
+  workerStale: boolean;
 }) {
   const theme = () => props.theme;
   return (
@@ -633,7 +662,7 @@ function NodeView(props: {
           return (
             <box flexDirection="column" marginTop={1}>
               <text fg={workerColor(worker().status, props.theme)}>
-                {`  ${props.focused ? '▸' : '◇'} ${sanitizeText(worker().agent)} · ${sanitizeText(worker().description)} — ${workerStatusLabel(worker().status)}${worker().status === 'running' ? '…' : ''}${props.focused ? '  (Enter)' : ''}`}
+                {`  ${props.focused ? '▸' : '◇'} ${sanitizeText(worker().agent)} · ${sanitizeText(worker().description)} — ${workerStatusLabel(worker().status)}${worker().status === 'running' ? '…' : ''}${props.workerStale ? ' · stale' : ''}${props.focused ? '  (Enter)' : ''}`}
               </text>
               <Show when={node().expanded}>
                 <text fg={theme().dim}>{`      child session ${worker().childSessionID}`}</text>

@@ -27,6 +27,17 @@ export type BackgroundEvent = Readonly<{
 }>;
 
 /**
+ * Freshness of one session's job list. A failed refresh keeps the last confirmed rows and
+ * marks them stale; with nothing retained the list is honestly unavailable (#230). Only a
+ * successful empty response is confirmed-empty.
+ */
+export type JobListStatus = Readonly<{
+  state: 'confirmed' | 'stale' | 'unavailable';
+  /** Bounded diagnostic from the last failed refresh; cleared on success. */
+  detail?: string;
+}>;
+
+/**
  * Overview and conversation (ADR-0002), plus `new`: an unsent conversation in a
  * directory. The server session is created only when its first prompt is sent.
  * Dialogs are overlays, never routes.
@@ -188,12 +199,16 @@ export type AppState = {
    */
   backgrounded: Record<string, readonly BackgroundEvent[]>;
   /**
-   * Server-confirmed subagent jobs per server-qualified session key (#101). Cleared on
-   * disconnect so a reattach cannot show a ghost running worker from a stale snapshot.
+   * Last server-confirmed subagent jobs per server-qualified session key (#101). A failed
+   * refresh retains them with `workerStatus` stale instead of claiming they finished (#230).
    */
   workers: Record<string, readonly WorkerJob[]>;
-  /** Server-confirmed shell jobs per session key; a timed-out shell can still be running. */
+  /** Freshness of `workers` per session key; absent means never confirmed. */
+  workerStatus: Record<string, JobListStatus>;
+  /** Last server-confirmed shell jobs per session key; a timed-out shell can still run. */
   shellJobs: Record<string, readonly ShellJob[]>;
+  /** Freshness of `shellJobs` per session key; absent means never confirmed. */
+  shellStatus: Record<string, JobListStatus>;
   inbox: Record<string, QueuedInput[]>;
   /** Primary-selectable agents for Shift+Tab and the picker (hidden/subagent-only excluded). */
   agents: AgentDescriptor[];
@@ -300,7 +315,9 @@ export function initialState(directory: string, serverID: string = localServerID
     transcripts: {},
     backgrounded: {},
     workers: {},
+    workerStatus: {},
     shellJobs: {},
+    shellStatus: {},
     inbox: {},
     agents: [],
     mentionAgents: [],

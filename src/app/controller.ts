@@ -164,7 +164,7 @@ import {
 } from '../domain/server-path.ts';
 import { classifySessionStatus, type SessionStatus } from '../domain/session-status.ts';
 import type { Execution, SessionSummary } from '../domain/session.ts';
-import { type ShellJob, shellRunningInBackground } from '../domain/shell-job.ts';
+import { shellRunningInBackground } from '../domain/shell-job.ts';
 import {
   completeCommand,
   isLocalCommand,
@@ -182,12 +182,13 @@ import {
   transcriptWindowStep,
 } from '../domain/transcript.ts';
 import { projectUsage, type UsageAnalytics } from '../domain/usage-analytics.ts';
-import { type WorkerJob, type WorkerNode, workerNodes } from '../domain/worker.ts';
+import { type WorkerNode, workerNodes } from '../domain/worker.ts';
 import {
   type AppState,
   type BackgroundEvent,
   type DiffOverlay,
   initialState,
+  type JobListStatus,
   type Overlay,
   type Route,
 } from './app-state.ts';
@@ -1320,7 +1321,9 @@ export class AppController {
         delete state.transcriptWindow[key];
         // A deleted session must not keep a live-looking worker or a stale background note.
         delete state.workers[key];
+        delete state.workerStatus[key];
         delete state.shellJobs[key];
+        delete state.shellStatus[key];
         delete state.backgrounded[key];
         for (const expansionKey of Object.keys(state.expandedGroups)) {
           if (expansionKey.startsWith(expansionPrefix)) delete state.expandedGroups[expansionKey];
@@ -1624,9 +1627,11 @@ export class AppController {
   }
 
   /**
-   * Drops every live-looking job row and transient background confirmation owned by one host,
-   * and invalidates in-flight refreshes for those keys, on disconnect/unpair (#136). Local keys
-   * are unqualified, so ownership is parsed rather than prefix-matched. Other hosts are untouched.
+   * Retires one host's live-looking state on disconnect/unpair (#136, #230): in-flight job
+   * refreshes are invalidated, transient background confirmations are dropped, and the last
+   * confirmed job rows are kept but marked stale. A disconnect must not impersonate "all
+   * jobs finished"; only a later successful refresh can confirm an empty list. Local keys are
+   * unqualified, so ownership is parsed rather than prefix-matched.
    */
   private clearRuntimeStateForServer(serverID: string): void {
     // Invalidate *every* in-flight refresh for this host, including first fetches that have
@@ -1634,18 +1639,33 @@ export class AppController {
     for (const key of this.jobRefreshEpoch.keys()) {
       if (parseSessionKey(key).serverID === serverID) this.invalidateJobRefresh(key);
     }
-    for (const field of ['workers', 'shellJobs', 'backgrounded'] as const) {
-      this.setState(
-        field,
-        produce((rows) => {
-          for (const key of Object.keys(rows)) {
+    this.setState(
+      produce((state) => {
+        for (const key of Object.keys(state.backgrounded)) {
+          if (parseSessionKey(key).serverID === serverID) delete state.backgrounded[key];
+        }
+        for (const [rowsField, statusField] of [
+          ['workers', 'workerStatus'],
+          ['shellJobs', 'shellStatus'],
+        ] as const) {
+          const keys = new Set([
+            ...Object.keys(state[rowsField]),
+            ...Object.keys(state[statusField]),
+          ]);
+          for (const key of keys) {
             if (parseSessionKey(key).serverID !== serverID) continue;
-            delete rows[key];
-            this.invalidateJobRefresh(key);
+            const retained = state[rowsField][key] ?? [];
+            state[statusField][key] = {
+              state: retained.length > 0 ? 'stale' : 'unavailable',
+              detail:
+                retained.length > 0
+                  ? 'connection lost · last confirmed rows retained'
+                  : 'connection lost before any rows were confirmed',
+            };
           }
-        }),
-      );
-    }
+        }
+      }),
+    );
   }
 
   /**
@@ -1977,30 +1997,37 @@ export class AppController {
   }
 
   /**
-   * Worker rows are server-authoritative (#101). A failed/unsupported RPC clears them: the
-   * delegated tool call still renders from the transcript as generic tool state, but the UI
-   * never claims a worker is running (or has finished) without server confirmation.
+   * Worker rows are server-authoritative (#101). A failed/unsupported RPC retains the last
+   * confirmed rows and marks them stale; only a successful empty response is confirmed-empty,
+   * so a timeout never impersonates "all workers finished" (#230).
    */
   private async refreshWorkers(sessionID: string, serverID = this.activeServerID()): Promise<void> {
     const key = this.keyFor(serverID, sessionID);
     const epoch = this.nextJobRefreshEpoch(key, 'worker');
-    let jobs: readonly WorkerJob[] = [];
-    try {
-      jobs = await this.backendFor(serverID).listSubagentJobs(sessionID);
-    } catch {
-      jobs = [];
-    }
+    const outcome = await refreshOutcome(() =>
+      this.backendFor(serverID).listSubagentJobs(sessionID),
+    );
     // Ownership + epoch: the session may have been deleted, unpaired or disconnected while
     // the RPC was in flight. An old response must never restore its rows (#136).
     if (this.disposed || !this.isJobRefreshCurrent(key, 'worker', epoch)) return;
     const owner = this.state.sessions[key];
     if (owner === undefined || owner.serverID !== serverID) return; // missing owner is not confirmed ownership
-    this.setState('workers', key, jobs);
+    if (outcome.ok) {
+      this.setState('workers', key, outcome.jobs);
+      this.setState('workerStatus', key, { state: 'confirmed' });
+      return;
+    }
+    const retained = this.state.workers[key] ?? [];
+    this.setState('workerStatus', key, {
+      state: retained.length > 0 ? 'stale' : 'unavailable',
+      detail: outcome.detail,
+    });
   }
 
   /**
-   * Shell jobs are refreshed on the same server-authoritative path (#103). On an unsupported
-   * RPC the timed-out shell keeps its honest `timeout` label; no background state is invented.
+   * Shell jobs are refreshed on the same server-authoritative path (#103). A failed refresh
+   * keeps the last confirmed rows stale instead of dropping a still-running timed-out shell
+   * (#230); no background state is invented when nothing was ever confirmed.
    */
   private async refreshShellJobs(
     sessionID: string,
@@ -2008,16 +2035,20 @@ export class AppController {
   ): Promise<void> {
     const key = this.keyFor(serverID, sessionID);
     const epoch = this.nextJobRefreshEpoch(key, 'shell');
-    let jobs: readonly ShellJob[] = [];
-    try {
-      jobs = await this.backendFor(serverID).listShellJobs(sessionID);
-    } catch {
-      jobs = [];
-    }
+    const outcome = await refreshOutcome(() => this.backendFor(serverID).listShellJobs(sessionID));
     if (this.disposed || !this.isJobRefreshCurrent(key, 'shell', epoch)) return;
     const owner = this.state.sessions[key];
     if (owner === undefined || owner.serverID !== serverID) return; // missing owner is not confirmed ownership
-    this.setState('shellJobs', key, jobs);
+    if (outcome.ok) {
+      this.setState('shellJobs', key, outcome.jobs);
+      this.setState('shellStatus', key, { state: 'confirmed' });
+      return;
+    }
+    const retained = this.state.shellJobs[key] ?? [];
+    this.setState('shellStatus', key, {
+      state: retained.length > 0 ? 'stale' : 'unavailable',
+      detail: outcome.detail,
+    });
   }
 
   /** True only when the server reports a running job for this timed-out shell. */
@@ -4206,7 +4237,9 @@ export class AppController {
           state.draftAttachments,
           state.transcriptWindow,
           state.workers,
+          state.workerStatus,
           state.shellJobs,
+          state.shellStatus,
           state.backgrounded,
         ]) {
           for (const key of Object.keys(map)) {
@@ -5810,6 +5843,22 @@ export class AppController {
     );
   }
 
+  /** Freshness of the retained worker rows; stale rows stay visible with a warning (#230). */
+  workerJobStatus(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): JobListStatus | undefined {
+    return this.state.workerStatus[this.keyFor(serverID, sessionID)];
+  }
+
+  /** Freshness of the retained shell rows; stale rows stay visible with a warning (#230). */
+  shellJobStatus(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): JobListStatus | undefined {
+    return this.state.shellStatus[this.keyFor(serverID, sessionID)];
+  }
+
   /** Tool groups in render order; empty outside conversations and in detailed mode. */
   toolGroups(): Extract<TranscriptNode, { kind: 'tool-group' }>[] {
     return this.conversationNodes().filter((node) => node.kind === 'tool-group');
@@ -7044,6 +7093,24 @@ export function mergeLatest(
 export function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/** One bounded, paint-safe diagnostic for a failed job refresh (#230). */
+function jobRefreshDetail(error: unknown): string {
+  const text = sanitizeTerminalText(errorText(error)).replace(/\s+/g, ' ').trim();
+  if (text === '') return 'job refresh failed';
+  return text.length > 160 ? `${text.slice(0, 157)}…` : text;
+}
+
+type RefreshOutcome<T> = { ok: true; jobs: readonly T[] } | { ok: false; detail: string };
+
+/** A job RPC's two real outcomes: a confirmed list, or a failure that preserves old rows. */
+async function refreshOutcome<T>(request: () => Promise<readonly T[]>): Promise<RefreshOutcome<T>> {
+  try {
+    return { ok: true, jobs: await request() };
+  } catch (error) {
+    return { ok: false, detail: jobRefreshDetail(error) };
+  }
 }
 
 /** Strict UTF-8 decode for a paste; undefined means the bytes are not text. */
