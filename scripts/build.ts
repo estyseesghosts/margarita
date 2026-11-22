@@ -2,6 +2,8 @@ import { mkdir } from 'node:fs/promises';
 
 import solidPlugin from '@opentui/solid/bun-plugin';
 
+import { formatBuildVersion, sourceIdentity } from '../src/build-version.ts';
+
 /**
  * Compiles margarita into one self-contained `marg` executable (Bun runtime, the
  * Solid transform and OpenTUI's native library embedded). Usage:
@@ -12,6 +14,7 @@ const requested = process.argv[2];
 const target = requested === undefined ? undefined : asTarget(requested);
 const windows = target === undefined ? process.platform === 'win32' : target.includes('windows');
 const outfile = `dist/marg${windows ? '.exe' : ''}`;
+const version = formatBuildVersion(sourceIdentity());
 const linux = target === undefined ? process.platform === 'linux' : target.includes('linux');
 // OpenTUI picks its Linux native package from this variable at run time, which would pull in
 // (and fail to resolve) the musl package inside a compiled glibc binary. Fixing it at compile
@@ -40,7 +43,11 @@ const result = await Bun.build({
   plugins: [solidPlugin],
   minify: true,
   sourcemap: 'linked',
-  define: linux ? { 'process.env.OPENTUI_LIBC': JSON.stringify(libc) } : {},
+  // Bake the build identity in: a compiled binary must not need the repository to report it.
+  define: {
+    MARGARITA_BUILD_VERSION: JSON.stringify(version),
+    ...(linux ? { 'process.env.OPENTUI_LIBC': JSON.stringify(libc) } : {}),
+  },
   compile: {
     outfile,
     // Never pick up a bunfig.toml/.env from wherever marg is launched (e.g. this repo).
@@ -53,7 +60,7 @@ if (!result.success) {
   for (const log of result.logs) console.error(log);
   process.exit(1);
 }
-console.log(`built ${outfile}`);
+console.log(`built ${outfile} (${version})`);
 
 function asTarget(value: string): Bun.Build.CompileTarget {
   if (!isTarget(value)) {

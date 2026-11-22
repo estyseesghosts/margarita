@@ -4,7 +4,6 @@ import { isAbsolute, resolve } from 'node:path';
 import { createCliRenderer } from '@opentui/core';
 import { render } from '@opentui/solid';
 
-import packageJson from '../package.json' with { type: 'json' };
 import { type Backend, BackendError, createBackend } from './adapter/backend.ts';
 import { connect, type Connection, ConnectionError, redactUrl } from './adapter/connection.ts';
 import { serverIDForConnection } from './adapter/server-manager.ts';
@@ -16,6 +15,7 @@ import {
   wireServerStream,
 } from './app/production-assembly.ts';
 import { remoteConnectionFor } from './app/remote-connection.ts';
+import { buildVersion } from './build-version.ts';
 import { type CliOptions, helpText, parseArgs } from './cli/args.ts';
 import { exitCodes, runPrint } from './cli/print.ts';
 import { resolveWorkingDirectory } from './cli/target.ts';
@@ -30,9 +30,8 @@ import type { SessionRef } from './domain/server-identity.ts';
 import { App } from './ui/app.tsx';
 import { pickTheme } from './ui/theme.ts';
 
-const version = packageJson.version;
-
 async function main(argv: readonly string[]): Promise<number> {
+  const version = buildVersion();
   const parsed = parseArgs(argv);
   switch (parsed.kind) {
     case 'help':
@@ -45,13 +44,13 @@ async function main(argv: readonly string[]): Promise<number> {
       process.stderr.write(`marg: ${parsed.message}\nRun marg --help for usage.\n`);
       return exitCodes.usage;
     case 'run':
-      return run(parsed.options);
+      return run(parsed.options, version);
     default:
       return exitCodes.usage;
   }
 }
 
-async function run(options: CliOptions): Promise<number> {
+async function run(options: CliOptions, version: string): Promise<number> {
   const env = process.env;
   const startedAt = Date.now();
   let debugLog: DebugLog = noDebugLog;
@@ -73,7 +72,7 @@ async function run(options: CliOptions): Promise<number> {
     cwd: options.cwd ?? process.cwd(),
   });
   try {
-    const code = await execute(options, debugLog);
+    const code = await execute(options, debugLog, version);
     debugLog.write('exit', { code, ms: Date.now() - startedAt });
     return code;
   } catch (error) {
@@ -104,7 +103,7 @@ function installCrashHandlers(log: DebugLog): void {
   });
 }
 
-async function execute(options: CliOptions, debugLog: DebugLog): Promise<number> {
+async function execute(options: CliOptions, debugLog: DebugLog, version: string): Promise<number> {
   const env = process.env;
   const platform = process.platform;
   const localCwd = options.cwd === undefined ? process.cwd() : absolute(options.cwd);
