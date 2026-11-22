@@ -21,6 +21,18 @@ describe('file references', () => {
     expect(activeMention('see @src done', 13)).toBeUndefined();
     expect(activeMention('a@b', 3)).toBeUndefined();
   });
+  test('plain prose and earlier-line mentions never scan the whole draft (#291)', () => {
+    const prose = 'lorem ipsum '.repeat(5000);
+    expect(activeMention(prose, prose.length)).toBeUndefined();
+    expect(activeMention(`${prose}\nnext line`, prose.length + 5)).toBeUndefined();
+    expect(activeMention(`@old\n${prose}`, prose.length + 5)).toBeUndefined();
+    expect(activeMention(`${prose}\nnow @ne`, prose.length + 8)).toEqual({
+      path: 'ne',
+      start: prose.length + 5,
+      end: prose.length + 8,
+      text: '@ne',
+    });
+  });
   test('ranks prefix, basename, then substring matches', () => {
     const paths = ['docs/app.md', 'src/app.ts', 'app.ts', 'src/main.ts'];
     expect(rankPaths(paths, 'app', 10)).toEqual(['app.ts', 'src/app.ts', 'docs/app.md']);

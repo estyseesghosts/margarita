@@ -9,6 +9,15 @@ export const emptyComposer: Composer = { text: '', cursor: 0 };
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
+/**
+ * Grapheme boundaries per exact draft, bounded and reused across cursor moves and caret
+ * blink phases (#291). Segmentation is O(draft length) once per text value; navigation is a
+ * binary search afterwards. Entries are keyed by the immutable draft string, so an edit
+ * (which produces a new string) can never observe stale indexes.
+ */
+const boundaryCache = new Map<string, readonly number[]>();
+const boundaryCacheLimit = 8;
+
 /** Splits text into user-perceived characters. */
 export function graphemes(text: string): string[] {
   return Array.from(segmenter.segment(text), (segment) => segment.segment);
@@ -36,34 +45,57 @@ export function caretPaint(
   const { before, at, after } = splitAtCursor(composer);
   if (!show) return { before: before + at, marked: '', after };
   if (at !== '') return { before, marked: at, after };
-  const leading = graphemes(before);
-  const last = leading.at(-1);
-  if (last === undefined) return { before, marked: '', after };
+  const points = boundaries(composer.text);
+  const end = points.at(-1) ?? 0;
+  const start = points.at(-2) ?? 0;
+  const last = composer.text.slice(start, end);
+  if (last === '') return { before, marked: '', after };
   return { before: before.slice(0, before.length - last.length), marked: last, after };
 }
 
-function boundaries(text: string): number[] {
+function boundaries(text: string): readonly number[] {
+  const cached = boundaryCache.get(text);
+  if (cached !== undefined) {
+    // Refresh recency without rebuilding the array.
+    boundaryCache.delete(text);
+    boundaryCache.set(text, cached);
+    return cached;
+  }
   const points = [0];
   for (const segment of segmenter.segment(text)) {
     points.push(segment.index + segment.segment.length);
   }
+  if (boundaryCache.size >= boundaryCacheLimit) {
+    const oldest = boundaryCache.keys().next().value;
+    if (oldest !== undefined) boundaryCache.delete(oldest);
+  }
+  boundaryCache.set(text, points);
   return points;
 }
 
-function previousBoundary(text: string, cursor: number): number {
-  let previous = 0;
-  for (const point of boundaries(text)) {
-    if (point >= cursor) return previous;
-    previous = point;
+/** First index whose boundary is >= `cursor`. */
+function lowerBoundary(points: readonly number[], cursor: number): number {
+  let low = 0;
+  let high = points.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if ((points[middle] ?? 0) < cursor) low = middle + 1;
+    else high = middle;
   }
-  return previous;
+  return low;
+}
+
+function previousBoundary(text: string, cursor: number): number {
+  const points = boundaries(text);
+  const index = lowerBoundary(points, cursor);
+  return index === 0 ? 0 : (points[index - 1] ?? 0);
 }
 
 function nextBoundary(text: string, cursor: number): number {
-  for (const point of boundaries(text)) {
-    if (point > cursor) return point;
-  }
-  return text.length;
+  const points = boundaries(text);
+  const index = lowerBoundary(points, cursor);
+  if (points[index] === cursor) return points[index + 1] ?? text.length;
+  return points[index] ?? text.length;
 }
 
 export function composerFrom(text: string): Composer {

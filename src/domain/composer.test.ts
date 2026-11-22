@@ -283,4 +283,44 @@ describe('layout-preserving caret paint (#137)', () => {
       expect(off.before.length + off.marked.length + off.after.length).toBe(text.length);
     }
   });
+
+  test('cached boundaries stay exact across edits, blink and large drafts (#291)', () => {
+    let composer = composerFrom('start ');
+    for (let index = 0; index < 2000; index += 1) {
+      composer = insertText(composer, index % 11 === 0 ? '👨‍👩‍👧' : index % 7 === 0 ? 'e\u0301' : 'a');
+    }
+    const text = composer.text;
+    const reference = Array.from(
+      new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text),
+      (segment) => segment.index,
+    );
+    reference.push(text.length);
+
+    // Repeated blink and navigation must never drift or split a grapheme.
+    for (let phase = 0; phase < 20; phase += 1) {
+      const paint = caretPaint(composer, phase % 2 === 0);
+      expect(paint.before + paint.marked + paint.after).toBe(text);
+    }
+    let cursor = text.length;
+    for (let step = 0; step < 200; step += 1) {
+      composer = moveLeft(composer);
+      cursor = reference[reference.indexOf(cursor) - 1] ?? 0;
+      expect(composer.cursor).toBe(cursor);
+    }
+    expect(composer.cursor).toBeGreaterThan(0);
+  });
+
+  test('an edit produces a new segmentation; cached drafts stay independent', () => {
+    const first = composerFrom('ab😀');
+    const second = composerFrom('x🐱y');
+    for (let round = 0; round < 3; round += 1) {
+      expect(moveLeft(first).cursor).toBe(2);
+      expect(moveLeft(second).cursor).toBe(3);
+      expect(caretPaint(first, true).marked).toBe('😀');
+      expect(caretPaint(second, true).marked).toBe('y');
+    }
+    const edited = insertText(first, 'z');
+    expect(caretPaint(edited, true)).toEqual({ before: 'ab😀', marked: 'z', after: '' });
+    expect(moveLeft(edited).cursor).toBe(4);
+  });
 });

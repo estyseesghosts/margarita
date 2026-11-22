@@ -160,9 +160,13 @@ export function findFileMentions(text: string): FileMention[] {
 
 /** The `@partial` token ending at the cursor, if the user is typing one. */
 export function activeMention(text: string, cursor: number): FileMention | undefined {
+  if (cursor <= 0) return undefined;
+  // Ordinary prose typing must not copy/scan the whole draft. Every mention form contains an
+  // `@` on the cursor's line, so a backward search rejects unrelated input in O(line tail).
+  const lineStart = text.lastIndexOf('\n', cursor - 1) + 1;
+  if (text.lastIndexOf('@', cursor - 1) < lineStart) return undefined;
   const before = text.slice(0, cursor);
-  const line = before.slice(before.lastIndexOf('\n') + 1);
-  const lineStart = before.length - line.length;
+  const line = before.slice(lineStart);
   const opened = activeQuotedAfter.exec(line);
   if (opened !== null) {
     const start = lineStart + opened.index + (opened[1] ?? '').length;

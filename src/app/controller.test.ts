@@ -209,6 +209,20 @@ describe('@file completion', () => {
     controller.dispose();
   });
 
+  test('ordinary prose never triggers a file lookup, even with an older mention (#291)', async () => {
+    let traversals = 0;
+    const controller = makeController(async () => {
+      traversals += 1;
+      return [] as string[];
+    });
+    const prose = 'word '.repeat(5000);
+    controller.setComposer(composerFrom(`@old\n${prose}`));
+    await flush();
+    expect(traversals).toBe(0);
+    expect(controller.state.completion).toBeUndefined();
+    controller.dispose();
+  });
+
   test('a project switch mid-scan cannot inject completions from the old project', async () => {
     const scan = deferred<string[]>();
     const controller = makeController(() => scan.promise);

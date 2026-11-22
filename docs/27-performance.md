@@ -23,7 +23,9 @@ a promise.
 | `projectorTailUpdate` | same | Incremental projection after appending one assistant part; the JSON `detail` reports messages folded/reprocessed and prefix nodes reused |
 | `projectUsage` | same | Footer/`/usage` analytics over loaded history |
 | `overviewGroups` | 1 / 50 / 500 sessions | Project grouping, ordering and path identity across two hosts |
-| `composerEdit` | 500 / 5,000 graphemes | End insertion plus one grapheme-left move |
+| `composerEdit` | 40 / 500 / 5,000 / 50,000 graphemes | End insertion plus one grapheme-left move |
+| `composerBackspace` / `composerCaret` | same | One grapheme delete and cached caret paint at end |
+| `composerMention` / `composerNoMention` | same | Active `@src` parsing versus ordinary prose with no `@` on the line |
 
 ## What is deliberately unavailable
 

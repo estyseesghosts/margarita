@@ -14,8 +14,15 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
-import { emptyComposer, insertText, moveLeft } from '../src/domain/composer.ts';
+import {
+  caretPaint,
+  composerFrom,
+  deleteBackward,
+  insertText,
+  moveLeft,
+} from '../src/domain/composer.ts';
 import { type ExecutionMarker, executionMarkers } from '../src/domain/execution-segment.ts';
+import { activeMention } from '../src/domain/file-reference.ts';
 import { groupSessions } from '../src/domain/overview-groups.ts';
 import type { SessionSummary } from '../src/domain/session.ts';
 import type { AssistantPart, TranscriptMessage } from '../src/domain/transcript.ts';
@@ -188,16 +195,48 @@ function scenarios(): Scenario[] {
         }),
     });
   }
-  const draftSize = smoke ? 500 : 5000;
-  let draft = emptyComposer;
-  for (let index = 0; index < draftSize; index += 1) draft = insertText(draft, 'x');
-  result.push({
-    name: 'composerEdit',
-    size: draftSize,
-    iterations: smoke ? 1 : 50,
-    run: () => moveLeft(insertText(draft, 'y')),
-    note: 'insert at end plus one grapheme-back',
-  });
+  for (const draftSize of smoke ? [500] : [40, 500, 5000, 50_000]) {
+    const chunk = 'ab😀e\u0301 line\n';
+    let draftText = '';
+    while (draftText.length < draftSize) draftText += chunk;
+    const draft = composerFrom(draftText);
+    const mentioned = composerFrom(`${draft.text.replace(/\n$/, '')} @src`);
+    result.push({
+      name: 'composerEdit',
+      size: draft.text.length,
+      iterations: smoke ? 1 : draftSize >= 50_000 ? 10 : 50,
+      run: () => moveLeft(insertText(draft, 'y')),
+      note: 'insert at end plus one grapheme-back',
+    });
+    result.push({
+      name: 'composerBackspace',
+      size: draft.text.length,
+      iterations: smoke ? 1 : draftSize >= 50_000 ? 10 : 50,
+      run: () => deleteBackward(draft),
+      note: 'delete one grapheme at end of a mixed emoji/combining draft',
+    });
+    result.push({
+      name: 'composerCaret',
+      size: draft.text.length,
+      iterations: smoke ? 1 : draftSize >= 50_000 ? 10 : 50,
+      run: () => caretPaint(draft, true),
+      note: 'caret paint at end (marks the last grapheme)',
+    });
+    result.push({
+      name: 'composerMention',
+      size: mentioned.text.length,
+      iterations: smoke ? 1 : draftSize >= 50_000 ? 10 : 50,
+      run: () => activeMention(mentioned.text, mentioned.cursor),
+      note: 'active @src token after the draft',
+    });
+    result.push({
+      name: 'composerNoMention',
+      size: draft.text.length,
+      iterations: smoke ? 1 : draftSize >= 50_000 ? 10 : 50,
+      run: () => activeMention(draft.text, draft.cursor),
+      note: 'ordinary typing with no @ on the cursor line',
+    });
+  }
   return result;
 }
 
