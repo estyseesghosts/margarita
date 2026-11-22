@@ -1,7 +1,10 @@
 name: Verify
 on:
   push:
-    # Tags go through release.yml, which runs this same gate before publishing.
+    # Both filters are required: defining only one of branches/tags stops the workflow from
+    # running for the other kind of ref. Tags go through release.yml, which runs this same gate.
+    branches:
+      - '**'
     tags-ignore:
       - '**'
   pull_request:
