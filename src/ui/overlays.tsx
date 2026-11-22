@@ -5,6 +5,7 @@ import { For, Match, Show, Switch } from 'solid-js';
 import type { DiffOverlay, Overlay } from '../app/app-state.ts';
 import type { AppController } from '../app/controller.ts';
 import { diffPageLines } from '../app/controller.ts';
+import { caretPaint } from '../domain/composer.ts';
 import { diffSummary, type FileDiff, type PatchLine, patchLines } from '../domain/diff.ts';
 import {
   currentField,
@@ -656,6 +657,13 @@ function FormDialog(props: {
       (current?.kind === 'multi' && current.custom && props.editor.addingCustom === true)
     );
   };
+  const typedComposer = () => {
+    const current = field();
+    return current?.kind === 'multi'
+      ? { text: props.editor.customDraft ?? '', cursor: props.editor.customCursor }
+      : { text: props.editor.text, cursor: props.editor.textCursor };
+  };
+  const paint = () => caretPaint(typedComposer(), true);
   const customMulti = () => {
     const current = field();
     return current?.kind === 'multi' && current.custom ? current : undefined;
@@ -689,9 +697,14 @@ function FormDialog(props: {
             </For>
             <Show when={typed()}>
               <text fg={props.theme.text}>
-                {`> ${
-                  current().kind === 'multi' ? (props.editor.customDraft ?? '') : props.editor.text
-                }`}
+                {'> '}
+                {paint().before}
+                <Show when={paint().marked !== ''}>
+                  <span style={{ underline: true, fg: props.theme.accentLight }}>
+                    {paint().marked}
+                  </span>
+                </Show>
+                {paint().after}
               </text>
             </Show>
             <Show when={current().kind === 'external' ? current() : undefined}>

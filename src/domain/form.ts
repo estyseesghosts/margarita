@@ -2,6 +2,21 @@
  * Agent questions (`session.form`). A form is not a permission: it has no
  * "always" and its answer is a plain key → value map (docs/12).
  */
+import {
+  type Composer,
+  deleteBackward,
+  deleteForward,
+  deleteWordBackward,
+  deleteWordForward,
+  insertText,
+  moveLeft,
+  moveLineEnd,
+  moveLineStart,
+  moveRight,
+  moveWordLeft,
+  moveWordRight,
+} from './composer.ts';
+
 export type FormOption = Readonly<{ value: string; label: string; description?: string }>;
 
 export type FormCondition = Readonly<{
@@ -277,10 +292,16 @@ export type FormEditor = Readonly<{
   answers: FormAnswers;
   /** Typed text for text/number fields (and custom choices). */
   text: string;
+  /** Grapheme-safe caret in `text` (#232). */
+  textCursor: number;
   /** Highlighted option for choice/multi/boolean fields. */
   cursor: number;
   /** In-progress custom multiselect value; `addingCustom` opens the entry row. */
   customDraft?: string | undefined;
+  /** Grapheme-safe caret in `customDraft` (#232). */
+  customCursor: number;
+  /** Last caret per text-like field key, restored when navigating back (#232). */
+  carets: Readonly<Record<string, number>>;
   addingCustom?: boolean | undefined;
   problem?: string | undefined;
 }>;
@@ -294,7 +315,20 @@ export function startEditor(form: FormRequest): FormEditor {
     const value = initialValue(field);
     if (value !== undefined) answers[field.key] = value;
   }
-  return enterField(form, { formID: form.id, index: 0, answers, text: '', cursor: 0 }, 0);
+  return enterField(
+    form,
+    {
+      formID: form.id,
+      index: 0,
+      answers,
+      text: '',
+      textCursor: 0,
+      cursor: 0,
+      customCursor: 0,
+      carets: {},
+    },
+    0,
+  );
 }
 
 export function currentField(form: FormRequest, editor: FormEditor): FormField | undefined {
@@ -337,7 +371,33 @@ function enterField(form: FormRequest, editor: FormEditor, index: number): FormE
     else if (field.custom) text = value;
   }
   if (field?.kind === 'boolean') cursor = value === false ? 1 : 0;
-  return { formID: editor.formID, answers: editor.answers, index, text, cursor };
+  const saved = field === undefined ? undefined : editor.carets[field.key];
+  const textCursor = saved === undefined ? text.length : Math.min(saved, text.length);
+  return {
+    formID: editor.formID,
+    answers: editor.answers,
+    index,
+    text,
+    textCursor,
+    cursor,
+    customCursor: 0,
+    carets: editor.carets,
+  };
+}
+
+/** Records the outgoing text-like field's caret before navigation (#232). */
+function rememberCaret(form: FormRequest, editor: FormEditor): FormEditor {
+  const field = currentField(form, editor);
+  if (
+    field === undefined ||
+    (field.kind !== 'text' && field.kind !== 'number' && !(field.kind === 'choice' && field.custom))
+  ) {
+    return editor;
+  }
+  return {
+    ...editor,
+    carets: { ...editor.carets, [field.key]: editor.textCursor },
+  };
 }
 
 /** Writes the field's typed/highlighted value into the answers. */
@@ -376,7 +436,7 @@ function advance(
   editor: FormEditor,
   field: FormField,
 ): { editor: FormEditor; outcome: FormOutcome } {
-  const committed = commitField(form, editor);
+  const committed = commitField(form, rememberCaret(form, editor));
   const problem = validateField(field, committed.answers[field.key]);
   if (problem !== undefined) return { editor: { ...committed, problem }, outcome: undefined };
   const fields = visibleFields(form, committed.answers);
@@ -395,27 +455,46 @@ function advance(
 function editField(editor: FormEditor, field: FormField, key: FormKey): FormEditor {
   const count = optionCount(field, editor.answers);
   if (field.kind === 'multi' && field.custom && editor.addingCustom === true) {
-    if (key.name === 'escape') return { ...editor, addingCustom: false, customDraft: '' };
+    const draft: Composer = { text: editor.customDraft ?? '', cursor: editor.customCursor };
+    const setDraft = (next: Composer): FormEditor => ({
+      ...editor,
+      customDraft: next.text,
+      customCursor: next.cursor,
+    });
+    if (key.name === 'escape')
+      return { ...editor, addingCustom: false, customDraft: '', customCursor: 0 };
     if (key.name === 'return') {
       const value = (editor.customDraft ?? '').trim();
-      if (value === '') return { ...editor, addingCustom: false, customDraft: '' };
+      if (value === '') return { ...editor, addingCustom: false, customDraft: '', customCursor: 0 };
       const current = editor.answers[field.key];
       const chosen = Array.isArray(current) ? current : [];
       if (chosen.includes(value)) {
-        return { ...editor, addingCustom: false, customDraft: '', problem: 'Already chosen.' };
+        return {
+          ...editor,
+          addingCustom: false,
+          customDraft: '',
+          customCursor: 0,
+          problem: 'Already chosen.',
+        };
       }
       return {
         ...editor,
         answers: { ...editor.answers, [field.key]: [...chosen, value] },
         addingCustom: false,
         customDraft: '',
+        customCursor: 0,
       };
     }
-    if (key.name === 'backspace') {
-      return { ...editor, customDraft: (editor.customDraft ?? '').slice(0, -1) };
-    }
+    if (key.name === 'left') return setDraft(key.ctrl ? moveWordLeft(draft) : moveLeft(draft));
+    if (key.name === 'right') return setDraft(key.ctrl ? moveWordRight(draft) : moveRight(draft));
+    if (key.name === 'home') return setDraft(moveLineStart(draft));
+    if (key.name === 'end') return setDraft(moveLineEnd(draft));
+    if (key.name === 'backspace')
+      return setDraft(key.ctrl ? deleteWordBackward(draft) : deleteBackward(draft));
+    if (key.name === 'delete')
+      return setDraft(key.ctrl ? deleteWordForward(draft) : deleteForward(draft));
     if (key.text !== undefined && key.text !== '' && !key.ctrl) {
-      return { ...editor, customDraft: (editor.customDraft ?? '') + key.text };
+      return setDraft(insertText(draft, key.text));
     }
     return editor;
   }
@@ -425,7 +504,7 @@ function editField(editor: FormEditor, field: FormField, key: FormKey): FormEdit
   }
   if (field.kind === 'multi') {
     if (field.custom && key.text === 'a' && !key.ctrl) {
-      return { ...editor, addingCustom: true, customDraft: '' };
+      return { ...editor, addingCustom: true, customDraft: '', customCursor: 0 };
     }
     const current = editor.answers[field.key];
     const chosen = Array.isArray(current) ? current : [];
@@ -456,9 +535,23 @@ function editField(editor: FormEditor, field: FormField, key: FormKey): FormEdit
   const typed =
     field.kind === 'text' || field.kind === 'number' || (field.kind === 'choice' && field.custom);
   if (!typed) return editor;
-  if (key.name === 'backspace') return { ...editor, text: editor.text.slice(0, -1) };
+  const buffer: Composer = { text: editor.text, cursor: editor.textCursor };
+  const setText = (next: Composer): FormEditor => ({
+    ...editor,
+    text: next.text,
+    textCursor: next.cursor,
+    problem: undefined,
+  });
+  if (key.name === 'left') return setText(key.ctrl ? moveWordLeft(buffer) : moveLeft(buffer));
+  if (key.name === 'right') return setText(key.ctrl ? moveWordRight(buffer) : moveRight(buffer));
+  if (key.name === 'home') return setText(moveLineStart(buffer));
+  if (key.name === 'end') return setText(moveLineEnd(buffer));
+  if (key.name === 'backspace')
+    return setText(key.ctrl ? deleteWordBackward(buffer) : deleteBackward(buffer));
+  if (key.name === 'delete')
+    return setText(key.ctrl ? deleteWordForward(buffer) : deleteForward(buffer));
   if (key.text !== undefined && key.text !== '' && !key.ctrl) {
-    return { ...editor, text: editor.text + key.text };
+    return setText(insertText(buffer, key.text));
   }
   return editor;
 }
@@ -475,18 +568,22 @@ export function pasteFormText(
   const field = currentField(form, editor);
   if (field === undefined) return { editor, error: 'No field is selected.' };
   if (field.kind === 'multi' && field.custom && editor.addingCustom === true) {
-    return { editor: { ...editor, customDraft: (editor.customDraft ?? '') + text } };
+    const next = insertText({ text: editor.customDraft ?? '', cursor: editor.customCursor }, text);
+    return { editor: { ...editor, customDraft: next.text, customCursor: next.cursor } };
   }
   if (
     field.kind === 'text' ||
     field.kind === 'number' ||
     (field.kind === 'choice' && field.custom)
   ) {
-    return { editor: { ...editor, text: editor.text + text, problem: undefined } };
+    const next = insertText({ text: editor.text, cursor: editor.textCursor }, text);
+    return {
+      editor: { ...editor, text: next.text, textCursor: next.cursor, problem: undefined },
+    };
   }
   if (field.kind === 'multi' && field.custom) {
     return {
-      editor: { ...editor, addingCustom: true, customDraft: text },
+      editor: { ...editor, addingCustom: true, customDraft: text, customCursor: text.length },
     };
   }
   const reason =
@@ -518,7 +615,7 @@ export function editorKey(
     return advance(form, editor, field);
   }
   if (key.name === 'tab' && key.shift) {
-    const committed = commitField(form, editor);
+    const committed = commitField(form, rememberCaret(form, editor));
     return {
       editor: enterField(form, committed, Math.max(0, committed.index - 1)),
       outcome: undefined,

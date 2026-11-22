@@ -206,6 +206,142 @@ describe('forms', () => {
     ).toEqual([]);
   });
 
+  test('typed fields edit at a grapheme-safe cursor (#232)', () => {
+    const textForm: FormRequest = {
+      ...form,
+      fields: [{ ...base, key: 'note', title: 'Note', kind: 'text', required: false }],
+    };
+    let editor = startEditor(textForm);
+    for (const character of 'abcd') {
+      editor = editorKey(textForm, editor, press('letter', character)).editor;
+    }
+    expect(editor.textCursor).toBe(4);
+    editor = editorKey(textForm, editor, press('left')).editor;
+    editor = editorKey(textForm, editor, press('left')).editor;
+    expect(editor.textCursor).toBe(2);
+    editor = editorKey(textForm, editor, press('letter', 'X')).editor;
+    expect(editor.text).toBe('abXcd');
+    expect(editor.textCursor).toBe(3);
+    editor = editorKey(textForm, editor, press('backspace')).editor;
+    expect(editor.text).toBe('abcd');
+    expect(editor.textCursor).toBe(2);
+    editor = editorKey(textForm, editor, press('delete')).editor;
+    expect(editor.text).toBe('abd');
+    editor = editorKey(textForm, editor, press('home')).editor;
+    expect(editor.textCursor).toBe(0);
+    editor = editorKey(textForm, editor, press('end')).editor;
+    expect(editor.textCursor).toBe(3);
+
+    // Emoji join sequences delete as one grapheme, never a lone surrogate.
+    let emoji = startEditor(textForm);
+    for (const character of 'ab') {
+      emoji = editorKey(textForm, emoji, press('letter', character)).editor;
+    }
+    emoji = editorKey(textForm, emoji, press('left')).editor;
+    emoji = editorKey(textForm, emoji, press('left')).editor;
+    emoji = editorKey(textForm, emoji, press('emoji', '👩‍💻')).editor;
+    expect(emoji.text).toBe('👩‍💻ab');
+    emoji = editorKey(textForm, emoji, press('backspace')).editor;
+    expect(emoji.text).toBe('ab');
+    expect(emoji.textCursor).toBe(0);
+  });
+
+  test('number and custom-choice text edit in the middle (#232)', () => {
+    const numberForm: FormRequest = {
+      ...form,
+      fields: [
+        { ...base, key: 'count', title: 'Count', kind: 'number', integer: false, required: false },
+      ],
+    };
+    let number = startEditor(numberForm);
+    number = editorKey(numberForm, number, press('digit', '1')).editor;
+    number = editorKey(numberForm, number, press('digit', '2')).editor;
+    number = editorKey(numberForm, number, press('left')).editor;
+    number = editorKey(numberForm, number, press('digit', '3')).editor;
+    expect(number.text).toBe('132');
+    const committed = editorKey(numberForm, number, press('return'));
+    expect(committed.outcome).toBe('submit');
+    expect(committed.editor.answers['count']).toBe(132);
+
+    const customForm: FormRequest = {
+      ...form,
+      fields: [
+        {
+          ...base,
+          key: 'branch',
+          title: 'Branch',
+          kind: 'choice',
+          custom: true,
+          options: [{ value: 'main', label: 'main' }],
+        },
+      ],
+    };
+    let custom = startEditor(customForm);
+    for (const character of 'feature') {
+      custom = editorKey(customForm, custom, press('letter', character)).editor;
+    }
+    custom = editorKey(customForm, custom, press('left')).editor;
+    custom = editorKey(customForm, custom, press('letter', 'X')).editor;
+    expect(custom.text).toBe('featurXe');
+  });
+
+  test('paste inserts at the active cursor and Shift+Tab restores the caret (#232)', () => {
+    const twoFields: FormRequest = {
+      ...form,
+      fields: [
+        { ...base, key: 'one', title: 'One', kind: 'text', required: false },
+        { ...base, key: 'two', title: 'Two', kind: 'text', required: false },
+      ],
+    };
+    let editor = startEditor(twoFields);
+    for (const character of 'hello') {
+      editor = editorKey(twoFields, editor, press('letter', character)).editor;
+    }
+    editor = editorKey(twoFields, editor, press('left')).editor;
+    editor = editorKey(twoFields, editor, press('left')).editor;
+    const pasted = pasteFormText(twoFields, editor, 'XY');
+    expect(pasted.editor.text).toBe('helXYlo');
+    expect(pasted.editor.textCursor).toBe(5);
+
+    editor = pasted.editor;
+    editor = editorKey(twoFields, editor, press('tab')).editor;
+    expect(editor.index).toBe(1);
+    editor = editorKey(twoFields, editor, press('tab', undefined)).editor;
+    // Shift+Tab back to the first field restores its caret.
+    editor = editorKey(twoFields, editor, { ...press('tab'), shift: true }).editor;
+    expect(editor.index).toBe(0);
+    expect(editor.text).toBe('helXYlo');
+    expect(editor.textCursor).toBe(5);
+  });
+
+  test('a custom multiselect draft edits at its own cursor (#232)', () => {
+    const multiForm: FormRequest = {
+      ...form,
+      fields: [
+        {
+          ...base,
+          key: 'tags',
+          title: 'Tags',
+          kind: 'multi',
+          custom: true,
+          options: [{ value: 'a', label: 'a' }],
+        },
+      ],
+    };
+    let editor = startEditor(multiForm);
+    editor = editorKey(multiForm, editor, press('letter', 'a')).editor;
+    expect(editor.addingCustom).toBe(true);
+    for (const character of 'abcd') {
+      editor = editorKey(multiForm, editor, press('letter', character)).editor;
+    }
+    editor = editorKey(multiForm, editor, press('left')).editor;
+    editor = editorKey(multiForm, editor, press('letter', 'X')).editor;
+    expect(editor.customDraft).toBe('abcXd');
+    expect(editor.customCursor).toBe(4);
+    editor = editorKey(multiForm, editor, press('backspace')).editor;
+    expect(editor.customDraft).toBe('abcd');
+  });
+
   test('custom multiselect values can be added, preserved and removed (#212)', () => {
     const field: FormField & { kind: 'multi' } = {
       ...base,
