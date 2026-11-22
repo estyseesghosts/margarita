@@ -89,7 +89,7 @@ describe('unreadable directories are reported, not treated as empty (#279)', () 
     const result = await scanProjectFiles(root, {
       readdir: async (path, options) => {
         if (path.endsWith('blocked')) throw fsError('EACCES');
-        return readdir(path, options) as Promise<Dirent[]>;
+        return readdir(path, options);
       },
     });
     expect(result.files.toSorted()).toEqual(['root.md', 'src/good.ts']);
@@ -107,7 +107,7 @@ describe('unreadable directories are reported, not treated as empty (#279)', () 
     const result = await scanProjectFiles(root, {
       readdir: async (path, options) => {
         if (path !== root) throw fsError('EPERM');
-        return readdir(path, options) as Promise<Dirent[]>;
+        return readdir(path, options);
       },
     });
     expect(result.unreadable.count).toBe(6);
@@ -119,7 +119,7 @@ describe('unreadable directories are reported, not treated as empty (#279)', () 
   test('a stalled read is abandoned at the deadline and cannot mutate the returned result', async () => {
     const root = await tree();
     await writeFile(join(root, 'late.ts'), '');
-    const entries = (await readdir(root, { withFileTypes: true })) as Dirent[];
+    const entries = await readdir(root, { withFileTypes: true });
     const result = await scanProjectFiles(root, {
       timeMs: 5,
       readdir: () => new Promise<Dirent[]>((resolve) => setTimeout(() => resolve(entries), 40)),

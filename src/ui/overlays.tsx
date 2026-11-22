@@ -746,9 +746,7 @@ function DiffDialog(props: {
               <text fg={props.theme.dim}>No file changes reported.</text>
             </Match>
             <Match when={props.overlay.files.length > 0}>
-              <For
-                each={props.overlay.files.slice(fileRows().start, fileRows().end)}
-              >
+              <For each={props.overlay.files.slice(fileRows().start, fileRows().end)}>
                 {(entry, index) => {
                   const absolute = () => fileRows().start + index();
                   const selected = () => absolute() === props.overlay.index;

@@ -1137,13 +1137,13 @@ describe('bounded preview policy (#219, #220)', () => {
 describe('tool metadata budgets (#277)', () => {
   test('compact, detailed and expanded metadata budgets are ordered and bounded', () => {
     for (const kind of ['error', 'files'] as const) {
-      const compact = toolMetadataRowBudget(kind, false);
-      const detailed = toolMetadataRowBudget(kind, true);
-      const expanded = toolMetadataRowBudget(kind, true, true);
-      expect(compact).toBeGreaterThan(0);
-      expect(detailed).toBeGreaterThan(compact);
-      expect(expanded).toBeGreaterThan(detailed);
-      expect(expanded).toBeLessThanOrEqual(48);
+      const compactRows = toolMetadataRowBudget(kind, false);
+      const detailedRows = toolMetadataRowBudget(kind, true);
+      const expandedRows = toolMetadataRowBudget(kind, true, true);
+      expect(compactRows).toBeGreaterThan(0);
+      expect(detailedRows).toBeGreaterThan(compactRows);
+      expect(expandedRows).toBeGreaterThan(detailedRows);
+      expect(expandedRows).toBeLessThanOrEqual(48);
     }
   });
 
