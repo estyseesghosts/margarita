@@ -31,6 +31,14 @@ automated suite. Mark `skipped-hosts` clearly when a case needs a terminal CI do
 |---|---------|---------|-------------------|
 | F1 | Start a brand-new remote session, attach an image and a PDF, type a prompt, submit. | The first `prompt` to the remote carries both attachments as `data:` URIs; no empty session is created on the launch host. | `test/production-composition.test.ts` (issue #77) |
 
+## Large output and raw inspection (#224)
+
+| # | Trigger | Observe | Automated coverage |
+|---|---------|---------|-------------------|
+| O1 | On Windows Terminal, run a command that returns a 10k-line log. | Compact and detailed transcripts stay bounded with a truthful hidden-row count; scroll position does not jump. | `src/ui/app.test.tsx` (10k-line result) |
+| O2 | With that row focused, press `i`, search for text near the end, copy, then close. | The inspector opens the complete result, jumps to the tail match, copies the untouched source, and returns the composer draft intact. | `src/ui/app.test.tsx`, `src/app/controller.test.ts` |
+| O3 | Paste a 500-column command into the composer and run it. | The command row clips to one terminal row; no horizontal overflow or wrapped ghost rows. | `src/ui/app.test.tsx` (500-column command) |
+
 ## Real terminal key decoding (not reliably synthesizable in CI)
 
 Run these under an actual terminal; where CI has no terminal, report the host as skipped and rely on `src/ui/key-events.test.ts` for the decoder unit coverage.

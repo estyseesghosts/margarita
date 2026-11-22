@@ -14,6 +14,7 @@ import { greetingCatalog } from '../domain/greetings.ts';
 import { buildKeymap } from '../domain/keymap.ts';
 import { directoryKey } from '../domain/path-identity.ts';
 import { projectLabel } from '../domain/project-label.ts';
+import { cellWidth } from '../domain/text-width.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
 import { App } from './app.tsx';
 import { pickTheme } from './theme.ts';
@@ -1335,6 +1336,113 @@ describe('bounded detail and reasoning previews (#219, #223)', () => {
     expect(frame).toContain('… 140 more rows · inspect to read the rest');
     expect(frame).not.toContain('line199');
     expect(frame).not.toContain('output truncated');
+  });
+
+  test('a 10k-line result stays bounded then opens complete in the inspector (#224)', async () => {
+    const full = Array.from({ length: 10_000 }, (_, index) => `log${index}`).join('\n');
+    const preview = Array.from({ length: 600 }, (_, index) => `log${index}`).join('\n');
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'dump the log', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'b1',
+                name: 'bash',
+                status: 'completed',
+                input: { command: 'cat huge.log' },
+                output: preview,
+                outputTruncated: 'frontend',
+                startedAt: 2,
+                completedAt: 3,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    backend.toolResults['ses_a:b1'] = {
+      text: `${full}\nneedle-at-the-end`,
+      files: [],
+      completeness: 'complete',
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const compact = setup.captureCharFrame();
+    expect(compact).toContain('Ran 1 shell command');
+    expect(compact).not.toContain('log9999');
+
+    setup.mockInput.pressKey('o', { ctrl: true });
+    await settle(setup);
+    const detailed = setup.captureCharFrame();
+    expect(detailed).toContain('more rows');
+    expect(detailed).not.toContain('log9999');
+
+    setup.mockInput.pressArrow('down', { ctrl: true });
+    await settle(setup);
+    setup.mockInput.pressKey('i');
+    await settle(setup);
+    expect(controller.state.overlay.kind).toBe('inspector');
+    for (const character of 'needle') setup.mockInput.pressKey(character);
+    await settle(setup);
+    const overlay = controller.state.overlay;
+    if (overlay.kind !== 'inspector') throw new Error('inspector closed');
+    expect(overlay.query).toBe('needle');
+    expect(overlay.offset).toBe(10_000);
+    expect(setup.captureCharFrame()).toContain('needle-at-the-end');
+    controller.dispose();
+  });
+
+  test('a 500-column shell command is clipped to one row (#224)', async () => {
+    const command = `echo ${'x'.repeat(500)}`;
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'run it', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'b1',
+                name: 'bash',
+                status: 'completed',
+                input: { command },
+                output: 'ok',
+                startedAt: 2,
+                completedAt: 3,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressKey('o', { ctrl: true });
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('echo ');
+    expect(frame).toContain('…');
+    for (const line of frame.split('\n')) expect(cellWidth(line)).toBeLessThanOrEqual(80);
+    controller.dispose();
   });
 
   test('detailed reasoning renders as Markdown, fully when short and bounded when long', async () => {

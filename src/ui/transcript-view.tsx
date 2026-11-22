@@ -829,12 +829,15 @@ function ToolView(props: {
       <box flexDirection="row">
         <text fg={bullet()}>● </text>
         <text fg={props.theme.text}>
-          {sanitizeText(
-            edit() !== undefined
-              ? `${props.tool.name === 'write' ? 'Write' : 'Update'}(${describeTool(props.tool, props.mcpServers).slice(props.tool.name.length + 1)})`
-              : unavailable() !== undefined
-                ? `Changed(${unavailable()})`
-                : describeTool(props.tool, props.mcpServers),
+          {truncateToWidth(
+            sanitizeText(
+              edit() !== undefined
+                ? `${props.tool.name === 'write' ? 'Write' : 'Update'}(${describeTool(props.tool, props.mcpServers).slice(props.tool.name.length + 1)})`
+                : unavailable() !== undefined
+                  ? `Changed(${unavailable()})`
+                  : describeTool(props.tool, props.mcpServers),
+            ),
+            lineWidth(),
           )}
         </text>
         <Show when={props.detailed}>
