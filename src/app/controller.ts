@@ -6370,6 +6370,7 @@ export class AppController {
           ...overlay.editor,
           cursor: index,
           choiceCustom: false,
+          choiceFocus: 'list',
           problem: undefined,
         },
       });

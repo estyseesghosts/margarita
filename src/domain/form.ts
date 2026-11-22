@@ -318,9 +318,18 @@ export type FormEditor = Readonly<{
    * highlighted listed option (#265). Browsing options never destroys the draft.
    */
   choiceCustom: boolean;
-  /** Per-choice-field custom draft and active source, restored when navigating back. */
+  /**
+   * Which part of a custom-enabled single-choice field owns the keyboard (#269): the listed
+   * options or the custom text caret. Kept separate from `choiceCustom`, which is the value
+   * Enter will commit; switching focus to custom also selects custom as the commit source.
+   */
+  choiceFocus: 'list' | 'custom';
+  /** Per-choice-field custom draft, active source and focus, restored when navigating back. */
   choiceDrafts: Readonly<
-    Record<string, Readonly<{ text: string; cursor: number; custom: boolean }>>
+    Record<
+      string,
+      Readonly<{ text: string; cursor: number; custom: boolean; focus: 'list' | 'custom' }>
+    >
   >;
   /** In-progress custom multiselect value; `addingCustom` opens the entry row. */
   customDraft?: string | undefined;
@@ -351,6 +360,7 @@ export function startEditor(form: FormRequest): FormEditor {
       textCursor: 0,
       cursor: 0,
       choiceCustom: false,
+      choiceFocus: 'list',
       choiceDrafts: {},
       customCursor: 0,
       carets: {},
@@ -394,12 +404,14 @@ function enterField(form: FormRequest, editor: FormEditor, index: number): FormE
   if (field?.kind === 'text' && typeof value === 'string') text = value;
   if (field?.kind === 'number' && typeof value === 'number') text = String(value);
   let choiceCustom = false;
+  let choiceFocus: 'list' | 'custom' = 'list';
   if (field?.kind === 'choice' && typeof value === 'string') {
     const found = field.options.findIndex((option) => option.value === value);
     if (found >= 0) cursor = found;
     else if (field.custom) {
       text = value;
       choiceCustom = true;
+      choiceFocus = 'custom';
     }
   }
   // A custom draft typed before browsing listed options survives the round trip (#265).
@@ -416,6 +428,7 @@ function enterField(form: FormRequest, editor: FormEditor, index: number): FormE
             : 0,
         );
     choiceCustom = draft.custom;
+    choiceFocus = draft.focus;
   }
   if (field?.kind === 'boolean') cursor = value === false ? 1 : 0;
   const saved = draft === undefined && field !== undefined ? editor.carets[field.key] : undefined;
@@ -433,6 +446,7 @@ function enterField(form: FormRequest, editor: FormEditor, index: number): FormE
     textCursor,
     cursor,
     choiceCustom,
+    choiceFocus,
     choiceDrafts: editor.choiceDrafts,
     customCursor: 0,
     carets: editor.carets,
@@ -463,6 +477,7 @@ function rememberCaret(form: FormRequest, editor: FormEditor): FormEditor {
         text: editor.text,
         cursor: editor.textCursor,
         custom: editor.choiceCustom,
+        focus: editor.choiceFocus,
       },
     },
   };
@@ -570,6 +585,31 @@ function editField(editor: FormEditor, field: FormField, key: FormKey): FormEdit
     }
     return editor;
   }
+  const customChoice = field.kind === 'choice' && field.custom;
+  if (customChoice && editor.choiceFocus === 'custom') {
+    if (key.ctrl && key.name === 'e') {
+      return { ...editor, choiceFocus: 'list', choiceCustom: false, problem: undefined };
+    }
+    // Up/Down are a deliberate return to the list, not caret movement; Home/End stay in the
+    // text editor while custom input owns the keyboard (#269).
+    if (
+      key.name === 'up' ||
+      key.name === 'down' ||
+      key.name === 'pageup' ||
+      key.name === 'pagedown'
+    ) {
+      const step =
+        key.name === 'up' ? -1 : key.name === 'down' ? 1 : key.name === 'pageup' ? -10 : 10;
+      return {
+        ...editor,
+        cursor: (editor.cursor + step + count) % count,
+        choiceFocus: 'list',
+        choiceCustom: false,
+        problem: undefined,
+      };
+    }
+    return editChoiceText(editor, key);
+  }
   if (
     count > 0 &&
     (key.name === 'up' ||
@@ -601,8 +641,22 @@ function editField(editor: FormEditor, field: FormField, key: FormKey): FormEdit
     return {
       ...editor,
       cursor: next,
-      ...(field.kind === 'choice' ? { choiceCustom: false } : {}),
+      ...(field.kind === 'choice' ? { choiceCustom: false, choiceFocus: 'list' as const } : {}),
     };
+  }
+  if (customChoice) {
+    // The list owns the keyboard: only an explicit edit action enters custom text. Typing a
+    // character is explicit; movement keys never silently flip the committed source (#269).
+    if (key.ctrl && key.name === 'e') {
+      return { ...editor, choiceFocus: 'custom', choiceCustom: true, problem: undefined };
+    }
+    if (key.text !== undefined && key.text !== '' && !key.ctrl) {
+      return editChoiceText(
+        { ...editor, choiceFocus: 'custom', choiceCustom: true, problem: undefined },
+        key,
+      );
+    }
+    return editor;
   }
   if (field.kind === 'multi') {
     if (field.custom && key.text === 'a' && !key.ctrl) {
@@ -634,15 +688,38 @@ function editField(editor: FormEditor, field: FormField, key: FormKey): FormEdit
     if (key.text === 'n') return { ...editor, cursor: 1 };
     return editor;
   }
-  const typed =
-    field.kind === 'text' || field.kind === 'number' || (field.kind === 'choice' && field.custom);
+  const typed = field.kind === 'text' || field.kind === 'number';
   if (!typed) return editor;
   const buffer: Composer = { text: editor.text, cursor: editor.textCursor };
   const setText = (next: Composer): FormEditor => ({
     ...editor,
     text: next.text,
     textCursor: next.cursor,
-    ...(field.kind === 'choice' ? { choiceCustom: true } : {}),
+    problem: undefined,
+  });
+  if (key.name === 'left') return setText(key.ctrl ? moveWordLeft(buffer) : moveLeft(buffer));
+  if (key.name === 'right') return setText(key.ctrl ? moveWordRight(buffer) : moveRight(buffer));
+  if (key.name === 'home') return setText(moveLineStart(buffer));
+  if (key.name === 'end') return setText(moveLineEnd(buffer));
+  if (key.name === 'backspace')
+    return setText(key.ctrl ? deleteWordBackward(buffer) : deleteBackward(buffer));
+  if (key.name === 'delete')
+    return setText(key.ctrl ? deleteWordForward(buffer) : deleteForward(buffer));
+  if (key.text !== undefined && key.text !== '' && !key.ctrl) {
+    return setText(insertText(buffer, key.text));
+  }
+  return editor;
+}
+
+/** Caret/text editing for a custom single-choice value; focus and source stay custom. */
+function editChoiceText(editor: FormEditor, key: FormKey): FormEditor {
+  const buffer: Composer = { text: editor.text, cursor: editor.textCursor };
+  const setText = (next: Composer): FormEditor => ({
+    ...editor,
+    text: next.text,
+    textCursor: next.cursor,
+    choiceFocus: 'custom',
+    choiceCustom: true,
     problem: undefined,
   });
   if (key.name === 'left') return setText(key.ctrl ? moveWordLeft(buffer) : moveLeft(buffer));
@@ -685,7 +762,7 @@ export function pasteFormText(
         ...editor,
         text: next.text,
         textCursor: next.cursor,
-        ...(field.kind === 'choice' ? { choiceCustom: true } : {}),
+        ...(field.kind === 'choice' ? { choiceCustom: true, choiceFocus: 'custom' as const } : {}),
         problem: undefined,
       },
     };

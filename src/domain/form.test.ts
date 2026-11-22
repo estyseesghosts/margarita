@@ -371,6 +371,7 @@ describe('forms', () => {
       editor = editorKey(choiceForm, editor, press('letter', character)).editor;
     }
     expect(editor.choiceCustom).toBe(true);
+    expect(editor.choiceFocus).toBe('custom');
     expect(editor.textCursor).toBe('feature/some-long-branch'.length);
     editor = editorKey(choiceForm, editor, press('left')).editor;
     editor = editorKey(choiceForm, editor, press('left')).editor;
@@ -380,6 +381,7 @@ describe('forms', () => {
     expect(editor.text).toBe('feature/some-long-branch');
     expect(editor.textCursor).toBe('feature/some-long-branch'.length - 2);
     expect(editor.choiceCustom).toBe(false);
+    expect(editor.choiceFocus).toBe('list');
     // Returning to custom entry restores it, and an edit resumes exactly at the caret.
     editor = editorKey(choiceForm, editor, press('up')).editor;
     editor = editorKey(choiceForm, editor, press('up')).editor;
@@ -411,10 +413,115 @@ describe('forms', () => {
     editor = editorKey(choiceForm, editor, press('down')).editor;
     editor = editorKey(choiceForm, editor, press('letter', 'd')).editor;
     expect(editor.choiceCustom).toBe(true);
-    editor = editorKey(choiceForm, editor, press('end')).editor;
+    expect(editor.choiceFocus).toBe('custom');
+    // Ctrl+E is the explicit keyboard path back to the option list.
+    editor = editorKey(choiceForm, editor, { ...press('e'), ctrl: true }).editor;
     expect(editor.choiceCustom).toBe(false);
+    expect(editor.choiceFocus).toBe('list');
     editor = editorKey(choiceForm, editor, press('return')).editor;
     expect(editor.answers['branch']).toBe('develop');
+  });
+
+  test('caret movement while the option list owns focus cannot commit stale custom text (#269)', () => {
+    const choiceForm: FormRequest = {
+      ...form,
+      fields: [
+        {
+          ...base,
+          key: 'branch',
+          title: 'Branch',
+          kind: 'choice',
+          custom: true,
+          options: [
+            { value: 'main', label: 'main' },
+            { value: 'develop', label: 'develop' },
+          ],
+        },
+      ],
+    };
+    let editor = startEditor(choiceForm);
+    for (const character of 'feature/old') {
+      editor = editorKey(choiceForm, editor, press('letter', character)).editor;
+    }
+    // Browse back to the listed option: the list and the listed value own the keyboard.
+    editor = editorKey(choiceForm, editor, press('down')).editor;
+    expect(editor.choiceCustom).toBe(false);
+    for (const name of ['left', 'right', 'home', 'end']) {
+      editor = editorKey(choiceForm, editor, press(name)).editor;
+      expect(editor.choiceCustom).toBe(false);
+      expect(editor.choiceFocus).toBe('list');
+      expect(editor.text).toBe('feature/old');
+    }
+    editor = editorKey(choiceForm, editor, press('end')).editor;
+    editor = editorKey(choiceForm, editor, press('return')).editor;
+    expect(editor.answers['branch']).toBe('develop');
+  });
+
+  test('custom focus makes Home/End caret actions without choosing a listed option (#269)', () => {
+    const choiceForm: FormRequest = {
+      ...form,
+      fields: [
+        {
+          ...base,
+          key: 'branch',
+          title: 'Branch',
+          kind: 'choice',
+          custom: true,
+          options: [
+            { value: 'main', label: 'main' },
+            { value: 'develop', label: 'develop' },
+          ],
+        },
+      ],
+    };
+    let editor = startEditor(choiceForm);
+    for (const character of 'feature/abcd') {
+      editor = editorKey(choiceForm, editor, press('letter', character)).editor;
+    }
+    editor = editorKey(choiceForm, editor, press('home')).editor;
+    expect(editor.textCursor).toBe(0);
+    expect(editor.choiceCustom).toBe(true);
+    expect(editor.choiceFocus).toBe('custom');
+    editor = editorKey(choiceForm, editor, press('right')).editor;
+    expect(editor.textCursor).toBe(1);
+    editor = editorKey(choiceForm, editor, press('end')).editor;
+    expect(editor.textCursor).toBe('feature/abcd'.length);
+    editor = editorKey(choiceForm, editor, press('return')).editor;
+    expect(editor.answers['branch']).toBe('feature/abcd');
+  });
+
+  test('Shift+Tab restores custom-choice focus and its caret (#269)', () => {
+    const twoFields: FormRequest = {
+      ...form,
+      fields: [
+        {
+          ...base,
+          key: 'branch',
+          title: 'Branch',
+          kind: 'choice',
+          custom: true,
+          options: [
+            { value: 'main', label: 'main' },
+            { value: 'develop', label: 'develop' },
+          ],
+        },
+        { ...base, key: 'note', title: 'Note', kind: 'text', required: false },
+      ],
+    };
+    let editor = startEditor(twoFields);
+    for (const character of 'feature/xyz') {
+      editor = editorKey(twoFields, editor, press('letter', character)).editor;
+    }
+    editor = editorKey(twoFields, editor, press('home')).editor;
+    editor = editorKey(twoFields, editor, press('right')).editor;
+    editor = editorKey(twoFields, editor, press('tab')).editor;
+    expect(editor.index).toBe(1);
+    editor = editorKey(twoFields, editor, { ...press('tab'), shift: true }).editor;
+    expect(editor.index).toBe(0);
+    expect(editor.text).toBe('feature/xyz');
+    expect(editor.textCursor).toBe(1);
+    expect(editor.choiceFocus).toBe('custom');
+    expect(editor.choiceCustom).toBe(true);
   });
 
   test('paste inserts at the active cursor and Shift+Tab restores the caret (#232)', () => {

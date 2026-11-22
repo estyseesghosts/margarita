@@ -775,7 +775,11 @@ function FormDialog(props: {
       ? { text: props.editor.customDraft ?? '', cursor: props.editor.customCursor }
       : { text: props.editor.text, cursor: props.editor.textCursor };
   };
-  const paint = () => caretPaint(typedComposer(), true);
+  const choiceListFocus = () => {
+    const current = field();
+    return current?.kind === 'choice' && current.custom && props.editor.choiceFocus === 'list';
+  };
+  const paint = () => caretPaint(typedComposer(), !choiceListFocus());
   const customMulti = () => {
     const current = field();
     return current?.kind === 'multi' && current.custom ? current : undefined;
@@ -849,11 +853,11 @@ function FormDialog(props: {
             </Show>
             <Show when={customChoice()}>
               <text fg={props.theme.dim}>
-                {props.editor.choiceCustom
-                  ? 'custom value will be submitted · ↑↓ choose a listed option'
+                {props.editor.choiceFocus === 'custom'
+                  ? 'editing custom value · Enter submits it · ↑↓ return to listed options'
                   : props.editor.text !== ''
-                    ? 'listed option will be submitted · type to edit the saved custom draft'
-                    : '↑↓ choose a listed option · type a custom value'}
+                    ? 'listed option will be submitted · Ctrl+E edit saved custom draft'
+                    : '↑↓ choose a listed option · type or Ctrl+E for a custom value'}
               </text>
             </Show>
             <Show when={current().kind === 'external' ? current() : undefined}>
@@ -891,7 +895,7 @@ function FormDialog(props: {
       <text fg={props.theme.dim}>
         {field()?.kind === 'external'
           ? 'o open · c copy · Enter next · Shift+Tab back · Esc later · Ctrl+X decline'
-          : 'Enter next · Shift+Tab back · ↑↓ choose · Space toggle · Esc later · Ctrl+X decline'}
+          : `Enter next · Shift+Tab back · ↑↓ choose${customChoice() ? ' · Ctrl+E custom' : ''} · Space toggle · Esc later · Ctrl+X decline`}
       </text>
       <Show when={customMulti()}>
         <text fg={props.theme.dim}>a add custom value · x remove selected custom value</text>

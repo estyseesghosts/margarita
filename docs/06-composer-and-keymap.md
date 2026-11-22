@@ -68,7 +68,7 @@ The mapping is deliberately not an exact Claude clone. `Shift+Tab` must never fl
 | Transcript, focused execute | `[` / `]` | Page the nested Code Mode child window; with a nonempty draft the brackets remain ordinary text |
 | Pending question | `Alt+Q` | Open the question without clearing a nonempty draft; `Enter` on an empty prompt also opens it |
 | Form dialog | `Enter` / `Shift+Tab` | Validate and advance / go back; `Esc` leaves the question pending, `Ctrl+X` declines |
-| Form text/custom choice | `Left`/`Right`, `Home`/`End`, `Backspace`/`Delete` | Grapheme-safe caret editing; choices additionally use `Up`/`Down`, `PageUp`/`PageDown`, `Home`/`End` |
+| Form text/custom choice | `Left`/`Right`, `Home`/`End`, `Backspace`/`Delete` | Grapheme-safe caret editing. A custom choice starts with the option list focused: `Up`/`Down`, `PageUp`/`PageDown`, `Home`/`End` navigate it; typing or `Ctrl+E` focuses custom text, and `Up`/`Down` (or `Ctrl+E`) returns to the list. Caret movement never changes which source Enter submits |
 | Form multiselect | `Space`, `a`, `x` | Toggle listed value, add custom value, remove selected custom value |
 | Help | `PageUp`/`PageDown` | Scroll the bounded key list; a printable key dismisses help |
 | Queue/tasks | `PageUp`/`PageDown`, `Home`/`End` | Move the selection through a bounded list; selected row stays visible |

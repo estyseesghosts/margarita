@@ -77,6 +77,65 @@ const submit = { name: 'return', shift: false, ctrl: false };
 const decline = { name: 'x', shift: false, ctrl: true };
 const close = { name: 'escape', shift: false, ctrl: false };
 
+function choiceForm(): FormRequest {
+  return {
+    id: formID,
+    sessionID,
+    title: 'Branch',
+    fields: [
+      {
+        kind: 'choice',
+        key: 'branch',
+        title: 'Branch',
+        required: false,
+        hidden: false,
+        when: [],
+        custom: true,
+        options: [
+          { value: 'main', label: 'main' },
+          { value: 'develop', label: 'develop' },
+        ],
+      },
+    ],
+  };
+}
+
+describe('custom-choice focus stays separate from the reply source (#269)', () => {
+  test('caret movement over a listed option still replies with that option', async () => {
+    const { controller, local } = harness();
+    local.forms = [choiceForm()];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    controller.openForm();
+    controller.formKey({ name: 'letter', text: 'old', shift: false, ctrl: false });
+    controller.formKey({ name: 'down', shift: false, ctrl: false });
+    for (const name of ['left', 'right', 'home', 'end']) {
+      controller.formKey({ name, shift: false, ctrl: false });
+    }
+    controller.formKey(submit);
+    await flush();
+    const reply = local.calls.find((call) => call.name === 'replyForm');
+    expect(reply?.args[2]).toEqual({ branch: 'develop' });
+  });
+
+  test('Ctrl+E returns from custom text to the listed option that is submitted', async () => {
+    const { controller, local } = harness();
+    local.forms = [choiceForm()];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    controller.openForm();
+    controller.formKey({ name: 'down', shift: false, ctrl: false });
+    controller.formKey({ name: 'letter', text: 'x', shift: false, ctrl: false });
+    controller.formKey({ name: 'e', shift: false, ctrl: true });
+    controller.formKey(submit);
+    await flush();
+    const reply = local.calls.find((call) => call.name === 'replyForm');
+    expect(reply?.args[2]).toEqual({ branch: 'develop' });
+  });
+});
+
 describe('form reply ownership (issue #171)', () => {
   test('concurrent colliding forms stay on their hosts and an old reply cannot dismiss a new form', async () => {
     const { controller, local, remote } = harness();
