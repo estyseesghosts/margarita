@@ -13,6 +13,35 @@ function server(_serverID: string, url: string): { connection: Connection; backe
   return { connection: connection(url), backend: new FakeBackend() };
 }
 
+/**
+ * A stream that reports `live` and then keeps its stop pending until `release()`, so a test
+ * can register a replacement while the old stop is still in flight.
+ */
+function deferredStream(backend: FakeBackend): {
+  started: Promise<void>;
+  release: () => void;
+} {
+  let start!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    start = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  backend.eventsHook = (signal: AbortSignal) =>
+    (async function* () {
+      yield { kind: 'connected' };
+      start();
+      await gate;
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    })();
+  return { started, release };
+}
+
 describe('ServerConnectionManager', () => {
   test('local and two remote servers coexist and stay isolated', () => {
     const manager = new ServerConnectionManager();
@@ -162,6 +191,42 @@ describe('ServerConnectionManager', () => {
     for (const release of releases) release();
     await Bun.sleep(30);
     expect(seen.filter((entry) => entry.startsWith('old:'))).toEqual([]);
+    await manager.dispose();
+  });
+
+  test('a delayed old-stream stop cannot offline a replacement registration (#270)', async () => {
+    const manager = new ServerConnectionManager();
+    const first = server('srv_1', 'http://one:4096');
+    manager.add({ serverID: 'srv_1', ...first });
+    const stop = deferredStream(first.backend);
+    manager.startStream('srv_1', { onBatch: () => {}, onStatus: () => {} });
+    await stop.started;
+    const disconnecting = manager.disconnect('srv_1');
+    await Bun.sleep(0);
+    const replacement = server('srv_1', 'http://two:4096');
+    manager.add({ serverID: 'srv_1', ...replacement });
+    manager.startStream('srv_1', { onBatch: () => {}, onStatus: () => {} });
+    stop.release();
+    await disconnecting;
+    expect(manager.serverFor('srv_1').backend).toBe(replacement.backend);
+    expect(manager.serverFor('srv_1').state).toBe('connecting');
+    await manager.dispose();
+  });
+
+  test('a delayed old-stream stop cannot remove a replacement registration (#270)', async () => {
+    const manager = new ServerConnectionManager();
+    const first = server('srv_1', 'http://one:4096');
+    manager.add({ serverID: 'srv_1', ...first });
+    const stop = deferredStream(first.backend);
+    manager.startStream('srv_1', { onBatch: () => {}, onStatus: () => {} });
+    await stop.started;
+    const removing = manager.remove('srv_1');
+    await Bun.sleep(0);
+    const replacement = server('srv_1', 'http://two:4096');
+    manager.add({ serverID: 'srv_1', ...replacement });
+    stop.release();
+    await removing;
+    expect(manager.backendFor('srv_1')).toBe(replacement.backend);
     await manager.dispose();
   });
 

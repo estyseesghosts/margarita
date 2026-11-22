@@ -189,13 +189,24 @@ export class ServerConnectionManager {
 
   /** Stops a server's stream but keeps it registered (its sessions stay cached). */
   async disconnect(serverID: string): Promise<void> {
+    // Capture ownership before awaiting: a replacement may be registered with the same ID
+    // while the old stream is still stopping, and must not be marked offline (#270).
+    const registration = this.servers.get(serverID)?.registration;
     await this.stopStream(serverID);
-    if (this.servers.has(serverID)) this.setState(serverID, 'offline');
+    if (registration === undefined) return;
+    const current = this.servers.get(serverID);
+    if (current?.registration !== registration) return;
+    this.setState(serverID, 'offline');
   }
 
   /** Forgets a server entirely. Never tells the remote service to stop anything. */
   async remove(serverID: string): Promise<void> {
+    // Same ownership rule as disconnect: never delete a replacement registration (#270).
+    const registration = this.servers.get(serverID)?.registration;
     await this.stopStream(serverID);
+    if (registration === undefined) return;
+    const current = this.servers.get(serverID);
+    if (current?.registration !== registration) return;
     if (this.servers.delete(serverID)) this.emit();
   }
 
