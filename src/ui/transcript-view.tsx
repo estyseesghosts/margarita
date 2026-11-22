@@ -390,7 +390,8 @@ export function WelcomePanel(props: WelcomeProps) {
           <text fg={props.theme.dim}>{`margarita v${props.controller.version}`}</text>
         </box>
         <Show when={wide()}>
-          <box flexDirection="column" marginLeft={2} flexShrink={0}>
+          {/* One row lower than the greeting so the hints align with the detail row. */}
+          <box flexDirection="column" marginLeft={2} marginTop={1} flexShrink={0}>
             <text fg={props.theme.dim}>← overview (empty prompt)</text>
             <text fg={props.theme.dim}>Alt+P model</text>
             <text fg={props.theme.dim}>Ctrl+O details · F1 help</text>
