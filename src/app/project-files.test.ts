@@ -101,19 +101,37 @@ describe('unreadable directories are reported, not treated as empty (#279)', () 
     });
   });
 
-  test('sample paths stay root-relative and the list is capped', async () => {
+  test('samples are capped, distinct, safe and independent of readdir order (#292)', async () => {
     const root = await tree();
-    for (let index = 0; index < 6; index += 1) await mkdir(join(root, `denied${index}`));
-    const result = await scanProjectFiles(root, {
-      readdir: async (path, options) => {
-        if (path !== root) throw fsError('EPERM');
-        return readdir(path, options);
-      },
-    });
-    expect(result.unreadable.count).toBe(6);
-    expect(result.unreadable.samples).toHaveLength(3);
-    expect(result.unreadable.samples[0]).toEqual({ path: 'denied0', code: 'EPERM' });
-    expect(result.incomplete).toBe(true);
+    const denied = Array.from({ length: 6 }, (_, index) => `denied${index}`);
+    for (const name of denied) await mkdir(join(root, name));
+    const entries = await readdir(root, { withFileTypes: true });
+    // Filesystem enumeration order is not a contract: exercise the same entries in three
+    // different orders and assert only the documented guarantees.
+    const orders = [
+      (list: Dirent[]) => list,
+      (list: Dirent[]) => list.toReversed(),
+      (list: Dirent[]) => [...list.slice(3), ...list.slice(0, 3)],
+    ];
+    for (const order of orders) {
+      const result = await scanProjectFiles(root, {
+        readdir: async (path) => {
+          if (path !== root) throw fsError('EPERM');
+          return order([...entries]);
+        },
+      });
+      expect(result.unreadable.count).toBe(6);
+      expect(result.unreadable.samples).toHaveLength(3);
+      const paths = result.unreadable.samples.map((sample) => sample.path);
+      expect(new Set(paths).size).toBe(3);
+      for (const sample of result.unreadable.samples) {
+        expect(denied).toContain(sample.path);
+        expect(sample.code).toBe('EPERM');
+        expect(sample.path.startsWith('/')).toBe(false);
+        expect(sample.path.includes(root)).toBe(false);
+      }
+      expect(result.incomplete).toBe(true);
+    }
   });
 
   test('a stalled read is abandoned at the deadline and cannot mutate the returned result', async () => {
