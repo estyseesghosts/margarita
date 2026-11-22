@@ -98,6 +98,8 @@ export type InspectorOverlay = {
   query: string;
   /** First visible document line (0-based), independent of the conversation scroll. */
   offset: number;
+  /** First visible terminal cell (0-based); overlong lines never wrap (#228). */
+  column: number;
   loading: boolean;
   /** The payload being shown; cached content until retrieval succeeds. */
   payload?: ToolResultPayload | undefined;

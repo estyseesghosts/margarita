@@ -22,6 +22,7 @@ import { rewindTimeLabel } from '../domain/rewind.ts';
 import { sanitizeTerminalText } from '../domain/sanitize-text.ts';
 import type { SessionSummary, TokenUsage } from '../domain/session.ts';
 import { localCommands } from '../domain/slash-command.ts';
+import { sliceCells } from '../domain/text-width.ts';
 import { completenessLabel } from '../domain/transcript.ts';
 import { formatCost, formatTokenCount } from '../domain/usage-format.ts';
 import type { Theme } from './theme.ts';
@@ -102,10 +103,14 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
         {(overlay: Accessor<Extract<Overlay, { kind: 'inspector' }>>) => {
           const dimensions = useTerminalDimensions();
           const rows = () => Math.max(4, dimensions().height - 12);
+          // One logical line is one physical row: skip the border, padding and line number.
+          const lineWidth = () => Math.max(8, dimensions().width - 12);
           const view = () => props.controller.inspectorView(rows());
           const matches = () => props.controller.inspectorMatches();
           const matchCount = () => matches().length;
           const shown = () => view();
+          const visibleLine = (line: string) =>
+            sliceCells(sanitizeTerminalText(line), overlay().column, lineWidth());
           return (
             <box
               border
@@ -136,7 +141,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                 when={overlay().query !== ''}
                 fallback={
                   <text fg={props.theme.dim}>
-                    {'/ search · Enter next match · Ctrl+Y copy · Ctrl+S save'}
+                    {'/ search · Enter next match · ←/→ scroll · Ctrl+Y copy · Ctrl+S save'}
                   </text>
                 }
               >
@@ -155,7 +160,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                           fg={props.theme.dim}
                         >{`${lineNumber().toString().padStart(6)}  `}</text>
                         <text fg={isMatch() ? props.theme.accent : props.theme.text}>
-                          {sanitizeTerminalText(line)}
+                          {visibleLine(line).text}
                         </text>
                       </box>
                     );

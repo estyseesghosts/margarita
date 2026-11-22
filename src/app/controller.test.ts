@@ -2170,6 +2170,32 @@ describe('output inspector (#221, #222)', () => {
     expect(view.lines[0]).toBe('row0');
     controller.dispose();
   });
+
+  test('horizontal scrolling never changes the logical window (#228)', async () => {
+    const { controller } = inspectorFixture();
+    await attach(controller, 'ses_a');
+    controller.openInspector();
+    await flush();
+    const overlay = () => {
+      const value = controller.state.overlay;
+      if (value.kind !== 'inspector') throw new Error('inspector not open');
+      return value;
+    };
+    expect(overlay().column).toBe(0);
+    controller.inspectorKey({ name: 'right', ctrl: false, alt: false, shift: false });
+    expect(overlay().column).toBe(8);
+    controller.inspectorKey({ name: 'right', ctrl: false, alt: false, shift: false });
+    expect(overlay().column).toBe(16);
+    controller.inspectorKey({ name: 'left', ctrl: false, alt: false, shift: false });
+    expect(overlay().column).toBe(8);
+    controller.inspectorKey({ name: 'left', ctrl: false, alt: false, shift: false });
+    controller.inspectorKey({ name: 'left', ctrl: false, alt: false, shift: false });
+    expect(overlay().column).toBe(0);
+    expect(controller.inspectorView(20).offset).toBe(0);
+    controller.inspectorKey({ name: 'r', ctrl: false, alt: false, shift: false, text: 'row600' });
+    expect(controller.inspectorMatches()).toEqual([600]);
+    controller.dispose();
+  });
 });
 
 describe('tool-group focus', () => {

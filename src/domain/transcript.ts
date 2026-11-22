@@ -3,6 +3,7 @@ import type { ModelSelection } from './model-ref.ts';
 import { sanitizeTerminalText } from './sanitize-text.ts';
 import { assertNever, type TokenUsage } from './session.ts';
 import { truncatePrompt } from './sticky-prompt.ts';
+import { clipLineTailToCells, clipLineToCells, lineRows } from './text-width.ts';
 import type { WorkerJob } from './worker.ts';
 
 /** Frontend projection of server messages; adapters map wire types into these. */
@@ -958,23 +959,33 @@ export function boundedPreview(
   width: number,
 ): { text: string; hiddenRows: number } {
   const safeWidth = Math.max(1, width);
+  const budget = Math.max(0, maxRows);
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
   const shown: string[] = [];
   let rows = 0;
-  for (const [index, line] of lines.entries()) {
-    const lineRows = Math.max(1, Math.ceil(Math.max(1, line.length) / safeWidth));
-    if (rows + lineRows > maxRows) {
-      if (shown.length === 0) shown.push(line);
-      const consumed = Math.max(1, shown.length);
-      let hidden = 0;
-      for (const remaining of lines.slice(consumed)) {
-        hidden += Math.max(1, Math.ceil(Math.max(1, remaining.length) / safeWidth));
-      }
-      return { text: shown.join('\n'), hiddenRows: hidden };
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    const total = lineRows(line, safeWidth);
+    if (rows + total <= budget) {
+      shown.push(line);
+      rows += total;
+      continue;
     }
-    shown.push(line);
-    rows += lineRows;
-    if (index === lines.length - 1) return { text: shown.join('\n'), hiddenRows: 0 };
+    const remaining = budget - rows;
+    let hidden = 0;
+    if (remaining > 0) {
+      // An overlong first line is clipped to the remaining physical-row budget instead of
+      // being shown whole: one minified payload must never cost thousands of rows (#228).
+      const clipped = clipLineToCells(line, remaining * safeWidth);
+      shown.push(clipped.text);
+      hidden += Math.max(0, total - lineRows(clipped.text, safeWidth));
+    } else {
+      hidden += total;
+    }
+    for (let rest = index + 1; rest < lines.length; rest += 1) {
+      hidden += lineRows(lines[rest] ?? '', safeWidth);
+    }
+    return { text: shown.join('\n'), hiddenRows: hidden };
   }
   return { text: shown.join('\n'), hiddenRows: 0 };
 }
@@ -1042,21 +1053,31 @@ export function boundedTailPreview(
   width: number,
 ): { text: string; hiddenRows: number } {
   const safeWidth = Math.max(1, width);
+  const budget = Math.max(0, maxRows);
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
   const shown: string[] = [];
   let rows = 0;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index] ?? '';
-    const lineRows = Math.max(1, Math.ceil(Math.max(1, line.length) / safeWidth));
-    if (rows + lineRows > maxRows && shown.length > 0) {
-      let hidden = 0;
-      for (const remaining of lines.slice(0, index + 1)) {
-        hidden += Math.max(1, Math.ceil(Math.max(1, remaining.length) / safeWidth));
-      }
-      return { text: shown.toReversed().join('\n'), hiddenRows: hidden };
+    const total = lineRows(line, safeWidth);
+    if (rows + total <= budget) {
+      shown.push(line);
+      rows += total;
+      continue;
     }
-    shown.push(line);
-    rows += lineRows;
+    let hidden = 0;
+    for (let head = 0; head < index; head += 1) {
+      hidden += lineRows(lines[head] ?? '', safeWidth);
+    }
+    if (shown.length === 0 && budget > 0) {
+      // The diagnosis itself is one huge physical row: keep its tail, not the whole line.
+      const clipped = clipLineTailToCells(line, budget * safeWidth);
+      shown.push(clipped.text);
+      hidden += Math.max(0, total - lineRows(clipped.text, safeWidth));
+    } else {
+      hidden += total;
+    }
+    return { text: shown.toReversed().join('\n'), hiddenRows: hidden };
   }
   return { text: shown.toReversed().join('\n'), hiddenRows: 0 };
 }

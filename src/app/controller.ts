@@ -5954,6 +5954,7 @@ export class AppController {
       title: `${target.tool.name}${detail}`,
       query: '',
       offset: 0,
+      column: 0,
       loading: true,
       payload: cachedToolResult(target.tool),
     });
@@ -6094,6 +6095,12 @@ export class AppController {
         return;
       case 'down':
         this.moveInspector(1);
+        return;
+      case 'left':
+        this.setInspectorState({ column: Math.max(0, overlay.column - 8) });
+        return;
+      case 'right':
+        this.setInspectorState({ column: overlay.column + 8 });
         return;
       case 'pageup':
         this.moveInspector(-AppController.INSPECTOR_PAGE_ROWS);

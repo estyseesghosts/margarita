@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import type { ExecutionMarker } from './execution-segment.ts';
 import { sanitizeTerminalText } from './sanitize-text.ts';
+import { cellWidth } from './text-width.ts';
 import {
   type AssistantPart,
   attachBackgroundNotices,
@@ -1069,6 +1070,35 @@ describe('bounded preview policy (#219, #220)', () => {
     const bounded = boundedPreview(text, 4, 40);
     expect(bounded.text).toBe('x'.repeat(160));
     expect(bounded.hiddenRows).toBe(1);
+  });
+
+  test('an overlong single line is clipped to compact, detailed and expanded budgets (#228)', () => {
+    const ascii = 'x'.repeat(100_000);
+    for (const budget of [previewBudget('output', false), previewBudget('output', true), 100]) {
+      const bounded = boundedPreview(ascii, budget, 80);
+      expect(cellWidth(bounded.text)).toBeLessThanOrEqual(budget * 80);
+      expect(bounded.text.endsWith('…')).toBe(true);
+      expect(bounded.hiddenRows).toBeGreaterThan(0);
+    }
+    expect(boundedPreview(ascii, 0, 80)).toEqual({ text: '', hiddenRows: 1250 });
+  });
+
+  test('wide text and tabs never exceed the row budget or split a grapheme', () => {
+    const wide = boundedPreview('日'.repeat(5000), 2, 10);
+    expect(cellWidth(wide.text)).toBeLessThanOrEqual(20);
+    expect(wide.text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+
+    const tabs = boundedPreview('\t'.repeat(5000), 2, 10);
+    expect(cellWidth(tabs.text)).toBeLessThanOrEqual(20);
+  });
+
+  test('a huge final error keeps its diagnosis inside the tail budget (#228)', () => {
+    const text = `${'x'.repeat(100_000)}error: cannot find module`;
+    const bounded = boundedTailPreview(text, 4, 40);
+    expect(bounded.text.endsWith('error: cannot find module')).toBe(true);
+    expect(bounded.text.startsWith('…')).toBe(true);
+    expect(cellWidth(bounded.text)).toBeLessThanOrEqual(160);
+    expect(bounded.hiddenRows).toBeGreaterThan(0);
   });
 
   test('tail preview keeps the diagnosis and counts the hidden head', () => {
