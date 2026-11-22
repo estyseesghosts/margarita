@@ -462,6 +462,7 @@ export function toToolResult(
     ...(tool.output === undefined ? {} : { text: tool.output }),
     ...(tool.diff === undefined ? {} : { diff: tool.diff }),
     files: tool.files ?? [],
+    ...(tool.executionError === undefined ? {} : { executionError: tool.executionError }),
     completeness,
   };
 }

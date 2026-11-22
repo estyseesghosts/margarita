@@ -7,7 +7,12 @@ import type {
   ToolContent,
 } from '@opencode/client';
 
-import { maxToolOutputChars, toTranscriptMessage, toWorkerJob } from './wire-mapping.ts';
+import {
+  maxToolOutputChars,
+  toToolResult,
+  toTranscriptMessage,
+  toWorkerJob,
+} from './wire-mapping.ts';
 
 describe('user attachment labels (#249)', () => {
   test('removes terminal controls and collapses line breaks in display labels', () => {
@@ -376,5 +381,21 @@ describe('Code Mode nested calls and file parts (#216, #218)', () => {
     expect(tool.output).toBeUndefined();
     expect(tool.files).toHaveLength(1);
     expect(tool.files?.[0]?.size).toBe(3);
+  });
+
+  test('the inspector payload retains every file and the script failure (#277)', () => {
+    const files = Array.from({ length: 1000 }, (_, index) => ({
+      type: 'file' as const,
+      uri: `file:///tmp/f${index}.txt`,
+      mime: 'text/plain',
+    }));
+    const message = executeTool([{ type: 'text', text: 'partial' }, ...files], {
+      error: 'script exploded\nat line 2',
+    });
+    const payload = toToolResult(message, 'tool_exec');
+    expect(payload?.files).toHaveLength(1000);
+    expect(payload?.files[999]?.uri).toBe('file:///tmp/f999.txt');
+    expect(payload?.executionError).toBe('script exploded\nat line 2');
+    expect(payload?.completeness).toBe('complete');
   });
 });

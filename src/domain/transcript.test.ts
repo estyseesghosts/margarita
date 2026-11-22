@@ -9,6 +9,7 @@ import {
   backgroundHint,
   boundedPreview,
   boundedTailPreview,
+  cachedToolResult,
   describeTool,
   foldTranscript,
   formatToolTiming,
@@ -20,6 +21,9 @@ import {
   semanticPreview,
   semanticResultKind,
   type ToolCall,
+  toolFileLabel,
+  toolFileWindow,
+  toolMetadataRowBudget,
   type TranscriptMessage,
   type TranscriptNode,
   transcriptWindowStep,
@@ -1127,6 +1131,65 @@ describe('bounded preview policy (#219, #220)', () => {
     expect(semanticResultKind(call)).toBe('json');
     expect(semanticPreview(call).text).toContain('\n  "name": "resource"');
     expect(call.output).toBe('{"name":"resource","size":2}');
+  });
+});
+
+describe('tool metadata budgets (#277)', () => {
+  test('compact, detailed and expanded metadata budgets are ordered and bounded', () => {
+    for (const kind of ['error', 'files'] as const) {
+      const compact = toolMetadataRowBudget(kind, false);
+      const detailed = toolMetadataRowBudget(kind, true);
+      const expanded = toolMetadataRowBudget(kind, true, true);
+      expect(compact).toBeGreaterThan(0);
+      expect(detailed).toBeGreaterThan(compact);
+      expect(expanded).toBeGreaterThan(detailed);
+      expect(expanded).toBeLessThanOrEqual(48);
+    }
+  });
+
+  test('file windows keep the first rows and report the exact hidden count', () => {
+    const files = Array.from({ length: 1000 }, (_, index) => ({ name: `f${index}.ts` }));
+    expect(toolFileWindow(files, 4)).toEqual({ visible: files.slice(0, 4), hidden: 996 });
+    expect(toolFileWindow(files.slice(0, 2), 4)).toEqual({
+      visible: files.slice(0, 2),
+      hidden: 0,
+    });
+    expect(toolFileWindow(files, 0)).toEqual({ visible: [], hidden: 1000 });
+  });
+
+  test('file labels stay on one logical line and keep the full path', () => {
+    expect(
+      toolFileLabel({
+        name: 'report\u001b[31m.pdf',
+        mime: 'application/pdf',
+        size: 2048,
+        uri: 'file:///tmp/a\nb.pdf',
+      }),
+    ).toBe('report.pdf · application/pdf · 2.0 kB · file:///tmp/a b.pdf');
+  });
+
+  test('cached payloads retain every file and the script failure', () => {
+    const files = Array.from({ length: 1000 }, (_, index) => ({ name: `f${index}.ts` }));
+    const payload = cachedToolResult({
+      id: 't1',
+      name: 'execute',
+      status: 'completed',
+      input: {},
+      files,
+      executionError: 'script failed\nat line 2',
+      startedAt: 0,
+    });
+    expect(payload.files).toHaveLength(1000);
+    expect(payload.executionError).toBe('script failed\nat line 2');
+  });
+
+  test('a 10k-line and 200k-cell script error fits a compact physical-row budget', () => {
+    const text = `${previewLines(10_000, 'error row ')}\n${'x'.repeat(200_000)}tail diagnosis`;
+    const bounded = boundedTailPreview(text, toolMetadataRowBudget('error', false), 40);
+    expect(bounded.text.split('\n').length).toBeLessThanOrEqual(4);
+    expect(cellWidth(bounded.text)).toBeLessThanOrEqual(4 * 40);
+    expect(bounded.text.endsWith('tail diagnosis')).toBe(true);
+    expect(bounded.hiddenRows).toBeGreaterThan(0);
   });
 });
 

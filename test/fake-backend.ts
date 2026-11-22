@@ -150,6 +150,9 @@ export class FakeBackend implements Backend {
             ...(part.tool.output === undefined ? {} : { text: part.tool.output }),
             ...(part.tool.diff === undefined ? {} : { diff: part.tool.diff }),
             files: part.tool.files ?? [],
+            ...(part.tool.executionError === undefined
+              ? {}
+              : { executionError: part.tool.executionError }),
             completeness:
               part.tool.outputTruncated === 'server'
                 ? 'server-truncated'

@@ -1,6 +1,7 @@
+import { formatBytes } from './attachment.ts';
 import type { ExecutionMarker } from './execution-segment.ts';
 import type { ModelSelection } from './model-ref.ts';
-import { sanitizeTerminalText } from './sanitize-text.ts';
+import { sanitizeSingleLine, sanitizeTerminalText } from './sanitize-text.ts';
 import { assertNever, type TokenUsage } from './session.ts';
 import { truncatePrompt } from './sticky-prompt.ts';
 import { clipLineTailToCells, clipLineToCells, lineRows } from './text-width.ts';
@@ -20,6 +21,46 @@ export type ToolFileReference = Readonly<{
   /** A normal file/resource URI; never a `data:` payload. */
   uri?: string;
 }>;
+
+/**
+ * One safe display label for a tool file. The value is not clipped here: the transcript
+ * decides its cell budget, while the inspector/copy path must keep the full metadata.
+ */
+export function toolFileLabel(file: ToolFileReference): string {
+  return [
+    sanitizeSingleLine(file.name),
+    ...(file.mime === undefined ? [] : [sanitizeSingleLine(file.mime)]),
+    ...(file.size === undefined ? [] : [formatBytes(file.size)]),
+    ...(file.uri === undefined ? [] : [sanitizeSingleLine(file.uri)]),
+  ].join(' · ');
+}
+
+/** Corporeal row ceilings for metadata outside the nested-child budget (#277). */
+export const toolMetadataRows: Readonly<
+  Record<'compact' | 'detailed' | 'expanded', Readonly<{ error: number; files: number }>>
+> = {
+  compact: { error: 4, files: 4 },
+  detailed: { error: 12, files: 16 },
+  expanded: { error: 24, files: 48 },
+};
+
+export function toolMetadataRowBudget(
+  kind: 'error' | 'files',
+  detailed: boolean,
+  expanded = false,
+): number {
+  return toolMetadataRows[expanded ? 'expanded' : detailed ? 'detailed' : 'compact'][kind];
+}
+
+/** First `rows` file references plus the exact number kept out of the inline window. */
+export function toolFileWindow(
+  files: readonly ToolFileReference[],
+  rows: number,
+): { visible: readonly ToolFileReference[]; hidden: number } {
+  const budget = Math.max(0, Math.floor(rows));
+  if (files.length <= budget) return { visible: files, hidden: 0 };
+  return { visible: files.slice(0, budget), hidden: files.length - budget };
+}
 
 /** One nested Code Mode operation reported in `execute.metadata.toolCalls`. */
 export type ToolCallChild = Readonly<{
@@ -90,6 +131,8 @@ export type ToolResultPayload = Readonly<{
   text?: string;
   diff?: string;
   files: readonly ToolFileReference[];
+  /** Code Mode's script failure, retained separately from the outer completion status. */
+  executionError?: string;
   completeness: SourceCompleteness;
 }>;
 
@@ -99,6 +142,7 @@ export function cachedToolResult(tool: ToolCall): ToolResultPayload {
     ...(tool.output === undefined ? {} : { text: tool.output }),
     ...(tool.diff === undefined ? {} : { diff: tool.diff }),
     files: tool.files ?? [],
+    ...(tool.executionError === undefined ? {} : { executionError: tool.executionError }),
     completeness:
       tool.outputTruncated === 'server'
         ? 'server-truncated'

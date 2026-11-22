@@ -1960,6 +1960,79 @@ describe('full-result inspector (#222)', () => {
     expect(controller.state.composer.text).toBe('i');
   });
 
+  test('script errors and file metadata stay within the inline row budget (#277)', async () => {
+    const error = `${Array.from({ length: 10_000 }, (_, index) => `error row ${index}`).join('\n')}\n${'x'.repeat(200_000)}tail diagnosis`;
+    const files = Array.from({ length: 1000 }, (_, index) => ({
+      name: `f${index}.ts`,
+      ...(index === 999 ? { uri: 'file:///tmp/ω-f999.ts', mime: 'text/plain' } : {}),
+    }));
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'run it', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'x1',
+                name: 'execute',
+                status: 'completed',
+                input: { code: 'return 1' },
+                output: 'partial',
+                executionError: error,
+                files,
+                startedAt: 2,
+                completedAt: 3,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend, { width: 80, height: 24 });
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    let frame = setup.captureCharFrame();
+    expect(frame.split('\n').filter((line) => line !== '').length).toBeLessThanOrEqual(24);
+    expect(frame).toContain('script failed:');
+    expect(frame).toContain('tail diagnosis');
+    expect(frame).toContain('earlier error rows');
+    expect(frame).toContain('996 more files');
+    expect(frame).not.toContain('f999.ts');
+
+    // A short terminal still costs at most its physical rows and cells.
+    setup.resize(40, 12);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame.split('\n').filter((line) => line !== '').length).toBeLessThanOrEqual(12);
+    for (const line of frame.split('\n')) expect(cellWidth(line)).toBeLessThanOrEqual(40);
+
+    setup.resize(80, 24);
+    await settle(setup);
+    setup.mockInput.pressKey('o', { ctrl: true });
+    await settle(setup);
+    setup.mockInput.pressArrow('down', { ctrl: true });
+    await settle(setup);
+    setup.mockInput.pressKey('i');
+    await settle(setup);
+    expect(controller.state.overlay.kind).toBe('inspector');
+    for (const character of 'f999') setup.mockInput.pressKey(character);
+    await settle(setup);
+    const overlay = controller.state.overlay;
+    if (overlay.kind !== 'inspector') throw new Error('inspector closed');
+    expect(overlay.offset).toBeGreaterThan(10_000);
+    expect(setup.captureCharFrame()).toContain('f999.ts');
+    controller.dispose();
+  });
+
   test('plain i keeps typing when a tool exists but no row is focused', async () => {
     const backend = backendWithSession();
     backend.messages = {

@@ -1,7 +1,28 @@
-import type { ToolResultPayload } from './transcript.ts';
+import { sanitizeTerminalText } from './sanitize-text.ts';
+import { toolFileLabel, type ToolResultPayload } from './transcript.ts';
 
 /** Text and diff are inspected independently; a diff is never concatenated into copy bytes. */
 export type InspectorKind = 'text' | 'diff';
+
+/** Full execution error and file metadata stay reachable even when inline rows are capped. */
+function metadataLines(payload: ToolResultPayload): string[] {
+  const lines: string[] = [];
+  if (payload.executionError !== undefined) {
+    lines.push('script failed:', ...sanitizeTerminalText(payload.executionError).split('\n'));
+  }
+  if (payload.files.length > 0) {
+    if (lines.length > 0) lines.push('');
+    lines.push(`files (${payload.files.length}):`);
+    for (const file of payload.files) lines.push(`  ${toolFileLabel(file)}`);
+  }
+  return lines;
+}
+
+function withMetadata(base: readonly string[], payload: ToolResultPayload): string[] {
+  const metadata = metadataLines(payload);
+  if (metadata.length === 0) return [...base];
+  return base.length === 0 ? metadata : [...base, '', ...metadata];
+}
 
 /**
  * Lines of one inspectable document. The full retained payload stays in memory as one
@@ -13,12 +34,18 @@ export function inspectorDocument(payload: ToolResultPayload): {
   kind: InspectorKind;
 } {
   if (payload.text !== undefined && payload.text !== '') {
-    return { lines: payload.text.replace(/\r\n?/g, '\n').split('\n'), kind: 'text' };
+    return {
+      lines: withMetadata(payload.text.replace(/\r\n?/g, '\n').split('\n'), payload),
+      kind: 'text',
+    };
   }
   if (payload.diff !== undefined) {
-    return { lines: payload.diff.replace(/\r\n?/g, '\n').split('\n'), kind: 'diff' };
+    return {
+      lines: withMetadata(payload.diff.replace(/\r\n?/g, '\n').split('\n'), payload),
+      kind: 'diff',
+    };
   }
-  return { lines: [], kind: 'text' };
+  return { lines: withMetadata([], payload), kind: 'text' };
 }
 
 /** Case-insensitive, literal substring search; empty query has no matches. */
@@ -94,8 +121,14 @@ export function inspectorWindow(
   return { lines: lines.slice(first, first + size), offset: first, total };
 }
 
-/** Copy/save bytes for one relied-on source: never the display window. */
+/**
+ * Copy/save bytes for one relied-on source: never the display window. Text still wins over
+ * a diff, but retained script failures and file metadata are appended so overflow paths
+ * never make them unreachable (#277).
+ */
 export function inspectorText(payload: ToolResultPayload): string {
-  if (payload.text !== undefined && payload.text !== '') return payload.text;
-  return payload.diff ?? '';
+  const base = payload.text !== undefined && payload.text !== '' ? payload.text : payload.diff;
+  const metadata = metadataLines(payload);
+  if (base === undefined || base === '') return metadata.join('\n');
+  return metadata.length === 0 ? base : `${base}\n\n${metadata.join('\n')}`;
 }

@@ -35,6 +35,33 @@ describe('inspector document and search (#221, #222)', () => {
     expect(inspectorText(payload())).toBe('');
   });
 
+  test('a bounded inline row never hides the script error or file metadata (#277)', () => {
+    const files = Array.from({ length: 1000 }, (_, index) => ({
+      name: `f${index}.ts`,
+      size: index,
+    }));
+    const full = payload({
+      text: 'result',
+      executionError: 'script failed\nat line 2',
+      files,
+    });
+    const document = inspectorDocument(full);
+    expect(document.kind).toBe('text');
+    expect(document.lines.slice(0, 5)).toEqual([
+      'result',
+      '',
+      'script failed:',
+      'script failed',
+      'at line 2',
+    ]);
+    expect(document.lines).toContain('files (1000):');
+    expect(document.lines).toContain('  f999.ts · 999 B');
+    const copied = inspectorText(full);
+    expect(copied).toContain('at line 2');
+    expect(copied).toContain('f999.ts · 999 B');
+    expect(inspectorIndex(full).matches('f999.ts')).toEqual([1006]);
+  });
+
   test('windows are clamped and materialize only the requested row count', () => {
     const lines = Array.from({ length: 10_000 }, (_, index) => `line${index}`);
     const middle = inspectorWindow(lines, 5000, 40);

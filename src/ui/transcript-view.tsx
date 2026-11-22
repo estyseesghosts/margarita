@@ -52,7 +52,10 @@ import {
   semanticPreview,
   type ToolCall,
   type ToolCallChild,
+  toolFileLabel,
+  toolFileWindow,
   toolIdentity,
+  toolMetadataRowBudget,
   type TranscriptNode,
   windowNodes,
 } from '../domain/transcript.ts';
@@ -973,6 +976,25 @@ function ToolView(props: {
   const childView = createMemo(() =>
     pagedToolChildren(props.tool.children ?? [], childBudget(), props.childPageFor(props.tool.id)),
   );
+  // Metadata is outside the nested-child budget: a script error or a thousand file parts
+  // must still fit the mode's physical-row allowance (#277). Full values stay in the
+  // inspector/copy payload; only this inline presentation is clipped.
+  const scriptError = createMemo(() => {
+    const error = props.tool.executionError;
+    return error === undefined
+      ? undefined
+      : boundedTailPreview(
+          sanitizeText(error),
+          toolMetadataRowBudget('error', props.detailed, props.userExpanded === true),
+          lineWidth(),
+        );
+  });
+  const fileView = createMemo(() =>
+    toolFileWindow(
+      props.tool.files ?? [],
+      toolMetadataRowBudget('files', props.detailed, props.userExpanded === true),
+    ),
+  );
 
   const bullet = () =>
     failed()
@@ -1003,19 +1025,39 @@ function ToolView(props: {
           <text fg={props.theme.accent}>{props.detailed ? '  (I)' : '  (Enter)'}</text>
         </Show>
       </box>
-      <Show when={props.tool.executionError}>
-        {(error: Accessor<string>) => (
-          <text fg={props.theme.error}>{`  └ script failed: ${sanitizeText(error())}`}</text>
+      <Show when={scriptError()}>
+        {(bounded: Accessor<{ text: string; hiddenRows: number }>) => (
+          <>
+            <text fg={props.theme.error}>
+              {`  └ script failed: ${indent(bounded().text)}`}
+            </text>
+            <Show when={bounded().hiddenRows > 0}>
+              <text fg={props.theme.error}>
+                {truncateToWidth(
+                  `    … ${bounded().hiddenRows} earlier error rows hidden · inspect for the full script error`,
+                  lineWidth(),
+                )}
+              </text>
+            </Show>
+          </>
         )}
       </Show>
-      <Show when={props.tool.files !== undefined && props.tool.files.length > 0}>
-        <For each={props.tool.files ?? []}>
+      <Show when={fileView().visible.length > 0}>
+        <For each={fileView().visible}>
           {(file) => (
             <text fg={props.theme.dim}>
-              {`  └ ${file.name}${file.mime === undefined ? '' : ` · ${file.mime}`}${file.size === undefined ? '' : ` · ${formatBytes(file.size)}`}${file.uri === undefined ? '' : ` · ${sanitizeText(file.uri)}`}`}
+              {truncateToWidth(`  └ ${toolFileLabel(file)}`, lineWidth())}
             </text>
           )}
         </For>
+        <Show when={fileView().hidden > 0}>
+          <text fg={props.theme.dim}>
+            {truncateToWidth(
+              `    … ${fileView().hidden} more ${fileView().hidden === 1 ? 'file' : 'files'} · inspect for the full metadata`,
+              lineWidth(),
+            )}
+          </text>
+        </Show>
       </Show>
       <Show when={childrenVisible() ? props.tool.children : undefined}>
         {() => (
@@ -1248,12 +1290,6 @@ function childPageLine(
       ? ''
       : ` · ${paging.previous}/${paging.next} page`;
   return truncateToWidth(`    page ${view.page + 1} of ${view.pages}${keys}`, Math.max(8, width));
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** Compact-mode colours for a clipped patch line; semantics match the full <diff> view. */
