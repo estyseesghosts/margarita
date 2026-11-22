@@ -1983,6 +1983,67 @@ describe('grouped activity (issue #23)', () => {
   });
 });
 
+describe('Code Mode child diagnostics (#231)', () => {
+  test('compact names the failed child and detailed mode shows its available reason', async () => {
+    const backend = backendWithSession();
+    backend.mcpServers = ['lotus'];
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'run it', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'exec',
+                name: 'execute',
+                status: 'completed',
+                input: { code: 'await lotus.fail()' },
+                output: 'script output',
+                startedAt: 1,
+                completedAt: 2,
+                children: [
+                  {
+                    id: 'exec:0',
+                    parentID: 'exec',
+                    index: 0,
+                    name: 'lotus.fail',
+                    status: 'error',
+                    input: { number: 4 },
+                    error: 'permission denied by the MCP server',
+                    startedAt: 1000,
+                    completedAt: 2000,
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const compact = setup.captureCharFrame();
+    // Failures stay visible in compact mode with their available reason.
+    expect(compact).toContain('lotus.fail');
+    expect(compact).toContain('permission denied by the MCP server');
+
+    controller.toggleDetails();
+    await settle(setup);
+    const detailed = setup.captureCharFrame();
+    expect(detailed).toContain('permission denied by the MCP server');
+    expect(detailed).toContain('1.0s');
+    controller.dispose();
+  });
+});
+
 describe('live action beneath a collapsed group (issue #75)', () => {
   test('a collapsed group shows the executing call without Ctrl+O', async () => {
     const { controller, setup } = await mount(liveBackend());

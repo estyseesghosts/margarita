@@ -33,6 +33,17 @@ export type ToolCallChild = Readonly<{
   status: ToolStatus;
   /** Bounded, sanitized display input; never the full script. */
   input?: Readonly<Record<string, string | number | boolean>>;
+  /**
+   * Optional child diagnostics retained only when the server supplies them. OpenCode v2.3.x
+   * reports just `tool`, `status` and `input`; these fields stay absent rather than invented.
+   */
+  error?: string;
+  /** Bounded child output, retained only when present in the metadata. */
+  output?: string;
+  /** True when `output` was clipped to its bounded display size. */
+  outputTruncated?: boolean;
+  startedAt?: number;
+  completedAt?: number;
 }>;
 
 export type ToolCall = Readonly<{

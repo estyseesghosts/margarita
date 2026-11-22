@@ -255,6 +255,7 @@ export type WireMappingOptions = Readonly<{
 
 const childStatuses = new Set<string>(['streaming', 'running', 'completed', 'error']);
 const childInputMaxChars = 200;
+const childOutputMaxChars = 1000;
 
 function isToolStatus(value: string): value is ToolStatus {
   return childStatuses.has(value);
@@ -276,7 +277,50 @@ function childInput(value: unknown): Record<string, string | number | boolean> |
   return Object.keys(result).length === 0 ? undefined : result;
 }
 
-/** Strictly reads `metadata.toolCalls`; malformed entries are skipped, never guessed (#216). */
+/** Optional per-child error, accepted only when the server actually supplied one. */
+function childError(value: unknown): string | undefined {
+  if (typeof value === 'string' && value.trim() !== '') return sanitizeTerminalText(value);
+  if (isRecord(value) && typeof value['message'] === 'string' && value['message'].trim() !== '') {
+    return sanitizeTerminalText(value['message']);
+  }
+  return undefined;
+}
+
+/** Optional per-child output/result, bounded so one child cannot flood the transcript. */
+function childOutput(entry: Record<string, unknown>): {
+  output?: string;
+  truncated?: boolean;
+} {
+  const raw = entry['result'] ?? entry['output'];
+  if (typeof raw !== 'string' || raw === '') return {};
+  const truncated = raw.length > childOutputMaxChars;
+  const text = truncated ? `${raw.slice(0, childOutputMaxChars)}…` : raw;
+  return { output: sanitizeTerminalText(text), ...(truncated ? { truncated: true } : {}) };
+}
+
+function finiteTimestamp(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** Optional per-child timing in either `time.started/completed` or flat fields. */
+function childTiming(entry: Record<string, unknown>): {
+  startedAt?: number;
+  completedAt?: number;
+} {
+  const time = isRecord(entry['time']) ? entry['time'] : undefined;
+  const startedAt = finiteTimestamp(time?.['started']) ?? finiteTimestamp(entry['startedAt']);
+  const completedAt = finiteTimestamp(time?.['completed']) ?? finiteTimestamp(entry['completedAt']);
+  return {
+    ...(startedAt === undefined ? {} : { startedAt }),
+    ...(completedAt === undefined ? {} : { completedAt }),
+  };
+}
+
+/**
+ * Strictly reads `metadata.toolCalls`; malformed entries are skipped, never guessed (#216).
+ * OpenCode v2.3.x supplies only `tool`, `status` and `input`; optional child diagnostics are
+ * retained when a server provides them, but no field is invented (#231).
+ */
 function toolChildren(
   metadata: Record<string, unknown>,
   parentID: string,
@@ -291,6 +335,9 @@ function toolChildren(
     if (name === undefined || name === '' || typeof status !== 'string') return;
     if (!isToolStatus(status)) return;
     const input = childInput(entry['input']);
+    const error = childError(entry['error']);
+    const result = childOutput(entry);
+    const timing = childTiming(entry);
     children.push({
       id: `${parentID}:${index}`,
       parentID,
@@ -298,6 +345,12 @@ function toolChildren(
       name: sanitizeTerminalText(name),
       status,
       ...(input === undefined ? {} : { input }),
+      ...(error === undefined ? {} : { error }),
+      ...(result.output === undefined ? {} : { output: result.output }),
+      ...(result.output === undefined || result.truncated !== true
+        ? {}
+        : { outputTruncated: true }),
+      ...timing,
     });
   });
   return children.length === 0 ? undefined : children;

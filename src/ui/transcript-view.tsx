@@ -862,19 +862,51 @@ function ToolView(props: {
         {(children: Accessor<NonNullable<ToolCall['children']>>) => (
           <box flexDirection="column" paddingLeft={2}>
             <For each={children()}>
-              {(child) => (
-                <text
-                  fg={
-                    child.status === 'error'
-                      ? props.theme.error
-                      : child.status === 'running' || child.status === 'streaming'
-                        ? props.theme.accent
-                        : props.theme.dim
-                  }
-                >
-                  {`└ ${childStatusMark(child.status)} ${childLabel(child.name, props.mcpServers)}${childInputSummary(child.input)}`}
-                </text>
-              )}
+              {(child) => {
+                const color = () =>
+                  child.status === 'error'
+                    ? props.theme.error
+                    : child.status === 'running' || child.status === 'streaming'
+                      ? props.theme.accent
+                      : props.theme.dim;
+                const error = () =>
+                  child.error === undefined
+                    ? undefined
+                    : boundedTailPreview(sanitizeText(child.error), 4, lineWidth());
+                const output = () =>
+                  child.output === undefined
+                    ? undefined
+                    : boundedPreview(sanitizeText(child.output), 4, lineWidth());
+                return (
+                  <box flexDirection="column">
+                    <text fg={color()}>
+                      {`└ ${childStatusMark(child.status)} ${childLabel(child.name, props.mcpServers)}${childInputSummary(child.input)}${childTimingLabel(child)}`}
+                    </text>
+                    {/* A failed child always names itself; detailed mode adds its available reason. */}
+                    <Show when={error()}>
+                      {(bounded: Accessor<{ text: string }>) => (
+                        <text fg={props.theme.error}>{`    ↳ ${indent(bounded().text)}`}</text>
+                      )}
+                    </Show>
+                    <Show when={props.detailed ? output() : undefined}>
+                      {(bounded: Accessor<{ text: string }>) => (
+                        <text fg={props.theme.dim}>{`    ↳ ${indent(bounded().text)}`}</text>
+                      )}
+                    </Show>
+                    <Show
+                      when={
+                        props.detailed && child.status === 'error' && child.error === undefined
+                          ? true
+                          : undefined
+                      }
+                    >
+                      <text fg={props.theme.dim}>
+                        {'    ↳ the server did not report a separate reason for this child'}
+                      </text>
+                    </Show>
+                  </box>
+                );
+              }}
             </For>
           </box>
         )}
@@ -981,6 +1013,13 @@ function childStatusMark(status: ToolCallChild['status']): string {
 function childLabel(name: string, mcpServers: readonly string[]): string {
   const identity = toolIdentity(name, mcpServers);
   return identity.kind === 'mcp' ? `${identity.server}.${identity.tool}` : sanitizeText(name);
+}
+
+/** Optional per-child duration; omitted unless both server timestamps exist (#231). */
+function childTimingLabel(child: ToolCallChild): string {
+  if (child.startedAt === undefined || child.completedAt === undefined) return '';
+  const seconds = Math.max(0, child.completedAt - child.startedAt) / 1000;
+  return ` · ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds).toString()}s`;
 }
 
 function childInputSummary(input: ToolCallChild['input']): string {

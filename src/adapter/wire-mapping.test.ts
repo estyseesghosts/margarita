@@ -271,6 +271,47 @@ describe('Code Mode nested calls and file parts (#216, #218)', () => {
     expect(bare.output).toBe('ok');
   });
 
+  test('optional child diagnostics are retained when supplied and never invented (#231)', () => {
+    const tool = toolOutput(
+      executeTool([{ type: 'text', text: 'done' }], {
+        toolCalls: [
+          {
+            tool: 'lotus.fail',
+            status: 'error',
+            input: { number: 4 },
+            error: 'boom\u001b[2J',
+            result: 'partial child output',
+            time: { started: 10, completed: 30 },
+          },
+          { tool: 'lotus.ok', status: 'completed', input: { line: 1 } },
+        ],
+      }),
+    );
+    const [failed, completed] = tool.children ?? [];
+    expect(failed?.error).toBe('boom');
+    expect(failed?.output).toBe('partial child output');
+    expect(failed?.startedAt).toBe(10);
+    expect(failed?.completedAt).toBe(30);
+    expect(completed?.error).toBeUndefined();
+    expect(completed?.output).toBeUndefined();
+    expect(completed?.startedAt).toBeUndefined();
+    expect(completed?.completedAt).toBeUndefined();
+
+    const big = toolOutput(
+      executeTool([{ type: 'text', text: 'done' }], {
+        toolCalls: [
+          {
+            tool: 'lotus.big',
+            status: 'completed',
+            result: 'a'.repeat(5000),
+          },
+        ],
+      }),
+    );
+    expect(big.children?.[0]?.outputTruncated).toBe(true);
+    expect(big.children?.[0]?.output?.length).toBeLessThanOrEqual(1001);
+  });
+
   test('metadata.error marks a completed execute as a visible failure', () => {
     const tool = toolOutput(
       executeTool([{ type: 'text', text: 'partial' }], {
