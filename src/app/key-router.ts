@@ -538,6 +538,11 @@ function routeComposer(controller: AppController, key: KeyInput): boolean {
       controller.historyDown();
       return true;
     }
+    case 'space':
+      // Space is the second disclosure key whenever a transcript row owns the empty
+      // prompt; otherwise it remains ordinary composer text (#281).
+      if (composer.text === '' && controller.toggleFocusedGroup()) return true;
+      return edit(insertText(composer, ' '));
     case 'escape':
       return controller.handleEscapeKey();
     case 'tab':

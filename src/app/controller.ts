@@ -1475,6 +1475,9 @@ export class AppController {
         for (const expansionKey of Object.keys(state.expandedDiffs)) {
           if (expansionKey.startsWith(expansionPrefix)) delete state.expandedDiffs[expansionKey];
         }
+        for (const expansionKey of Object.keys(state.expandedTools)) {
+          if (expansionKey.startsWith(expansionPrefix)) delete state.expandedTools[expansionKey];
+        }
         for (const pageKey of Object.keys(state.childPages)) {
           if (pageKey.startsWith(expansionPrefix)) delete state.childPages[pageKey];
         }
@@ -5021,7 +5024,12 @@ export class AppController {
         }
         // Qualified expansion entries are `<server-qualified session key> <node key>`; match
         // them by the session-key prefix of this host only.
-        for (const map of [state.expandedGroups, state.expandedDiffs, state.childPages]) {
+        for (const map of [
+          state.expandedGroups,
+          state.expandedDiffs,
+          state.expandedTools,
+          state.childPages,
+        ]) {
           for (const key of Object.keys(map)) {
             if (this.ownsKey(key, serverID)) delete map[key];
           }
@@ -6522,8 +6530,10 @@ export class AppController {
     try {
       const files = await this.backendFor(session.serverID).sessionDiff(session.id, range);
       if (this.isDiffOverlay(session.serverID, session.id, scope, request, generation)) {
-        const anchored = anchorFile === undefined ? -1 : files.findIndex((f) => f.file === anchorFile);
-        const index = anchored >= 0 ? anchored : Math.min(previous?.index ?? 0, Math.max(0, files.length - 1));
+        const anchored =
+          anchorFile === undefined ? -1 : files.findIndex((f) => f.file === anchorFile);
+        const index =
+          anchored >= 0 ? anchored : Math.min(previous?.index ?? 0, Math.max(0, files.length - 1));
         const open = anchorOpen && files[index] !== undefined;
         const offset = open
           ? Math.min(anchorOffset, Math.max(0, patchLinesFor(files[index]!).length - 1))
@@ -6858,22 +6868,39 @@ export class AppController {
       : undefined;
   }
 
-  expandedSets(): { groups: Set<string>; diffs: Set<string> } {
+  expandedSets(): { groups: Set<string>; diffs: Set<string>; tools: Set<string> } {
     const prefix = this.expansionPrefix();
-    if (prefix === undefined) return { groups: new Set(), diffs: new Set() };
+    if (prefix === undefined) return { groups: new Set(), diffs: new Set(), tools: new Set() };
     const strip = (key: string): string => key.slice(prefix.length);
+    const keys = (map: Record<string, true>): Set<string> =>
+      new Set(
+        Object.keys(map)
+          .filter((key) => key.startsWith(prefix))
+          .map(strip),
+      );
     return {
-      groups: new Set(
-        Object.keys(this.state.expandedGroups)
-          .filter((key) => key.startsWith(prefix))
-          .map(strip),
-      ),
-      diffs: new Set(
-        Object.keys(this.state.expandedDiffs)
-          .filter((key) => key.startsWith(prefix))
-          .map(strip),
-      ),
+      groups: keys(this.state.expandedGroups),
+      diffs: keys(this.state.expandedDiffs),
+      tools: keys(this.state.expandedTools),
     };
+  }
+
+  /** Whether one tool row inside an expanded group is open (#281). */
+  isToolExpanded(id: string): boolean {
+    const prefix = this.expansionPrefix();
+    return prefix !== undefined && this.state.expandedTools[`${prefix}${id}`] === true;
+  }
+
+  toggleToolExpanded(id: string): void {
+    const prefix = this.expansionPrefix();
+    if (prefix === undefined) return;
+    const qualified = `${prefix}${id}`;
+    this.setState(
+      produce((state) => {
+        if (state.expandedTools[qualified] === true) delete state.expandedTools[qualified];
+        else state.expandedTools[qualified] = true;
+      }),
+    );
   }
 
   toggleGroup(key: string): void {
@@ -6886,6 +6913,18 @@ export class AppController {
         else state.expandedGroups[qualified] = true;
       }),
     );
+  }
+
+  /** Mouse: select and disclose one group summary without touching other groups. */
+  clickToolGroup(key: string): void {
+    this.setState('focusedGroup', key);
+    this.toggleGroup(key);
+  }
+
+  /** Mouse: select and disclose one tool row inside an expanded group (#281). */
+  clickToolRow(id: string): void {
+    this.setState('focusedGroup', `tool:${id}`);
+    this.toggleToolExpanded(id);
   }
 
   /** Folded nodes for the attached conversation; empty elsewhere. */
@@ -6941,6 +6980,7 @@ export class AppController {
    * tool results (keys `tool:<toolID>`) because everything is already expanded (#222).
    */
   collapsibleItems(): { key: string; kind: 'group' | 'diff' | 'worker' | 'tool' }[] {
+    const expandedGroups = this.expandedSets().groups;
     return this.conversationNodes().flatMap(
       (node): { key: string; kind: 'group' | 'diff' | 'worker' | 'tool' }[] => {
         if (node.kind === 'worker') return [{ key: node.key, kind: 'worker' as const }];
@@ -6948,9 +6988,20 @@ export class AppController {
           return [{ key: `tool:${node.tool.id}`, kind: 'tool' as const }];
         }
         if (this.state.detailed) return [];
-        if (node.kind === 'tool-group') return [{ key: node.key, kind: 'group' as const }];
-        if (node.kind === 'tool' && node.tool.status !== 'error' && hasOversizedDiff(node.tool)) {
-          return [{ key: `diff:${node.tool.id}`, kind: 'diff' as const }];
+        if (node.kind === 'tool') {
+          // Standalone compact failures stay expanded and standalone edits keep their
+          // inline diff; only oversized diffs are a disclosure target there (#281).
+          return node.tool.status !== 'error' && hasOversizedDiff(node.tool)
+            ? [{ key: `diff:${node.tool.id}`, kind: 'diff' as const }]
+            : [];
+        }
+        if (node.kind === 'tool-group') {
+          const group = [{ key: node.key, kind: 'group' as const }];
+          if (!expandedGroups.has(node.key)) return group;
+          return [
+            ...group,
+            ...node.tools.map((tool) => ({ key: `tool:${tool.id}`, kind: 'tool' as const })),
+          ];
         }
         return [];
       },
@@ -6984,9 +7035,14 @@ export class AppController {
     }
     if (item.kind === 'diff') this.toggleDiffExpanded(item.key.slice('diff:'.length));
     else if (item.kind === 'tool') {
-      // Detailed tools are already expanded; only an oversized diff can grow further.
-      const tool = this.toolByID(item.key.slice('tool:'.length));
-      if (tool !== undefined && hasOversizedDiff(tool)) this.toggleDiffExpanded(tool.id);
+      const id = item.key.slice('tool:'.length);
+      if (this.state.detailed) {
+        // Detailed tools are already expanded; only an oversized diff can grow further.
+        const tool = this.toolByID(id);
+        if (tool !== undefined && hasOversizedDiff(tool)) this.toggleDiffExpanded(tool.id);
+      } else {
+        this.toggleToolExpanded(id);
+      }
     } else this.toggleGroup(item.key);
     return true;
   }

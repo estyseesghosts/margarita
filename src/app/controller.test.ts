@@ -2370,11 +2370,18 @@ describe('tool-group focus', () => {
       ['group:t4', false],
     ]);
 
-    // Expand the second group too; collapse the first again.
-    controller.moveGroupFocus(1);
+    // An expanded group exposes its tool rows; walk past them to the next group.
+    for (let step = 0; step < 8; step += 1) {
+      if (controller.state.focusedGroup === 'group:t4') break;
+      controller.moveGroupFocus(1);
+    }
     expect(controller.state.focusedGroup).toBe('group:t4');
     controller.toggleFocusedGroup();
-    controller.moveGroupFocus(-1);
+    for (let step = 0; step < 8; step += 1) {
+      if (controller.state.focusedGroup === 'group:t1') break;
+      controller.moveGroupFocus(-1);
+    }
+    expect(controller.state.focusedGroup).toBe('group:t1');
     controller.toggleFocusedGroup();
 
     const after = controller.toolGroups();
@@ -2382,6 +2389,86 @@ describe('tool-group focus', () => {
       ['group:t1', false],
       ['group:t4', true],
     ]);
+    controller.dispose();
+  });
+
+  test('individual tool disclosures are qualified by owner and survive group collapse (#281)', async () => {
+    const { backend, controller } = conversationFixture();
+    backend.messages['ses_b'] = [
+      groupedTranscript([fakeTool('t1', 'read'), fakeTool('t2', 'read')]),
+    ];
+    await attach(controller, 'ses_a');
+    controller.moveGroupFocus(1);
+    controller.toggleFocusedGroup();
+    controller.moveGroupFocus(1);
+    expect(controller.state.focusedGroup).toBe('tool:t1');
+    controller.toggleFocusedGroup();
+    expect(controller.state.expandedTools['ses_a t1']).toBe(true);
+    expect(controller.isToolExpanded('t1')).toBe(true);
+    expect(controller.isToolExpanded('t2')).toBe(false);
+
+    // Collapsing the group preserves the individual choice for reopening.
+    controller.toggleGroup('group:t1');
+    expect(controller.toolGroups()[0]?.expanded).toBe(false);
+    expect(controller.isToolExpanded('t1')).toBe(true);
+
+    // The same tool ID on another session has no inherited disclosure.
+    controller.openSession('ses_b');
+    await flush();
+    expect(controller.isToolExpanded('t1')).toBe(false);
+    controller.openSession('ses_a');
+    await flush();
+    expect(controller.isToolExpanded('t1')).toBe(true);
+
+    controller.onEvents('local', [{ kind: 'session-deleted', sessionID: 'ses_a' }], false);
+    await flush();
+    expect(controller.state.expandedTools['ses_a t1']).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('identical tool IDs on two hosts keep separate disclosures (#281)', async () => {
+    const local = new FakeBackend();
+    local.sessions = [fakeSession('ses_same')];
+    local.messages = {
+      ses_same: [groupedTranscript([fakeTool('t1', 'read'), fakeTool('t2', 'read')])],
+    };
+    const remote = new FakeBackend();
+    remote.serverID = 'srv_b';
+    remote.sessions = [{ ...fakeSession('ses_same'), serverID: 'srv_b' }];
+    remote.messages = {
+      ses_same: [groupedTranscript([fakeTool('t1', 'read'), fakeTool('t2', 'read')])],
+    };
+    const controller = makeController(
+      () => Promise.resolve([]),
+      local,
+      () => 10_000,
+      {
+        serverIDs: () => ['local', 'srv_b'],
+        backendFor: (serverID) => (serverID === 'srv_b' ? remote : local),
+      },
+    );
+    await attach(controller, 'ses_same');
+    controller.moveGroupFocus(1);
+    controller.toggleFocusedGroup();
+    controller.moveGroupFocus(1);
+    controller.toggleFocusedGroup();
+    expect(controller.isToolExpanded('t1')).toBe(true);
+
+    controller.openSession('ses_same', 'srv_b');
+    await flush();
+    expect(controller.isToolExpanded('t1')).toBe(false);
+    controller.moveGroupFocus(1);
+    controller.toggleFocusedGroup();
+    controller.moveGroupFocus(1);
+    controller.toggleFocusedGroup();
+    expect(controller.isToolExpanded('t1')).toBe(true);
+
+    controller.openSession('ses_same', 'local');
+    await flush();
+    expect(controller.isToolExpanded('t1')).toBe(true);
+    const remoteKey = sessionKey({ serverID: 'srv_b', sessionID: 'ses_same' });
+    expect(controller.state.expandedTools[`${remoteKey} t1`]).toBe(true);
+    expect(controller.state.expandedTools['ses_same t1']).toBe(true);
     controller.dispose();
   });
 
@@ -6482,25 +6569,25 @@ describe('monotonic goal plan UI state (#161)', () => {
   });
 });
 
-describe('external editor result ownership (#271)', () => {
-  function editorFixture() {
-    const backend = new FakeBackend();
-    backend.sessions = [fakeSession('ses_a'), fakeSession('ses_b')];
-    const written: { path: string; text: string }[] = [];
-    const controller = makeController(
-      () => Promise.resolve([]),
-      backend,
-      () => 10_000,
-      {
-        copyFallbackDir: '/tmp',
-        writeFile: async (path, text) => {
-          written.push({ path, text });
-        },
+function editorFixture() {
+  const backend = new FakeBackend();
+  backend.sessions = [fakeSession('ses_a'), fakeSession('ses_b')];
+  const written: { path: string; text: string }[] = [];
+  const controller = makeController(
+    () => Promise.resolve([]),
+    backend,
+    () => 10_000,
+    {
+      copyFallbackDir: '/tmp',
+      writeFile: async (path, text) => {
+        written.push({ path, text });
       },
-    );
-    return { controller, written };
-  }
+    },
+  );
+  return { controller, written };
+}
 
+describe('external editor result ownership (#271)', () => {
   test('a late result updates the original parked draft, never the current one', async () => {
     const { controller } = editorFixture();
     await controller.bootstrap();

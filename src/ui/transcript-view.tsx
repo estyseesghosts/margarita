@@ -21,7 +21,14 @@ import type { JobListStatus } from '../app/app-state.ts';
 import type { AppController } from '../app/controller.ts';
 import type { ScrollMove } from '../app/key-router.ts';
 import type { PatchLine } from '../domain/diff.ts';
-import { clampDiffPatch, diffCounts, editDiff, isEditLike, toolPath } from '../domain/edit-diff.ts';
+import {
+  clampDiffPatch,
+  diffCounts,
+  editDiff,
+  hasOversizedDiff,
+  isEditLike,
+  toolPath,
+} from '../domain/edit-diff.ts';
 import { type ExecutionMarker, executionMarkers } from '../domain/execution-segment.ts';
 import { type FormRequest, initialVisibleFields } from '../domain/form.ts';
 import { actionHint, type Keymap } from '../domain/keymap.ts';
@@ -33,7 +40,7 @@ import {
 import { sessionKey } from '../domain/server-identity.ts';
 import { assertNever } from '../domain/session.ts';
 import type { ShellBackgroundState } from '../domain/shell-job.ts';
-import { stickyPrompt, truncatePrompt } from '../domain/sticky-prompt.ts';
+import { followsLiveTail, stickyPrompt, truncatePrompt } from '../domain/sticky-prompt.ts';
 import { clipLineToCells } from '../domain/text-width.ts';
 import { type ThrobberFacts } from '../domain/throbber.ts';
 import { pagedToolChildren, toolChildBudget, type ToolChildPage } from '../domain/tool-children.ts';
@@ -183,10 +190,19 @@ export function Transcript(props: TranscriptProps) {
     () => new Map(nodes().map((node, index) => [node.key, index] as const)),
   );
 
-  /** Recomputes which earlier prompt, if any, has scrolled out above the viewport. */
+  /**
+   * Recomputes which earlier prompt, if any, has scrolled out above the viewport. The
+   * sticky strip is reading chrome for history only: while the box follows the live tail
+   * (within the documented row tolerance) it disappears even if a long current turn has
+   * pushed its prompt above the viewport (#280).
+   */
   const updateSticky = () => {
     if (box === undefined) return;
     const scrollbox = box;
+    if (followsLiveTail(scrollbox.scrollTop, scrollbox.scrollHeight, scrollbox.height)) {
+      setSticky(undefined);
+      return;
+    }
     const positions = windowed().visible.flatMap((node) => {
       if (node.kind !== 'user') return [];
       const element = scrollbox.findDescendantById(nodeID(node.key));
@@ -223,6 +239,15 @@ export function Transcript(props: TranscriptProps) {
   };
   createEffect(() => {
     windowed();
+    box?.afterLayout(updateSticky);
+  });
+
+  // A route/host switch must never carry the previous conversation's pinned prompt.
+  createEffect(() => {
+    // Track owner identity; the values themselves are read through props elsewhere.
+    void props.sessionID;
+    void props.serverID;
+    setSticky(undefined);
     box?.afterLayout(updateSticky);
   });
 
@@ -273,6 +298,21 @@ export function Transcript(props: TranscriptProps) {
     });
   });
 
+  // Expanding the already-focused row adds rows below it after the focus effect above has
+  // already run. Re-reveal the same semantic row so its new detail does not grow out of the
+  // viewport (#281). Streaming updates do not touch this map, so tail-follow never re-anchors.
+  createEffect(() => {
+    const focused = state.focusedGroup;
+    Object.keys(state.expandedTools);
+    windowed();
+    if (focused === undefined || box === undefined) return;
+    const scrollbox = box;
+    const key = focusedNodeKey(focused);
+    scrollbox.afterLayout(() => {
+      scrollbox.scrollChildIntoView(nodeID(key), { align: 'nearest' });
+    });
+  });
+
   const scroll = (move: ScrollMove) => {
     if (box === undefined) return;
     const page = Math.max(1, box.height - 2);
@@ -280,6 +320,8 @@ export function Transcript(props: TranscriptProps) {
       case 'pageUp': {
         if (box.scrollTop > 0) {
           box.scrollBy(-page);
+          updateSticky();
+          box.afterLayout(updateSticky);
           return;
         }
         // At the top: remember the first node and its row, reveal earlier nodes, then put
@@ -296,15 +338,24 @@ export function Transcript(props: TranscriptProps) {
       }
       case 'pageDown':
         box.scrollBy(page);
+        updateSticky();
+        box.afterLayout(updateSticky);
         return;
       case 'top':
         // Ctrl+Home reaches the earliest loaded node, not just the top of the current
         // render window. Any remaining server history stays advertised above (#251).
         props.controller.revealAllLoaded(props.sessionID, windowed().hidden, props.serverID);
-        box.afterLayout(() => box?.scrollTo(0));
+        box.afterLayout(() => {
+          box?.scrollTo(0);
+          updateSticky();
+        });
         return;
       case 'bottom':
+        // Ctrl+End is an explicit return to the live tail, so the history strip clears
+        // immediately rather than waiting for another layout event.
+        setSticky(undefined);
         box.scrollTo(box.scrollHeight);
+        box.afterLayout(updateSticky);
         return;
       default:
         assertNever(move);
@@ -377,6 +428,7 @@ export function Transcript(props: TranscriptProps) {
               </Show>
               <box id={nodeID(node().key)} flexDirection="column" flexShrink={0}>
                 <NodeView
+                  controller={props.controller}
                   node={node()}
                   theme={props.theme}
                   detailed={state.detailed}
@@ -544,6 +596,7 @@ function workerColor(status: WorkerStatus, theme: Theme): string {
 }
 
 function NodeView(props: {
+  controller: AppController;
   node: TranscriptNode;
   theme: Theme;
   detailed: boolean;
@@ -650,6 +703,11 @@ function NodeView(props: {
             childPageNextKey={props.childPageNextKey}
             childPageFor={props.childPageFor}
             userExpanded={node().userExpanded === true}
+            onActivate={
+              !props.detailed && hasOversizedDiff(node().tool)
+                ? () => props.controller.toggleDiffExpanded(node().tool.id)
+                : undefined
+            }
           />
         )}
       </Match>
@@ -658,14 +716,6 @@ function NodeView(props: {
           // The background hint describes the one running call. It follows that call's own
           // row when the group is expanded, so the action is never shown twice (issue #111).
           const activeID = () => activeTool(node().tools)?.id;
-          // Child paging follows the last child-bearing call, matching the controller.
-          const childToolID = (): string | undefined => {
-            for (let index = node().tools.length - 1; index >= 0; index -= 1) {
-              const tool = node().tools[index];
-              if (tool !== undefined && (tool.children?.length ?? 0) > 0) return tool.id;
-            }
-            return undefined;
-          };
           const hintText = (): string | undefined => {
             const key = props.backgroundKey;
             return key === undefined || !backgroundHint(node().live, props.now)
@@ -674,7 +724,10 @@ function NodeView(props: {
           };
           return (
             <box flexDirection="column" marginTop={1}>
-              <text fg={props.focused ? theme().accent : theme().dim}>
+              <text
+                fg={props.focused ? theme().accent : theme().dim}
+                onMouseDown={() => props.controller.clickToolGroup(node().key)}
+              >
                 {`${props.focused ? '▸' : ' '}  ${node().summary}${node().running ? '…' : ''}${
                   props.focused ? '  (Enter)' : ''
                 }`}
@@ -700,19 +753,18 @@ function NodeView(props: {
                 <For each={node().tools}>
                   {(tool) => (
                     <>
-                      <ToolView
+                      <ToolDisclosure
+                        controller={props.controller}
                         tool={tool}
-                        expanded
                         detailed={props.detailed}
                         theme={theme()}
                         syntax={props.syntax}
                         width={props.width}
-                        focused={props.focused && childToolID() === tool.id}
+                        focused={props.controller.state.focusedGroup === `tool:${tool.id}`}
                         mcpServers={props.mcpServers}
                         childPagePreviousKey={props.childPagePreviousKey}
                         childPageNextKey={props.childPageNextKey}
                         childPageFor={props.childPageFor}
-                        userExpanded={false}
                       />
                       <Show when={activeID() === tool.id ? hintText() : undefined}>
                         {(text: Accessor<string>) => (
@@ -897,6 +949,69 @@ function indent(text: string): string {
   return text.split('\n').join('\n    ');
 }
 
+/** One compact, individually disclosable tool row inside an expanded group (#281). */
+function ToolDisclosure(props: {
+  controller: AppController;
+  tool: ToolCall;
+  detailed: boolean;
+  theme: Theme;
+  syntax: SyntaxStyle;
+  width: number;
+  focused: boolean;
+  mcpServers: readonly string[];
+  childPagePreviousKey: string | undefined;
+  childPageNextKey: string | undefined;
+  childPageFor: (toolID: string) => number;
+}) {
+  const expanded = () =>
+    props.controller.isToolExpanded(props.tool.id) ||
+    props.tool.status === 'error' ||
+    props.tool.executionError !== undefined ||
+    props.tool.children?.some((child) => child.status === 'error') === true;
+  const tone = () =>
+    props.tool.status === 'error'
+      ? props.theme.error
+      : props.tool.status === 'running' || props.tool.status === 'streaming'
+        ? props.theme.accent
+        : props.focused
+          ? props.theme.accent
+          : props.theme.text;
+  const status = () =>
+    props.tool.status === 'error'
+      ? 'failed'
+      : props.tool.status === 'completed'
+        ? 'done'
+        : props.tool.status;
+  const summary = () =>
+    `${props.focused ? '❯' : ' '} ${expanded() ? '▾' : '▸'} ${describeTool(props.tool, props.mcpServers)} · ${status()} · ${formatToolTiming(props.tool, clock)}`;
+  return (
+    // The focus/reveal path addresses this row by the same tool ID standalone calls use,
+    // so Ctrl+Down can bring an individual disclosure into view (#281).
+    <box id={nodeID(props.tool.id)} flexDirection="column">
+      <text fg={tone()} onMouseDown={() => props.controller.clickToolRow(props.tool.id)}>
+        {truncateToWidth(summary(), Math.max(8, props.width - 4))}
+      </text>
+      <Show when={expanded()}>
+        <ToolView
+          tool={props.tool}
+          expanded
+          detailed={props.detailed}
+          theme={props.theme}
+          syntax={props.syntax}
+          width={props.width}
+          focused={props.focused}
+          mcpServers={props.mcpServers}
+          childPagePreviousKey={props.childPagePreviousKey}
+          childPageNextKey={props.childPageNextKey}
+          childPageFor={props.childPageFor}
+          userExpanded={props.controller.isToolExpanded(props.tool.id)}
+          showHeader={false}
+        />
+      </Show>
+    </box>
+  );
+}
+
 function ToolView(props: {
   tool: ToolCall;
   expanded: boolean;
@@ -912,6 +1027,10 @@ function ToolView(props: {
   childPageFor: (toolID: string) => number;
   /** The user explicitly grew this item beyond its mode default (#219). */
   userExpanded?: boolean;
+  /** False when a disclosure row already names the tool (#281). */
+  showHeader?: boolean;
+  /** Mouse disclosure for a standalone compact row (#281). */
+  onActivate?: (() => void) | undefined;
 }) {
   const edit = createMemo(() => (props.tool.status === 'error' ? undefined : editDiff(props.tool)));
   // A completed edit-like call with no usable patch must say so instead of degrading to a
@@ -1004,33 +1123,33 @@ function ToolView(props: {
         : props.theme.dim;
   return (
     <box flexDirection="column" marginTop={1}>
-      <box flexDirection="row">
-        <text fg={bullet()}>● </text>
-        <text fg={props.theme.text}>
-          {truncateToWidth(
-            sanitizeText(
-              edit() !== undefined
-                ? `${props.tool.name === 'write' ? 'Write' : 'Update'}(${describeTool(props.tool, props.mcpServers).slice(props.tool.name.length + 1)})`
-                : unavailable() !== undefined
-                  ? `Changed(${unavailable()})`
-                  : describeTool(props.tool, props.mcpServers),
-            ),
-            lineWidth(),
-          )}
-        </text>
-        <Show when={props.detailed}>
-          <text fg={props.theme.dim}>{`  ${formatToolTiming(props.tool, clock)}`}</text>
-        </Show>
-        <Show when={props.focused}>
-          <text fg={props.theme.accent}>{props.detailed ? '  (I)' : '  (Enter)'}</text>
-        </Show>
-      </box>
+      <Show when={props.showHeader !== false}>
+        <box flexDirection="row" onMouseDown={() => props.onActivate?.()}>
+          <text fg={bullet()}>● </text>
+          <text fg={props.theme.text}>
+            {truncateToWidth(
+              sanitizeText(
+                edit() !== undefined
+                  ? `${props.tool.name === 'write' ? 'Write' : 'Update'}(${describeTool(props.tool, props.mcpServers).slice(props.tool.name.length + 1)})`
+                  : unavailable() !== undefined
+                    ? `Changed(${unavailable()})`
+                    : describeTool(props.tool, props.mcpServers),
+              ),
+              lineWidth(),
+            )}
+          </text>
+          <Show when={props.detailed}>
+            <text fg={props.theme.dim}>{`  ${formatToolTiming(props.tool, clock)}`}</text>
+          </Show>
+          <Show when={props.focused}>
+            <text fg={props.theme.accent}>{props.detailed ? '  (I)' : '  (Enter)'}</text>
+          </Show>
+        </box>
+      </Show>
       <Show when={scriptError()}>
         {(bounded: Accessor<{ text: string; hiddenRows: number }>) => (
           <>
-            <text fg={props.theme.error}>
-              {`  └ script failed: ${indent(bounded().text)}`}
-            </text>
+            <text fg={props.theme.error}>{`  └ script failed: ${indent(bounded().text)}`}</text>
             <Show when={bounded().hiddenRows > 0}>
               <text fg={props.theme.error}>
                 {truncateToWidth(
@@ -1178,7 +1297,10 @@ function ToolView(props: {
                       </text>
                     )}
                   </For>
-                  <text fg={props.focused ? props.theme.accent : props.theme.dim}>
+                  <text
+                    fg={props.focused ? props.theme.accent : props.theme.dim}
+                    onMouseDown={() => props.onActivate?.()}
+                  >
                     {`${props.focused ? '▸ ' : '  '}${clampHint()}`}
                   </text>
                 </box>

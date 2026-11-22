@@ -248,6 +248,8 @@ export type AppState = {
   expandedGroups: Record<string, true>;
   /** Tool IDs whose oversized inline diffs the user expanded; mirrors expandedGroups. */
   expandedDiffs: Record<string, true>;
+  /** Individual tool disclosures opened inside an expanded group (#281). */
+  expandedTools: Record<string, true>;
   /** Selected child page per qualified tool ID for dense Code Mode execute calls (#260). */
   childPages: Record<string, number>;
   /** Group key of the tool group selected for per-group toggle; absent when composer has focus. */
@@ -342,6 +344,7 @@ export function initialState(directory: string, serverID: string = localServerID
     transcriptWindow: {},
     expandedGroups: {},
     expandedDiffs: {},
+    expandedTools: {},
     childPages: {},
     composer: { ...emptyComposer },
     attachments: [],

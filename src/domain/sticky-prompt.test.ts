@@ -1,8 +1,26 @@
 import { describe, expect, test } from 'bun:test';
 
-import { stickyPrompt, truncatePrompt } from './sticky-prompt.ts';
+import { followsLiveTail, stickyPrompt, truncatePrompt } from './sticky-prompt.ts';
 
 const at = (key: string, top: number, bottom = top + 1) => ({ key, text: key, top, bottom });
+
+describe('followsLiveTail (#280)', () => {
+  test('content shorter than the viewport is always live', () => {
+    expect(followsLiveTail(0, 10, 20)).toBe(true);
+    expect(followsLiveTail(0, 20, 20)).toBe(true);
+  });
+
+  test('the final rows within the tolerance count as live', () => {
+    expect(followsLiveTail(78, 100, 20)).toBe(true);
+    expect(followsLiveTail(80, 100, 20)).toBe(true);
+    expect(followsLiveTail(77, 100, 20)).toBe(false);
+  });
+
+  test('a deliberate scroll back into history is not live', () => {
+    expect(followsLiveTail(40, 1000, 20)).toBe(false);
+    expect(followsLiveTail(0, 1000, 20)).toBe(false);
+  });
+});
 
 describe('stickyPrompt', () => {
   test('is the latest prompt that has scrolled fully above the viewport', () => {

@@ -65,6 +65,7 @@ The mapping is deliberately not an exact Claude clone. `Shift+Tab` must never fl
 | Transcript | `PageUp`/`PageDown` | Scroll; at the top, reveal or fetch earlier history without moving the current top message |
 | Transcript | `Ctrl+Home`/`Ctrl+End` | Earliest **loaded** message / latest message; the `earlier messages` marker stays when server history remains |
 | Transcript | `Ctrl+Up`/`Ctrl+Down` | Focus the previous/next tool group or row, revealing it and scrolling it into view |
+| Transcript, focused group/tool | `Enter` / `Space` | Toggle that group or individual tool disclosure; an expanded group exposes each tool row as its own target, and the empty composer keeps the key from submitting |
 | Transcript, focused execute | `[` / `]` | Page the nested Code Mode child window; with a nonempty draft the brackets remain ordinary text |
 | Pending question | `Alt+Q` | Open the question without clearing a nonempty draft; `Enter` on an empty prompt also opens it |
 | Form dialog | `Enter` / `Shift+Tab` | Validate and advance / go back; `Esc` leaves the question pending, `Ctrl+X` declines |

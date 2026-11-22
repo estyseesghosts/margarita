@@ -53,7 +53,7 @@ Never aggregate across separate user submissions, idle markers, session switches
 4. Fold contiguous safe tool parts into groups when count >= 2 or output is long; single short call may remain one concise status line.
 5. Derive summary from data—not model-generated restatement—and compute `success/warn/fail/running` aggregate state.
 6. Give all groups stable `groupID` from first/last child IDs and grouping version. Fold state keyed by canonical child IDs; avoid rewriting every key when a group grows.
-7. Show detailed group children on click/Enter/Space/`Ctrl+O`.
+7. Show detailed group children on click/Enter/Space/`Ctrl+O`. Group and individual tools are separate disclosures: opening a group lists concise tool rows, and clicking or keyboard-activating one row expands only that tool. Per-tool choices are qualified by host/session, persist when the group is collapsed and reopened, and never turn on global detailed mode (#281).
 
 A code review should verify the algorithm does not suppress a failed call merely because it belongs to an otherwise successful batch. Reference upstream tool lifecycles in [message-updater.ts](https://github.com/anomalyco/opencode/blob/v2.3.0/packages/core/src/session/message-updater.ts): `session.tool.input.started`, `tool.called`, `tool.success`, `tool.failed` project into tool parts.
 

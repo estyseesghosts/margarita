@@ -145,6 +145,67 @@ function backendWithSession(): FakeBackend {
   return backend;
 }
 
+/** One synthetic prompt/answer turn used by the sticky-header tests (#280). */
+function stickyTurn(number: number): TranscriptMessage[] {
+  return [
+    {
+      kind: 'user',
+      id: `u${number}`,
+      createdAt: number * 100,
+      text: `question number ${number}`,
+      attachments: [],
+    },
+    {
+      kind: 'assistant',
+      id: `a${number}`,
+      createdAt: number * 100 + 1,
+      completedAt: number * 100 + 2,
+      agent: 'build',
+      model: { providerID: 'opencode', modelID: 'longcat' },
+      parts: [
+        {
+          kind: 'text',
+          text: Array.from({ length: 40 }, (_, row) => `answer ${number} row ${row}`).join('\n'),
+        },
+      ],
+    },
+  ];
+}
+
+function stickyLongTurn(prefix: string, number: number): TranscriptMessage[] {
+  return [
+    {
+      kind: 'user',
+      id: `${prefix}-u${number}`,
+      createdAt: number,
+      text: `${prefix} question ${number}`,
+      attachments: [],
+    },
+    {
+      kind: 'assistant',
+      id: `${prefix}-a${number}`,
+      createdAt: number + 1,
+      completedAt: number + 2,
+      agent: 'build',
+      model: { providerID: 'opencode', modelID: 'longcat' },
+      parts: [
+        {
+          kind: 'text',
+          text: Array.from({ length: 30 }, (_, row) => `${prefix} row ${number}.${row}`).join('\n'),
+        },
+      ],
+    },
+  ];
+}
+
+function stickyHeader(frame: string): string {
+  return frame.split('\n')[0] ?? '';
+}
+
+function numberedOutput(prefix: string): string {
+  return Array.from({ length: 30 }, (_, row) => `${prefix}${row}`).join('\n');
+}
+
 describe('app', () => {
   test('overview lists sessions grouped by project with a new-session composer', async () => {
     const { setup } = await mount(backendWithSession());
@@ -955,9 +1016,9 @@ describe('app', () => {
 
   test('scope toggles preserve the open file and offset; mouse opens a row (#276)', async () => {
     const backend = backendWithSession();
-    backend.diffs = Array.from({ length: 3 }, (_, index) => ({
+    backend.diffs = Array.from({ length: 3 }, (_entry, index) => ({
       file: `src/f${index}.ts`,
-      patch: Array.from({ length: 100 }, (_, line) => `+f${index} line ${line}`).join('\n'),
+      patch: Array.from({ length: 100 }, (_line, line) => `+f${index} line ${line}`).join('\n'),
       additions: 100,
       deletions: 0,
       status: 'modified' as const,
@@ -2128,9 +2189,144 @@ describe('transcript rendering (docs/22, docs/23)', () => {
     await controller.loadOlder('ses_a');
     await settle(setup);
     expect(controller.state.transcripts['ses_a']?.messages.length).toBeGreaterThan(200);
-    const frame = setup.captureCharFrame();
-    const first = frame.split('\n')[0] ?? '';
-    expect(first).toContain('❯ the original request');
+    // Following the live tail never pins the prompt, even when it is outside the window.
+    expect(setup.captureCharFrame().split('\n')[0]).not.toContain('❯ the original request');
+
+    setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    const reading = setup.captureCharFrame();
+    expect(reading.split('\n')[0] ?? '').toContain('❯ the original request');
+
+    setup.mockInput.pressKey('END', { ctrl: true });
+    await settle(setup);
+    expect(setup.captureCharFrame().split('\n')[0]).not.toContain('❯ the original request');
+    controller.dispose();
+  });
+
+  test('the sticky prompt appears only while reading history and tracking updates (#280)', async () => {
+    const backend = backendWithSession();
+    const turn = stickyTurn;
+    backend.messages = { ses_a: [turn(1), turn(2), turn(3)].flat() };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    const header = stickyHeader;
+    expect(header(setup.captureCharFrame())).not.toContain('❯ question number');
+
+    setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    let frame = setup.captureCharFrame();
+    expect(header(frame)).toContain('❯ question number 3');
+
+    // Once prompt 3 itself enters the viewport it is no longer duplicated above.
+    for (let page = 0; page < 4; page += 1) setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(header(frame)).not.toContain('❯ question number 3');
+
+    setup.mockInput.pressKey('END', { ctrl: true });
+    await settle(setup);
+    expect(header(setup.captureCharFrame())).not.toContain('❯ question number');
+
+    // Streaming while tail-locked never flashes the header, even as content grows.
+    backend.messages['ses_a'] = [
+      ...(backend.messages['ses_a'] ?? []),
+      {
+        kind: 'assistant',
+        id: 'streamed-live',
+        createdAt: 1000,
+        completedAt: 1001,
+        agent: 'build',
+        model: { providerID: 'opencode', modelID: 'longcat' },
+        parts: [{ kind: 'text', text: 'fresh tail output' }],
+      },
+    ];
+    controller.onEvents('local', [], true);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('fresh tail output');
+    expect(header(frame)).not.toContain('❯ question number');
+
+    // While reading history the same update keeps the header and the reader's position.
+    setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    const readingHeader = header(frame);
+    expect(readingHeader).toContain('❯ question number');
+    backend.messages['ses_a'] = [
+      ...(backend.messages['ses_a'] ?? []),
+      {
+        kind: 'assistant',
+        id: 'streamed-history',
+        createdAt: 1002,
+        completedAt: 1003,
+        agent: 'build',
+        model: { providerID: 'opencode', modelID: 'longcat' },
+        parts: [{ kind: 'text', text: 'more history output' }],
+      },
+    ];
+    controller.onEvents('local', [], true);
+    await settle(setup);
+    expect(header(setup.captureCharFrame())).toBe(readingHeader);
+
+    // A new user turn changes identity only when it reaches the preceding position.
+    backend.messages['ses_a'] = [...(backend.messages['ses_a'] ?? []), ...turn(4)];
+    controller.onEvents('local', [], true);
+    await settle(setup);
+    expect(header(setup.captureCharFrame())).not.toContain('❯ question number 4');
+
+    setup.mockInput.pressKey('END', { ctrl: true });
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(header(frame)).not.toContain('❯ question number');
+    expect(frame).toContain('answer 4 row 39');
+
+    setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    setup.resize(40, 12);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    const clipped = header(frame);
+    expect(clipped).toContain('❯');
+    expect(cellWidth(clipped)).toBeLessThanOrEqual(40);
+    // The strip overlays the transcript; the composer and footer keep their rows.
+    expect(frame).toContain('← overview');
+    expect(frame).toMatch(/\$\d/);
+    controller.dispose();
+  });
+
+  test('switching sessions or hosts never leaks a pinned prompt (#280)', async () => {
+    const backend = backendWithSession();
+    const longTurn = stickyLongTurn;
+    backend.messages = {
+      ses_a: [longTurn('alpha', 1), longTurn('alpha', 2)].flat(),
+      ses_b: [longTurn('beta', 1), longTurn('beta', 2)].flat(),
+    };
+    backend.sessions = [
+      ...backend.sessions,
+      {
+        ...backend.sessions[0]!,
+        id: 'ses_b',
+        title: 'Another session',
+      },
+    ];
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    expect(setup.captureCharFrame().split('\n')[0] ?? '').toMatch(/❯ alpha question [12]/);
+
+    controller.openSession('ses_b');
+    await settle(setup);
+    expect(setup.captureCharFrame().split('\n')[0] ?? '').not.toContain('❯ alpha');
+
+    setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    const beta = setup.captureCharFrame().split('\n')[0] ?? '';
+    expect(beta).toMatch(/❯ beta question [12]/);
+    expect(beta).not.toContain('alpha');
     controller.dispose();
   });
 
@@ -2534,7 +2730,12 @@ describe('inline diff stability (issue #26)', () => {
     controller.openSession('ses_a');
     await settle(setup);
     const after = setup.captureCharFrame();
-    expect(after).toContain('and then ship it');
+    // History reading keeps its anchor, so the appended prompt may sit below the viewport.
+    expect(
+      controller.state.transcripts['ses_a']?.messages.some(
+        (message) => message.kind === 'user' && message.text === 'and then ship it',
+      ),
+    ).toBe(true);
     // The viewport may scroll by the appended row; every diff row visible in both frames renders byte-identically.
     const keyed = (frame: string) =>
       new Map(diffLines(frame).map((line) => [/row\d+/.exec(line)?.[0] ?? '', line]));
@@ -2719,6 +2920,273 @@ describe('grouped activity (issue #23)', () => {
     expect(detailedFrame).toContain('Changed(src/index.ts)');
     expect(detailedFrame).toContain('bash s10.log');
     expect(detailedFrame).toContain('edit src/fixed.ts');
+    controller.dispose();
+  });
+});
+
+function disclosureBackend(): FakeBackend {
+  const backend = backendWithSession();
+  backend.messages = {
+    ses_a: [
+      { kind: 'user', id: 'm1', createdAt: 1, text: 'do three things', attachments: [] },
+      {
+        kind: 'assistant',
+        id: 'm2',
+        createdAt: 2,
+        completedAt: 3,
+        agent: 'build',
+        model: { providerID: 'opencode', modelID: 'longcat' },
+        parts: [
+          {
+            kind: 'tool',
+            tool: {
+              id: 'readA',
+              name: 'read',
+              status: 'completed',
+              input: { filePath: 'A' },
+              output: 'A output only',
+              startedAt: 1,
+              completedAt: 2,
+            },
+          },
+          {
+            kind: 'tool',
+            tool: {
+              id: 'bashB',
+              name: 'bash',
+              status: 'completed',
+              input: { command: 'B' },
+              output: 'B output only',
+              startedAt: 2,
+              completedAt: 3,
+            },
+          },
+          {
+            kind: 'tool',
+            tool: {
+              id: 'editC',
+              name: 'edit',
+              status: 'completed',
+              input: { path: 'C', oldString: 'old', newString: 'new' },
+              diff: '--- a/C\n+++ b/C\n@@ -1 +1 @@\n-old\n+new',
+              diffFile: 'C',
+              startedAt: 3,
+              completedAt: 4,
+            },
+          },
+          {
+            kind: 'tool',
+            tool: {
+              id: 'editD',
+              name: 'edit',
+              status: 'completed',
+              input: { path: 'D', oldString: 'before', newString: 'after' },
+              diff: '--- a/D\n+++ b/D\n@@ -1 +1 @@\n-before\n+after',
+              diffFile: 'D',
+              startedAt: 4,
+              completedAt: 5,
+            },
+          },
+        ],
+      },
+    ],
+  };
+  return backend;
+}
+
+describe('individual tool disclosure (#281)', () => {
+  test('group and tool rows disclose independently with mouse and keyboard', async () => {
+    const backend = disclosureBackend();
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const group = controller.toolGroups()[0];
+    if (group === undefined) throw new Error('no tool group');
+    let frame = setup.captureCharFrame();
+    expect(frame).toContain(group.summary);
+    expect(frame).not.toContain('read A');
+    expect(frame).not.toContain('B output only');
+
+    // Keyboard: focus and expand the group, which lists concise tools without results.
+    setup.mockInput.pressArrow('down', { ctrl: true });
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('read A');
+    expect(frame).toContain('bash B');
+    expect(frame).toContain('edit C');
+    expect(frame).not.toContain('A output only');
+    expect(frame).not.toContain('B output only');
+    expect(frame).not.toContain('+ new');
+
+    // Mouse: expand only Bash B, leaving its neighbours collapsed.
+    let row = frame.split('\n').findIndex((line) => line.includes('bash B'));
+    expect(row).toBeGreaterThanOrEqual(0);
+    await setup.mockMouse.click(3, row);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('B output only');
+    expect(frame).not.toContain('A output only');
+    expect(frame).not.toContain('+ new');
+
+    // Clicking the same row collapses it again.
+    row = frame.split('\n').findIndex((line) => line.includes('bash B'));
+    await setup.mockMouse.click(3, row);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).not.toContain('B output only');
+
+    // Keyboard: move to Edit C and disclose only its colored diff.
+    setup.mockInput.pressArrow('down', { ctrl: true });
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('+ new');
+    expect(frame).toContain('- old');
+    expect(frame).not.toContain('A output only');
+    expect(frame).not.toContain('B output only');
+
+    // Mouse: collapse the group; reopening preserves the individual choice.
+    row = frame.split('\n').findIndex((line) => line.includes(group.summary));
+    await setup.mockMouse.click(3, row);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).not.toContain('+ new');
+    row = frame.split('\n').findIndex((line) => line.includes(group.summary));
+    await setup.mockMouse.click(3, row);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('+ new');
+    expect(frame).not.toContain('A output only');
+
+    // Space is a disclosure key once a tool row owns the empty prompt.
+    for (let step = 0; step < 3; step += 1) setup.mockInput.pressArrow('down', { ctrl: true });
+    await settle(setup);
+    setup.mockInput.pressKey(' ');
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).not.toContain('+ new');
+    expect(controller.state.composer.text).toBe('');
+    controller.dispose();
+  });
+
+  test('one expanded tool gets a generous preview without widening its neighbours (#281)', async () => {
+    const backend = backendWithSession();
+    const output = numberedOutput;
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'read two files', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'readA',
+                name: 'read',
+                status: 'completed',
+                input: { filePath: 'A' },
+                output: output('A-row-'),
+                startedAt: 1,
+                completedAt: 2,
+              },
+            },
+            {
+              kind: 'tool',
+              tool: {
+                id: 'readB',
+                name: 'read',
+                status: 'completed',
+                input: { filePath: 'B' },
+                output: output('B-row-'),
+                startedAt: 2,
+                completedAt: 3,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend, { width: 80, height: 24 });
+    controller.openSession('ses_a');
+    await settle(setup);
+    controller.moveGroupFocus(1);
+    controller.toggleFocusedGroup();
+    await settle(setup);
+    controller.moveGroupFocus(1);
+    controller.moveGroupFocus(1);
+    expect(controller.state.focusedGroup).toBe('tool:readB');
+    controller.toggleFocusedGroup();
+    await settle(setup);
+    setup.mockInput.pressKey('END', { ctrl: true });
+    await settle(setup);
+
+    const frame = setup.captureCharFrame();
+    // The explicit one-row expansion shows the whole short result, not the compact cap.
+    expect(frame).toContain('B-row-29');
+    expect(frame).not.toContain('A-row-29');
+    expect(controller.isToolExpanded('readA')).toBe(false);
+    expect(controller.isToolExpanded('readB')).toBe(true);
+    controller.dispose();
+  });
+
+  test('expanding a tool keeps the row visible while content changes (#281)', async () => {
+    const backend = disclosureBackend();
+    backend.sessions = [...backend.sessions, { ...backend.sessions[0]!, id: 'ses_b' }];
+    backend.messages['ses_b'] = backend.messages['ses_a'] ?? [];
+    const { controller, setup } = await mount(backend, { width: 40, height: 12 });
+    controller.openSession('ses_a');
+    await settle(setup);
+    // Read from history so the streamed update cannot pull the row back to the tail.
+    setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    const group = controller.toolGroups()[0];
+    if (group === undefined) throw new Error('no tool group');
+    controller.moveGroupFocus(1);
+    controller.toggleFocusedGroup();
+    await settle(setup);
+    controller.moveGroupFocus(1);
+    controller.moveGroupFocus(1);
+    controller.toggleFocusedGroup();
+    await settle(setup);
+    expect(controller.state.focusedGroup).toBe('tool:bashB');
+    let frame = setup.captureCharFrame();
+    expect(frame).toContain('B output only');
+
+    // A streamed update elsewhere must not collapse or lose the open row.
+    backend.messages['ses_a'] = [
+      ...(backend.messages['ses_a'] ?? []),
+      {
+        kind: 'assistant',
+        id: 'streamed',
+        createdAt: 10,
+        completedAt: 11,
+        agent: 'build',
+        model: { providerID: 'opencode', modelID: 'longcat' },
+        parts: [{ kind: 'text', text: 'streamed after disclosure' }],
+      },
+    ];
+    controller.onEvents('local', [], true);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('B output only');
+    expect(controller.isToolExpanded('bashB')).toBe(true);
+
+    setup.resize(80, 24);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('B output');
+    expect(controller.isToolExpanded('bashB')).toBe(true);
+
+    controller.openSession('ses_b');
+    await settle(setup);
+    // Different owner: the same tool identity has no inherited expansion state.
+    expect(controller.isToolExpanded('bashB')).toBe(false);
     controller.dispose();
   });
 });
