@@ -380,14 +380,25 @@ export type ControllerDeps = Readonly<{
    * route's transcript and any in-flight read are never evicted by bytes.
    */
   transcriptCacheBytes?: number;
+  /** Per-child ownership-check timeout while refreshing input requests (#294). */
+  ancestryVerifyTimeoutMs?: number;
+  /** Base backoff for a failed canonical transcript refetch (#295); tests shrink it. */
+  transcriptRetryBaseDelayMs?: number;
 }>;
 
 const transcriptPageSize = 120;
 const transcriptCacheLimit = 8;
+/** A failed canonical refetch retries a bounded number of times with exponential delay (#295). */
+const transcriptRetryLimit = 3;
+const transcriptRetryBaseDelayMs = 250;
 /** Default retained-history budget; summaries and drafts live outside this cache. */
 const transcriptCacheByteLimit = 32 * 1024 * 1024;
 const sessionPageLimit = 5;
 const reconcileConcurrency = 8;
+/** Ownership checks for uncached child questions run after confirmed data is published (#294). */
+const ancestryVerifyConcurrency = 4;
+const ancestryVerifyTimeoutMs = 2_000;
+const ancestryVerifyBudgetMs = 4_000;
 const exportPageSize = 500;
 /** Lines a diff patch scrolls per PageUp/PageDown; matches the rendered window. */
 export const diffPageLines = 18;
@@ -447,6 +458,9 @@ export class AppController {
   private escapeTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly transcriptInFlight = new Map<string, Promise<void>>();
   private readonly transcriptDirty = new Set<string>();
+  /** Bounded retry state for a failed canonical refetch (#295). */
+  private readonly transcriptRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly transcriptRetryAttempts = new Map<string, number>();
   /**
    * Admission/commit order for canonical transcript reads (#262). Concurrent reads for one
    * server-qualified session are legitimate, but a slower older response must never replace
@@ -648,6 +662,8 @@ export class AppController {
     this.resetEscapeTimer();
     for (const timer of this.summaryTimers.values()) clearTimeout(timer);
     this.summaryTimers.clear();
+    for (const timer of this.transcriptRetryTimers.values()) clearTimeout(timer);
+    this.transcriptRetryTimers.clear();
   }
 
   /**
@@ -1602,8 +1618,16 @@ export class AppController {
   /** Drops every cached trace of a session the server no longer has. */
   private forgetSession(sessionID: string, serverID: string = this.activeServerID()): void {
     const key = this.keyFor(serverID, sessionID);
-    // Retire every in-flight read/refresh for this lifetime before deleting its state (#252).
+    // Retire every in-flight read/refresh and pending retry for this lifetime before
+    // deleting its state (#252, #295).
     this.invalidateSession(key);
+    const retryKey = `${serverID} ${sessionID}`;
+    const retryTimer = this.transcriptRetryTimers.get(retryKey);
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer);
+      this.transcriptRetryTimers.delete(retryKey);
+    }
+    this.transcriptRetryAttempts.delete(retryKey);
     const expansionPrefix = `${key} `;
     this.setState(
       produce((state) => {
@@ -2288,79 +2312,40 @@ export class AppController {
       locationFormsResult.status === 'rejected' ? locationFormsResult.reason : undefined;
     const cachedForms = this.state.forms[key] ?? [];
     const allowed = this.requestSessionScope(sessionID, serverID);
+    const authoritative = sessionForms !== undefined;
     // A location snapshot may contain a question from an actively running child that the
-    // session index has not caught up with yet. Walk the server's authoritative parent links
-    // before filtering, so the parent sees a verified descendant but never a sibling (#274).
-    let ownershipError: string | undefined;
-    if (locationForms !== undefined) {
-      const checked = new Set<string>();
-      for (const form of locationForms) {
-        const childID = form.sessionID;
-        if (childID === 'global' || childID === sessionID || allowed.has(childID)) continue;
-        if (checked.has(childID)) continue;
-        checked.add(childID);
-        const result = await this.verifyDescendant(childID, sessionID, serverID);
-        if (result.status === 'verified') allowed.add(childID);
-        else if (result.status === 'unresolved') ownershipError ??= result.error;
-      }
-      // The ancestry walk is another await: a newer refresh, deletion or unpair may have
-      // happened while it ran, and its result must not be committed.
-      if (this.inputRequestRevisions.get(key) !== revision) return;
-      if (!this.isSessionCurrent(key, epoch)) return;
-      if (!this.isRegisteredBackend(serverID, backend)) return;
-    }
-    if (ownershipError !== undefined) {
-      errors.forms ??= `Could not verify a child question's owner: ${ownershipError}`;
-    }
-    // A successful per-session listing is authoritative for the attached session's own
-    // forms. A failed one proves nothing, so keep cached forms owned by that session.
+    // session index has not caught up with yet. Those IDs are resolved *after* the
+    // independently authoritative permissions, session forms and global questions are
+    // published, so one stalled child cannot delay an actionable prompt (#294).
+    const unknownChildren = this.unknownLocationChildren(locationForms, sessionID, allowed);
     let forms = sessionForms ?? cachedForms.filter((form) => form.sessionID === sessionID);
-    if (locationForms !== undefined) {
-      // Only the location-wide forms that belong to this conversation may appear:
-      // the global MCP sentinel, or a verified descendant (child-session) form. Never
-      // leak a sibling session's question into this transcript (#209, #274).
-      const merged = new Map(forms.map((form) => [form.id, form]));
-      for (const form of locationForms) {
-        // With a successful per-session listing, that route is authoritative for the
-        // attached session; merging the same forms again could revive one it just removed.
-        // When the session route failed, the location snapshot is the only available
-        // source and may supply the attached session's own form (#258).
-        if (form.sessionID === sessionID && sessionForms !== undefined) continue;
-        if (
-          form.sessionID === 'global' ||
-          form.sessionID === sessionID ||
-          allowed.has(form.sessionID)
-        ) {
-          // With an authoritative session listing, a duplicate location entry must not
-          // overwrite it. Without one, the location snapshot is the only live source.
-          if (sessionForms !== undefined && merged.has(form.id)) continue;
-          merged.set(form.id, form);
-        }
-      }
-      forms = [...merged.values()];
-    } else {
+    if (locationForms === undefined) {
       // The location route failed. Keep the location-owned forms that were previously
       // confirmed instead of discarding them with the failed snapshot: a transport error
       // does not prove the global or child request was settled (#264). The stale marker
       // in `requestErrors` keeps the partial data visible rather than authoritative.
-      const locationOwned = cachedForms.filter(
-        (form) =>
-          form.sessionID === 'global' ||
-          (form.sessionID !== sessionID && allowed.has(form.sessionID)),
-      );
-      const merged = new Map(forms.map((form) => [form.id, form]));
-      for (const form of locationOwned) {
-        if (!merged.has(form.id)) merged.set(form.id, form);
-      }
-      forms = [...merged.values()];
       errors.forms ??= errorText(locationFormsError);
     }
+    // Only the global sentinel, the attached session and already verified descendants may
+    // appear. Previously shown rows for a child still under verification are preserved so
+    // a retry cannot make an established question blink out (#294); new unknown children
+    // stay hidden until verified, so a sibling question can never leak (#209, #274).
+    forms = this.mergeLocationForms(
+      forms,
+      locationForms,
+      sessionID,
+      authoritative,
+      allowed,
+      new Set(unknownChildren),
+      cachedForms,
+    );
 
+    // Publish every independently authoritative result before any ancestry walk runs.
     batch(() => {
       if (permissionsResult.status === 'fulfilled') {
         this.setState('permissions', key, permissionsResult.value);
       }
-      if (forms !== undefined) this.setState('forms', key, forms);
+      this.setState('forms', key, forms);
       // Replace the per-session record: a successful retry must remove an old error, and a
       // later failure in one category must not leave the other category's stale text.
       this.setState(
@@ -2387,6 +2372,183 @@ export class AppController {
         this.setState('permissionFocused', false);
       }
     });
+
+    if (unknownChildren.length === 0) return;
+    // Resolve unknown-child ownership in a separately bounded phase. Results that arrive
+    // after a newer refresh, deletion, unpair or backend replacement are discarded.
+    const checked = await this.verifyUnknownDescendants(unknownChildren, sessionID, serverID);
+    if (!this.inputRefreshCurrent(key, epoch, serverID, backend, revision)) return;
+    for (const childID of checked.verified) allowed.add(childID);
+    for (const childID of checked.unrelated) allowed.delete(childID);
+    // Unrelated rows disappear; verified rows appear from the live location snapshot;
+    // unresolved rows keep their last confirmed form and an explicit retryable error.
+    const merged = this.mergeLocationForms(
+      forms.filter((form) => !checked.unrelated.has(form.sessionID)),
+      locationForms,
+      sessionID,
+      authoritative,
+      allowed,
+      new Set(checked.pending),
+      cachedForms,
+    );
+    const finalErrors = { ...errors };
+    if (checked.error !== undefined) {
+      finalErrors.forms ??= `Could not verify a child question's owner: ${checked.error}`;
+    }
+    batch(() => {
+      this.setState('forms', key, merged);
+      this.setState(
+        'requestErrors',
+        produce((all) => {
+          if (Object.keys(finalErrors).length === 0) delete all[key];
+          else all[key] = finalErrors;
+        }),
+      );
+    });
+  }
+
+  /** True when this refresh still owns the session, backend and revision it started with. */
+  private inputRefreshCurrent(
+    key: string,
+    epoch: number,
+    serverID: string,
+    backend: Backend,
+    revision: number,
+  ): boolean {
+    return (
+      this.inputRequestRevisions.get(key) === revision &&
+      this.isSessionCurrent(key, epoch) &&
+      this.isRegisteredBackend(serverID, backend)
+    );
+  }
+
+  /** Distinct location-form owners outside the attached session and its verified scope. */
+  private unknownLocationChildren(
+    locationForms: readonly FormRequest[] | undefined,
+    sessionID: string,
+    allowed: ReadonlySet<string>,
+  ): string[] {
+    if (locationForms === undefined) return [];
+    const unknown = new Set<string>();
+    for (const form of locationForms) {
+      const childID = form.sessionID;
+      if (childID === 'global' || childID === sessionID || allowed.has(childID)) continue;
+      unknown.add(childID);
+    }
+    return [...unknown];
+  }
+
+  /**
+   * The location forms this conversation may display. The per-session listing is
+   * authoritative for the attached session's own rows; the global sentinel and verified
+   * descendants may be merged from the location snapshot. `keepUnknown` retains a child's
+   * previously confirmed row while a new ownership check is in flight, never a new one.
+   */
+  private mergeLocationForms(
+    base: readonly FormRequest[],
+    locationForms: readonly FormRequest[] | undefined,
+    sessionID: string,
+    sessionFormsAuthoritative: boolean,
+    allowed: ReadonlySet<string>,
+    keepUnknown: ReadonlySet<string>,
+    cachedForms: readonly FormRequest[],
+  ): FormRequest[] {
+    const merged = new Map(base.map((form) => [form.id, form]));
+    for (const form of cachedForms) {
+      if (keepUnknown.has(form.sessionID) && !merged.has(form.id)) merged.set(form.id, form);
+    }
+    if (locationForms === undefined) {
+      for (const form of cachedForms) {
+        const locationOwned =
+          form.sessionID === 'global' ||
+          (form.sessionID !== sessionID && allowed.has(form.sessionID));
+        if (locationOwned && !merged.has(form.id)) merged.set(form.id, form);
+      }
+      return [...merged.values()];
+    }
+    for (const form of locationForms) {
+      // With a successful per-session listing, that route is authoritative for the attached
+      // session; merging the same forms again could revive one it just removed. When the
+      // session route failed, the location snapshot is the only available source (#258).
+      if (form.sessionID === sessionID && sessionFormsAuthoritative) continue;
+      if (
+        form.sessionID !== 'global' &&
+        form.sessionID !== sessionID &&
+        !allowed.has(form.sessionID)
+      ) {
+        continue;
+      }
+      // With an authoritative session listing, a duplicate location entry must not
+      // overwrite it. Without one, the location snapshot is the only live source.
+      if (sessionFormsAuthoritative && merged.has(form.id)) continue;
+      merged.set(form.id, form);
+    }
+    return [...merged.values()];
+  }
+
+  /**
+   * Bounded, time-limited ownership checks for uncached child questions (#294). Each child
+   * is checked at most once; a stalled backend or deep ancestry chain becomes `pending`
+   * (visible, retryable, never cleared) instead of blocking the refresh forever.
+   */
+  private async verifyUnknownDescendants(
+    childIDs: readonly string[],
+    ancestorID: string,
+    serverID: string,
+  ): Promise<{
+    verified: Set<string>;
+    unrelated: Set<string>;
+    pending: Set<string>;
+    error?: string;
+  }> {
+    const verified = new Set<string>();
+    const unrelated = new Set<string>();
+    const pending = new Set<string>();
+    let error: string | undefined;
+    const deadline = Date.now() + ancestryVerifyBudgetMs;
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < childIDs.length) {
+        const childID = childIDs[next];
+        next += 1;
+        if (childID === undefined) continue;
+        if (Date.now() >= deadline) {
+          pending.add(childID);
+          error ??= 'ownership verification ran out of time';
+          continue;
+        }
+        const result = await this.withDescendantTimeout(
+          this.verifyDescendant(childID, ancestorID, serverID),
+        ).catch((cause: unknown): DescendantCheck => ({
+          status: 'unresolved',
+          error: errorText(cause),
+        }));
+        if (result.status === 'verified') verified.add(childID);
+        else if (result.status === 'unrelated') unrelated.add(childID);
+        else {
+          pending.add(childID);
+          error ??= result.error;
+        }
+      }
+    };
+    const workers = Math.min(ancestryVerifyConcurrency, childIDs.length);
+    await Promise.all(Array.from({ length: workers }, worker));
+    return { verified, unrelated, pending, ...(error === undefined ? {} : { error }) };
+  }
+
+  private async withDescendantTimeout(check: Promise<DescendantCheck>): Promise<DescendantCheck> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<DescendantCheck>((settle) => {
+      timer = setTimeout(
+        () => settle({ status: 'unresolved', error: 'the ownership check timed out' }),
+        this.deps.ancestryVerifyTimeoutMs ?? ancestryVerifyTimeoutMs,
+      );
+    });
+    try {
+      return await Promise.race([check, timeout]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   /**
@@ -2682,25 +2844,99 @@ export class AppController {
     refreshJobs = false,
   ): void {
     const key = `${serverID} ${sessionID}`;
+    // A fresh signal supersedes a pending backoff retry; it must not wait behind it.
+    const retryTimer = this.transcriptRetryTimers.get(key);
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer);
+      this.transcriptRetryTimers.delete(key);
+    }
     if (this.transcriptInFlight.has(key)) {
       this.transcriptDirty.add(key);
       if (refreshJobs) this.transcriptJobsDirty.add(key);
       return;
     }
     const run = (async () => {
+      let failure: unknown;
       try {
         await this.fetchLatest(sessionID, serverID);
-        if (refreshJobs) this.scheduleJobRefresh(sessionID, serverID);
-        await delay(80);
+      } catch (error) {
+        failure = error;
       } finally {
         this.transcriptInFlight.delete(key);
       }
+      // Always settle the coalesced hints, including after a rejected read. Draining them
+      // only on success dropped an already-observed update when no later event arrived
+      // (#295), and left the flags cached for an unrelated refresh.
       const dirty = this.transcriptDirty.delete(key);
       const dirtyJobs = this.transcriptJobsDirty.delete(key);
+      if (failure !== undefined) {
+        await this.handleTranscriptFailure(
+          sessionID,
+          serverID,
+          failure,
+          refreshJobs || dirty,
+          dirtyJobs,
+        );
+        return;
+      }
+      this.transcriptRetryAttempts.delete(key);
+      if (refreshJobs) this.scheduleJobRefresh(sessionID, serverID);
+      await delay(80);
       if (dirty && !this.disposed) this.scheduleTranscript(sessionID, serverID, dirtyJobs);
     })();
     this.transcriptInFlight.set(key, run);
     void this.track('transcript', run);
+  }
+
+  /**
+   * Keeps the last confirmed transcript, marks it stale and schedules a bounded backoff
+   * retry for transient failures (#295). A deleted session, removed host or unsupported
+   * operation clears the queued hints instead of retrying forever.
+   */
+  private async handleTranscriptFailure(
+    sessionID: string,
+    serverID: string,
+    failure: unknown,
+    refreshJobs: boolean,
+    dirtyJobs: boolean,
+  ): Promise<void> {
+    const key = `${serverID} ${sessionID}`;
+    const qualifiedKey = this.keyFor(serverID, sessionID);
+    const current =
+      !this.disposed &&
+      this.state.sessions[qualifiedKey] !== undefined &&
+      this.serverIDs().includes(serverID);
+    if (!current) {
+      this.transcriptRetryAttempts.delete(key);
+      return;
+    }
+    if (this.state.transcripts[qualifiedKey] !== undefined) {
+      // The failed response is not authoritative: keep the last confirmed messages and say
+      // so, rather than clearing the transcript or pretending it refreshed.
+      this.setState('transcripts', qualifiedKey, 'stale', true);
+    }
+    // Job hints are independent of transcript success; honor them without delaying a
+    // subsequent transcript retry on a slow job RPC (#284, #295).
+    if (refreshJobs || dirtyJobs) this.scheduleJobRefresh(sessionID, serverID);
+    if (!transcriptFailureRetryable(failure)) {
+      this.transcriptRetryAttempts.delete(key);
+      return;
+    }
+    const attempt = (this.transcriptRetryAttempts.get(key) ?? 0) + 1;
+    if (attempt > transcriptRetryLimit) {
+      this.transcriptRetryAttempts.delete(key);
+      return;
+    }
+    this.transcriptRetryAttempts.set(key, attempt);
+    const timer = setTimeout(
+      () => {
+        this.transcriptRetryTimers.delete(key);
+        if (this.disposed) return;
+        this.scheduleTranscript(sessionID, serverID, dirtyJobs);
+      },
+      (this.deps.transcriptRetryBaseDelayMs ?? transcriptRetryBaseDelayMs) * 2 ** (attempt - 1),
+    );
+    this.transcriptRetryTimers.set(key, timer);
   }
 
   private async fetchLatest(
@@ -8692,4 +8928,10 @@ function goalFailureReason(kind: BackendError['kind']): GoalQueryFailure {
 
 function delay(ms: number): Promise<void> {
   return new Promise((done) => setTimeout(done, ms));
+}
+
+/** Transient read failures are worth a bounded retry; a gone session or auth failure is not. */
+function transcriptFailureRetryable(error: unknown): boolean {
+  if (!(error instanceof BackendError)) return true;
+  return error.kind === 'transport' || error.kind === 'unknown';
 }

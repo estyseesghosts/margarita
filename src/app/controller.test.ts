@@ -2100,6 +2100,10 @@ describe('session pagination', () => {
   });
 });
 
+function userMessage(id: string, text: string): TranscriptMessage {
+  return { kind: 'user', id, createdAt: Number(id.slice(1)) || 1, text, attachments: [] };
+}
+
 function fakeSession(id: string): SessionSummary {
   return {
     id,
@@ -6166,6 +6170,129 @@ describe('background worker lifecycle (#101)', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.worker.status).toBe('completed');
     expect(controller.workerJobStatus('ses_a', 'local')?.state).toBe('confirmed');
+    controller.dispose();
+  });
+});
+
+describe('failed transcript refresh retains and drains queued work (#295)', () => {
+  test('an update received during a failed read lands after bounded recovery', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [userMessage('m1', 'first')] };
+    const controller = makeController(
+      async () => [],
+      backend,
+      () => 10_000,
+      {
+        transcriptRetryBaseDelayMs: 10,
+      },
+    );
+    await attach(controller, 'ses_a');
+
+    const real = backend.listMessages.bind(backend);
+    const gate = deferred<void>();
+    let attempts = 0;
+    backend.listMessages = async (sessionID, limit, cursor) => {
+      attempts += 1;
+      if (attempts === 1) {
+        await gate.promise;
+        throw new BackendError('transport', 'message.list', 'temporary disconnect');
+      }
+      return real(sessionID, limit, cursor);
+    };
+
+    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    await flush();
+    // The second update arrives while the first read is still in flight.
+    backend.messages = { ses_a: [userMessage('m1', 'first'), userMessage('m2', 'second')] };
+    controller.onEvents(
+      'local',
+      [{ kind: 'transcript-changed', sessionID: 'ses_a', jobs: true }],
+      false,
+    );
+    gate.resolve();
+    await Bun.sleep(150);
+    await flush();
+
+    expect(attempts).toBeGreaterThanOrEqual(2);
+    const messages = controller.state.transcripts['ses_a']?.messages ?? [];
+    expect(messages.some((message) => message.id === 'm2')).toBe(true);
+    expect(controller.state.transcripts['ses_a']?.stale).toBe(false);
+    // The job hint was not lost when the transcript read failed.
+    expect(backend.calls.some((call) => call.name === 'listSubagentJobs')).toBe(true);
+    controller.dispose();
+  });
+
+  test('a persistent outage retries a bounded number of times and keeps the last transcript', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [userMessage('m1', 'first')] };
+    const controller = makeController(
+      async () => [],
+      backend,
+      () => 10_000,
+      {
+        transcriptRetryBaseDelayMs: 5,
+      },
+    );
+    await attach(controller, 'ses_a');
+
+    let attempts = 0;
+    backend.listMessages = async () => {
+      attempts += 1;
+      throw new BackendError('transport', 'message.list', 'host is down');
+    };
+    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    await Bun.sleep(150);
+    await flush();
+
+    // One attempt plus the three bounded retries; no endless fast loop.
+    expect(attempts).toBe(4);
+    expect(controller.state.transcripts['ses_a']?.messages.map((message) => message.id)).toEqual([
+      'm1',
+    ]);
+    expect(controller.state.transcripts['ses_a']?.stale).toBe(true);
+    controller.dispose();
+  });
+
+  test('a permanent failure does not retry and does not strand the next update', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [userMessage('m1', 'first')] };
+    const controller = makeController(
+      async () => [],
+      backend,
+      () => 10_000,
+      {
+        transcriptRetryBaseDelayMs: 5,
+      },
+    );
+    await attach(controller, 'ses_a');
+
+    const real = backend.listMessages.bind(backend);
+    let attempts = 0;
+    backend.listMessages = async () => {
+      attempts += 1;
+      throw new BackendError('not-found', 'message.list', 'session is gone');
+    };
+    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    await Bun.sleep(60);
+    await flush();
+    expect(attempts).toBe(1);
+    expect(controller.state.transcripts['ses_a']?.stale).toBe(true);
+
+    // The dirty flag was drained when the failure settled, so a later event is a fresh read.
+    backend.listMessages = real;
+    backend.messages = { ses_a: [userMessage('m1', 'first'), userMessage('m2', 'second')] };
+    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    await Bun.sleep(120);
+    await flush();
+    expect(
+      (controller.state.transcripts['ses_a']?.messages ?? []).some(
+        (message) => message.id === 'm2',
+      ),
+    ).toBe(true);
+    expect(controller.state.transcripts['ses_a']?.stale).toBe(false);
     controller.dispose();
   });
 });

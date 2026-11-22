@@ -67,6 +67,18 @@ eight 1,000-message sessions, heap/RSS before and after allocation/GC/release, a
 samples. Native OpenTUI retained memory and attached heap-snapshot reports are not exposed by
 the pinned renderer; they are listed as unavailable rather than approximated.
 
+## Transcript refresh failures (#295)
+
+`scheduleTranscript()` coalesces one canonical refetch per session. Hints that arrive while a
+read is in flight are always drained, including when the read rejects; the previous code only
+drained after a successful `try`, so a queued update could be lost until some unrelated event.
+A transient (`transport`/`unknown`) failure keeps the last confirmed transcript, marks it
+stale, and retries up to three times with 250/500/1000 ms backoff
+(`ControllerDeps.transcriptRetryBaseDelayMs` shrinks it in tests). A deleted session, removed
+host, `not-found`, or authorization failure clears the queued hints instead of retrying. A job
+hint from the failed batch is honored immediately, independently of the transcript retry, and a
+successful refresh resets the retry budget and clears staleness.
+
 ## Overview invalidation (#288, #293)
 
 The overview cache is keyed by a **reactive** invalidation clock plus the external host
@@ -121,6 +133,8 @@ dispose the server manager exactly once.
 - #287 — interactive shell before catalog/session indexing.
 - #288 — cached overview grouping/tab counts.
 - #293 — reactive overview invalidation ordering.
+- #294 — permissions/forms publish before child ancestry verification.
+- #295 — failed transcript refresh drains queued hints and retries boundedly.
 - #289 — retained-byte transcript cache budget and the bench memory report.
 - #290 — animation-off timer cadence.
 - #291 — composer editing under large drafts.

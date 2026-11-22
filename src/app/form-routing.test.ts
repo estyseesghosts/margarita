@@ -42,6 +42,7 @@ async function flush(): Promise<void> {
 type HarnessOverrides = Partial<{
   openUrl: (url: URL) => Promise<{ ok: true } | { ok: false; error: string }>;
   copyText: (text: string) => Promise<{ method: 'clipboard' | 'file'; path?: string }>;
+  ancestryVerifyTimeoutMs: number;
 }>;
 
 function harness(overrides: HarnessOverrides = {}) {
@@ -191,6 +192,76 @@ describe('uncached child questions resolve from server ancestry (#274)', () => {
     expect(
       (controller.state.forms[remoteKey] ?? []).some((entry) => entry.id === 'form_local_child'),
     ).toBe(false);
+  });
+});
+
+describe('input-request latency is independent of child ancestry (#294)', () => {
+  test('a confirmed permission and global question publish before a stalled child lookup', async () => {
+    const { controller, local } = harness({ ancestryVerifyTimeoutMs: 20 });
+    local.sessions = [session('local')]; // the child is not indexed yet
+    local.permissions = [{ id: 'perm_1', sessionID, action: 'shell', resources: [], save: [] }];
+    local.forms = [
+      formFor('form_global', 'global', 'global question'),
+      formFor('form_sibling', 'ses_unindexed_sibling', 'sibling question'),
+    ];
+    local.getSession = () => new Promise<SessionSummary>(() => {});
+
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    // Only the three independent list calls and their commit need to finish.
+    await flush();
+    expect(controller.state.permissions[sessionID]?.map((entry) => entry.id)).toEqual(['perm_1']);
+    expect((controller.state.forms[sessionID] ?? []).map((entry) => entry.title)).toEqual([
+      'global question',
+    ]);
+    // The never-resolving child must not hold the permission card hostage.
+    expect(controller.state.permissions[sessionID]).toHaveLength(1);
+
+    // When verification times out the sibling stays hidden but is explicitly retryable.
+    await Bun.sleep(40);
+    await flush();
+    expect((controller.state.forms[sessionID] ?? []).map((entry) => entry.title)).toEqual([
+      'global question',
+    ]);
+    expect(controller.currentRequestError()?.forms).toContain('timed out');
+  });
+
+  test('twenty stalled unindexed siblings cannot hide a global question or leak a sibling', async () => {
+    const { controller, local } = harness({ ancestryVerifyTimeoutMs: 20 });
+    local.sessions = [session('local')];
+    const siblings = Array.from({ length: 20 }, (_, index) =>
+      formFor(`form_sibling_${index}`, `ses_child_${index}`, `sibling ${index}`),
+    );
+    local.forms = [...siblings, formFor('form_global', 'global', 'global question')];
+    local.getSession = () => new Promise<SessionSummary>(() => {});
+
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+
+    const titles = (controller.state.forms[sessionID] ?? []).map((entry) => entry.title);
+    expect(titles).toEqual(['global question']);
+    expect(titles.some((title) => title.startsWith('sibling'))).toBe(false);
+    expect(controller.currentRequestError()).toBeUndefined();
+  });
+
+  test('a bounded verification failure does not clear an already confirmed permission', async () => {
+    const { controller, local } = harness({ ancestryVerifyTimeoutMs: 20 });
+    local.sessions = [session('local')];
+    local.permissions = [{ id: 'perm_1', sessionID, action: 'shell', resources: [], save: [] }];
+    local.forms = [formFor('form_child', 'ses_child', 'child')];
+    local.getSession = () => new Promise<SessionSummary>(() => {});
+
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    const before = controller.state.permissions[sessionID];
+
+    await Bun.sleep(40);
+    await flush();
+    expect(controller.state.permissions[sessionID]).toBe(before);
+    expect(controller.state.permissions[sessionID]?.map((entry) => entry.id)).toEqual(['perm_1']);
+    expect(controller.currentRequestError()?.forms).toContain('timed out');
   });
 });
 
