@@ -18,7 +18,7 @@ import { emptyComposer, insertText, moveLeft } from '../src/domain/composer.ts';
 import { groupSessions } from '../src/domain/overview-groups.ts';
 import type { SessionSummary } from '../src/domain/session.ts';
 import type { AssistantPart, TranscriptMessage } from '../src/domain/transcript.ts';
-import { foldTranscript } from '../src/domain/transcript.ts';
+import { createTranscriptProjector, foldTranscript } from '../src/domain/transcript.ts';
 import { projectUsage } from '../src/domain/usage-analytics.ts';
 import { type BenchStats, sampleOperation } from '../src/perf/measure.ts';
 
@@ -28,6 +28,8 @@ type Scenario = Readonly<{
   iterations: number;
   run: () => unknown;
   note?: string;
+  /** Extra machine-readable evidence captured after sampling. */
+  detail?: () => unknown;
 }>;
 
 const args = new Set(Bun.argv.slice(2));
@@ -110,6 +112,36 @@ function scenarios(): Scenario[] {
         }),
       note: 'compact fold of the loaded history',
     });
+    let projected = messages;
+    const projector = createTranscriptProjector();
+    const foldOptions = {
+      detailed: false,
+      expandedGroups: new Set<string>(),
+      expandedDiffs: new Set<string>(),
+      mcpServers: ['lotus'],
+    };
+    projector.project(projected, foldOptions);
+    let updateSerial = 0;
+    result.push({
+      name: 'projectorTailUpdate',
+      size,
+      iterations: smoke ? 1 : size >= 10_000 ? 3 : 8,
+      run: () => {
+        updateSerial += 1;
+        const index = projected.findLastIndex((message) => message.kind === 'assistant');
+        const target = projected[index];
+        if (target?.kind !== 'assistant') return projector.project(projected, foldOptions);
+        const next = [...projected];
+        next[index] = {
+          ...target,
+          parts: [...target.parts, { kind: 'text', text: `update ${updateSerial}` }],
+        };
+        projected = next;
+        return projector.project(projected, foldOptions);
+      },
+      note: 'one appended assistant part in the newest turn',
+      detail: () => projector.lastStats(),
+    });
     result.push({
       name: 'projectUsage',
       size,
@@ -159,6 +191,7 @@ const reports: {
   heapUsedBytes: number;
   rssBytes: number;
   note?: string;
+  detail?: unknown;
 }[] = [];
 for (const scenario of scenarios()) {
   const stats = await sampleOperation(scenario.run, scenario.iterations, smoke ? 0 : 1);
@@ -170,6 +203,7 @@ for (const scenario of scenarios()) {
     heapUsedBytes: memory.heapUsed,
     rssBytes: memory.rss,
     ...(scenario.note === undefined ? {} : { note: scenario.note }),
+    ...(scenario.detail === undefined ? {} : { detail: scenario.detail() }),
   });
 }
 

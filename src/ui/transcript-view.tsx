@@ -50,8 +50,8 @@ import {
   backgroundHint,
   boundedPreview,
   boundedTailPreview,
+  createTranscriptProjector,
   describeTool,
-  foldTranscript,
   formatToolTiming,
   type LiveTool,
   previewBudget,
@@ -120,6 +120,9 @@ export function Transcript(props: TranscriptProps) {
   }, props.hintTickMs ?? 1000);
   onCleanup(() => clearInterval(hintTimer));
   const transcript = () => state.transcripts[sessionKeyValue()];
+  // Stable per-message derivation (#283): streaming updates refold only the changed turn,
+  // and untouched node objects keep their identity so their rows do not re-render (#286).
+  const projector = createTranscriptProjector();
   const mcpServers = () =>
     props.controller.mcpServersFor(
       props.serverID,
@@ -134,7 +137,7 @@ export function Transcript(props: TranscriptProps) {
       ]),
     );
     const expanded = props.controller.expandedSets();
-    const folded = foldTranscript(messages, {
+    const folded = projector.project(messages, {
       detailed: state.detailed,
       expandedGroups: expanded.groups,
       expandedDiffs: expanded.diffs,
@@ -412,9 +415,9 @@ export function Transcript(props: TranscriptProps) {
         <Show when={transcript()?.loading === true && nodes().length === 0}>
           <text fg={props.theme.dim}> Loading conversation…</text>
         </Show>
-        {/* Row slots persist by index: folding emits fresh node objects every update,
-            and identity-keyed <For> would remount (and re-parse) every visible row on
-            each streamed event. */}
+        {/* Row slots persist by index so a semantic prepend/reorder cannot remount every
+            visible row. Unchanged nodes keep their object identity (#283), so a streamed
+            tail update leaves those slots and their formatting untouched. */}
         <Index each={windowed().visible}>
           {(node) => (
             <>

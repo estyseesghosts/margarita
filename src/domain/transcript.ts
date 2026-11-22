@@ -398,98 +398,291 @@ export function foldTranscript(
   options: FoldOptions,
 ): TranscriptNode[] {
   const out: TranscriptNode[] = [];
-  /**
-   * Every canonical assistant text part is user-visible prose. Whether text matters is not
-   * decidable from its length, newline count, or whether a later step was appended (issue
-   * #167): short status notes, warnings and intermediate results are all meaningful. The
-   * fold therefore never discards canonical text — only repetitive tool calls collapse.
-   * Tools still group, reasoning stays hidden in compact mode, and chronology is preserved.
-   */
-  /** Emits the marker for the message just appended, if the segment boundary falls there. */
-  function appendBoundaryMarker(messageId: string) {
-    const marker = options.markers?.get(messageId);
-    if (marker !== undefined) {
-      out.push({
-        kind: 'execution',
-        key: `seg:${marker.id}`,
-        segment: marker,
-      });
-    }
-  }
-
   for (const message of messages) {
-    switch (message.kind) {
-      case 'user': {
-        out.push({
-          kind: 'user',
-          key: message.id,
-          text: message.text,
-          attachments: message.attachments,
-        });
-        break;
-      }
-      case 'assistant':
-        foldAssistant(message, options, out);
-        break;
-      case 'shell':
-        out.push({
-          kind: 'shell',
-          key: message.id,
-          ...(message.shellID === undefined ? {} : { shellID: message.shellID }),
-          command: message.command,
-          status: message.status,
-          ...(message.exitCode === undefined ? {} : { exitCode: message.exitCode }),
-          ...(message.output === undefined ? {} : { output: message.output }),
-          ...(message.outputTruncated === undefined
-            ? {}
-            : { outputTruncated: message.outputTruncated }),
-        });
-        break;
-      case 'agent-switched':
-        out.push({ kind: 'meta', key: message.id, text: `agent → ${message.agent}` });
-        break;
-      case 'model-switched':
-        out.push({
-          kind: 'meta',
-          key: message.id,
-          text: `model → ${message.model.modelID}${message.model.variant === undefined ? '' : ` · ${message.model.variant}`}`,
-        });
-        break;
-      case 'idle':
-        if (message.outcome === 'failed') {
-          out.push({
-            kind: 'notice',
-            key: message.id,
-            text: `Run failed${message.error === undefined ? '' : `: ${message.error}`}`,
-            tone: 'error',
-          });
-        } else if (message.outcome === 'interrupted') {
-          out.push({ kind: 'notice', key: message.id, text: 'Interrupted', tone: 'warn' });
-        }
-        break;
-      case 'compaction':
-        // A running compaction is the throbber's job ("Compacting conversation…");
-        // only the terminal states earn a one-off transcript notice.
-        if (message.state === 'running') break;
+    out.push(...foldMessageNodes(message, options));
+    const marker = options.markers?.get(message.id);
+    if (marker !== undefined) out.push(executionNode(marker));
+  }
+  return finishFoldedNodes(out, options);
+}
+
+/**
+ * One canonical message's display nodes, before cross-message consolidation and grouping.
+ * Deterministic and independent of its neighbours, which is what lets an incremental
+ * projector cache it by message identity (#283).
+ *
+ * Every canonical assistant text part is user-visible prose. Whether text matters is not
+ * decidable from its length, newline count, or whether a later step was appended (issue
+ * #167): short status notes, warnings and intermediate results are all meaningful. The
+ * fold therefore never discards canonical text — only repetitive tool calls collapse.
+ * Tools still group, reasoning stays hidden in compact mode, and chronology is preserved.
+ */
+function foldMessageNodes(message: TranscriptMessage, options: FoldOptions): TranscriptNode[] {
+  const out: TranscriptNode[] = [];
+  switch (message.kind) {
+    case 'user': {
+      out.push({
+        kind: 'user',
+        key: message.id,
+        text: message.text,
+        attachments: message.attachments,
+      });
+      break;
+    }
+    case 'assistant':
+      foldAssistant(message, options, out);
+      break;
+    case 'shell':
+      out.push({
+        kind: 'shell',
+        key: message.id,
+        ...(message.shellID === undefined ? {} : { shellID: message.shellID }),
+        command: message.command,
+        status: message.status,
+        ...(message.exitCode === undefined ? {} : { exitCode: message.exitCode }),
+        ...(message.output === undefined ? {} : { output: message.output }),
+        ...(message.outputTruncated === undefined
+          ? {}
+          : { outputTruncated: message.outputTruncated }),
+      });
+      break;
+    case 'agent-switched':
+      out.push({ kind: 'meta', key: message.id, text: `agent → ${message.agent}` });
+      break;
+    case 'model-switched':
+      out.push({
+        kind: 'meta',
+        key: message.id,
+        text: `model → ${message.model.modelID}${message.model.variant === undefined ? '' : ` · ${message.model.variant}`}`,
+      });
+      break;
+    case 'idle':
+      if (message.outcome === 'failed') {
         out.push({
           kind: 'notice',
           key: message.id,
-          text: message.state === 'failed' ? 'Compaction failed' : 'Conversation compacted',
-          tone: message.state === 'failed' ? 'error' : 'dim',
+          text: `Run failed${message.error === undefined ? '' : `: ${message.error}`}`,
+          tone: 'error',
         });
-        break;
-      case 'note':
-        if (options.detailed) {
-          out.push({ kind: 'notice', key: message.id, text: message.text, tone: 'dim' });
-        }
-        break;
-      default:
-        assertNever(message);
-    }
-    appendBoundaryMarker(message.id);
+      } else if (message.outcome === 'interrupted') {
+        out.push({ kind: 'notice', key: message.id, text: 'Interrupted', tone: 'warn' });
+      }
+      break;
+    case 'compaction':
+      // A running compaction is the throbber's job ("Compacting conversation…");
+      // only the terminal states earn a one-off transcript notice.
+      if (message.state === 'running') break;
+      out.push({
+        kind: 'notice',
+        key: message.id,
+        text: message.state === 'failed' ? 'Compaction failed' : 'Conversation compacted',
+        tone: message.state === 'failed' ? 'error' : 'dim',
+      });
+      break;
+    case 'note':
+      if (options.detailed) {
+        out.push({ kind: 'notice', key: message.id, text: message.text, tone: 'dim' });
+      }
+      break;
+    default:
+      assertNever(message);
   }
-  const consolidated = consolidateInterruptions(out);
+  return out;
+}
+
+function executionNode(marker: ExecutionMarker): TranscriptNode {
+  return { kind: 'execution', key: `seg:${marker.id}`, segment: marker };
+}
+
+/** Cross-message passes applied to the concatenated per-message nodes. */
+function finishFoldedNodes(nodes: TranscriptNode[], options: FoldOptions): TranscriptNode[] {
+  const consolidated = consolidateInterruptions(nodes);
   return options.detailed ? consolidated : mergeAdjacentGroups(consolidated, options);
+}
+
+/**
+ * Visibility of a canonical transcript must not depend on the order a cache was filled.
+ * The projector treats each canonical message as an immutable value: the controller's
+ * `mergeLatest`/`loadOlder` replace the array and the affected message objects, so object
+ * identity is a stronger change signal than an ID or timestamp (and catches non-tail
+ * replacements and reorders).
+ */
+const toolArrayIDs = new WeakMap<readonly ToolCall[], number>();
+let nextToolArrayID = 1;
+
+function toolArrayKey(tools: readonly ToolCall[]): string {
+  const existing = toolArrayIDs.get(tools);
+  if (existing !== undefined) return String(existing);
+  const id = nextToolArrayID++;
+  toolArrayIDs.set(tools, id);
+  return String(id);
+}
+
+/** Fold options that change per-message derivation. Cleared wholesale when they change. */
+function foldOptionSignature(options: FoldOptions): string {
+  const expandedGroups = [...options.expandedGroups].toSorted().join('\u0001');
+  const expandedDiffs = [...(options.expandedDiffs ?? [])].toSorted().join('\u0001');
+  return [
+    options.detailed ? 'detailed' : 'compact',
+    (options.mcpServers ?? []).join('\u0001'),
+    expandedGroups,
+    expandedDiffs,
+  ].join('\u0000');
+}
+
+/** Marker fields that affect its rendered node; an unchanged marker reuses its node. */
+function markerFingerprint(marker: ExecutionMarker): string {
+  return [
+    marker.id,
+    marker.afterMessageId,
+    marker.phase,
+    String(marker.startedAt),
+    String(marker.completedAt ?? ''),
+    String(marker.durationMs ?? ''),
+    marker.activity ?? '',
+  ].join('\u0000');
+}
+
+export type ProjectionStats = Readonly<{
+  /** Messages whose per-message nodes were derived during this projection. */
+  messagesFolded: number;
+  /** Messages whose cached nodes were reused unchanged. */
+  messagesReused: number;
+  /** Messages in the suffix after the reusable execution boundary. */
+  messagesReprocessed: number;
+  /** Cross-message groups rebuilt during this projection. */
+  groupsComputed: number;
+  /** Cross-message groups reused by member identity. */
+  groupsReused: number;
+  /** Final nodes carried over verbatim from the previous projection. */
+  prefixNodesReused: number;
+}>;
+
+export type TranscriptProjector = Readonly<{
+  project(messages: readonly TranscriptMessage[], options: FoldOptions): TranscriptNode[];
+  lastStats(): ProjectionStats | undefined;
+}>;
+
+type MessageCacheEntry = Readonly<{
+  markerKey: string;
+  nodes: readonly TranscriptNode[];
+}>;
+
+type IndexedNode = Readonly<{ node: TranscriptNode; messageIndex: number }>;
+
+type MergeCache = Map<string, Extract<TranscriptNode, { kind: 'tool-group' }>>;
+type MergeTracker = { computed: number; reused: number };
+
+/** Bounded cross-projection group reuse; a flush only costs one summary recomputation. */
+const mergeCacheLimit = 512;
+
+/**
+ * Incremental folded-node projector (#283).
+ *
+ * Canonical messages are folded once and cached by object identity; cross-message work is
+ * limited to the current segment. A projection reuses the previous final node list up to
+ * the last execution marker in the unchanged prefix, because an execution marker closes a
+ * segment: interruption consolidation and tool grouping never cross one. The remaining
+ * passes still walk the suffix's nodes, but a single tail update re-folds and regroups only
+ * its own turn instead of the entire loaded history.
+ */
+export function createTranscriptProjector(): TranscriptProjector {
+  let messageCache = new WeakMap<TranscriptMessage, MessageCacheEntry>();
+  let signature: string | undefined;
+  let mergeCache: MergeCache = new Map();
+  let baseLists: readonly (readonly TranscriptNode[])[] = [];
+  let finalNodes: readonly TranscriptNode[] = [];
+  let endOffsetByMessage: number[] = [];
+  let stats: ProjectionStats | undefined;
+
+  function project(messages: readonly TranscriptMessage[], options: FoldOptions): TranscriptNode[] {
+    const nextSignature = foldOptionSignature(options);
+    if (nextSignature !== signature) {
+      signature = nextSignature;
+      messageCache = new WeakMap();
+      mergeCache = new Map();
+      baseLists = [];
+      finalNodes = [];
+      endOffsetByMessage = [];
+    }
+
+    let messagesFolded = 0;
+    let messagesReused = 0;
+    const nextBaseLists: (readonly TranscriptNode[])[] = [];
+    for (const message of messages) {
+      const marker = options.markers?.get(message.id);
+      const markerKey = marker === undefined ? '' : markerFingerprint(marker);
+      const cached = messageCache.get(message);
+      if (cached !== undefined && cached.markerKey === markerKey) {
+        nextBaseLists.push(cached.nodes);
+        messagesReused += 1;
+        continue;
+      }
+      const nodes = foldMessageNodes(message, options);
+      if (marker !== undefined) nodes.push(executionNode(marker));
+      messageCache.set(message, { markerKey, nodes });
+      nextBaseLists.push(nodes);
+      messagesFolded += 1;
+    }
+
+    // Longest unchanged prefix, cut only where a segment has definitively ended.
+    let cut = -1;
+    const shared = Math.min(baseLists.length, nextBaseLists.length);
+    for (let index = 0; index < shared; index += 1) {
+      if (baseLists[index] !== nextBaseLists[index]) break;
+      const nodes = nextBaseLists[index];
+      if (nodes !== undefined && endsSegment(nodes)) cut = index;
+    }
+
+    const prefixLength = cut >= 0 ? (endOffsetByMessage[cut] ?? 0) : 0;
+    const startIndex = cut >= 0 ? cut + 1 : 0;
+    const indexed: IndexedNode[] = [];
+    for (let index = startIndex; index < nextBaseLists.length; index += 1) {
+      for (const node of nextBaseLists[index] ?? []) indexed.push({ node, messageIndex: index });
+    }
+
+    const tracker: MergeTracker = { computed: 0, reused: 0 };
+    const consolidated = consolidateInterruptionsIndexed(indexed);
+    const finished = options.detailed
+      ? consolidated
+      : mergeAdjacentGroupsIndexed(consolidated, options, mergeCache, tracker);
+
+    const nextFinal: TranscriptNode[] =
+      prefixLength === 0
+        ? finished.map((entry) => entry.node)
+        : [...finalNodes.slice(0, prefixLength), ...finished.map((entry) => entry.node)];
+
+    // Record how many final nodes each message owns, so a later projection can cut at an
+    // execution marker without replaying consolidation/grouping before it.
+    let cursor = 0;
+    for (let index = startIndex; index < nextBaseLists.length; index += 1) {
+      while (cursor < finished.length && (finished[cursor]?.messageIndex ?? 0) <= index) {
+        cursor += 1;
+      }
+      endOffsetByMessage[index] = prefixLength + cursor;
+    }
+    endOffsetByMessage.length = nextBaseLists.length;
+
+    const nextStats: ProjectionStats = {
+      messagesFolded,
+      messagesReused,
+      messagesReprocessed: nextBaseLists.length - startIndex,
+      groupsComputed: tracker.computed,
+      groupsReused: tracker.reused,
+      prefixNodesReused: prefixLength,
+    };
+    baseLists = nextBaseLists;
+    finalNodes = nextFinal;
+    stats = nextStats;
+    return nextFinal;
+  }
+
+  return { project, lastStats: () => stats };
+}
+
+function endsSegment(nodes: readonly TranscriptNode[]): boolean {
+  const last = nodes.at(-1);
+  return last !== undefined && last.kind === 'execution';
 }
 
 /** Normalizes a candidate interruption banner without touching the source text. */
@@ -510,26 +703,32 @@ function isInterruptionBanner(text: string): boolean {
  * `interrupted`; source messages are untouched, and extra detail prose is preserved.
  */
 function consolidateInterruptions(nodes: readonly TranscriptNode[]): TranscriptNode[] {
-  const consolidated: TranscriptNode[] = [];
-  let segment: TranscriptNode[] = [];
+  return consolidateInterruptionsIndexed(
+    nodes.map((node, messageIndex) => ({ node, messageIndex })),
+  ).map((entry) => entry.node);
+}
+
+function consolidateInterruptionsIndexed(nodes: readonly IndexedNode[]): IndexedNode[] {
+  const consolidated: IndexedNode[] = [];
+  let segment: IndexedNode[] = [];
   const flush = (interrupted: boolean) => {
-    for (const node of segment) {
+    for (const entry of segment) {
       if (!interrupted) {
-        consolidated.push(node);
+        consolidated.push(entry);
         continue;
       }
-      if (node.kind === 'notice' && isInterruptionBanner(node.text)) continue;
-      if (node.kind === 'text' && isInterruptionBanner(node.text)) continue;
-      consolidated.push(node);
+      if (entry.node.kind === 'notice' && isInterruptionBanner(entry.node.text)) continue;
+      if (entry.node.kind === 'text' && isInterruptionBanner(entry.node.text)) continue;
+      consolidated.push(entry);
     }
     segment = [];
   };
-  for (const node of nodes) {
-    if (node.kind === 'execution') {
-      flush(node.segment.phase === 'interrupted');
-      consolidated.push(node);
+  for (const entry of nodes) {
+    if (entry.node.kind === 'execution') {
+      flush(entry.node.segment.phase === 'interrupted');
+      consolidated.push(entry);
     } else {
-      segment.push(node);
+      segment.push(entry);
     }
   }
   flush(false);
@@ -539,36 +738,74 @@ function consolidateInterruptions(nodes: readonly TranscriptNode[]): TranscriptN
 type GroupNode = Extract<TranscriptNode, { kind: 'tool-group' }>;
 
 /** Calls split across assistant messages still read as one uninterrupted activity segment. */
-function mergeAdjacentGroups(nodes: TranscriptNode[], options: FoldOptions): TranscriptNode[] {
-  const merged: TranscriptNode[] = [];
-  let run: GroupNode[] = [];
+function mergeAdjacentGroups(
+  nodes: readonly TranscriptNode[],
+  options: FoldOptions,
+): TranscriptNode[] {
+  return mergeAdjacentGroupsIndexed(
+    nodes.map((node, messageIndex) => ({ node, messageIndex })),
+    options,
+  ).map((entry) => entry.node);
+}
+
+function mergeAdjacentGroupsIndexed(
+  nodes: readonly IndexedNode[],
+  options: FoldOptions,
+  cache?: MergeCache,
+  tracker?: MergeTracker,
+): IndexedNode[] {
+  type IndexedGroup = Readonly<{ node: GroupNode; messageIndex: number }>;
+  const merged: IndexedNode[] = [];
+  let run: IndexedGroup[] = [];
   const flush = () => {
     const first = run[0];
     if (first === undefined) return;
     if (run.length === 1) {
       merged.push(first);
+      run = [];
+      return;
+    }
+    const groups = run.map((entry) => entry.node);
+    const cacheKey = groups.map((group) => toolArrayKey(group.tools)).join('|');
+    const cached = cache?.get(cacheKey);
+    let group: GroupNode;
+    if (cached !== undefined) {
+      if (tracker !== undefined) tracker.reused += 1;
+      group = cached;
     } else {
-      const tools = run.flatMap((group) => group.tools);
+      const tools = groups.flatMap((entry) => entry.tools);
       const key = groupKey(tools);
       const live = liveToolLine(tools, options.mcpServers);
-      merged.push({
+      group = {
         kind: 'tool-group',
         key,
         summary: summarizeTools(tools, options.mcpServers),
-        running: run.some((group) => group.running),
+        running: groups.some((entry) => entry.running),
         ...(live === undefined ? {} : { live }),
         tools,
-        expanded: run.some((group) => group.expanded) || options.expandedGroups.has(key),
-      });
+        expanded: groups.some((entry) => entry.expanded) || options.expandedGroups.has(key),
+      };
+      if (cache !== undefined) {
+        cache.set(cacheKey, group);
+        if (cache.size > mergeCacheLimit) {
+          const oldest = cache.keys().next().value;
+          if (oldest !== undefined) cache.delete(oldest);
+        }
+      }
+      if (tracker !== undefined) tracker.computed += 1;
     }
+    merged.push({
+      node: group,
+      messageIndex: run[run.length - 1]?.messageIndex ?? first.messageIndex,
+    });
     run = [];
   };
-  for (const node of nodes) {
-    if (node.kind === 'tool-group') {
-      run.push(node);
+  for (const entry of nodes) {
+    if (entry.node.kind === 'tool-group') {
+      run.push({ node: entry.node, messageIndex: entry.messageIndex });
     } else {
       flush();
-      merged.push(node);
+      merged.push(entry);
     }
   }
   flush();

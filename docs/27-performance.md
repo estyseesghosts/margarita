@@ -19,7 +19,8 @@ a promise.
 
 | Name | Sizes | What it exercises |
 | --- | --- | --- |
-| `foldTranscript` | 120 / 1,000 / 10,000 messages | Compact derivation of transcript nodes, including groups/tool rows |
+| `foldTranscript` | 120 / 1,000 / 10,000 messages | Full compact derivation of transcript nodes, including groups/tool rows |
+| `projectorTailUpdate` | same | Incremental projection after appending one assistant part; the JSON `detail` reports messages folded/reprocessed and prefix nodes reused |
 | `projectUsage` | same | Footer/`/usage` analytics over loaded history |
 | `overviewGroups` | 1 / 50 / 500 sessions | Project grouping, ordering and path identity across two hosts |
 | `composerEdit` | 500 / 5,000 graphemes | End insertion plus one grapheme-left move |
@@ -45,7 +46,8 @@ behaviour, not for numeric performance claims.
 ## Related work
 
 - #282 — this harness.
-- #283 — incremental folded-node derivation.
+- #283 — incremental folded-node derivation (`createTranscriptProjector`). The harness's
+  `projectorTailUpdate` scenario reports how many messages were refolded versus reused.
 - #284 — decoupled transcript/job refreshes.
 - #285 — memoized usage analytics and footer facts.
 - #288 — cached overview grouping/tab counts.
