@@ -105,8 +105,12 @@ export type InspectorOverlay = {
   toolID: string;
   /** One-line identity, e.g. `bash · make test`. */
   title: string;
-  /** Case-insensitive search over payload lines; empty shows the document start. */
+  /** Case-insensitive literal search over payload lines; empty shows the document start. */
   query: string;
+  /** UTF-16 cursor in `query`, always on a grapheme boundary (#236). */
+  queryCursor: number;
+  /** True while the search field owns typing; `/` starts it and Esc clears or closes. */
+  searching: boolean;
   /** First visible document line (0-based), independent of the conversation scroll. */
   offset: number;
   /** First visible terminal cell (0-based); overlong lines never wrap (#228). */

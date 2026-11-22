@@ -43,8 +43,14 @@ import type { BackendEvent } from '../domain/backend-event.ts';
 import {
   type Composer,
   composerFrom,
+  deleteBackward,
+  deleteForward,
   emptyComposer,
   insertText,
+  moveLeft,
+  moveLineEnd,
+  moveLineStart,
+  moveRight,
   restoreComposer,
 } from '../domain/composer.ts';
 import { type Copyable, copyableFromMessages } from '../domain/copyable.ts';
@@ -6006,6 +6012,8 @@ export class AppController {
       toolID: target.tool.id,
       title: `${target.tool.name}${detail}`,
       query: '',
+      queryCursor: 0,
+      searching: false,
       offset: 0,
       column: 0,
       loading: true,
@@ -6118,22 +6126,44 @@ export class AppController {
     });
   }
 
-  private setInspectorQuery(query: string): void {
-    const document = this.inspectorDoc();
-    if (document === undefined) return;
-    const matches = document.matches(query);
+  private scrollInspector(delta: number): void {
     const overlay = this.state.overlay;
     if (overlay.kind !== 'inspector') return;
+    this.setInspectorState({ column: Math.max(0, overlay.column + delta) });
+  }
+
+  /**
+   * Applies one grapheme-aware edit to the search field. The query remains a literal,
+   * case-insensitive substring; only the cursor plumbing changed (#236).
+   */
+  private setInspectorSearch(composer: Composer): void {
+    const document = this.inspectorDoc();
+    if (document === undefined) return;
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'inspector') return;
+    const matches = document.matches(composer.text);
     this.setState('overlay', {
       ...overlay,
-      query,
+      query: composer.text,
+      queryCursor: composer.cursor,
+      searching: true,
       offset: matches[0] ?? overlay.offset,
     });
   }
 
+  private jumpInspectorMatch(previous: boolean): void {
+    const matches = this.inspectorMatches();
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'inspector' || matches.length === 0) return;
+    const next = nextMatch(matches, overlay.offset + (previous ? -1 : 0), previous ? -1 : 1);
+    this.setInspectorState({ offset: next });
+  }
+
   /**
-   * Inspector keys. Escape clears a search before closing; Enter jumps to the next match,
-   * Shift+Enter to the previous one. Ctrl+Y copies the source payload and Ctrl+S saves it.
+   * Inspector keys. `/` enters the search field (and is literal once there); Escape clears a
+   * non-empty query before closing; Enter jumps to the next match, Shift+Enter the previous.
+   * Backspace/Delete and Left/Right operate on whole graphemes while searching. Ctrl+Y copies
+   * the source payload and Ctrl+S saves it.
    */
   inspectorKey(
     key: Readonly<{ name: string; ctrl: boolean; alt: boolean; shift: boolean; text?: string }>,
@@ -6152,23 +6182,81 @@ export class AppController {
       this.closeOverlay();
       return;
     }
+
+    const composer: Composer = { text: overlay.query, cursor: overlay.queryCursor };
+
+    if (!overlay.searching) {
+      if (key.name === 'escape') {
+        this.closeOverlay();
+        return;
+      }
+      switch (key.name) {
+        case 'up':
+          this.moveInspector(-1);
+          return;
+        case 'down':
+          this.moveInspector(1);
+          return;
+        case 'left':
+          this.scrollInspector(-8);
+          return;
+        case 'right':
+          this.scrollInspector(8);
+          return;
+        case 'pageup':
+          this.moveInspector(-AppController.INSPECTOR_PAGE_ROWS);
+          return;
+        case 'pagedown':
+          this.moveInspector(AppController.INSPECTOR_PAGE_ROWS);
+          return;
+        case 'home':
+          this.moveInspector(-overlay.offset);
+          return;
+        case 'end': {
+          const total = this.inspectorDoc()?.lines.length ?? 1;
+          this.moveInspector(total);
+          return;
+        }
+        case 'return':
+          this.jumpInspectorMatch(key.shift);
+          return;
+        default:
+          if (key.text !== undefined && key.text !== '') {
+            // `/` focuses without entering the slash; any other printable key starts typing.
+            if (key.text === '/') this.setInspectorState({ searching: true });
+            else this.setInspectorSearch(insertText(composer, key.text));
+          }
+      }
+      return;
+    }
+
     if (key.name === 'escape') {
-      if (overlay.query !== '') this.setInspectorQuery('');
+      if (overlay.query !== '') this.setInspectorSearch({ text: '', cursor: 0 });
       else this.closeOverlay();
       return;
     }
+    if ((key.shift || key.ctrl) && (key.name === 'left' || key.name === 'right')) {
+      this.scrollInspector(key.name === 'left' ? -8 : 8);
+      return;
+    }
     switch (key.name) {
+      case 'left':
+        this.setInspectorSearch(moveLeft(composer));
+        return;
+      case 'right':
+        this.setInspectorSearch(moveRight(composer));
+        return;
+      case 'home':
+        this.setInspectorSearch(moveLineStart(composer));
+        return;
+      case 'end':
+        this.setInspectorSearch(moveLineEnd(composer));
+        return;
       case 'up':
         this.moveInspector(-1);
         return;
       case 'down':
         this.moveInspector(1);
-        return;
-      case 'left':
-        this.setInspectorState({ column: Math.max(0, overlay.column - 8) });
-        return;
-      case 'right':
-        this.setInspectorState({ column: overlay.column + 8 });
         return;
       case 'pageup':
         this.moveInspector(-AppController.INSPECTOR_PAGE_ROWS);
@@ -6176,34 +6264,22 @@ export class AppController {
       case 'pagedown':
         this.moveInspector(AppController.INSPECTOR_PAGE_ROWS);
         return;
-      case 'home':
-        this.moveInspector(-overlay.offset);
+      case 'return':
+        this.jumpInspectorMatch(key.shift);
         return;
-      case 'end': {
-        const total = this.inspectorDoc()?.lines.length ?? 1;
-        this.moveInspector(total);
-        return;
-      }
-      case 'return': {
-        const matches = this.inspectorMatches();
-        if (matches.length > 0) {
-          const next = nextMatch(
-            matches,
-            overlay.offset + (key.shift ? -1 : 0),
-            key.shift ? -1 : 1,
-          );
-          this.setInspectorState({ offset: next });
-        }
-        return;
-      }
       case 'backspace':
-        this.setInspectorQuery(overlay.query.slice(0, -1));
+        if (overlay.query === '') {
+          this.setInspectorState({ searching: false });
+          return;
+        }
+        this.setInspectorSearch(deleteBackward(composer));
+        return;
+      case 'delete':
+        this.setInspectorSearch(deleteForward(composer));
         return;
       default:
-        if (key.text !== undefined && key.text !== '/') {
-          this.setInspectorQuery(overlay.query + key.text);
-        } else if (key.text === '/') {
-          this.setInspectorQuery('');
+        if (key.text !== undefined && key.text !== '' && !key.ctrl && !key.alt) {
+          this.setInspectorSearch(insertText(composer, key.text));
         }
     }
   }

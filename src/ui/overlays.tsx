@@ -138,7 +138,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                 {(error: Accessor<string>) => <text fg={props.theme.warn}>{`  ${error()}`}</text>}
               </Show>
               <Show
-                when={overlay().query !== ''}
+                when={overlay().searching}
                 fallback={
                   <text fg={props.theme.dim}>
                     {'/ search · Enter next match · ←/→ scroll · Ctrl+Y copy · Ctrl+S save'}
@@ -146,7 +146,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                 }
               >
                 <text fg={props.theme.accent}>
-                  {`/${overlay().query}  · ${matchCount()} ${matchCount() === 1 ? 'match' : 'matches'} · Enter next · Shift+Enter previous`}
+                  {`/${overlay().query.slice(0, overlay().queryCursor)}▏${overlay().query.slice(overlay().queryCursor)}  · ${matchCount()} ${matchCount() === 1 ? 'match' : 'matches'} · Enter next · Esc clear/close`}
                 </text>
               </Show>
               <box flexDirection="column" flexGrow={1} flexShrink={1}>

@@ -57,6 +57,17 @@ async function flush(): Promise<void> {
   for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
 }
 
+/** A plain (non-modifier) key for the inspector's search-field tests. */
+function inspectorKeyEvent(name: string, text?: string) {
+  return {
+    name,
+    ctrl: false,
+    alt: false,
+    shift: false,
+    ...(text === undefined ? {} : { text }),
+  };
+}
+
 test('MCP catalogs retain confirmed project names through failures and late loads', async () => {
   const backend = new FakeBackend();
   const controller = makeController(async () => [], backend);
@@ -2172,6 +2183,53 @@ describe('output inspector (#221, #222)', () => {
     expect(view.offset).toBe(0);
     expect(view.total).toBe(602);
     expect(view.lines[0]).toBe('row0');
+    controller.dispose();
+  });
+
+  test('search keeps literal slashes and edits whole graphemes (#236)', async () => {
+    const { controller } = inspectorFixture();
+    await attach(controller, 'ses_a');
+    controller.openInspector();
+    await flush();
+    const overlay = () => {
+      const value = controller.state.overlay;
+      if (value.kind !== 'inspector') throw new Error('inspector not open');
+      return value;
+    };
+    const key = inspectorKeyEvent;
+
+    // `/` opens the field without inserting or clearing; later slashes are literal.
+    controller.inspectorKey(key('slash', '/'));
+    expect(overlay().searching).toBe(true);
+    expect(overlay().query).toBe('');
+    for (const character of 'src/foo/bar')
+      controller.inspectorKey(key(character === '/' ? 'slash' : 'letter', character));
+    expect(overlay().query).toBe('src/foo/bar');
+    expect(overlay().queryCursor).toBe('src/foo/bar'.length);
+    expect(overlay().searching).toBe(true);
+
+    // Cursor movement and insertion stay on grapheme boundaries.
+    controller.inspectorKey(key('left'));
+    controller.inspectorKey(key('left'));
+    controller.inspectorKey(key('left'));
+    controller.inspectorKey(key('letter', 'X'));
+    expect(overlay().query).toBe('src/foo/Xbar');
+    expect(overlay().queryCursor).toBe(9);
+
+    // One Backspace removes a joined emoji cluster, leaving no lone surrogate.
+    controller.inspectorKey(key('letter', '👩‍💻'));
+    expect(overlay().query).toContain('👩‍💻');
+    controller.inspectorKey(key('backspace'));
+    expect(overlay().query).not.toContain('👩‍💻');
+    expect(overlay().query).toBe('src/foo/Xbar');
+
+    // Escape clears the non-empty query; a second Escape closes the inspector.
+    controller.inspectorKey(key('escape'));
+    expect(overlay().query).toBe('');
+    expect(overlay().queryCursor).toBe(0);
+    expect(controller.state.overlay.kind).toBe('inspector');
+    controller.inspectorKey(key('escape'));
+    expect(controller.state.overlay.kind).toBe('none');
     controller.dispose();
   });
 
