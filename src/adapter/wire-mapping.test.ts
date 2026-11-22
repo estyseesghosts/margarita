@@ -80,9 +80,11 @@ describe('subagent job mapping (#101)', () => {
 });
 
 function assistantWithTool(
-  output: string,
+  output: string | readonly string[],
   metadata?: Record<string, string | number | boolean>,
 ): SessionMessageAssistant {
+  const outputs = typeof output === 'string' ? [output] : output;
+  const [firstOutput, ...restOutputs] = outputs;
   return {
     type: 'assistant',
     id: 'msg_1',
@@ -97,7 +99,10 @@ function assistantWithTool(
         state: {
           status: 'completed',
           input: { command: 'big-test' },
-          content: [{ type: 'text', text: output }],
+          content: [
+            { type: 'text' as const, text: firstOutput ?? '' },
+            ...restOutputs.map((text) => ({ type: 'text' as const, text })),
+          ],
           ...(metadata === undefined ? {} : { metadata }),
         },
       },
@@ -221,6 +226,21 @@ describe('tool output retention (issue #7)', () => {
     const tool = toolOutput(assistantWithTool(output), { maxToolOutputChars: 1_000 });
     expect(tool.outputTruncated).toBe('frontend');
     expect(tool.output!.length).toBeLessThan(1_200);
+  });
+
+  test('a segmented payload is bounded without joining it first or splitting Unicode (#289)', () => {
+    const head = 'HEAD-' + 'h'.repeat(9_000);
+    const middle = Array.from({ length: 20 }, () => 'm'.repeat(10_000));
+    const tail = '9'.repeat(9_900) + '😀TAIL';
+    const tool = toolOutput(assistantWithTool([head, ...middle, tail]), {
+      maxToolOutputChars: 1_000,
+    });
+    expect(tool.outputTruncated).toBe('frontend');
+    expect(tool.output).toContain('HEAD-');
+    expect(tool.output).toContain('TAIL');
+    expect(tool.output).toContain('chars total');
+    expect(tool.output!.length).toBeLessThan(1_200);
+    expect(tool.output!.isWellFormed()).toBe(true);
   });
 
   test('server-flagged truncation is reported as server-side, not frontend', () => {

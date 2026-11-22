@@ -29,6 +29,7 @@ import type { AssistantPart, TranscriptMessage } from '../src/domain/transcript.
 import { createTranscriptProjector, foldTranscript } from '../src/domain/transcript.ts';
 import { projectUsage } from '../src/domain/usage-analytics.ts';
 import { type BenchStats, sampleOperation } from '../src/perf/measure.ts';
+import { approximateTranscriptBytes } from '../src/perf/memory.ts';
 
 type Scenario = Readonly<{
   name: string;
@@ -114,6 +115,89 @@ function sessions(size: number): SessionSummary[] {
     createdAt: 0,
     archived: false,
   }));
+}
+
+/** Synthetic retained history: 64k tool previews every tenth message plus a large diff. */
+function retainedTranscript(size: number, tag: string): TranscriptMessage[] {
+  const output = 'x'.repeat(64_000);
+  const diff = Array.from({ length: 500 }, (_, row) => `+line ${row}`).join('\n');
+  const messages: TranscriptMessage[] = [];
+  for (let index = 0; index < size; index += 1) {
+    const ordinal = Math.floor(index / 2);
+    if (index % 2 === 0) {
+      messages.push({
+        kind: 'user',
+        id: `${tag}-u${ordinal}`,
+        createdAt: index,
+        text: `request ${ordinal}`,
+        attachments: [],
+      });
+      continue;
+    }
+    const parts: AssistantPart[] = [{ kind: 'text', text: `Answer ${ordinal}` }];
+    if (ordinal % 10 === 0) {
+      parts.push({
+        kind: 'tool',
+        tool: {
+          id: `${tag}-t${ordinal}`,
+          name: 'edit',
+          status: 'completed',
+          input: { path: `src/file-${ordinal}.ts` },
+          output,
+          diff,
+          startedAt: index,
+          completedAt: index + 1,
+        },
+      });
+    }
+    messages.push({
+      kind: 'assistant',
+      id: `${tag}-a${ordinal}`,
+      createdAt: index,
+      completedAt: index + 1,
+      agent: 'build',
+      model: { providerID: 'mock', modelID: 'mock-1' },
+      parts,
+    });
+  }
+  return messages;
+}
+
+async function memoryReport(): Promise<unknown> {
+  const sizes = smoke ? [20] : [20, 1000, 10_000];
+  const before = process.memoryUsage();
+  const retained = sizes.map((size) => {
+    const transcript = retainedTranscript(size, `mem${size}`);
+    return {
+      size,
+      ...approximateTranscriptBytes(transcript),
+    };
+  });
+  // Eight cached sessions are the controller's current count bound; measure the payload
+  // separately from the process's transient allocation peak.
+  let eight = Array.from({ length: 8 }, (_, index) => retainedTranscript(1000, `eight${index}`));
+  const eightRetained = eight.reduce(
+    (total, transcript) => total + approximateTranscriptBytes(transcript).total,
+    0,
+  );
+  const afterAlloc = process.memoryUsage();
+  const gcPause = await sampleOperation(() => Bun.gc(true), smoke ? 1 : 5, 0);
+  const afterGc = process.memoryUsage();
+  eight = [];
+  Bun.gc(true);
+  const afterRelease = process.memoryUsage();
+  return {
+    sizes: retained,
+    eightSessions: { messagesEach: 1000, retainedBytes: eightRetained },
+    heap: {
+      before: { heapUsedBytes: before.heapUsed, rssBytes: before.rss },
+      afterAlloc: { heapUsedBytes: afterAlloc.heapUsed, rssBytes: afterAlloc.rss },
+      afterGc: { heapUsedBytes: afterGc.heapUsed, rssBytes: afterGc.rss },
+      afterRelease: { heapUsedBytes: afterRelease.heapUsed, rssBytes: afterRelease.rss },
+    },
+    gcPauseMs: gcPause,
+    note: 'JS heap only; native OpenTUI allocations and retained-object snapshots are not attributed here',
+  };
 }
 
 function scenarios(): Scenario[] {
@@ -264,6 +348,7 @@ for (const scenario of scenarios()) {
   });
 }
 
+const memory = await memoryReport();
 const report = {
   kind: 'margarita-performance' as const,
   version: 1,
@@ -274,10 +359,12 @@ const report = {
   smoke,
   before: { heapUsedBytes: before.heapUsed, rssBytes: before.rss },
   scenarios: reports,
+  memory,
   unavailable: [
     'event-receipt-to-paint latency (requires a live TTY/PTY trace)',
     'OpenTUI native frame/cell counters (@opentui/core 0.9.2 exposes no stable API)',
     'dropped-frame count (not exposed by the test renderer)',
+    'native renderer retained memory and attached heap-snapshot reports (not exposed by OpenTUI)',
   ],
 };
 

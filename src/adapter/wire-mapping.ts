@@ -236,16 +236,67 @@ function toolContent(
       if (file !== undefined) files.push(file);
     }
   }
-  const text = textParts.join('\n');
-  // Bounded, but keep both ends: failures usually live in the tail.
-  if (text.length > maxChars) {
-    const head = Math.floor(maxChars / 2);
-    const tail = maxChars - head;
-    const omitted = text.length - maxChars;
-    const capped = `${text.slice(0, head)}\n… ${omitted} characters omitted from the middle of this output (${text.length} chars total) …\n${text.slice(text.length - tail)}`;
-    return { text: sanitizeTerminalText(capped), truncated: true, files };
+  const total = textParts.reduce(
+    (length, part, index) => length + part.length + (index === 0 ? 0 : 1),
+    0,
+  );
+  if (total <= maxChars) {
+    return { text: sanitizeTerminalText(textParts.join('\n')), truncated: false, files };
   }
-  return { text: sanitizeTerminalText(text), truncated: false, files };
+  // Bounded, but keep both ends: failures usually live in the tail. Build the head and tail
+  // across the parts directly instead of joining a potentially huge upstream payload first
+  // (#289); the omission banner still states the true total length.
+  const headBudget = Math.floor(maxChars / 2);
+  const tailBudget = maxChars - headBudget;
+  let head = '';
+  let remaining = headBudget;
+  for (let index = 0; index < textParts.length && remaining > 0; index += 1) {
+    if (index > 0) {
+      head += '\n';
+      remaining -= 1;
+      if (remaining <= 0) break;
+    }
+    const piece = safePrefix(textParts[index] ?? '', remaining);
+    head += piece;
+    remaining -= piece.length;
+  }
+  let tail = '';
+  remaining = tailBudget;
+  for (let index = textParts.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    if (index < textParts.length - 1) {
+      tail = `\n${tail}`;
+      remaining -= 1;
+      if (remaining <= 0) break;
+    }
+    const piece = safeSuffix(textParts[index] ?? '', remaining);
+    tail = piece + tail;
+    remaining -= piece.length;
+  }
+  const omitted = total - head.length - tail.length;
+  const capped = `${head}\n… ${omitted} characters omitted from the middle of this output (${total} chars total) …\n${tail}`;
+  return { text: sanitizeTerminalText(capped), truncated: true, files };
+}
+
+/** A UTF-16 prefix that never ends between a high and a low surrogate. */
+function safePrefix(text: string, max: number): string {
+  if (max <= 0) return '';
+  if (max >= text.length) return text;
+  let end = max;
+  const unit = text.charCodeAt(end - 1);
+  const next = text.charCodeAt(end);
+  if (unit >= 0xd800 && unit <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
+  return text.slice(0, end);
+}
+
+/** A UTF-16 suffix that never starts between a high and a low surrogate. */
+function safeSuffix(text: string, max: number): string {
+  if (max <= 0) return '';
+  if (max >= text.length) return text;
+  let start = text.length - max;
+  const unit = text.charCodeAt(start);
+  const previous = text.charCodeAt(start - 1);
+  if (unit >= 0xdc00 && unit <= 0xdfff && previous >= 0xd800 && previous <= 0xdbff) start += 1;
+  return text.slice(start);
 }
 
 export type WireMappingOptions = Readonly<{

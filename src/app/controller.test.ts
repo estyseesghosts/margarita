@@ -2556,6 +2556,78 @@ describe('tool-group focus', () => {
     controller.dispose();
   });
 
+  test('a retained byte budget evicts inactive transcripts, never the active one (#289)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = ['ses_a', 'ses_b', 'ses_c'].map(fakeSession);
+    const largeOutput = 'x'.repeat(20_000);
+    const transcript = (id: string): TranscriptMessage[] => [
+      {
+        kind: 'user',
+        id: `${id}-u1`,
+        createdAt: 1,
+        text: `request ${id}`,
+        attachments: [],
+      },
+      {
+        kind: 'assistant',
+        id: `${id}-a1`,
+        createdAt: 2,
+        completedAt: 3,
+        agent: 'build',
+        model: { providerID: 'opencode', modelID: 'longcat' },
+        parts: [
+          {
+            kind: 'tool',
+            tool: {
+              id: `${id}-t1`,
+              name: 'read',
+              status: 'completed',
+              input: { filePath: 'src/a.ts' },
+              output: largeOutput,
+              startedAt: 2,
+              completedAt: 3,
+            },
+          },
+        ],
+      },
+    ];
+    backend.messages = {
+      ses_a: transcript('a'),
+      ses_b: transcript('b'),
+      ses_c: transcript('c'),
+    };
+    const controller = makeController(
+      async () => [],
+      backend,
+      () => 10_000,
+      {
+        transcriptCacheBytes: 1_000,
+      },
+    );
+    await controller.bootstrap();
+
+    controller.openSession('ses_a');
+    await flush();
+    controller.openSession('ses_b');
+    await flush();
+    expect(controller.state.transcripts['ses_b']).toBeDefined();
+    expect(controller.state.transcripts['ses_a']).toBeUndefined();
+
+    // The active transcript is over budget all by itself and must stay resident.
+    controller.openSession('ses_a');
+    await flush();
+    expect(controller.state.transcripts['ses_a']?.messages).toHaveLength(2);
+    expect(controller.state.transcripts['ses_b']).toBeUndefined();
+    expect(controller.state.sessions['ses_b']).toBeDefined();
+
+    // Deletion drops the retained cache completely; the summary is gone too.
+    backend.sessions = backend.sessions.filter((session) => session.id !== 'ses_a');
+    controller.onEvents('local', [{ kind: 'session-deleted', sessionID: 'ses_a' }], false);
+    expect(controller.state.transcripts['ses_a']).toBeUndefined();
+    expect(controller.state.sessions['ses_a']).toBeUndefined();
+    controller.dispose();
+  });
+
   test('streamed tools keep the focused group identity; typing clears it', async () => {
     const { backend, controller } = conversationFixture();
     await attach(controller, 'ses_a');

@@ -199,6 +199,7 @@ import {
 } from '../domain/transcript.ts';
 import { projectUsage, type UsageAnalytics } from '../domain/usage-analytics.ts';
 import { type WorkerNode, workerNodes } from '../domain/worker.ts';
+import { approximateTranscriptBytes } from '../perf/memory.ts';
 import {
   type AppState,
   type BackgroundEvent,
@@ -374,10 +375,17 @@ export type ControllerDeps = Readonly<{
   serverIDs?: () => readonly string[];
   /** Opt-in diagnostics sink (--debug-log); defaults to a silent no-op. */
   debugLog?: DebugLog;
+  /**
+   * Approximate retained-byte budget for inactive transcript caches (#289). The active
+   * route's transcript and any in-flight read are never evicted by bytes.
+   */
+  transcriptCacheBytes?: number;
 }>;
 
 const transcriptPageSize = 120;
 const transcriptCacheLimit = 8;
+/** Default retained-history budget; summaries and drafts live outside this cache. */
+const transcriptCacheByteLimit = 32 * 1024 * 1024;
 const sessionPageLimit = 5;
 const reconcileConcurrency = 8;
 const exportPageSize = 500;
@@ -2772,6 +2780,7 @@ export class AppController {
           else delete current.olderCheckFailed;
         }),
       );
+      this.touchTranscript(key);
     } catch (error) {
       // A failure from a retired lifetime says nothing about the current one; do not
       // surface it as a notice for a session the user no longer has.
@@ -2865,17 +2874,59 @@ export class AppController {
     return true;
   }
 
-  /** Bounded LRU of cached transcripts; detached sessions keep summaries only. */
+  /**
+   * Bounded LRU of cached transcripts; detached sessions keep summaries only. Both the
+   * session count and approximate retained bytes are bounded (#289). The active route and
+   * an in-flight read are never evicted, so a slow refresh cannot lose its destination and
+   * reopening an evicted session refetches the latest page normally.
+   */
   private touchTranscript(key: string): void {
     this.transcriptOrder = [key, ...this.transcriptOrder.filter((entry) => entry !== key)];
-    const evicted = this.transcriptOrder.slice(transcriptCacheLimit);
+    const evicted = new Set(this.transcriptOrder.slice(transcriptCacheLimit));
     this.transcriptOrder = this.transcriptOrder.slice(0, transcriptCacheLimit);
-    if (evicted.length === 0) return;
+
+    const budget = this.deps.transcriptCacheBytes ?? transcriptCacheByteLimit;
+    const activeKey =
+      this.state.route.kind === 'conversation'
+        ? this.keyFor(this.state.route.serverID, this.state.route.sessionID)
+        : undefined;
+    const sizes = new Map<string, number>();
+    let total = 0;
+    for (const entry of this.transcriptOrder) {
+      if (evicted.has(entry)) continue;
+      const messages = this.state.transcripts[entry]?.messages ?? [];
+      const retained = approximateTranscriptBytes(messages).total;
+      sizes.set(entry, retained);
+      total += retained;
+    }
+    const inFlight = this.inFlightTranscriptKeys();
+    for (let index = this.transcriptOrder.length - 1; index >= 0 && total > budget; index -= 1) {
+      const entry = this.transcriptOrder[index];
+      if (entry === undefined || entry === activeKey || inFlight.has(entry)) continue;
+      // Keep the most recently used entry even when it alone exceeds the budget: evicting
+      // it would make the next refresh refetch the same bytes with no memory win.
+      if (index === 0) continue;
+      total -= sizes.get(entry) ?? 0;
+      evicted.add(entry);
+    }
+    if (evicted.size === 0) return;
+    this.transcriptOrder = this.transcriptOrder.filter((entry) => !evicted.has(entry));
     this.setState(
       produce((state) => {
         for (const entry of evicted) delete state.transcripts[entry];
       }),
     );
+  }
+
+  /** Session keys whose transcript read is still allowed to commit. */
+  private inFlightTranscriptKeys(): ReadonlySet<string> {
+    const keys = new Set<string>();
+    for (const entry of this.transcriptInFlight.keys()) {
+      const separator = entry.indexOf(' ');
+      if (separator <= 0) continue;
+      keys.add(this.keyFor(entry.slice(0, separator), entry.slice(separator + 1)));
+    }
+    return keys;
   }
 
   private async loadConversation(

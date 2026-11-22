@@ -47,6 +47,26 @@ Native Markdown parse/reparse, layout and changed-cell counts are still unavaila
 same renderer reason above; the counter is a revision boundary, not a claim about native
 work.
 
+## Retained transcript memory (#289)
+
+`src/perf/memory.ts` estimates retained bytes from UTF-16 string payloads plus fixed
+per-message/part/tool/child/file overhead. The estimate is deterministic and cached per
+message and per message array; it is a policy input, not a heap measurement.
+
+The controller keeps at most eight cached transcripts and additionally enforces an
+approximate 32 MiB budget over *inactive* transcripts (`ControllerDeps.transcriptCacheBytes`
+overrides it in tests). The active route and any in-flight transcript read are never evicted;
+the most recently used transcript stays even when it alone exceeds the budget, because
+evicting it would only trigger an identical refetch. Eviction deletes canonical messages and
+derived data only; reopening the session refetches the latest page, and older pagination is
+re-established from that page's cursor. Deleting or unpairing a session still clears every
+per-session cache entry.
+
+The JSON `memory` section reports retained estimates for 20/1,000/10,000-message fixtures,
+eight 1,000-message sessions, heap/RSS before and after allocation/GC/release, and GC pause
+samples. Native OpenTUI retained memory and attached heap-snapshot reports are not exposed by
+the pinned renderer; they are listed as unavailable rather than approximated.
+
 ## Reproducibility rules
 
 - Use the same commit, machine, terminal size, Bun version and power mode for comparisons.
@@ -65,5 +85,6 @@ work.
 - #284 — decoupled transcript/job refreshes.
 - #285 — memoized usage analytics and footer facts.
 - #288 — cached overview grouping/tab counts.
+- #289 — retained-byte transcript cache budget and the bench memory report.
 - #290 — animation-off timer cadence.
 - #291 — composer editing under large drafts.
