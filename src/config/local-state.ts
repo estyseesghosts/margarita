@@ -12,6 +12,16 @@ import {
   supportedSchemaVersion,
 } from './schema-guard.ts';
 
+/** A single user-intent mutation of one pin scope, persisted so cross-process saves merge. */
+export interface PinnedModelOperation {
+  /** Monotonic per scope; 0 is reserved for legacy pins that predate operations. */
+  revision: number;
+  /** `null` is an explicit clear and suppresses a stale writer's older pin for this scope. */
+  model: ModelSelection | null;
+  /** ISO timestamp, used only to order equal revisions deterministically. */
+  updatedAt: string;
+}
+
 /** Frontend-only presentation state. Session history is never stored here. */
 export type LocalState = Readonly<{
   schemaVersion: 1;
@@ -23,6 +33,12 @@ export type LocalState = Readonly<{
    * `project:<scopeKey>`; absent when nothing is pinned. Older builds ignore this field.
    */
   pinnedModels?: Readonly<Record<string, ModelSelection>>;
+  /**
+   * Per-scope pin mutations behind `pinnedModels` (#273). Keeping the operations (including
+   * explicit clears) lets two processes merge independent scopes without either snapshot
+   * overwriting the other; a build that does not know this field still reads `pinnedModels`.
+   */
+  pinnedModelOps?: Readonly<Record<string, PinnedModelOperation>>;
   /** Last server-confirmed model per `<scopeKey>` (server + canonical project) (#189). */
   lastModels?: Readonly<Record<string, ModelSelection>>;
 }>;
@@ -106,13 +122,16 @@ export function parseState(raw: unknown): LocalState {
       if (model !== undefined) recentModels.push(model);
     }
   }
-  const pinnedModels = parseModelMap(raw['pinnedModels']);
+  const legacyPins = parseModelMap(raw['pinnedModels']);
+  const pinnedModelOps = parsePinOperations(raw['pinnedModelOps']);
+  const pinnedModels = applyPinOperations(legacyPins, pinnedModelOps);
   const lastModels = parseModelMap(raw['lastModels']);
   return {
     schemaVersion: 1,
     history,
     recentModels,
     ...(pinnedModels === undefined ? {} : { pinnedModels }),
+    ...(pinnedModelOps === undefined ? {} : { pinnedModelOps }),
     ...(lastModels === undefined ? {} : { lastModels }),
   };
 }
@@ -137,6 +156,74 @@ function parseModelMap(raw: unknown): Record<string, ModelSelection> | undefined
     if (model !== undefined) result[key] = model;
   }
   return Object.keys(result).length === 0 ? undefined : result;
+}
+
+function parsePinOperations(raw: unknown): Record<string, PinnedModelOperation> | undefined {
+  if (!isRecord(raw)) return undefined;
+  const result: Record<string, PinnedModelOperation> = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    if (!isRecord(entry)) continue;
+    const revision = entry['revision'];
+    const updatedAt = entry['updatedAt'];
+    if (
+      typeof revision !== 'number' ||
+      !Number.isSafeInteger(revision) ||
+      revision < 1 ||
+      typeof updatedAt !== 'string'
+    ) {
+      continue;
+    }
+    const rawModel = entry['model'];
+    const model = rawModel === null ? null : parseModelEntry(rawModel);
+    // `undefined` from a malformed model must not become an implicit clear.
+    if (model === undefined) continue;
+    result[key] = { revision, model, updatedAt };
+  }
+  return Object.keys(result).length === 0 ? undefined : result;
+}
+
+/**
+ * Applies operations to the legacy pin map. A clear suppresses a legacy pin for the same
+ * scope, so an older writer that only knows `pinnedModels` cannot resurrect it.
+ */
+function applyPinOperations(
+  legacyPins: Record<string, ModelSelection> | undefined,
+  operations: Readonly<Record<string, PinnedModelOperation>> | undefined,
+): Record<string, ModelSelection> | undefined {
+  const pins = { ...legacyPins };
+  for (const [key, operation] of Object.entries(operations ?? {})) {
+    if (operation.model === null) delete pins[key];
+    else pins[key] = operation.model;
+  }
+  return Object.keys(pins).length === 0 ? undefined : pins;
+}
+
+/**
+ * Chooses the newer of two operations for the same scope. Revision is primary; equal
+ * revisions fall back to the explicit timestamp; a full tie keeps the local writer. This is
+ * a total order defined by operation contents, never by object enumeration.
+ */
+function newerOperation(
+  ours: PinnedModelOperation,
+  theirs: PinnedModelOperation,
+): PinnedModelOperation {
+  if (ours.revision !== theirs.revision) return ours.revision > theirs.revision ? ours : theirs;
+  if (ours.updatedAt !== theirs.updatedAt) return ours.updatedAt > theirs.updatedAt ? ours : theirs;
+  return ours;
+}
+
+function mergePinOperations(
+  ours: Readonly<Record<string, PinnedModelOperation>> | undefined,
+  theirs: Readonly<Record<string, PinnedModelOperation>> | undefined,
+): Record<string, PinnedModelOperation> | undefined {
+  if (ours === undefined) return theirs === undefined ? undefined : { ...theirs };
+  if (theirs === undefined) return { ...ours };
+  const merged: Record<string, PinnedModelOperation> = { ...theirs };
+  for (const [key, operation] of Object.entries(ours)) {
+    const existing = merged[key];
+    merged[key] = existing === undefined ? operation : newerOperation(operation, existing);
+  }
+  return Object.keys(merged).length === 0 ? undefined : merged;
 }
 
 /** Bounds used when merging two snapshots written by different processes. */
@@ -171,18 +258,21 @@ export function mergeState(
     recentModels.push(entry);
     if (recentModels.length >= limits.recentLimit) break;
   }
-  // Pins are explicit user state: when the writer holds a pin map (even an empty one after
-  // /model default clear) it is authoritative, so a cleared pin is never resurrected from
-  // disk; a writer that never touched pins leaves another process's pins alone.
-  const pinnedModels = ours.pinnedModels ?? theirs.pinnedModels;
+  // Pins are merged per scope: each writer persists the operations it actually performed,
+  // so independent project pins from two processes both survive and an explicit clear is not
+  // resurrected by the other writer's stale snapshot (#273).
+  const pinnedModelOps = mergePinOperations(ours.pinnedModelOps, theirs.pinnedModelOps);
+  const pinnedModels = applyPinOperations(
+    { ...theirs.pinnedModels, ...ours.pinnedModels },
+    pinnedModelOps,
+  );
   const lastModels = { ...theirs.lastModels, ...ours.lastModels };
   return {
     schemaVersion: 1,
     history,
     recentModels,
-    ...(pinnedModels === undefined || Object.keys(pinnedModels).length === 0
-      ? {}
-      : { pinnedModels }),
+    ...(pinnedModels === undefined ? {} : { pinnedModels }),
+    ...(pinnedModelOps === undefined ? {} : { pinnedModelOps }),
     ...(Object.keys(lastModels).length === 0 ? {} : { lastModels }),
   };
 }

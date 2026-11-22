@@ -18,7 +18,7 @@ import type { StreamStatus } from '../adapter/event-pump.ts';
 import { nextQueuedUser } from '../adapter/wire-mapping.ts';
 import type { AppConfig } from '../config/config.ts';
 import { GoalConflictError, type GoalStore, memoryGoalStore } from '../config/goal-store.ts';
-import type { LocalState, SaveResult } from '../config/local-state.ts';
+import type { LocalState, PinnedModelOperation, SaveResult } from '../config/local-state.ts';
 import { mergeState } from '../config/local-state.ts';
 import {
   type AgentDescriptor,
@@ -494,6 +494,8 @@ export class AppController {
   private completionGeneration = 0;
   private disposed = false;
   private persisted: LocalState;
+  /** Canonical per-scope pin operations, kept in sync with the latest merged disk state. */
+  private pinOperations: Readonly<Record<string, PinnedModelOperation>>;
   /** In-flight saves, serialized per controller. */
   private saveChain: Promise<void> = Promise.resolve();
   private saveError: string | undefined;
@@ -521,6 +523,7 @@ export class AppController {
     this.state = state;
     this.setState = setState;
     this.persisted = deps.localState;
+    this.pinOperations = deps.localState.pinnedModelOps ?? {};
     this.goalStore = deps.goalStore ?? memoryGoalStore();
     setState('recentModels', [...deps.localState.recentModels]);
     setState('pinnedModels', { ...deps.localState.pinnedModels });
@@ -5352,10 +5355,7 @@ export class AppController {
         this.showNotice(`No model is pinned for ${label}.`, 'dim');
         return;
       }
-      const next = { ...this.state.pinnedModels };
-      delete next[key];
-      this.setState('pinnedModels', reconcile(next));
-      this.persist({ pinnedModels: next });
+      this.mutatePin(key, null);
       this.showNotice(
         `Cleared the pinned model for ${label}; automatic selection restored.`,
         'dim',
@@ -5376,10 +5376,26 @@ export class AppController {
       this.showNotice('No confirmed model to pin yet. Select one with /model first.', 'warn');
       return;
     }
-    const pinned = { ...this.state.pinnedModels, [key]: model };
-    this.setState('pinnedModels', reconcile(pinned));
-    this.persist({ pinnedModels: pinned });
+    this.mutatePin(key, model);
     this.showNotice(`Pinned ${formatModelRef(model)} as the default for ${label}.`, 'dim');
+  }
+
+  /**
+   * Records one scope's pin intent and persists the full view derived from it. The explicit
+   * operation (including a clear) is what lets another process merge unrelated scopes (#273).
+   */
+  private mutatePin(key: string, model: ModelSelection | null): void {
+    const revision = (this.pinOperations[key]?.revision ?? 0) + 1;
+    const operations: Record<string, PinnedModelOperation> = {
+      ...this.pinOperations,
+      [key]: { revision, model, updatedAt: this.isoNow() },
+    };
+    const pins: Record<string, ModelSelection> = { ...this.state.pinnedModels };
+    if (model === null) delete pins[key];
+    else pins[key] = model;
+    this.pinOperations = operations;
+    this.setState('pinnedModels', reconcile(pins));
+    this.persist({ pinnedModels: pins, pinnedModelOps: operations });
   }
 
   private modelDispatchBlocked(serverID: string, sessionID: string): boolean {
@@ -7243,7 +7259,12 @@ export class AppController {
           // disk. If this process applied a newer patch while the save was in flight,
           // re-merge that patch over the disk state instead of dropping either.
           const latest = this.persisted;
-          this.persisted = latest === snapshot ? merged : mergeState(latest, merged);
+          const adopted = latest === snapshot ? merged : mergeState(latest, merged);
+          this.persisted = adopted;
+          this.pinOperations = adopted.pinnedModelOps ?? {};
+          // The footer/`/model default show` must reflect unrelated pins that another
+          // process wrote, not the stale snapshot this save started from.
+          this.setState('pinnedModels', reconcile({ ...adopted.pinnedModels }));
         }
         if (result?.warning !== undefined) {
           this.showNotice(`Local state warning: ${result.warning}`, 'warn');

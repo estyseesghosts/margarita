@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { pickTheme } from '../ui/theme.ts';
 import { defaultConfig, loadConfig, parseConfig, stripJsonComments } from './config.ts';
 import { emptyState, loadState, mergeState, parseState, saveState } from './local-state.ts';
+import type { PinnedModelOperation } from './local-state.ts';
 import { appPaths } from './paths.ts';
 import { IncompatibleSchemaError } from './schema-guard.ts';
 
@@ -258,8 +259,98 @@ describe('pinned and last-used model state (#189, #190)', () => {
   test('a cleared pin is not resurrected from disk, an untouched writer keeps foreign pins', () => {
     const base = { schemaVersion: 1 as const, history: {}, recentModels: [] };
     const onDisk = { ...base, pinnedModels: { user: m('a') } };
-    expect(mergeState({ ...base, pinnedModels: {} }, onDisk).pinnedModels).toBeUndefined();
+    const clear: PinnedModelOperation = {
+      revision: 1,
+      model: null,
+      updatedAt: '2026-01-01T00:00:00Z',
+    };
+    expect(
+      mergeState({ ...base, pinnedModels: {}, pinnedModelOps: { user: clear } }, onDisk)
+        .pinnedModels,
+    ).toBeUndefined();
     expect(mergeState(base, onDisk).pinnedModels).toEqual({ user: m('a') });
+  });
+  test('independent scopes survive an interleaved write from a stale snapshot (#273)', async () => {
+    const path = join(await tempDir(), 'state.json');
+    const base = { schemaVersion: 1 as const, history: {}, recentModels: [] };
+    const pinA: PinnedModelOperation = {
+      revision: 1,
+      model: m('a'),
+      updatedAt: '2026-01-01T00:00:00Z',
+    };
+    const pinB: PinnedModelOperation = {
+      revision: 1,
+      model: m('b'),
+      updatedAt: '2026-01-01T00:00:00Z',
+    };
+    // Writer A pins project A; writer B still holds the pre-pin snapshot and pins project B.
+    await saveState(path, {
+      ...base,
+      pinnedModels: { 'project:/a': m('a') },
+      pinnedModelOps: { 'project:/a': pinA },
+    });
+    await saveState(path, {
+      ...base,
+      pinnedModels: { 'project:/b': m('b') },
+      pinnedModelOps: { 'project:/b': pinB },
+    });
+    expect((await loadState(path)).state.pinnedModels).toEqual({
+      'project:/a': m('a'),
+      'project:/b': m('b'),
+    });
+  });
+  test('a clear wins over a stale writer and the other scope survives (#273)', async () => {
+    const path = join(await tempDir(), 'state.json');
+    const base = { schemaVersion: 1 as const, history: {}, recentModels: [] };
+    const pinA: PinnedModelOperation = {
+      revision: 1,
+      model: m('a'),
+      updatedAt: '2026-01-01T00:00:00Z',
+    };
+    const pinB: PinnedModelOperation = {
+      revision: 1,
+      model: m('b'),
+      updatedAt: '2026-01-01T00:00:00Z',
+    };
+    const stale = {
+      ...base,
+      pinnedModels: { 'project:/a': m('a'), 'project:/b': m('b') },
+      pinnedModelOps: { 'project:/a': pinA, 'project:/b': pinB },
+    };
+    await saveState(path, {
+      ...stale,
+      pinnedModels: { 'project:/b': m('b') },
+      pinnedModelOps: {
+        'project:/b': pinB,
+        'project:/a': { revision: 2, model: null, updatedAt: '2026-01-01T00:00:01Z' },
+      },
+    });
+    // Re-save the stale writer's unrelated scope: it must not resurrect A.
+    await saveState(path, stale);
+    expect((await loadState(path)).state.pinnedModels).toEqual({ 'project:/b': m('b') });
+  });
+  test('same-scope conflicts use revision then timestamp, not object order', () => {
+    const base = { schemaVersion: 1 as const, history: {}, recentModels: [] };
+    const older: PinnedModelOperation = {
+      revision: 1,
+      model: m('old'),
+      updatedAt: '2026-01-01T00:00:00Z',
+    };
+    const newer: PinnedModelOperation = {
+      revision: 1,
+      model: m('new'),
+      updatedAt: '2026-01-02T00:00:00Z',
+    };
+    const left = mergeState(
+      { ...base, pinnedModelOps: { user: older } },
+      { ...base, pinnedModelOps: { user: newer } },
+    );
+    const right = mergeState(
+      { ...base, pinnedModelOps: { user: newer } },
+      { ...base, pinnedModelOps: { user: older } },
+    );
+    expect(left.pinnedModels).toEqual({ user: m('new') });
+    expect(right.pinnedModels).toEqual({ user: m('new') });
   });
   test('last-used merges per scope with the writer winning', () => {
     const base = { schemaVersion: 1 as const, history: {}, recentModels: [] };

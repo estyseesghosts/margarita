@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { FakeBackend } from '../../test/fake-backend.ts';
 import { toModelSelection } from '../adapter/wire-mapping.ts';
 import { defaultConfig } from '../config/config.ts';
-import { emptyState, type LocalState, parseState } from '../config/local-state.ts';
+import { emptyState, type LocalState, mergeState, parseState } from '../config/local-state.ts';
 import { isRecord } from '../domain/backend-event.ts';
 import { composerFrom } from '../domain/composer.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
@@ -38,7 +38,13 @@ async function flush(): Promise<void> {
 
 type Fixture = Awaited<ReturnType<typeof boot>>;
 
-async function boot(options: { state?: LocalState; setup?: (backend: FakeBackend) => void } = {}) {
+async function boot(
+  options: {
+    state?: LocalState;
+    setup?: (backend: FakeBackend) => void;
+    save?: (state: LocalState) => Promise<LocalState | void>;
+  } = {},
+) {
   const backend = new FakeBackend();
   backend.models = catalog;
   backend.serverDefaultModel = paid;
@@ -54,7 +60,8 @@ async function boot(options: { state?: LocalState; setup?: (backend: FakeBackend
     now: () => 1000,
     saveLocalState: async (state) => {
       saved.push(state);
-      return { state };
+      const merged = await options.save?.(state);
+      return { state: merged ?? state };
     },
     listFiles: async () => [],
     requestExit: () => {},
@@ -242,6 +249,27 @@ describe('/model default (#190)', () => {
     await send(fixture, '/model default clear');
     expect(fixture.controller.modelFor('local', '/work')).toEqual({ model: paid });
     expect(lastSaved(fixture).pinnedModels).toEqual({});
+  });
+
+  test('adopts pins another process wrote during the save (#273)', async () => {
+    const foreign: LocalState = {
+      ...emptyState,
+      pinnedModels: { 'project:other|/elsewhere': paid },
+      pinnedModelOps: {
+        'project:other|/elsewhere': {
+          revision: 3,
+          model: paid,
+          updatedAt: '2026-01-01T00:00:00Z',
+        },
+      },
+    };
+    const fixture = await boot({ save: async (state) => mergeState(state, foreign) });
+    await fixture.controller.setModel(fast);
+    await send(fixture, '/model default set');
+    expect(fixture.controller.state.pinnedModels).toEqual({
+      'project:other|/elsewhere': paid,
+      user: fast,
+    });
   });
 
   test('a pinned model missing from the catalog blocks instead of switching silently', async () => {
