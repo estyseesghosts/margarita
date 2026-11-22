@@ -65,7 +65,11 @@ export function Overview(props: {
         </For>
       </box>
       <Show when={groups().length === 0}>
-        <text fg={props.theme.dim}>No sessions yet. Type below to start one.</text>
+        <text fg={props.theme.dim}>
+          {state.startup.phase === 'loading'
+            ? 'Loading sessions and project catalog…'
+            : 'No sessions yet. Type below to start one.'}
+        </text>
       </Show>
       <For each={groups()}>
         {(group) => (

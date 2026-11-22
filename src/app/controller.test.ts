@@ -336,6 +336,128 @@ describe('completion results are scoped to the viewed host (#112)', () => {
   });
 });
 
+describe('startup shell before indexing (#287)', () => {
+  test('marks loading, becomes ready after the launch host, and does not wait for a remote', async () => {
+    const remoteGate = deferred<void>();
+    const local = new FakeBackend();
+    local.sessions = [fakeSession('ses_local')];
+    const remote = new FakeBackend();
+    remote.serverID = 'srv_remote';
+    remote.sessions = [{ ...fakeSession('ses_r'), serverID: 'srv_remote' }];
+    remote.listSessionsHook = async () => {
+      await remoteGate.promise;
+      return { sessions: remote.sessions };
+    };
+    const controller = makeController(
+      async () => [],
+      local,
+      () => 10_000,
+      {
+        serverIDs: () => ['local', 'srv_remote'],
+        backendFor: (serverID) => (serverID === 'srv_remote' ? remote : local),
+      },
+    );
+
+    const booting = controller.bootstrap();
+    // `bootstrap` sets the phase synchronously, before its first await, so the first frame
+    // can show a genuine loading state rather than a false empty overview.
+    expect(controller.state.startup.phase).toBe('loading');
+    await flush();
+    expect(controller.state.startup.phase).toBe('ready');
+    expect(controller.state.startup.readyAt).toBeDefined();
+    expect(controller.state.sessions['ses_local']).toBeDefined();
+    const remoteKey = sessionKey({ serverID: 'srv_remote', sessionID: 'ses_r' });
+    expect(controller.state.sessions[remoteKey]).toBeUndefined();
+
+    remoteGate.resolve();
+    await booting;
+    expect(controller.state.sessions[remoteKey]).toBeDefined();
+    expect(controller.state.startup.phase).toBe('ready');
+    controller.dispose();
+  });
+
+  test('an offline remote stays non-fatal while the launch host is usable', async () => {
+    const local = new FakeBackend();
+    local.sessions = [fakeSession('ses_local')];
+    const remote = new FakeBackend();
+    remote.serverID = 'srv_remote';
+    remote.listSessionsHook = () => Promise.reject(new Error('connect ECONNREFUSED'));
+    const controller = makeController(
+      async () => [],
+      local,
+      () => 10_000,
+      {
+        serverIDs: () => ['local', 'srv_remote'],
+        backendFor: (serverID) => (serverID === 'srv_remote' ? remote : local),
+      },
+    );
+
+    await controller.bootstrap();
+    expect(controller.state.startup.phase).toBe('ready');
+    expect(controller.state.sessions['ses_local']).toBeDefined();
+    expect(controller.state.serverPages['srv_remote']?.error).toContain('ECONNREFUSED');
+    controller.dispose();
+  });
+
+  test('a launch-host failure marks the phase failed and still propagates to the CLI', async () => {
+    const backend = new FakeBackend();
+    backend.listSessionsHook = () => Promise.reject(new Error('launch unreachable'));
+    const controller = makeController(async () => [], backend);
+
+    const outcome = await controller.bootstrap().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(outcome instanceof Error ? outcome.message : '').toContain('launch unreachable');
+    expect(controller.state.startup.phase).toBe('failed');
+    expect(controller.state.startup.detail).toContain('launch unreachable');
+    controller.dispose();
+  });
+
+  test('prompts wait for startup while local controls stay available', async () => {
+    const catalog = deferred<void>();
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.listAgentsHook = async () => {
+      await catalog.promise;
+      return [];
+    };
+    let exits = 0;
+    const controller = makeController(
+      async () => [],
+      backend,
+      () => 10_000,
+      {
+        requestExit: () => {
+          exits += 1;
+        },
+      },
+    );
+
+    const booting = controller.bootstrap();
+    expect(controller.state.startup.phase).toBe('loading');
+    controller.setComposer(composerFrom('hello'));
+    await controller.submit();
+    expect(backend.calls.some((call) => call.name === 'prompt')).toBe(false);
+    expect(controller.state.notice?.text).toContain('Still loading sessions');
+
+    // A frontend-local command needs no catalog and must not be held back.
+    controller.setComposer(composerFrom('/quit'));
+    await controller.submit();
+    expect(exits).toBe(1);
+
+    catalog.resolve();
+    await booting;
+    expect(controller.state.startup.phase).toBe('ready');
+    controller.openSession('ses_a');
+    await flush();
+    controller.setComposer(composerFrom('hello'));
+    await controller.submit();
+    expect(backend.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    controller.dispose();
+  });
+});
+
 function remoteController(remoteFiles: string[], directory: string, cwd: string) {
   const backend = new FakeBackend();
   backend.remoteFiles = remoteFiles;

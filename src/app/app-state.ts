@@ -159,6 +159,17 @@ export type Completion = Readonly<{
 
 export type AppState = {
   stream: StreamStatus;
+  /**
+   * Interactive startup progress. `loading` is set synchronously by `bootstrap()`; `ready`
+   * means the launch host's catalog and first session page are usable, while paired remote
+   * hosts may still be loading in the background (#287).
+   */
+  startup: {
+    phase: 'loading' | 'ready' | 'failed';
+    startedAt?: number;
+    readyAt?: number;
+    detail?: string;
+  };
   route: Route;
   overlay: Overlay;
   notice?: Notice;
@@ -313,6 +324,7 @@ export type AppState = {
 export function initialState(directory: string, serverID: string = localServerID): AppState {
   return {
     stream: 'connecting',
+    startup: { phase: 'ready' },
     route: { kind: 'overview' },
     overlay: { kind: 'none' },
     sessions: {},

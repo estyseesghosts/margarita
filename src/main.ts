@@ -254,9 +254,90 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     requestExit: () => exit.request?.(),
   });
 
+  const interactive = !options.print;
+  // Start loading immediately, but never make the interactive shell wait for catalog and
+  // historical session indexing before its first frame (#287). Print mode keeps the strict
+  // "no TUI" contract and settles the same promise before producing output.
+  const bootstrapPromise = controller.bootstrap();
+  // The early shell must not turn a startup failure into an unhandled rejection while the
+  // renderer is being created or the first frame is painted; the awaited copy below is
+  // still the authority for the exit code.
+  void bootstrapPromise.catch(() => {});
+  let renderer: Awaited<ReturnType<typeof createCliRenderer>> | undefined;
+  const finished = Promise.withResolvers<void>();
+  const stopPump = () => servers.dispose();
+  const shutdown = async () => {
+    if (renderer !== undefined && !renderer.isDestroyed) renderer.destroy();
+    // Stop every stream before returning so a failed target resolution cannot leave the
+    // event loop alive with a TUI that has already been torn down (#287).
+    await stopPump();
+    controller.dispose();
+  };
+  if (interactive) {
+    // One stream per registered server. Manager-level guards drop callbacks from stale
+    // streams, so reconnects and unpair cannot duplicate subscriptions. Cached sessions stay
+    // visible while a host is offline; only the launch server drives the stream badge.
+    for (const managed of servers.list()) {
+      wireServerStream(servers, controller, managed.serverID);
+    }
+    renderer = await createCliRenderer({
+      exitOnCtrlC: false,
+      targetFps: 30,
+      useKittyKeyboard: {},
+      autoFocus: false,
+      openConsoleOnError: false,
+    });
+    const surface = renderer;
+    exit.request = () => {
+      if (!surface.isDestroyed) surface.destroy();
+    };
+    surface.once('destroy', () => finished.resolve());
+    process.once('SIGTERM', () => {
+      debugLog.write('signal', { signal: 'SIGTERM' });
+      exit.request?.();
+    });
+
+    const ui = configLoad.config.ui;
+    const animate =
+      ui.animation && env['MARGARITA_NO_ANIMATION'] === undefined && env['NO_COLOR'] === undefined;
+    try {
+      await render(
+        () =>
+          App({
+            controller,
+            keymap: keymapBuild.keymap,
+            theme: pickTheme(env, ui.theme),
+            animate,
+            ascii: ui.ascii || env['MARGARITA_ASCII'] !== undefined,
+            env,
+          }),
+        renderer,
+      );
+    } catch (error) {
+      // A renderer that mounted and then failed must still restore the terminal.
+      await shutdown();
+      throw error;
+    }
+  }
+
   try {
-    await controller.bootstrap();
-    debugLog.write('bootstrap', { sessions: Object.keys(controller.state.sessions).length });
+    // Ctrl+C/SIGTERM destroys the renderer; do not keep the process alive waiting for a
+    // catalog or session index the user has already dismissed (#287).
+    const phase = await Promise.race([
+      bootstrapPromise.then(() => 'ready' as const),
+      finished.promise.then(() => 'aborted' as const),
+    ]);
+    if (phase === 'aborted') {
+      await shutdown();
+      return exitCodes.ok;
+    }
+    const startup = controller.state.startup;
+    debugLog.write('bootstrap', {
+      sessions: Object.keys(controller.state.sessions).length,
+      ...(startup.startedAt === undefined || startup.readyAt === undefined
+        ? {}
+        : { readyInMs: startup.readyAt - startup.startedAt }),
+    });
   } catch (error) {
     debugLog.write('bootstrap-failed', {
       errorKind: error instanceof BackendError ? error.kind : 'unknown',
@@ -264,6 +345,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     process.stderr.write(
       `marg: could not load from ${redactUrl(backend.baseUrl)}: ${errorText(error)}\n`,
     );
+    await shutdown();
     return error instanceof BackendError && error.kind === 'unauthorized'
       ? exitCodes.unauthorized
       : exitCodes.unavailable;
@@ -281,6 +363,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
       process.stderr.write(
         'marg: --remote needs --cwd <absolute path on the remote host> to start or continue a session.\n',
       );
+      await shutdown();
       return exitCodes.usage;
     }
   }
@@ -297,6 +380,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     );
     if (!resolved.ok) {
       process.stderr.write(`marg: ${resolved.message}\n`);
+      await shutdown();
       return resolved.reason === 'not-found' ? exitCodes.notFound : exitCodes.failed;
     }
     sessionRef = resolved.ref;
@@ -309,10 +393,12 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
         resolvedDirectory = latest.directory;
       } else if (options.print) {
         process.stderr.write('marg: no session to continue in this project.\n');
+        await shutdown();
         return exitCodes.notFound;
       }
     } catch (error) {
       process.stderr.write(`marg: could not continue in this project: ${errorText(error)}\n`);
+      await shutdown();
       return exitCodes.failed;
     }
   }
@@ -325,6 +411,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     const resolvedAgent = controller.resolveCliAgent(options.agent);
     if (!resolvedAgent.ok) {
       process.stderr.write(`marg: ${resolvedAgent.message}\n`);
+      await shutdown();
       return exitCodes.modelUnavailable;
     }
     const resolvedModel = controller.resolveCliModel({
@@ -334,6 +421,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     });
     if (!resolvedModel.ok) {
       process.stderr.write(`marg: ${resolvedModel.message}\n`);
+      await shutdown();
       return exitCodes.modelUnavailable;
     }
     agent = resolvedAgent;
@@ -348,6 +436,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     });
     if (!applied.ok) {
       process.stderr.write(`marg: ${applied.message}\n`);
+      await shutdown();
       return exitCodes.modelUnavailable;
     }
   }
@@ -356,6 +445,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     const prompt = 'prompt' in target ? target.prompt : undefined;
     if (prompt === undefined || prompt.trim() === '') {
       process.stderr.write('marg: --print needs a prompt.\n');
+      await shutdown();
       return exitCodes.usage;
     }
     const abort = new AbortController();
@@ -380,50 +470,10 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
       });
     } catch (error) {
       process.stderr.write(`marg: ${errorText(error)}\n`);
+      await shutdown();
       return exitCodes.failed;
     }
   }
-
-  // One stream per registered server. Manager-level guards drop callbacks from stale
-  // streams, so reconnects and unpair cannot duplicate subscriptions. Cached sessions stay
-  // visible while a host is offline; only the launch server drives the single stream badge.
-  for (const managed of servers.list()) {
-    wireServerStream(servers, controller, managed.serverID);
-  }
-  const stopPump = () => servers.dispose();
-
-  const renderer = await createCliRenderer({
-    exitOnCtrlC: false,
-    targetFps: 30,
-    useKittyKeyboard: {},
-    autoFocus: false,
-    openConsoleOnError: false,
-  });
-  const finished = Promise.withResolvers<void>();
-  exit.request = () => {
-    if (!renderer.isDestroyed) renderer.destroy();
-  };
-  renderer.once('destroy', () => finished.resolve());
-  process.once('SIGTERM', () => {
-    debugLog.write('signal', { signal: 'SIGTERM' });
-    exit.request?.();
-  });
-
-  const ui = configLoad.config.ui;
-  const animate =
-    ui.animation && env['MARGARITA_NO_ANIMATION'] === undefined && env['NO_COLOR'] === undefined;
-  await render(
-    () =>
-      App({
-        controller,
-        keymap: keymapBuild.keymap,
-        theme: pickTheme(env, ui.theme),
-        animate,
-        ascii: ui.ascii || env['MARGARITA_ASCII'] !== undefined,
-        env,
-      }),
-    renderer,
-  );
 
   const prompt = 'prompt' in target ? target.prompt : undefined;
   if (sessionRef !== undefined) {

@@ -67,6 +67,8 @@ async function mount(
     width?: number;
     height?: number;
     editText?: typeof editExternally;
+    /** Render the first frame while bootstrap is still indexing (#287). */
+    startup?: 'loading';
   } = {},
 ) {
   const controller = new AppController({
@@ -81,7 +83,14 @@ async function mount(
     listFiles: async () => [],
     requestExit: () => {},
   });
-  await controller.bootstrap();
+  if (options.startup === 'loading') {
+    // Production renders the shell while `bootstrap()` is still awaiting the catalog and
+    // session index; hold the catalog open so the first frame is deterministically loading.
+    backend.listAgentsHook = () => new Promise(() => {});
+    void controller.bootstrap();
+  } else {
+    await controller.bootstrap();
+  }
   const setup = await testRender(
     () =>
       App({
@@ -1355,6 +1364,15 @@ function twoTurns(backend: FakeBackend) {
   };
   return backend;
 }
+
+describe('startup shell before indexing (#287)', () => {
+  test('the empty overview reports loading instead of claiming there are no sessions', async () => {
+    const { setup } = await mount(new FakeBackend(), { startup: 'loading' });
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('Loading sessions and project catalog');
+    expect(frame).not.toContain('No sessions yet');
+  });
+});
 
 describe('execution markers (issue #28)', () => {
   test('each completed execution keeps its own static marker between the right turns', async () => {

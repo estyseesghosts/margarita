@@ -67,6 +67,28 @@ eight 1,000-message sessions, heap/RSS before and after allocation/GC/release, a
 samples. Native OpenTUI retained memory and attached heap-snapshot reports are not exposed by
 the pinned renderer; they are listed as unavailable rather than approximated.
 
+## Startup before indexing (#287)
+
+Interactive mode creates the renderer and paints the shell **before** awaiting
+`controller.bootstrap()`. `bootstrap()` sets `state.startup.phase = 'loading'` synchronously,
+loads the launch host's catalog and first session page, then marks `ready`, and only then
+loads paired remotes. A slow or offline remote therefore cannot delay the local first frame
+or the local list; each remote appears when its own `loadSessions()` applies.
+
+`ready` is a functional milestone (launch catalog plus session page loaded), not a painted
+spinner. The overview shows "Loading sessions and project catalog…" while loading instead of
+a false "No sessions yet". Prompt submission is refused with a visible notice while loading,
+except for frontend-local slash commands; print mode never creates a TUI and keeps awaiting
+the same bootstrap before producing output.
+
+`--debug-log` records `bootstrap` with the loaded session count and
+`readyInMs = readyAt - startedAt`. That is the controller's ready-to-send time. Native
+first-paint and event-receipt→paint times remain unavailable without a compiled PTY trace
+(see above), so they are not inferred from this number. Destroying the renderer (Ctrl+C or
+SIGTERM) during startup disposes streams and returns without resolving a target against a
+dead TUI; target-resolution failures after the renderer exists also restore the terminal and
+dispose the server manager exactly once.
+
 ## Reproducibility rules
 
 - Use the same commit, machine, terminal size, Bun version and power mode for comparisons.
@@ -84,6 +106,7 @@ the pinned renderer; they are listed as unavailable rather than approximated.
   `projectorTailUpdate` scenario reports how many messages were refolded versus reused.
 - #284 — decoupled transcript/job refreshes.
 - #285 — memoized usage analytics and footer facts.
+- #287 — interactive shell before catalog/session indexing.
 - #288 — cached overview grouping/tab counts.
 - #289 — retained-byte transcript cache budget and the bench memory report.
 - #290 — animation-off timer cadence.

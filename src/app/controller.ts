@@ -1042,10 +1042,29 @@ export class AppController {
 
   /** Loads catalogs and sessions. Errors propagate so startup can report them. */
   async bootstrap(): Promise<void> {
-    await Promise.all([this.loadCatalog(this.deps.cwd, this.serverID), this.loadSessions()]);
-    // A remote server failing to load must not abort startup; the launch server failing
-    // still propagates so the CLI can report it with an actionable message.
-    if (this.launchLoadError !== undefined) throw this.launchLoadError;
+    const startedAt = this.deps.now();
+    this.setState('startup', { phase: 'loading', startedAt });
+    try {
+      // The launch host gets the screen ready first; paired remotes continue below without
+      // making the local UI wait for an unrelated slow host (#287).
+      await Promise.all([
+        this.loadCatalog(this.deps.cwd, this.serverID),
+        this.loadSessions(this.serverID),
+      ]);
+      this.setState('startup', { phase: 'ready', startedAt, readyAt: this.deps.now() });
+      const remotes = this.serverIDs().filter((serverID) => serverID !== this.serverID);
+      await Promise.all(remotes.map((serverID) => this.loadSessions(serverID).catch(() => {})));
+      // A remote server failing to load must not abort startup; the launch server failing
+      // still propagates so the CLI can report it with an actionable message.
+      if (this.launchLoadError !== undefined) throw this.launchLoadError;
+    } catch (error) {
+      this.setState('startup', {
+        phase: 'failed',
+        startedAt,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
   }
 
   private catalogGeneration = 0;
@@ -4100,6 +4119,19 @@ export class AppController {
     }
     const text = this.state.composer.text;
     if (text.trim() === '' && this.state.attachments.length === 0) return;
+    if (this.state.startup.phase === 'loading') {
+      const queuedName = /^\/(\S+)/.exec(text.trimStart())?.[1];
+      // Local controls stay available; anything that needs an authoritative catalog or
+      // session selection waits for startup instead of failing against partial state (#287).
+      if (queuedName === undefined || !isLocalCommand(queuedName)) {
+        this.showNotice(
+          'Still loading sessions and the project catalog. Try again in a moment.',
+          'dim',
+          false,
+        );
+        return;
+      }
+    }
     const localName = /^\/(\S+)/.exec(text.trimStart())?.[1];
     const isLocal = localName !== undefined && isLocalCommand(localName);
     if (text.trimStart().startsWith('/')) {
