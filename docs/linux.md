@@ -60,6 +60,24 @@ Config and state follow the XDG base directories: `$XDG_CONFIG_HOME` (default `~
 
 WSL2 is a good place to build and run the source gate, but it does not replace native Linux terminals: the Windows terminal sits between your keyboard and the Linux PTY, so key and clipboard behaviour measured there says little about Ghostty, kitty or GNOME Terminal on a Linux desktop.
 
+## Recorded WSL2 automated verification
+
+At `cb1b1f3`, a Linux build from a clean copy under Fedora 44 (WSL2, kernel 6.18, Bun 1.4.4,
+Python 3.14, tmux 3.8) passed:
+
+```text
+sh scripts/test-pty-smoke.sh dist/marg
+  ctrl-c, keys, mouse, editor, editor-fail, sigterm, resize, crash
+  PTY scenario suite passed
+
+sh scripts/test-tmux.sh dist/marg
+  tmux smoke passed
+```
+
+This revalidates the POSIX PTY/tmux automated paths on the current tree. It does **not** replace
+the manual Ghostty/kitty/GNOME Terminal/SSH matrix or real terminal OSC 52/image-clipboard
+checks; those remain the open acceptance work for #181, #182 and #184.
+
 ## Tests specific to Linux
 
 - `scripts/test-pty-smoke.sh` and `test/smoke/pty-smoke.py`: every PTY scenario against a disposable stub (paint, keys/paste, mouse, editor round trip and failure, SIGTERM, resize, SIGKILL harness). CI-verified on Ubuntu.
