@@ -16,7 +16,7 @@ Legend: **origin** = value captured before the first `await` (a `SessionRef`/`se
 | 1260 | `reconcileKnownSessions` | 2 | `backendFor(ref.serverID)` | – | safe (pattern): explicit owner |
 | 1340 | `loadMoreSessions` | 4 | `backendFor(serverID)` | – | fixed (#196) · test: async-audit-regressions |
 | 1516 | `applyCliOverrides` | 6 | `backendFor(serverID)` | `activeServerID()` | safe (pattern): explicit owner |
-| 1637 | `resync` | 3 | – | `state.route` | reviewed by reading: safe · post-await route reads are comparisons against the captured origin (guards); stale results are dropped |
+| 1637 | `resync` | 3 | – | `state.route` | fixed (#275): per-host resync generation + transcript commit watermark; the route is read at each use, never reused from before an await · test: async-audit-regressions |
 | 1768 | `refreshSummary` | 1 | `backendFor(serverID)` | `activeServerID()` | fixed (#252, #263): session lifetime + backend + summary admission watermark before write · test: async-audit-regressions |
 | 1791 | `refreshInbox` | 1 | `backendFor(serverID)` | `activeServerID()` | fixed (#252): session lifetime check before write |
 | 1810 | `refreshInputRequests` | 1 | `backendFor(serverID)` | `activeServerID()`, `state.route` | fixed (#252, #264): session lifetime check before write; location-owned forms retained stale when the location route fails · post-await route reads compare the captured origin |
@@ -110,6 +110,7 @@ Legend: **origin** = value captured before the first `await` (a `SessionRef`/`se
 | #264 a failed location-wide form listing discarded confirmed global/child requests | fixed by retaining location-owned cached forms with the existing partial-error marker; regression test in `form-routing.test.ts` |
 | #253 an older confirmed-agent cache outranked a newer external switch, and survived deletion | fixed with evidence + transcript watermark and lifetime-scoped caches; regression tests in `controller.test.ts` |
 | #272 a summary snapshot could roll back a live usage event received while it was in flight | fixed with a per-session usage-event watermark; summaries and session listings preserve the newer cost/tokens; regression test in `async-audit-regressions.test.ts` |
+| #275 a resync marked the newly attached route's transcript stale, and an older resync could act after a newer one | fixed with a per-host resync generation plus per-session commit watermarks; detached transcripts become stale, refreshed attached ones stay fresh; regression tests in `async-audit-regressions.test.ts` |
 | `this.backend` is a getter over the *current route's* server | intentional; every post-`await` use in the file goes through `backendFor(owner)`; `interrupt` and `rename` were made explicit as hardening |
 
 ## Ownership policy (intentional behaviour)

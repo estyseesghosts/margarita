@@ -312,6 +312,72 @@ describe('actions on a remote session never use the launch backend (#178)', () =
   });
 });
 
+describe('reconnect resync freshness follows the current route (#275)', () => {
+  const otherID = 'ses_other';
+  const keyA = sessionKey({ serverID: 'local', sessionID });
+  const keyB = sessionKey({ serverID: 'local', sessionID: otherID });
+
+  async function resyncHarness() {
+    const fixture = await harness(undefined, (local) => {
+      local.sessions = [session('local'), { ...session('local'), id: otherID }];
+    });
+    fixture.controller.openSession(sessionID, 'local');
+    await flush();
+    return fixture;
+  }
+
+  test('switching during a held resync load keeps the new route fresh and the old one stale', async () => {
+    const { local, controller } = await resyncHarness();
+    const realList = local.listMessages.bind(local);
+    const held = Promise.withResolvers<MessagePage>();
+    let holdA = false;
+    local.listMessages = async (id, limit, cursor) => {
+      if (holdA && id === sessionID) return held.promise;
+      return realList(id, limit, cursor);
+    };
+    holdA = true;
+    controller.onEvents('local', [], true);
+    await flush();
+    controller.openSession(otherID, 'local');
+    await flush();
+    expect(controller.state.transcripts[keyB]?.stale).toBe(false);
+
+    held.resolve({ messages: [], hasEarlier: false });
+    await flush();
+    expect(controller.state.transcripts[keyB]?.stale).toBe(false);
+    expect(controller.state.transcripts[keyA]?.stale).toBe(true);
+    controller.dispose();
+  });
+
+  test('a superseded resync cannot stale a transcript a newer resync kept fresh', async () => {
+    const { local, controller } = await resyncHarness();
+    const realList = local.listMessages.bind(local);
+    const held = Promise.withResolvers<MessagePage>();
+    let holdA = false;
+    local.listMessages = async (id, limit, cursor) => {
+      if (holdA && id === sessionID) return held.promise;
+      return realList(id, limit, cursor);
+    };
+    holdA = true;
+    controller.onEvents('local', [], true);
+    await flush();
+    controller.openSession(otherID, 'local');
+    await flush();
+    // A newer resync runs while the older one is still awaiting session A.
+    controller.onEvents('local', [], true);
+    await flush();
+    holdA = false;
+    controller.openSession(sessionID, 'local');
+    await flush();
+
+    held.resolve({ messages: [], hasEarlier: false });
+    await flush();
+    expect(controller.state.transcripts[keyA]?.stale).toBe(false);
+    expect(controller.state.transcripts[keyB]?.stale).toBe(false);
+    controller.dispose();
+  });
+});
+
 describe('overlapping summary and transcript reads (#262, #263)', () => {
   const key = sessionKey({ serverID: 'local', sessionID });
 

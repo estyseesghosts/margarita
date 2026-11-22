@@ -1809,38 +1809,69 @@ export class AppController {
     );
   }
 
+  /** Per-host reconnect generation: a superseded resync must not act after a newer one. */
+  private readonly resyncEpochs = new Map<string, number>();
+
   /**
    * A stream (re)connect means we may have missed events for that host: refetch that
    * host's snapshot only. Other servers are untouched; the route keeps what it has.
    */
   private async resync(serverID: string): Promise<void> {
+    const epoch = (this.resyncEpochs.get(serverID) ?? 0) + 1;
+    this.resyncEpochs.set(serverID, epoch);
+    const currentResync = (): boolean =>
+      !this.disposed &&
+      this.resyncEpochs.get(serverID) === epoch &&
+      this.serverIDs().includes(serverID);
+    // Transcript freshness is judged against what was committed *before* this resync:
+    // a session read that lands during it is genuinely fresh, not a stale replay.
+    const committedBefore = new Map<string, number>();
+    for (const key of Object.keys(this.state.transcripts)) {
+      if (parseSessionKey(key).serverID !== serverID) continue;
+      committedBefore.set(key, this.transcriptCommitted.get(key) ?? 0);
+    }
+    const attachedSession = (): string | undefined => {
+      const route = this.state.route;
+      return route.kind === 'conversation' && route.serverID === serverID
+        ? route.sessionID
+        : undefined;
+    };
     await this.loadSessions(serverID);
+    if (!currentResync()) return;
+    // The catalog and conversation are read from the route *now*, never from a route
+    // captured before an await; a switch during resync must keep the new route fresh (#275).
     const route = this.state.route;
     const routeServer =
       route.kind === 'overview' ? this.state.overview.project.serverID : route.serverID;
-    // The catalog is one global pair of lists scoped to (directory, server); reload it
-    // only when the resyncing server owns the scope the user is looking at.
     if (routeServer === serverID)
       void this.track('catalog', this.loadCatalog(this.currentDirectory(), serverID));
-    if (route.kind === 'conversation' && route.serverID === serverID)
-      await this.loadConversation(route.sessionID, serverID);
+    const attached = attachedSession();
+    if (attached !== undefined) await this.loadConversation(attached, serverID);
+    if (!currentResync()) return;
     // Goal reads that failed while disconnected are re-tried; a successful push or read
     // during the outage already superseded them (version guard).
+    const attachedNow = attachedSession();
     const unattached = Object.entries(this.state.nativeGoals)
       .filter(
         ([key, goal]) =>
           goal.status === 'unavailable' &&
           parseSessionKey(key).serverID === serverID &&
-          (route.kind !== 'conversation' || route.sessionID !== parseSessionKey(key).sessionID),
+          attachedNow !== parseSessionKey(key).sessionID,
       )
       .map(([key]) => parseSessionKey(key).sessionID);
     await Promise.all(unattached.map((id) => this.refreshNativeGoal(id, serverID).catch(() => {})));
+    if (!currentResync()) return;
+    // Mark only sessions this resync did not refresh; the attached conversation must have
+    // committed a newer page to stay fresh. A detached session is stale even if an old
+    // read happened to land, because its live events were not the focus of this resync.
+    const attachedAtCommit = attachedSession();
     for (const key of Object.keys(this.state.transcripts)) {
-      if (parseSessionKey(key).serverID === serverID) {
-        if (route.kind !== 'conversation' || route.sessionID !== parseSessionKey(key).sessionID) {
-          this.setState('transcripts', key, 'stale', true);
-        }
-      }
+      const ref = parseSessionKey(key);
+      if (ref.serverID !== serverID) continue;
+      const isAttached = attachedAtCommit === ref.sessionID;
+      const refreshed = (this.transcriptCommitted.get(key) ?? 0) > (committedBefore.get(key) ?? 0);
+      if (!isAttached || !refreshed) this.setState('transcripts', key, 'stale', true);
+      else this.setState('transcripts', key, 'stale', false);
     }
     if (serverID === this.serverID && this.state.notice?.text === 'Connection lost · retrying')
       this.clearNotice();
