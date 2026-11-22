@@ -5,6 +5,7 @@ import { createSignal, Match, onCleanup, Show, Switch } from 'solid-js';
 import type { AppController } from '../app/controller.ts';
 import { type KeyInput, routeKey, type ScrollMove } from '../app/key-router.ts';
 import { graphemes } from '../domain/composer.ts';
+import { diffWindowRows } from '../domain/diff.ts';
 import type { Keymap } from '../domain/keymap.ts';
 import { ComposerView, Footer } from './composer-view.tsx';
 import { editExternally } from './external-editor.ts';
@@ -92,6 +93,8 @@ export function App(props: AppProps) {
       scroll: (move) => scrollTranscript?.(move),
       // Overview chrome (title, tabs, composer, footer) is not part of the row viewport.
       overviewPageRows: Math.max(3, dimensions().height - 8),
+      // Diff paging must match what the dialog can paint after its border and footer.
+      diffPageRows: diffWindowRows(dimensions().height),
     });
     if (handled) event.preventDefault();
   });

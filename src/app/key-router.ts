@@ -36,6 +36,8 @@ export type RouterServices = Readonly<{
    * and tests get a sensible page without supplying terminal dimensions.
    */
   overviewPageRows?: number;
+  /** Patch/file rows one diff-dialog PageUp/PageDown moves, from the live terminal height. */
+  diffPageRows?: number;
 }>;
 
 /**
@@ -54,7 +56,7 @@ export function routeKey(
     controller.closeOverlay();
     return routeKey(controller, keymap, key, services);
   }
-  if (state.overlay.kind !== 'none') return routeOverlay(controller, keymap, key);
+  if (state.overlay.kind !== 'none') return routeOverlay(controller, keymap, key, services);
   if (state.route.kind === 'conversation' && controller.pendingPermission() !== undefined) {
     if (routePermission(controller, key)) return true;
   } else if (state.route.kind === 'conversation' && controller.pendingForm() !== undefined) {
@@ -223,14 +225,19 @@ function runAction(controller: AppController, action: ActionID, services: Router
   }
 }
 
-function routeOverlay(controller: AppController, keymap: Keymap, key: KeyInput): boolean {
+function routeOverlay(
+  controller: AppController,
+  keymap: Keymap,
+  key: KeyInput,
+  services: RouterServices,
+): boolean {
   const overlay = controller.state.overlay;
   if (overlay.kind === 'inspector') {
     controller.inspectorKey(key);
     return true;
   }
   if (overlay.kind === 'diff' && !(key.ctrl && key.name === 'c')) {
-    controller.diffKey(key);
+    controller.diffKey(key, services.diffPageRows);
     return true;
   }
   if (overlay.kind === 'tasks' && actionFor(keymap, key) === 'tasks.toggle') {

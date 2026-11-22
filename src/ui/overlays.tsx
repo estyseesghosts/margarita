@@ -1,12 +1,17 @@
 import { useTerminalDimensions } from '@opentui/solid';
 import type { Accessor } from 'solid-js';
-import { For, Match, Show, Switch } from 'solid-js';
+import { createMemo, For, Match, Show, Switch } from 'solid-js';
 
 import type { DiffOverlay, Overlay } from '../app/app-state.ts';
 import type { AppController } from '../app/controller.ts';
-import { diffPageLines } from '../app/controller.ts';
 import { caretPaint } from '../domain/composer.ts';
-import { diffSummary, type FileDiff, type PatchLine, patchLines } from '../domain/diff.ts';
+import {
+  diffSummary,
+  diffWindowRows,
+  type FileDiff,
+  type PatchLine,
+  patchLinesFor,
+} from '../domain/diff.ts';
 import {
   choiceWindow,
   currentField,
@@ -24,7 +29,7 @@ import { rewindTimeLabel } from '../domain/rewind.ts';
 import { sanitizeTerminalText } from '../domain/sanitize-text.ts';
 import type { SessionSummary, TokenUsage } from '../domain/session.ts';
 import { localCommands } from '../domain/slash-command.ts';
-import { sliceCells } from '../domain/text-width.ts';
+import { cellWidth, sliceCells } from '../domain/text-width.ts';
 import { completenessLabel } from '../domain/transcript.ts';
 import { formatCost, formatTokenCount } from '../domain/usage-format.ts';
 import type { Theme } from './theme.ts';
@@ -601,7 +606,12 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
       </Match>
       <Match when={state.overlay.kind === 'diff' ? state.overlay : undefined}>
         {(overlay: Accessor<DiffOverlay>) => (
-          <DiffDialog overlay={overlay()} theme={props.theme} frame={frame} />
+          <DiffDialog
+            controller={props.controller}
+            overlay={overlay()}
+            theme={props.theme}
+            frame={frame}
+          />
         )}
       </Match>
       <Match when={state.overlay.kind === 'form' ? state.overlay : undefined}>
@@ -643,9 +653,29 @@ type Frame = (title: string) => Record<string, unknown>;
 const statusMark = { added: 'A', deleted: 'D', modified: 'M' } as const;
 
 /** File list, or one file's colored patch; everything comes from `session.diff`. */
-function DiffDialog(props: { overlay: DiffOverlay; theme: Theme; frame: Frame }) {
+function DiffDialog(props: {
+  controller: AppController;
+  overlay: DiffOverlay;
+  theme: Theme;
+  frame: Frame;
+}) {
+  const terminal = useTerminalDimensions();
   const file = () => props.overlay.files[props.overlay.index];
   const scopeLabel = () => (props.overlay.scope === 'turn' ? 'this turn' : 'session');
+  const width = () => Math.max(8, terminal().width - 6);
+  /** Frame border/title is outside the row budget; the footer keeps totals visible. */
+  const pageRows = () => diffWindowRows(terminal().height);
+  const title = (text: string) =>
+    props.frame(sliceCells(text, 0, Math.max(8, terminal().width - 4)).text);
+  const fileRows = () => pickerWindow(props.overlay.index, props.overlay.files.length, pageRows());
+  // A file object is immutable across scroll keys. Reformat only when the opened file or
+  // scope changes, never once per rendered row or keypress (#276).
+  const lines = createMemo<readonly PatchLine[]>(() => {
+    const current = file();
+    return current === undefined ? [] : patchLinesFor(current);
+  });
+  /** Keep the logical offset visible; fill the window at the end instead of leaving it blank. */
+  const firstLine = () => Math.min(props.overlay.offset, Math.max(0, lines().length - pageRows()));
   const lineColor = (kind: PatchLine['kind']) => {
     switch (kind) {
       case 'add':
@@ -660,20 +690,40 @@ function DiffDialog(props: { overlay: DiffOverlay; theme: Theme; frame: Frame })
         return props.theme.text;
     }
   };
+  /** One physical row per file: clip the prefix, path and counters in order. */
+  const fileRow = (entry: FileDiff, selected: boolean) => {
+    let budget = width();
+    const mark = sliceCells(`${selected ? '❯' : ' '} ${statusMark[entry.status]} `, 0, budget).text;
+    budget -= cellWidth(mark);
+    const path = sliceCells(entry.file, 0, budget).text;
+    budget -= cellWidth(path);
+    const added = sliceCells(`  +${entry.additions}`, 0, budget).text;
+    budget -= cellWidth(added);
+    const removed = sliceCells(` −${entry.deletions}`, 0, budget).text;
+    return { mark, path, added, removed };
+  };
   return (
     <Switch>
       <Match when={props.overlay.open ? file() : undefined}>
         {(current: Accessor<FileDiff>) => {
-          const lines = () => patchLines(current().patch);
+          const shown = () => Math.min(pageRows(), Math.max(0, lines().length - firstLine()));
           return (
-            <box {...props.frame(`${current().file} · ↑↓ PgUp PgDn scroll · ← files`)}>
-              <For each={lines().slice(props.overlay.offset, props.overlay.offset + diffPageLines)}>
+            <box {...title(`${current().file} · ↑↓ PgUp PgDn · ← files`)}>
+              <For each={lines().slice(firstLine(), firstLine() + pageRows())}>
                 {(line) => (
-                  <text fg={lineColor(line.kind)}>{line.text === '' ? ' ' : line.text}</text>
+                  <text fg={lineColor(line.kind)}>
+                    {sliceCells(line.text === '' ? ' ' : line.text, 0, width()).text}
+                  </text>
                 )}
               </For>
               <text fg={props.theme.dim}>
-                {`lines ${Math.min(props.overlay.offset + 1, lines().length)}–${Math.min(props.overlay.offset + diffPageLines, lines().length)} of ${lines().length}${current().truncated ? ' · truncated by server' : ''}`}
+                {lines().length === 0
+                  ? `no patch lines · file ${props.overlay.index + 1}/${props.overlay.files.length}`
+                  : sliceCells(
+                      `${firstLine() + 1}–${firstLine() + shown()}/${lines().length} · file ${props.overlay.index + 1}/${props.overlay.files.length}${current().truncated ? ' · server-truncated' : ''}`,
+                      0,
+                      width(),
+                    ).text}
               </text>
             </box>
           );
@@ -681,7 +731,7 @@ function DiffDialog(props: { overlay: DiffOverlay; theme: Theme; frame: Frame })
       </Match>
       <Match when={!props.overlay.open}>
         <box
-          {...props.frame(
+          {...title(
             `Changes in ${scopeLabel()} · ${diffSummary(props.overlay.files)} · t ${props.overlay.scope === 'turn' ? 'session' : 'turn'} · Esc close`,
           )}
         >
@@ -696,18 +746,35 @@ function DiffDialog(props: { overlay: DiffOverlay; theme: Theme; frame: Frame })
               <text fg={props.theme.dim}>No file changes reported.</text>
             </Match>
             <Match when={props.overlay.files.length > 0}>
-              <For each={props.overlay.files}>
+              <For
+                each={props.overlay.files.slice(fileRows().start, fileRows().end)}
+              >
                 {(entry, index) => {
-                  const selected = () => index() === props.overlay.index;
+                  const absolute = () => fileRows().start + index();
+                  const selected = () => absolute() === props.overlay.index;
+                  const row = () => fileRow(entry, selected());
                   return (
-                    <text fg={selected() ? props.theme.accent : props.theme.text}>
-                      {`${selected() ? '❯' : ' '} ${statusMark[entry.status]} ${entry.file}`}
-                      <span style={{ fg: props.theme.success }}>{`  +${entry.additions}`}</span>
-                      <span style={{ fg: props.theme.error }}>{` −${entry.deletions}`}</span>
+                    <text
+                      fg={selected() ? props.theme.accent : props.theme.text}
+                      onMouseDown={() => props.controller.openDiffFile(absolute())}
+                    >
+                      {row().mark}
+                      {row().path}
+                      <span style={{ fg: props.theme.success }}>{row().added}</span>
+                      <span style={{ fg: props.theme.error }}>{row().removed}</span>
                     </text>
                   );
                 }}
               </For>
+              <text fg={props.theme.dim}>
+                {fileRows().end === 0
+                  ? 'no files'
+                  : sliceCells(
+                      `files ${fileRows().start + 1}–${fileRows().end} of ${props.overlay.files.length} · selected ${props.overlay.index + 1}`,
+                      0,
+                      width(),
+                    ).text}
+              </text>
             </Match>
           </Switch>
         </box>

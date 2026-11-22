@@ -841,6 +841,169 @@ describe('app', () => {
     expect(controller.state.overlay.kind).toBe('none');
   });
 
+  test('diff file list windows to a short terminal and keeps the selection reachable (#276)', async () => {
+    const backend = backendWithSession();
+    backend.diffs = Array.from({ length: 1000 }, (_, index) => ({
+      file:
+        index === 0
+          ? 'src/α-first-very-long-path-with-unicode.ts'
+          : index === 999
+            ? 'src/ω-last-file.ts'
+            : `src/f${index}.ts`,
+      patch: '@@ -1 +1 @@\n-old\n+new',
+      additions: 1,
+      deletions: 1,
+      status: 'modified' as const,
+      truncated: false,
+    }));
+    const { controller, setup } = await mount(backend, { width: 40, height: 12 });
+    controller.openSession('ses_a');
+    await settle(setup);
+    await setup.mockInput.typeText('/diff turn');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+
+    let frame = setup.captureCharFrame();
+    expect(frame).toContain('files 1–4 of 1000 · selected 1');
+    expect(frame).toContain('src/α-first');
+
+    setup.mockInput.pressKey('END');
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('files 997–1000 of 1000');
+    expect(frame).toContain('src/ω-last-file.ts');
+
+    // Live resize keeps the last selected file inside the new window.
+    setup.resize(60, 20);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('files 989–1000 of 1000 · selected 1000');
+    expect(frame).toContain('src/ω-last-file.ts');
+
+    setup.resize(40, 12);
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('files 997–1000 of 1000');
+
+    setup.mockInput.pressKey('HOME');
+    await settle(setup);
+    setup.mockInput.pressKey(pageDown);
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('selected 5');
+    setup.mockInput.pressArrow('up');
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('selected 4');
+  });
+
+  test('diff patch paging is bounded by terminal rows and reaches both ends (#276)', async () => {
+    const backend = backendWithSession();
+    backend.diffs = [
+      {
+        file: 'src/long.ts',
+        patch: Array.from({ length: 1000 }, (_, index) => `+line ${index}`).join('\n'),
+        additions: 1000,
+        deletions: 0,
+        status: 'modified',
+        truncated: true,
+      },
+    ];
+    const { controller, setup } = await mount(backend, { width: 40, height: 12 });
+    controller.openSession('ses_a');
+    await settle(setup);
+    await setup.mockInput.typeText('/diff turn');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    setup.mockInput.pressEnter();
+    await settle(setup);
+
+    let frame = setup.captureCharFrame();
+    expect(frame).toContain('1–4/1000 · file 1/1');
+    expect(frame).toContain('+line 0');
+
+    setup.mockInput.pressKey('END');
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('997–1000/1000 · file 1/1');
+    expect(frame).toContain('+line 999');
+
+    setup.mockInput.pressKey('HOME');
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('1–4/1000');
+
+    setup.mockInput.pressKey(pageDown);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('5–8/1000');
+    expect(frame).toContain('+line 4');
+
+    setup.mockInput.pressArrow('down');
+    setup.mockInput.pressArrow('up');
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('5–8/1000');
+
+    // A wider terminal grows the patch window without resetting the logical offset.
+    setup.resize(60, 20);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('5–16/1000');
+    expect(frame).toContain('+line 4');
+
+    // Server truncation stays visible at a normal width.
+    setup.resize(120, 40);
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('server-truncated');
+  });
+
+  test('scope toggles preserve the open file and offset; mouse opens a row (#276)', async () => {
+    const backend = backendWithSession();
+    backend.diffs = Array.from({ length: 3 }, (_, index) => ({
+      file: `src/f${index}.ts`,
+      patch: Array.from({ length: 100 }, (_, line) => `+f${index} line ${line}`).join('\n'),
+      additions: 100,
+      deletions: 0,
+      status: 'modified' as const,
+      truncated: false,
+    }));
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    await setup.mockInput.typeText('/diff turn');
+    setup.mockInput.pressEnter();
+    await settle(setup);
+
+    setup.mockInput.pressArrow('down');
+    setup.mockInput.pressEnter();
+    setup.mockInput.pressKey(pageDown);
+    await settle(setup);
+    let overlay = controller.state.overlay;
+    if (overlay.kind !== 'diff') throw new Error('diff closed');
+    expect(overlay.index).toBe(1);
+    expect(overlay.open).toBe(true);
+    expect(overlay.offset).toBe(16);
+
+    setup.mockInput.pressKey('t');
+    await settle(setup);
+    overlay = controller.state.overlay;
+    if (overlay.kind !== 'diff') throw new Error('diff closed');
+    expect(overlay.scope).toBe('session');
+    expect(overlay.index).toBe(1);
+    expect(overlay.open).toBe(true);
+    expect(overlay.offset).toBe(16);
+    expect(setup.captureCharFrame()).toContain('+f1 line 16');
+
+    setup.mockInput.pressArrow('left');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    const row = frame.split('\n').findIndex((line) => line.includes('src/f2.ts'));
+    expect(row).toBeGreaterThanOrEqual(0);
+    await setup.mockMouse.click(3, row);
+    await settle(setup);
+    overlay = controller.state.overlay;
+    if (overlay.kind !== 'diff') throw new Error('diff closed');
+    expect(overlay.index).toBe(2);
+    expect(overlay.open).toBe(true);
+    expect(setup.captureCharFrame()).toContain('+f2 line 0');
+  });
+
   test('long transcripts render a window; PageUp at the top reveals then fetches older pages', async () => {
     const backend = backendWithSession();
     backend.messages['ses_a'] = Array.from({ length: 300 }, (_, index) => ({

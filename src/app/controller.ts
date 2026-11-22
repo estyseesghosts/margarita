@@ -55,7 +55,7 @@ import {
   restoreComposer,
 } from '../domain/composer.ts';
 import { type Copyable, copyableFromMessages } from '../domain/copyable.ts';
-import { type DiffScope, type FileDiff, patchLines, turnStart } from '../domain/diff.ts';
+import { type DiffScope, type FileDiff, patchLinesFor, turnStart } from '../domain/diff.ts';
 import { hasOversizedDiff } from '../domain/edit-diff.ts';
 import { projectExecution } from '../domain/execution.ts';
 import {
@@ -6499,6 +6499,12 @@ export class AppController {
       }
       Object.assign(range, { from });
     }
+    // Toggling turn/session is a snapshot change, not a navigation away: keep the reader on
+    // the same file and patch offset when that file still exists in the new snapshot (#276).
+    const previous = this.state.overlay.kind === 'diff' ? this.state.overlay : undefined;
+    const anchorFile = previous?.files[previous.index]?.file;
+    const anchorOpen = previous?.open === true && anchorFile !== undefined;
+    const anchorOffset = previous?.offset ?? 0;
     const base: DiffOverlay = {
       kind: 'diff',
       serverID: session.serverID,
@@ -6516,7 +6522,13 @@ export class AppController {
     try {
       const files = await this.backendFor(session.serverID).sessionDiff(session.id, range);
       if (this.isDiffOverlay(session.serverID, session.id, scope, request, generation)) {
-        this.setState('overlay', { ...base, loading: false, files });
+        const anchored = anchorFile === undefined ? -1 : files.findIndex((f) => f.file === anchorFile);
+        const index = anchored >= 0 ? anchored : Math.min(previous?.index ?? 0, Math.max(0, files.length - 1));
+        const open = anchorOpen && files[index] !== undefined;
+        const offset = open
+          ? Math.min(anchorOffset, Math.max(0, patchLinesFor(files[index]!).length - 1))
+          : 0;
+        this.setState('overlay', { ...base, loading: false, files, index, open, offset });
       }
     } catch (error) {
       if (this.isDiffOverlay(session.serverID, session.id, scope, request, generation)) {
@@ -6549,32 +6561,59 @@ export class AppController {
     );
   }
 
-  /** List: ↑↓ select, Enter open, t toggles turn/session. Patch: ↑↓/PgUp/PgDn scroll, ← back. */
-  diffKey(key: { name: string; text?: string }): void {
+  /**
+   * List: ↑↓/PgUp/PgDn/Home/End select, Enter opens, t toggles turn/session.
+   * Patch: ↑↓/PgUp/PgDn/Home/End scroll, ←/Esc returns to the same file. Paging uses the
+   * rows the dialog can actually paint, so the selected file/line never falls outside the
+   * window on a short terminal (#276).
+   */
+  diffKey(key: { name: string; text?: string }, pageRows: number = diffPageLines): void {
     const overlay = this.state.overlay;
     if (overlay.kind !== 'diff') return;
     const update = (patch: Partial<DiffOverlay>) =>
       this.setState('overlay', { ...overlay, ...patch });
+    const page = Math.max(1, Math.floor(pageRows));
     if (overlay.open) {
-      const lines = patchLines(overlay.files[overlay.index]?.patch ?? '').length;
-      const clamp = (offset: number) => Math.max(0, Math.min(offset, Math.max(0, lines - 1)));
+      const file = overlay.files[overlay.index];
+      const lines = file === undefined ? 0 : patchLinesFor(file).length;
+      const last = Math.max(0, lines - 1);
+      const clamp = (offset: number) => Math.max(0, Math.min(offset, last));
       if (key.name === 'escape' || key.name === 'left' || key.name === 'q') {
         update({ open: false, offset: 0 });
       } else if (key.name === 'up') update({ offset: clamp(overlay.offset - 1) });
       else if (key.name === 'down') update({ offset: clamp(overlay.offset + 1) });
-      else if (key.name === 'pageup') update({ offset: clamp(overlay.offset - diffPageLines) });
-      else if (key.name === 'pagedown') update({ offset: clamp(overlay.offset + diffPageLines) });
+      else if (key.name === 'pageup') update({ offset: clamp(overlay.offset - page) });
+      else if (key.name === 'pagedown') update({ offset: clamp(overlay.offset + page) });
+      else if (key.name === 'home') update({ offset: 0 });
+      else if (key.name === 'end') update({ offset: last });
+      else if (key.text === 't') {
+        void this.openDiff(overlay.scope === 'turn' ? 'session' : 'turn');
+      }
       return;
     }
     const count = overlay.files.length;
+    const last = Math.max(0, count - 1);
+    const clamp = (index: number) => Math.max(0, Math.min(index, last));
     if (key.name === 'escape' || key.name === 'q') this.closeOverlay();
-    else if (key.name === 'up' && count > 0) update({ index: (overlay.index - 1 + count) % count });
-    else if (key.name === 'down' && count > 0) update({ index: (overlay.index + 1) % count });
+    else if (key.name === 'up' && count > 0) update({ index: clamp(overlay.index - 1) });
+    else if (key.name === 'down' && count > 0) update({ index: clamp(overlay.index + 1) });
+    else if (key.name === 'pageup' && count > 0) update({ index: clamp(overlay.index - page) });
+    else if (key.name === 'pagedown' && count > 0) update({ index: clamp(overlay.index + page) });
+    else if (key.name === 'home' && count > 0) update({ index: 0 });
+    else if (key.name === 'end' && count > 0) update({ index: last });
     else if ((key.name === 'return' || key.name === 'right') && count > 0) {
       update({ open: true, offset: 0 });
     } else if (key.text === 't') {
       void this.openDiff(overlay.scope === 'turn' ? 'session' : 'turn');
     }
+  }
+
+  /** Mouse row selection in the file list opens that file through the same key path. */
+  openDiffFile(index: number): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'diff' || overlay.open || overlay.files.length === 0) return;
+    const selected = Math.max(0, Math.min(overlay.files.length - 1, Math.floor(index)));
+    this.setState('overlay', { ...overlay, index: selected, open: true, offset: 0 });
   }
 
   /** Oldest pending agent question for the attached session; permissions go first. */

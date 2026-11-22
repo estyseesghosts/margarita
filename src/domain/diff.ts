@@ -41,6 +41,42 @@ export function patchLines(patch: string): PatchLine[] {
   });
 }
 
+// The dialog re-renders on every scroll key, but a file's patch text never changes. Keep
+// the formatted lines with the `FileDiff` identity so paging slices instead of re-splitting
+// and re-sanitizing thousands of lines (#276). A WeakMap follows overlay snapshots without
+// retaining old sessions.
+const patchLineCache = new WeakMap<FileDiff, readonly PatchLine[]>();
+
+/** Cached form of {@link patchLines} for one server-reported file. */
+export function patchLinesFor(file: FileDiff): readonly PatchLine[] {
+  const cached = patchLineCache.get(file);
+  if (cached !== undefined) return cached;
+  const lines = patchLines(file.patch);
+  patchLineCache.set(file, lines);
+  return lines;
+}
+
+/**
+ * Outer height budget for the diff dialog. This mirrors the shared overlay frame
+ * (`height - 5`, floor 6) so key paging and the rendered window never disagree (#276).
+ */
+export function diffFrameHeight(terminalHeight: number): number {
+  return Math.max(6, Math.floor(terminalHeight) - 5);
+}
+
+/** Inner rows after the rounded border/title. */
+export function diffBodyRows(terminalHeight: number): number {
+  return Math.max(1, diffFrameHeight(terminalHeight) - 2);
+}
+
+/**
+ * Rows available to one file-list page or patch page. One inner row is reserved for the
+ * position/count footer, keeping totals and server truncation visible on short terminals.
+ */
+export function diffWindowRows(terminalHeight: number): number {
+  return Math.max(1, diffBodyRows(terminalHeight) - 1);
+}
+
 /** `3 files · +12 −4`, or `No changes`. */
 export function diffSummary(files: readonly FileDiff[]): string {
   if (files.length === 0) return 'No changes';
