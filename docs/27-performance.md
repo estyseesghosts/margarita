@@ -147,19 +147,39 @@ dispose the server manager exactly once.
 - Do not turn machine-specific p95 numbers into hard CI thresholds. CI may run `--smoke` to
   catch crashes or runaway work, not as a performance gate.
 
+## Event-to-visible-frame (#301)
+
+`bun run bench:render` mounts the real Solid/OpenTUI tree through `testRender` over a
+deterministic controller/backend, loads 1,000 synthetic messages, then measures from a
+`transcript-changed` event through canonical refetch, mapping, incremental projection and one
+rendered frame. It runs 30 samples at both 80×24 and 40×12 and injects a known 100 ms stage as
+a clock control.
+
+One recorded run (Bun 1.4.4, `@opentui/core` 0.9.2, Windows x64):
+
+| Size | p50 | p95 | p99 | 100 ms control |
+| --- | --- | --- | --- | --- |
+| 80×24 | 76.1 ms | 101.7 ms | 102.7 ms | 109.7 ms |
+| 40×12 | 81.1 ms | 99.7 ms | 110.1 ms | 101.2 ms |
+
+This includes `scheduleTranscript`'s intentional 80 ms coalescing window, so it is not
+comparable to the pure `projectorTailUpdate` milliseconds above. It is a real component-boundary
+measurement (state commit → layout → captured frame), but still not native terminal paint; a
+compiled PTY trace remains the only honest source for terminal compositor latency.
+
 `livePageReconcile` deliberately reports `pageObjectsRecreated: 120` and
 `pageObjectsReused: 0`: a real page fetch allocates fresh DTO objects even when their content
 is unchanged. The projector's deep-equal reuse keeps `messagesFolded` at one (the changed
 tail), so unchanged rows retain their derived nodes despite new message identities (#301).
 
-## Event-to-paint
+## Native terminal paint remains unavailable
 
-The harness does not claim an event-to-paint number. It measures wire mapping, reconciliation,
-incremental projection, grouping and composer derivation in-process; native layout, paint and
-dropped-frame counts remain unavailable until a compiled PTY trace exposes them. A deliberately
-inserted 100 ms stage in `src/perf/measure.test.ts` verifies that the sampling clock detects a
-known stall, and every report labels the unavailable stages explicitly rather than substituting
-a pure projector duration for interactive latency (#301).
+`bench:render` measures the test renderer's state-commit → layout → captured-frame boundary,
+not the terminal's compositor. Native terminal paint, PTY ingress latency and dropped-frame
+counts remain unavailable until a compiled PTY trace exposes them. A deliberately inserted
+100 ms stage in `src/perf/measure.test.ts` verifies that the sampling clock detects a known
+stall, and every report labels the unavailable stages explicitly rather than substituting a
+pure projector duration for interactive latency (#301).
 
 ## Related work
 
@@ -178,4 +198,5 @@ a pure projector duration for interactive latency (#301).
 - #291 — composer editing under large drafts.
 - #297 — bounded job-start probing after tool calls.
 - #300 — retryable incomplete @file scans.
-- #301 — real page reconciliation, wire mapping and honest event-to-paint boundaries.
+- #301 — real page reconciliation, recorded wire DTO mapping and an opt-in state-to-frame
+  benchmark, with native terminal paint still labelled unavailable.
