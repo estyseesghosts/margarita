@@ -22,9 +22,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # A release must never expose an artifact that the source gate rejects.
+  # A release must never expose an artifact that the source gate rejects, on either platform
+  # whose binary it publishes.
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
