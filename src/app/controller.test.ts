@@ -2145,6 +2145,10 @@ describe('output inspector (#221, #222)', () => {
     if (overlay.kind !== 'inspector') throw new Error('inspector not open');
     expect(overlay.offset).toBe(600);
     expect(controller.inspectorMatches()).toEqual([600]);
+    // Repeated renders reuse the same match array and O(1) membership set (#234).
+    expect(controller.inspectorMatches()).toBe(controller.inspectorMatches());
+    expect(controller.inspectorMatch(600)).toBe(true);
+    expect(controller.inspectorMatch(599)).toBe(false);
 
     await controller.inspectCopy();
     expect(copied).toEqual([full]);

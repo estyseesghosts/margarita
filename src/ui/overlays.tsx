@@ -153,7 +153,8 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                 <For each={shown().lines}>
                   {(line, index) => {
                     const lineNumber = () => shown().offset + index() + 1;
-                    const isMatch = () => matches().includes(shown().offset + index());
+                    // Membership comes from the memoized match set, never a per-row rescan (#234).
+                    const isMatch = () => props.controller.inspectorMatch(shown().offset + index());
                     return (
                       <box flexDirection="row">
                         <text

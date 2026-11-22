@@ -87,11 +87,11 @@ import {
 import { greetingPeriod } from '../domain/greeting-time.ts';
 import { selectGreeting } from '../domain/greetings.ts';
 import {
-  inspectorDocument,
+  type InspectorIndex,
+  inspectorIndex,
   inspectorText,
   inspectorWindow,
   nextMatch,
-  searchLines,
 } from '../domain/inspector.ts';
 import {
   defaultVariant,
@@ -177,6 +177,7 @@ import {
   findToolMessage,
   foldTranscript,
   type ToolCall,
+  type ToolResultPayload,
   type TranscriptMessage,
   type TranscriptNode,
   transcriptWindowStep,
@@ -415,6 +416,9 @@ export class AppController {
   private readonly redoStacks = new Map<string, UndoSnapshot[]>();
   private lastEditAt = 0;
   private lastEditRoute = '';
+  /** Materialized inspector document for the current payload, reused across renders (#234). */
+  private inspectorCache:
+    { payload: ToolResultPayload | undefined; index: InspectorIndex } | undefined;
   private readonly debugLog: DebugLog;
 
   /**
@@ -6058,11 +6062,17 @@ export class AppController {
     }
   }
 
-  private inspectorDoc(): ReturnType<typeof inspectorDocument> | undefined {
+  /** The materialized document for the open inspector, reused until its payload changes. */
+  private inspectorDoc(): InspectorIndex | undefined {
     const overlay = this.state.overlay;
     if (overlay.kind !== 'inspector') return undefined;
-    if (overlay.payload === undefined) return { lines: [], kind: 'text' };
-    return inspectorDocument(overlay.payload);
+    const payload = overlay.payload;
+    if (this.inspectorCache !== undefined && this.inspectorCache.payload === payload) {
+      return this.inspectorCache.index;
+    }
+    const index = inspectorIndex(payload ?? { files: [], completeness: 'complete' });
+    this.inspectorCache = { payload, index };
+    return index;
   }
 
   /** The visible window for the inspector view; materializes only `rows` lines. */
@@ -6075,11 +6085,20 @@ export class AppController {
     return inspectorWindow(document.lines, overlay.offset, rows);
   }
 
-  inspectorMatches(): number[] {
+  /** Matches for the current query, memoized per query and source identity (#234). */
+  inspectorMatches(): readonly number[] {
     const document = this.inspectorDoc();
     const overlay = this.state.overlay;
     if (document === undefined || overlay.kind !== 'inspector') return [];
-    return searchLines(document.lines, overlay.query);
+    return document.matches(overlay.query);
+  }
+
+  /** O(1) row highlight membership from the same memoized match set (#234). */
+  inspectorMatch(lineIndex: number): boolean {
+    const document = this.inspectorDoc();
+    const overlay = this.state.overlay;
+    if (document === undefined || overlay.kind !== 'inspector') return false;
+    return document.matchSet(overlay.query).has(lineIndex);
   }
 
   private setInspectorState(patch: Partial<Extract<Overlay, { kind: 'inspector' }>>): void {
@@ -6102,7 +6121,7 @@ export class AppController {
   private setInspectorQuery(query: string): void {
     const document = this.inspectorDoc();
     if (document === undefined) return;
-    const matches = searchLines(document.lines, query);
+    const matches = document.matches(query);
     const overlay = this.state.overlay;
     if (overlay.kind !== 'inspector') return;
     this.setState('overlay', {

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   inspectorDocument,
+  inspectorIndex,
   inspectorText,
   inspectorWindow,
   nextMatch,
@@ -45,6 +46,18 @@ describe('inspector document and search (#221, #222)', () => {
     const pastEnd = inspectorWindow(lines, 99_999, 40);
     expect(pastEnd.offset).toBe(9960);
     expect(inspectorWindow([], 4, 40)).toEqual({ lines: [], offset: 0, total: 0 });
+  });
+
+  test('an index materializes once and memoizes matches per query (#234)', () => {
+    const index = inspectorIndex(payload({ text: 'one\ntwo\none' }));
+    const lines = index.lines;
+    expect(index.lines).toBe(lines);
+    const first = index.matches('one');
+    expect(index.matches('one')).toBe(first);
+    expect([...first]).toEqual([0, 2]);
+    expect([...index.matchSet('one')]).toEqual([0, 2]);
+    expect(index.matches('two')).not.toBe(first);
+    expect([...index.matches('two')]).toEqual([1]);
   });
 
   test('search is literal, case-insensitive and wraps in both directions', () => {
