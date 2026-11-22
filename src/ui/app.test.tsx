@@ -17,6 +17,7 @@ import { projectLabel } from '../domain/project-label.ts';
 import { cellWidth } from '../domain/text-width.ts';
 import type { ToolCallChild, TranscriptMessage } from '../domain/transcript.ts';
 import { App } from './app.tsx';
+import { editExternally } from './external-editor.ts';
 import { pickTheme } from './theme.ts';
 
 const pageUp = '\u001b[5~';
@@ -64,6 +65,7 @@ async function mount(
     keymap?: ReturnType<typeof buildKeymap>['keymap'];
     width?: number;
     height?: number;
+    editText?: typeof editExternally;
   } = {},
 ) {
   const controller = new AppController({
@@ -89,6 +91,7 @@ async function mount(
         ascii: false,
         env: {},
         ...(options.hintTickMs === undefined ? {} : { hintTickMs: options.hintTickMs }),
+        ...(options.editText === undefined ? {} : { editText: options.editText }),
       }),
     options.kittyKeyboard === undefined
       ? { width: options.width ?? 80, height: options.height ?? 24 }
@@ -3874,6 +3877,43 @@ describe('short-terminal pickers and nested child budgets (#267, #268)', () => {
     await settle(setup);
     expect(controller.currentRequestError()).toBeUndefined();
     expect(setup.captureCharFrame()).not.toContain('Request refresh incomplete');
+    controller.dispose();
+  });
+});
+
+describe('external editor result ownership (#271)', () => {
+  test('a result finishing after a route switch cannot replace the new draft', async () => {
+    const backend = backendWithSession();
+    backend.sessions.push({
+      ...backend.sessions[0]!,
+      id: 'ses_b',
+      title: 'Other session',
+    });
+    const editor = Promise.withResolvers<{ ok: true; text: string }>();
+    let startedWith: string | undefined;
+    const { controller, setup } = await mount(backend, {
+      editText: async (_renderer, text) => {
+        startedWith = text;
+        return editor.promise;
+      },
+    });
+    controller.openSession('ses_a');
+    await settle(setup);
+    await setup.mockInput.typeText('alpha');
+    setup.mockInput.pressKey('g', { ctrl: true });
+    await settle(setup);
+    expect(startedWith).toBe('alpha');
+
+    controller.openSession('ses_b');
+    await settle(setup);
+    controller.setComposer(composerFrom('beta'));
+    await settle(setup);
+    editor.resolve({ ok: true, text: 'edited alpha' });
+    await settle(setup);
+    await settle(setup);
+
+    expect(controller.state.composer.text).toBe('beta');
+    expect(controller.state.drafts['ses_a']?.text).toBe('edited alpha');
     controller.dispose();
   });
 });

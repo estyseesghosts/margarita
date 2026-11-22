@@ -285,6 +285,24 @@ export type ConversationView = Readonly<{
 /** Where a copy operation actually landed; the UI always reports this truthfully. */
 export type CopyResult = Readonly<{ method: 'clipboard' | 'file'; path?: string }>;
 
+/**
+ * Route/draft identity captured before suspending the renderer for the external editor
+ * (#271). Applying a late result is allowed only while this owner and draft still match.
+ */
+export type ExternalEditOrigin = Readonly<{
+  routeKey: string;
+  kind: Route['kind'];
+  label: string;
+  serverID?: string;
+  sessionID?: string;
+  /** Session lifetime at capture; a deleted/recreated ID rejects the result. */
+  epoch?: number;
+  text: string;
+  cursor: number;
+  attachmentIDs: readonly string[];
+  revision: number;
+}>;
+
 export type UnpairOutcome = Readonly<{
   credentialCleanup: 'done' | 'pending';
   error?: string;
@@ -503,6 +521,9 @@ export class AppController {
   private completionGeneration = 0;
   private disposed = false;
   private persisted: LocalState;
+  /** Bumped by every composer write; lets an editor result detect intervening edits (#271). */
+  private composerRevision = 0;
+  private editorRecoverySeq = 0;
   /** Canonical per-scope pin operations, kept in sync with the latest merged disk state. */
   private pinOperations: Readonly<Record<string, PinnedModelOperation>>;
   /** In-flight saves, serialized per controller. */
@@ -2822,6 +2843,7 @@ export class AppController {
    * the stored object, which may be shared (a draft, or the `emptyComposer` constant).
    */
   private writeComposer(composer: Composer): void {
+    this.composerRevision += 1;
     this.setState({ composer: { ...composer } });
   }
 
@@ -3407,6 +3429,115 @@ export class AppController {
       }
     });
     this.updateCompletion();
+  }
+
+  /** Captures the active route's draft identity before opening the external editor (#271). */
+  captureExternalEditOrigin(): ExternalEditOrigin {
+    const route = this.state.route;
+    const key = this.routeKey(route);
+    return {
+      routeKey: key,
+      kind: route.kind,
+      label: this.describeRoute(route),
+      ...(route.kind === 'overview' ? {} : { serverID: route.serverID }),
+      ...(route.kind === 'conversation' ? { sessionID: route.sessionID } : {}),
+      ...(route.kind === 'conversation'
+        ? { epoch: this.sessionEpoch(this.keyFor(route.serverID, route.sessionID)) }
+        : {}),
+      text: this.state.composer.text,
+      cursor: this.state.composer.cursor,
+      attachmentIDs: this.state.attachments.map((attachment) => attachment.id),
+      revision: this.composerRevision,
+    };
+  }
+
+  /**
+   * Applies an external-editor result to the draft that started the edit. It never navigates,
+   * never touches another route, and never overwrites a newer draft: an unmatched result is
+   * written to a client-local recovery file and reported instead of being lost (#271).
+   */
+  async applyExternalEdit(
+    origin: ExternalEditOrigin,
+    text: string,
+  ): Promise<'composer' | 'draft' | 'recovery'> {
+    const currentKey = this.routeKey(this.state.route);
+    if (currentKey === origin.routeKey) {
+      if (this.matchesEditOrigin(this.state.composer, this.state.attachments, origin)) {
+        this.setComposer(composerFrom(text));
+        return 'composer';
+      }
+      await this.saveEditorRecovery(text, origin.label);
+      return 'recovery';
+    }
+    const draft = this.state.drafts[origin.routeKey] ?? emptyComposer;
+    const attachments = this.state.draftAttachments[origin.routeKey] ?? [];
+    if (this.originStillExists(origin) && this.matchesEditOrigin(draft, attachments, origin)) {
+      this.setState('drafts', origin.routeKey, composerFrom(text));
+      this.showNotice(`External edit saved to the ${origin.label} draft.`, 'dim');
+      return 'draft';
+    }
+    await this.saveEditorRecovery(text, origin.label);
+    return 'recovery';
+  }
+
+  private matchesEditOrigin(
+    composer: Composer,
+    attachments: readonly Attachment[],
+    origin: ExternalEditOrigin,
+  ): boolean {
+    if (composer.text !== origin.text || composer.cursor !== origin.cursor) return false;
+    if (attachments.length !== origin.attachmentIDs.length) return false;
+    return attachments.every((attachment, index) => attachment.id === origin.attachmentIDs[index]);
+  }
+
+  private originStillExists(origin: ExternalEditOrigin): boolean {
+    if (origin.kind === 'overview') return true;
+    if (origin.serverID === undefined || !this.serverIDs().includes(origin.serverID)) return false;
+    if (origin.kind === 'new') return true;
+    if (origin.sessionID === undefined) return false;
+    const key = this.keyFor(origin.serverID, origin.sessionID);
+    if (origin.epoch !== undefined && this.sessionEpoch(key) !== origin.epoch) return false;
+    return this.state.sessions[key] !== undefined;
+  }
+
+  private describeRoute(route: Route): string {
+    switch (route.kind) {
+      case 'overview':
+        return 'overview';
+      case 'new':
+        return `new session in ${route.directory}`;
+      case 'conversation':
+        return (
+          this.state.sessions[this.keyFor(route.serverID, route.sessionID)]?.title ??
+          route.sessionID
+        );
+      default:
+        return 'draft';
+    }
+  }
+
+  private async saveEditorRecovery(text: string, label: string): Promise<void> {
+    const dir = this.deps.copyFallbackDir ?? this.deps.cwd;
+    this.editorRecoverySeq += 1;
+    const path = join(
+      dir,
+      `marg-editor-${process.pid}-${this.deps.now()}-${this.editorRecoverySeq}.txt`,
+    );
+    try {
+      const write =
+        this.deps.writeFile ??
+        (async (file: string, body: string) => void (await Bun.write(file, body)));
+      await write(path, text);
+      this.showNotice(
+        `External edit for ${label} was not applied (its draft changed or disappeared); saved to ${path}.`,
+        'warn',
+      );
+    } catch (error) {
+      this.showNotice(
+        `External edit for ${label} was not applied and could not be saved: ${errorText(error)}`,
+        'error',
+      );
+    }
   }
 
   private updateCompletion(): void {

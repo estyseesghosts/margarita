@@ -4,7 +4,7 @@ import { createSignal, Match, onCleanup, Show, Switch } from 'solid-js';
 
 import type { AppController } from '../app/controller.ts';
 import { type KeyInput, routeKey, type ScrollMove } from '../app/key-router.ts';
-import { composerFrom, graphemes } from '../domain/composer.ts';
+import { graphemes } from '../domain/composer.ts';
 import type { Keymap } from '../domain/keymap.ts';
 import { ComposerView, Footer } from './composer-view.tsx';
 import { editExternally } from './external-editor.ts';
@@ -22,6 +22,8 @@ export type AppProps = Readonly<{
   env: NodeJS.ProcessEnv;
   /** How often the 10s background hint threshold is re-checked (default 1s). */
   hintTickMs?: number;
+  /** Injectable for tests; defaults to the real external editor. */
+  editText?: typeof editExternally;
 }>;
 
 /** Structural subset of a terminal key event; KeyEvent satisfies this. */
@@ -59,9 +61,12 @@ export function App(props: AppProps) {
   const openEditor = () => {
     if (editing) return;
     editing = true;
-    void editExternally(renderer, state.composer.text, props.env)
+    // Bind the result to the draft that opened the editor; a route change or a newer draft
+    // while the child process runs must not let the old text land in another conversation.
+    const origin = controller.captureExternalEditOrigin();
+    void (props.editText ?? editExternally)(renderer, origin.text, props.env)
       .then((result) => {
-        if (result.ok) controller.setComposer(composerFrom(result.text));
+        if (result.ok) void controller.applyExternalEdit(origin, result.text);
         else controller.showNotice(result.message, 'warn');
       })
       .finally(() => {

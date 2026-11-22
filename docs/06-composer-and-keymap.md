@@ -37,7 +37,7 @@ The mapping is deliberately not an exact Claude clone. `Shift+Tab` must never fl
 | Composer | `Ctrl+O` | Toggle detailed transcript |
 | Composer | `Ctrl+R` | Reverse search prompt history |
 | Composer | `Ctrl+S` | Stash/restore composer draft |
-| Composer | `Ctrl+G` | Open draft in `$VISUAL` / `$EDITOR` |
+| Composer | `Ctrl+G` | Open draft in `$VISUAL` / `$EDITOR`. The result is bound to the draft and server/session lifetime that opened it; a switch, newer draft or deleted session parks it in that original draft or a client-local recovery file instead of writing into another conversation |
 | Composer | `Ctrl+T` | Open goal/task checklist |
 | Composer | `Ctrl+L` | Redraw display |
 | Conversation | `Alt+R` | Retry a partial permission/question refresh; cached requests stay visible |

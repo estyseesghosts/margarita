@@ -6481,3 +6481,98 @@ describe('monotonic goal plan UI state (#161)', () => {
     controller.dispose();
   });
 });
+
+describe('external editor result ownership (#271)', () => {
+  function editorFixture() {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a'), fakeSession('ses_b')];
+    const written: { path: string; text: string }[] = [];
+    const controller = makeController(
+      () => Promise.resolve([]),
+      backend,
+      () => 10_000,
+      {
+        copyFallbackDir: '/tmp',
+        writeFile: async (path, text) => {
+          written.push({ path, text });
+        },
+      },
+    );
+    return { controller, written };
+  }
+
+  test('a late result updates the original parked draft, never the current one', async () => {
+    const { controller } = editorFixture();
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    controller.setComposer(composerFrom('alpha'));
+    expect(controller.attachImage(new Uint8Array([1, 2, 3]), 'image/png', 'a.png')).toBe(true);
+    const origin = controller.captureExternalEditOrigin();
+    const attachmentIDs = [...origin.attachmentIDs];
+
+    controller.openSession('ses_b');
+    await flush();
+    controller.setComposer(composerFrom('beta'));
+    expect(await controller.applyExternalEdit(origin, 'edited alpha')).toBe('draft');
+
+    expect(controller.state.composer.text).toBe('beta');
+    expect(controller.state.drafts['ses_a']?.text).toBe('edited alpha');
+    expect(controller.state.draftAttachments['ses_a']?.map((entry) => entry.id)).toEqual(
+      attachmentIDs,
+    );
+    controller.dispose();
+  });
+
+  test('a newer edit on the same route is never overwritten and the result is saved', async () => {
+    const { controller, written } = editorFixture();
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    controller.setComposer(composerFrom('alpha'));
+    const origin = controller.captureExternalEditOrigin();
+    controller.setComposer(composerFrom('newer local text'));
+
+    expect(await controller.applyExternalEdit(origin, 'edited alpha')).toBe('recovery');
+    expect(controller.state.composer.text).toBe('newer local text');
+    expect(written.map((entry) => entry.text)).toEqual(['edited alpha']);
+    expect(controller.state.notice?.text).toContain('saved to');
+    controller.dispose();
+  });
+
+  test('a result for a deleted session is retained, not injected into another conversation', async () => {
+    const { controller, written } = editorFixture();
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    controller.setComposer(composerFrom('alpha'));
+    const origin = controller.captureExternalEditOrigin();
+    controller.onEvents('local', [{ kind: 'session-deleted', sessionID: 'ses_a' }], false);
+    controller.openSession('ses_b');
+    await flush();
+    controller.setComposer(composerFrom('beta'));
+
+    expect(await controller.applyExternalEdit(origin, 'edited alpha')).toBe('recovery');
+    expect(controller.state.composer.text).toBe('beta');
+    expect(controller.state.drafts['ses_a']?.text).not.toBe('edited alpha');
+    expect(written.map((entry) => entry.text)).toEqual(['edited alpha']);
+    controller.dispose();
+  });
+
+  test('a recreated same-ID session rejects the old lifetime result', async () => {
+    const { controller, written } = editorFixture();
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    controller.setComposer(composerFrom('alpha'));
+    const origin = controller.captureExternalEditOrigin();
+    controller.onEvents('local', [{ kind: 'session-deleted', sessionID: 'ses_a' }], false);
+    await controller.loadSessions('local');
+    controller.openSession('ses_a');
+    await flush();
+
+    expect(await controller.applyExternalEdit(origin, 'edited alpha')).toBe('recovery');
+    expect(written.map((entry) => entry.text)).toEqual(['edited alpha']);
+    controller.dispose();
+  });
+});
