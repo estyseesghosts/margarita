@@ -311,3 +311,96 @@ describe('actions on a remote session never use the launch backend (#178)', () =
     controller.dispose();
   });
 });
+
+describe('overlapping summary and transcript reads (#262, #263)', () => {
+  const key = sessionKey({ serverID: 'local', sessionID });
+
+  test('a slower older summary cannot overwrite a newer accepted summary (#263)', async () => {
+    const { local, controller } = await harness();
+    const first = Promise.withResolvers<SessionSummary>();
+    const second = Promise.withResolvers<SessionSummary>();
+    let calls = 0;
+    local.getSession = () => {
+      calls += 1;
+      return calls === 1 ? first.promise : second.promise;
+    };
+    controller.openSession(sessionID, 'local');
+    await flush();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    expect(calls).toBeGreaterThanOrEqual(2);
+
+    second.resolve({ ...session('local'), title: 'new title', updatedAt: 50 });
+    await flush();
+    expect(controller.state.sessions[key]?.title).toBe('new title');
+    // The older request resolves last; it is no longer the admitted summary.
+    first.resolve({ ...session('local'), title: 'old title', updatedAt: 10 });
+    await flush();
+    expect(controller.state.sessions[key]?.title).toBe('new title');
+    controller.dispose();
+  });
+
+  test('an older overlapping transcript page cannot replace a newer page (#262)', async () => {
+    const { local, controller } = await harness();
+    const older = Promise.withResolvers<MessagePage>();
+    const newer = Promise.withResolvers<MessagePage>();
+    let calls = 0;
+    local.listMessages = () => {
+      calls += 1;
+      return calls === 1 ? older.promise : newer.promise;
+    };
+    controller.openSession(sessionID, 'local');
+    await flush();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    expect(calls).toBeGreaterThanOrEqual(2);
+
+    const user: TranscriptMessage = {
+      kind: 'user',
+      id: 'u1',
+      createdAt: 1,
+      text: 'run it',
+      attachments: [],
+    };
+    newer.resolve({
+      messages: [
+        user,
+        {
+          kind: 'assistant',
+          id: 'a_new',
+          createdAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [{ kind: 'text', text: 'the new answer' }],
+        },
+      ],
+      hasEarlier: false,
+    });
+    await flush();
+    expect(
+      controller.state.transcripts[key]?.messages.some((message) => message.id === 'a_new'),
+    ).toBe(true);
+
+    // The older request started first but resolves last with a page that overlaps and
+    // lacks the new assistant message. It must not erase what the newer page committed.
+    older.resolve({
+      messages: [
+        user,
+        {
+          kind: 'assistant',
+          id: 'a_old',
+          createdAt: 2,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [{ kind: 'text', text: 'the stale answer' }],
+        },
+      ],
+      hasEarlier: false,
+    });
+    await flush();
+    const ids = controller.state.transcripts[key]?.messages.map((message) => message.id) ?? [];
+    expect(ids).toContain('a_new');
+    expect(ids).not.toContain('a_old');
+    controller.dispose();
+  });
+});

@@ -40,6 +40,7 @@ The mapping is deliberately not an exact Claude clone. `Shift+Tab` must never fl
 | Composer | `Ctrl+G` | Open draft in `$VISUAL` / `$EDITOR` |
 | Composer | `Ctrl+T` | Open goal/task checklist |
 | Composer | `Ctrl+L` | Redraw display |
+| Conversation | `Alt+R` | Retry a partial permission/question refresh; cached requests stay visible |
 | Composer | `Enter` | Submit prompt; if session running, **queue** (project choice) |
 | Composer | `Ctrl+Enter` | Explicit **steer now** if terminal supports; fallback `/steer` command |
 | Composer | `Shift+Enter` | Newline where distinguishable; else `Ctrl+J` |
@@ -74,6 +75,7 @@ The mapping is deliberately not an exact Claude clone. `Shift+Tab` must never fl
 | Searchable overlay | paste | Text is inserted into the active query; binary paste is refused and never leaks to the composer |
 | Overview list | mouse click | Click a tab, session row or Show more/less toggle; keyboard remains complete |
 | Model/effort picker | mouse click | Activate that row through the same verified switch path as Enter |
+| Model/agent/effort/copy/rewind picker | `Up`/`Down`, `PageUp`/`PageDown`, `Home`/`End` | A bounded window sized to the current terminal height; the highlighted row stays visible and an `n of N` line reports position |
 | Dialog | `Tab` / `Shift+Tab` | Move focus within dialog, **not** cycle agents |
 | Permission dialog | `Left` / `Right` | Navigate choices; never overview |
 | Global | `?` | Keybinding help when not editing |

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { boundedToolChildren } from './tool-children.ts';
+import { boundedToolChildren, pagedToolChildren, toolChildBudget } from './tool-children.ts';
 import type { ToolCallChild } from './transcript.ts';
 
 function child(index: number, status: ToolCallChild['status'] = 'completed'): ToolCallChild {
@@ -83,5 +83,70 @@ describe('bounded nested child view (#260)', () => {
       page: 0,
       pages: 1,
     });
+  });
+});
+
+function richChild(index: number, status: ToolCallChild['status'] = 'completed'): ToolCallChild {
+  return {
+    id: `exec:${index}`,
+    parentID: 'exec',
+    index,
+    name: `lotus.step_${index}`,
+    status,
+    input: { note: `argument ${index}` },
+    ...(status === 'error' ? { error: `failure ${index}\nwith\na\nfour-line reason` } : {}),
+    ...(index % 3 === 0 ? { output: `output ${index}\nsecond line` } : {}),
+  };
+}
+
+describe('aggregate nested child row budget (#268)', () => {
+  test('a 400-child page with many failures stays inside the compact row budget', () => {
+    const children = Array.from({ length: 400 }, (_, index) =>
+      richChild(index, index < 50 ? 'error' : 'completed'),
+    );
+    const budget = toolChildBudget({ detailed: false, userExpanded: false });
+    const view = pagedToolChildren(children, budget, 0);
+    expect(view.rowCount).toBeLessThanOrEqual(budget.rowBudget);
+    expect(view.visible.length).toBeGreaterThan(0);
+    // Every distinct failure is still identifiable, and the first page prioritizes them.
+    expect(view.visible.some((row) => row.child.status === 'error')).toBe(true);
+    expect(view.summary.failed).toBe(50);
+    expect(view.pages).toBeGreaterThan(1);
+  });
+
+  test('every page reaches every child exactly once within its mode budget', () => {
+    const children = Array.from({ length: 120 }, (_, index) =>
+      richChild(index, index % 11 === 0 ? 'error' : 'completed'),
+    );
+    for (const mode of [
+      { detailed: false, userExpanded: false },
+      { detailed: true, userExpanded: false },
+      { detailed: true, userExpanded: true },
+    ]) {
+      const budget = toolChildBudget(mode);
+      const first = pagedToolChildren(children, budget, 0);
+      const all: string[] = [];
+      for (let page = 0; page < first.pages; page += 1) {
+        const view = pagedToolChildren(children, budget, page);
+        expect(view.page).toBe(page);
+        expect(view.pages).toBe(first.pages);
+        expect(view.rowCount).toBeLessThanOrEqual(budget.rowBudget);
+        expect(view.visible.length).toBeLessThanOrEqual(budget.maxChildren);
+        all.push(...view.visible.map((row) => row.child.id));
+      }
+      expect(all).toHaveLength(children.length);
+      expect(new Set(all).size).toBe(children.length);
+      expect(all.toSorted()).toEqual(children.map((entry) => entry.id).toSorted());
+    }
+  });
+
+  test('a shorter terminal page clamps detail before exceeding the row budget', () => {
+    const children = Array.from({ length: 20 }, (_, index) => richChild(index, 'error'));
+    const budget = toolChildBudget({ detailed: true, userExpanded: false });
+    const view = pagedToolChildren(children, budget, 0);
+    expect(view.rowCount).toBeLessThanOrEqual(budget.rowBudget);
+    expect(view.visible.length).toBeGreaterThan(0);
+    // Labels are always kept; detail shrinks only as far as the allocation requires.
+    expect(view.visible.every((row) => row.child.status === 'error')).toBe(true);
   });
 });

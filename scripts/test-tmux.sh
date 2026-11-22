@@ -81,13 +81,25 @@ sleep 0.5
 check "second line"
 check "pasted two"
 
-# F1 help opens; Escape dismisses it and leaves the draft intact.
+# F1 help opens; paging works; Escape dismisses it and leaves the draft intact.
 $t send-keys F1
 sleep 0.6
-check "Keys · Esc to close"
+# Assert semantic capabilities, not incidental full-title copy: future wording edits must
+# not silently break CI while the dialog still works (#261).
+check "Keys"
+check "PgUp/PgDn scroll"
+check "transcript.inspect"
+check "agent.cycle"
+$t send-keys PageDown
+sleep 0.4
+absent "agent.cycle"
+check "transcript.inspect"
+$t send-keys PageUp
+sleep 0.4
+check "agent.cycle"
 $t send-keys Escape
 sleep 0.5
-absent "Keys · Esc to close"
+absent "PgUp/PgDn scroll"
 check "pasted two"
 
 # Modified/global keys must neither crash nor submit.

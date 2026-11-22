@@ -62,6 +62,8 @@ async function mount(
     now?: () => number;
     hintTickMs?: number;
     keymap?: ReturnType<typeof buildKeymap>['keymap'];
+    width?: number;
+    height?: number;
   } = {},
 ) {
   const controller = new AppController({
@@ -89,8 +91,12 @@ async function mount(
         ...(options.hintTickMs === undefined ? {} : { hintTickMs: options.hintTickMs }),
       }),
     options.kittyKeyboard === undefined
-      ? { width: 80, height: 24 }
-      : { width: 80, height: 24, kittyKeyboard: options.kittyKeyboard },
+      ? { width: options.width ?? 80, height: options.height ?? 24 }
+      : {
+          width: options.width ?? 80,
+          height: options.height ?? 24,
+          kittyKeyboard: options.kittyKeyboard,
+        },
   );
   current = setup;
   await setup.renderOnce();
@@ -3732,4 +3738,142 @@ test('/usage and a context click render the same analytics view (#124)', async (
   expect(setup.captureCharFrame()).toContain('session analytics');
   expect(setup.captureCharFrame()).toContain('Lifetime server totals');
   controller.dispose();
+});
+
+describe('short-terminal pickers and nested child budgets (#267, #268)', () => {
+  test('a model picker keeps the highlighted row visible on a 40×12 terminal (#267)', async () => {
+    const backend = backendWithSession();
+    backend.models = Array.from({ length: 50 }, (_, index) => ({
+      providerID: 'opencode',
+      modelID: `model-${String(index).padStart(2, '0')}`,
+      name: `Long model ${String(index).padStart(2, '0')}`,
+      enabled: true,
+      variants: [],
+    }));
+    const { controller, setup } = await mount(backend, { width: 40, height: 12 });
+    await controller.openModelPicker();
+    controller.selectModelPickerIndex(49);
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('50 of 50');
+    expect(frame).toContain('model-49');
+    expect(frame).not.toContain('model-01');
+    expect(frame.trimEnd().split('\n').length).toBeLessThanOrEqual(12);
+    controller.dispose();
+  });
+
+  test('an agent picker bounds rows and reports position on a short terminal (#267)', async () => {
+    const backend = backendWithSession();
+    backend.agents = Array.from({ length: 40 }, (_, index) => ({
+      id: `agent-${String(index).padStart(2, '0')}`,
+      name: `Agent ${index}`,
+      mode: 'primary' as const,
+      hidden: false,
+      description: 'a long description that must not clip the selected row',
+    }));
+    const { controller, setup } = await mount(backend, { width: 40, height: 12 });
+    await controller.openAgentPicker();
+    controller.selectAgentPickerIndex(39);
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('40 of 40');
+    expect(frame).toContain('agent-39');
+    expect(frame.trimEnd().split('\n').length).toBeLessThanOrEqual(12);
+    controller.dispose();
+  });
+
+  test('a 400-child execute page is bounded by physical rows, not a widget count (#268)', async () => {
+    const backend = backendWithSession();
+    backend.mcpServers = ['lotus'];
+    const children: ToolCallChild[] = Array.from({ length: 400 }, (_, index) => ({
+      id: `exec:${index}`,
+      parentID: 'exec',
+      index,
+      name: `lotus.step_${index}`,
+      status: index < 50 ? ('error' as const) : ('completed' as const),
+      input: { argument: `very long input for child ${index} `.repeat(4) },
+      ...(index < 50 ? { error: `failure ${index}\nline two\nline three\nline four` } : {}),
+    }));
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'run all of them', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'exec',
+                name: 'execute',
+                status: 'completed',
+                input: { code: 'await lotus.many()' },
+                output: 'script output',
+                startedAt: 1,
+                completedAt: 2,
+                children,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend, { width: 80, height: 24 });
+    controller.openSession('ses_a');
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    const shown = /showing (\d+) of 400 nested calls/.exec(frame)?.[1];
+    expect(shown).toBeDefined();
+    expect(Number(shown)).toBeLessThanOrEqual(10);
+    expect(frame).toContain('50 failed');
+    expect(frame).toContain('lotus.step_4');
+    expect(frame).toContain('page 1 of');
+    controller.dispose();
+  });
+
+  test('a partial request refresh is visible and retryable without hiding cached requests (#264)', async () => {
+    const backend = backendWithSession();
+    backend.forms = [
+      {
+        id: 'frm_global',
+        sessionID: 'global',
+        title: 'Authorize the location',
+        fields: [
+          {
+            kind: 'text',
+            key: 'answer',
+            title: 'Answer',
+            required: false,
+            hidden: false,
+            when: [],
+          },
+        ],
+      },
+    ];
+    const listForms = backend.listForms.bind(backend);
+    backend.listForms = async () => {
+      throw new BackendError('transport', 'session.form.list', 'questions unavailable');
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    const card = setup.captureCharFrame();
+    expect(card).toContain('Request refresh incomplete');
+    expect(card).toContain('session.form.list');
+    expect(card).toContain('Alt+R retry');
+    // The last confirmed global question is still shown, not discarded by the failure.
+    expect(card).toContain('Authorize the location');
+
+    backend.listForms = listForms;
+    controller.retryInputRequests();
+    await settle(setup);
+    await settle(setup);
+    expect(controller.currentRequestError()).toBeUndefined();
+    expect(setup.captureCharFrame()).not.toContain('Request refresh incomplete');
+    controller.dispose();
+  });
 });

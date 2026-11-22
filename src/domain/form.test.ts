@@ -319,7 +319,7 @@ describe('forms', () => {
     expect(custom.text).toBe('featurXe');
   });
 
-  test('selecting a listed option clears stale custom-choice text (#255)', () => {
+  test('selecting a listed option overrides stale custom-choice text (#255)', () => {
     const choiceForm: FormRequest = {
       ...form,
       fields: [
@@ -342,9 +342,79 @@ describe('forms', () => {
     }
     expect(editor.text).toBe('feature');
     editor = editorKey(choiceForm, editor, press('down')).editor;
-    expect(editor.text).toBe('');
+    // Browsing must not destroy the draft; only the active commit source changes (#265).
+    expect(editor.text).toBe('feature');
+    expect(editor.choiceCustom).toBe(false);
     editor = editorKey(choiceForm, editor, press('return')).editor;
     expect(editor.answers['branch']).toBe('release');
+  });
+
+  test('custom → listed → custom restores draft, caret and the typed answer (#265)', () => {
+    const choiceForm: FormRequest = {
+      ...form,
+      fields: [
+        {
+          ...base,
+          key: 'branch',
+          title: 'Branch',
+          kind: 'choice',
+          custom: true,
+          options: [
+            { value: 'main', label: 'main' },
+            { value: 'develop', label: 'develop' },
+          ],
+        },
+      ],
+    };
+    let editor = startEditor(choiceForm);
+    for (const character of 'feature/some-long-branch') {
+      editor = editorKey(choiceForm, editor, press('letter', character)).editor;
+    }
+    expect(editor.choiceCustom).toBe(true);
+    expect(editor.textCursor).toBe('feature/some-long-branch'.length);
+    editor = editorKey(choiceForm, editor, press('left')).editor;
+    editor = editorKey(choiceForm, editor, press('left')).editor;
+    // Browse the listed options: the draft and its caret survive.
+    editor = editorKey(choiceForm, editor, press('down')).editor;
+    editor = editorKey(choiceForm, editor, press('down')).editor;
+    expect(editor.text).toBe('feature/some-long-branch');
+    expect(editor.textCursor).toBe('feature/some-long-branch'.length - 2);
+    expect(editor.choiceCustom).toBe(false);
+    // Returning to custom entry restores it, and an edit resumes exactly at the caret.
+    editor = editorKey(choiceForm, editor, press('up')).editor;
+    editor = editorKey(choiceForm, editor, press('up')).editor;
+    editor = editorKey(choiceForm, editor, press('letter', 'X')).editor;
+    expect(editor.choiceCustom).toBe(true);
+    expect(editor.text).toBe('feature/some-long-branXch');
+    editor = editorKey(choiceForm, editor, press('return')).editor;
+    expect(editor.answers['branch']).toBe('feature/some-long-branXch');
+  });
+
+  test('listed → custom → listed submits the visible listed option (#255, #265)', () => {
+    const choiceForm: FormRequest = {
+      ...form,
+      fields: [
+        {
+          ...base,
+          key: 'branch',
+          title: 'Branch',
+          kind: 'choice',
+          custom: true,
+          options: [
+            { value: 'main', label: 'main' },
+            { value: 'develop', label: 'develop' },
+          ],
+        },
+      ],
+    };
+    let editor = startEditor(choiceForm);
+    editor = editorKey(choiceForm, editor, press('down')).editor;
+    editor = editorKey(choiceForm, editor, press('letter', 'd')).editor;
+    expect(editor.choiceCustom).toBe(true);
+    editor = editorKey(choiceForm, editor, press('end')).editor;
+    expect(editor.choiceCustom).toBe(false);
+    editor = editorKey(choiceForm, editor, press('return')).editor;
+    expect(editor.answers['branch']).toBe('develop');
   });
 
   test('paste inserts at the active cursor and Shift+Tab restores the caret (#232)', () => {

@@ -128,6 +128,9 @@ function runAction(controller: AppController, action: ActionID, services: Router
     case 'form.open':
       if (controller.pendingForm() !== undefined) controller.openForm();
       return true;
+    case 'requests.retry':
+      if (controller.state.route.kind === 'conversation') controller.retryInputRequests();
+      return true;
     case 'transcript.pageUp':
       // The overview has its own scroller; never hand the key to the transcript's stale
       // callback. Paging moves the selected row in list focus and is a no-op in the

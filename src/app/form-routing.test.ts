@@ -505,6 +505,48 @@ describe('external MCP elicitation actions (#233)', () => {
     controller.dispose();
   });
 
+  test('a conditionally hidden text field does not make an external-only step answerable (#266)', async () => {
+    const { controller, local } = harness();
+    local.forms = [
+      {
+        id: 'form_conditional',
+        sessionID,
+        title: 'Authorize',
+        fields: [
+          {
+            kind: 'external',
+            key: 'auth',
+            title: 'Authorize',
+            required: true,
+            hidden: false,
+            when: [],
+            url: 'https://example.test/auth',
+          },
+          {
+            kind: 'text',
+            key: 'note',
+            title: 'Note',
+            required: true,
+            hidden: false,
+            when: [{ key: 'mode', op: 'eq', value: 'advanced' }],
+          },
+        ],
+      },
+    ];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    controller.openForm();
+
+    controller.formKey({ name: 'return', ctrl: false, shift: false });
+    await flush();
+    // The hidden conditional field is not answerable, so Enter must not send `{}`.
+    expect(local.calls.filter((call) => call.name === 'replyForm')).toHaveLength(0);
+    expect(controller.state.overlay.kind).toBe('form');
+    expect(controller.state.notice?.text).toContain('not an answer');
+    controller.dispose();
+  });
+
   test('non-http(s) addresses are refused without leaving the question', async () => {
     const opened: string[] = [];
     const { controller, local } = harness({
@@ -540,6 +582,53 @@ describe('external MCP elicitation actions (#233)', () => {
     expect(controller.state.notice?.text).toContain('no browser');
     expect(controller.state.notice?.text).toContain('copy');
     expect(controller.state.overlay.kind).toBe('form');
+    controller.dispose();
+  });
+});
+
+describe('partial location refresh (#264)', () => {
+  test('a failed location listing keeps previously confirmed global and child forms', async () => {
+    const { controller, local } = harness();
+    local.sessions.push({ ...session('local'), id: 'ses_child', parentID: sessionID });
+    local.forms = [
+      { ...form('parent question'), id: 'form_parent' },
+      { ...form('global question'), id: 'form_global', sessionID: 'global' },
+      { ...form('child question'), id: 'form_child', sessionID: 'ses_child' },
+    ];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    expect(controller.state.forms[sessionID]?.map((entry) => entry.id)).toEqual([
+      'form_parent',
+      'form_global',
+      'form_child',
+    ]);
+
+    // The per-session route still works, but the location-owned listing is down. That is
+    // not proof the global/child questions were settled: keep the last confirmed cards.
+    local.listForms = async () => local.forms.filter((entry) => entry.sessionID === sessionID);
+    const locationForms = local.listLocationForms.bind(local);
+    local.listLocationForms = async () => {
+      throw new BackendError('transport', 'form.list', 'location offline');
+    };
+    controller.onEvents('local', [{ kind: 'input-requests-changed', sessionID }], false);
+    await flush();
+    expect(controller.state.forms[sessionID]?.map((entry) => entry.id)).toEqual([
+      'form_parent',
+      'form_global',
+      'form_child',
+    ]);
+    expect(controller.state.requestErrors[sessionID]?.forms).toContain('location offline');
+
+    // A successful location snapshot removes the settled global question.
+    local.forms = local.forms.filter((entry) => entry.id !== 'form_global');
+    local.listLocationForms = locationForms;
+    controller.onEvents('local', [{ kind: 'input-requests-changed', sessionID }], false);
+    await flush();
+    expect(controller.state.forms[sessionID]?.map((entry) => entry.id)).toEqual([
+      'form_parent',
+      'form_child',
+    ]);
     controller.dispose();
   });
 });

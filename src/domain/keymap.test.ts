@@ -25,6 +25,14 @@ test('accepts two-way and three-way swaps regardless of override order', () => {
   expect(buildKeymap({ 'model.pick': 'f2', 'model.recentNext': 'alt+p' }).errors).toEqual([]);
 });
 
+test('requests.retry is bound to Alt+R by default', () => {
+  const { keymap, errors } = buildKeymap({});
+  expect(errors).toEqual([]);
+  expect(actionFor(keymap, { name: 'r', ctrl: false, alt: true, shift: false })).toBe(
+    'requests.retry',
+  );
+});
+
 test('rejects final conflicts while retaining unrelated overrides', () => {
   const { keymap, errors } = buildKeymap({
     'model.pick': 'ctrl+o',

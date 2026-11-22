@@ -29,7 +29,20 @@ import { completenessLabel } from '../domain/transcript.ts';
 import { formatCost, formatTokenCount } from '../domain/usage-format.ts';
 import type { Theme } from './theme.ts';
 
-const visibleRows = 10;
+const PICKER_MAX_ROWS = 10;
+
+/**
+ * A bounded window around the highlighted row (#267). The selected row stays visible at
+ * every terminal height; the window is centered except at the list's edges.
+ */
+function pickerWindow(index: number, count: number, rows: number): { start: number; end: number } {
+  const total = Math.max(0, count);
+  const size = Math.min(total, Math.max(1, Math.floor(rows)));
+  if (size === 0) return { start: 0, end: 0 };
+  const selected = Math.max(0, Math.min(total - 1, index));
+  const start = Math.max(0, Math.min(selected - Math.floor(size / 2), total - size));
+  return { start, end: start + size };
+}
 
 /** Percentage for compact analytics rows; `N/A` when there is no denominator. */
 function analyticsPercent(value: number | undefined): string {
@@ -58,6 +71,11 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
   const terminal = useTerminalDimensions();
   /** Body rows shared by variable-length dialogs; never grows past the terminal (#241). */
   const bodyRows = () => Math.max(3, terminal().height - 12);
+  /**
+   * Actual option rows after the frame border, query and position line (#267). A short
+   * terminal shows fewer options instead of clipping the highlighted one.
+   */
+  const pickerRows = () => Math.max(1, Math.min(PICKER_MAX_ROWS, terminal().height - 9));
   const frame = (title: string) => ({
     border: true,
     borderStyle: 'rounded' as const,
@@ -327,7 +345,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
       <Match when={state.overlay.kind === 'model-picker' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'model-picker' }>>) => {
           const choices = () => props.controller.modelChoices(overlay().query);
-          const start = () => Math.max(0, overlay().index - visibleRows + 1);
+          const view = () => pickerWindow(overlay().index, choices().length, pickerRows());
           return (
             <box
               {...frame(
@@ -341,9 +359,9 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                 when={choices().length > 0}
                 fallback={<text fg={dim()}>No matching models.</text>}
               >
-                <For each={choices().slice(start(), start() + visibleRows)}>
+                <For each={choices().slice(view().start, view().end)}>
                   {(choice, index) => {
-                    const absolute = () => start() + index();
+                    const absolute = () => view().start + index();
                     const selected = () => absolute() === overlay().index;
                     return (
                       <text
@@ -353,11 +371,20 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                           void props.controller.acceptModelPicker();
                         }}
                       >
-                        {`${selected() ? '❯' : ' '} ${formatModelRef(choice)}`}
+                        {
+                          sliceCells(
+                            `${selected() ? '❯' : ' '} ${formatModelRef(choice)}`,
+                            0,
+                            Math.max(10, terminal().width - 6),
+                          ).text
+                        }
                       </text>
                     );
                   }}
                 </For>
+                <text fg={dim()}>
+                  {`${overlay().index + 1} of ${choices().length} · type to filter`}
+                </text>
               </Show>
             </box>
           );
@@ -366,7 +393,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
       <Match when={state.overlay.kind === 'effort-picker' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'effort-picker' }>>) => {
           const choices = () => props.controller.effortChoices(overlay().query);
-          const start = () => Math.max(0, overlay().index - visibleRows + 1);
+          const view = () => pickerWindow(overlay().index, choices().length, pickerRows());
           const current = () => props.controller.currentEffort();
           return (
             <box {...frame('Effort · type to filter · Enter select · Esc cancel')}>
@@ -375,9 +402,9 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                 when={choices().length > 0}
                 fallback={<text fg={dim()}>No variants available for this model.</text>}
               >
-                <For each={choices().slice(start(), start() + visibleRows)}>
+                <For each={choices().slice(view().start, view().end)}>
                   {(choice, index) => {
-                    const absolute = () => start() + index();
+                    const absolute = () => view().start + index();
                     const selected = () => absolute() === overlay().index;
                     const active = () => choice.variant === current();
                     return (
@@ -388,11 +415,20 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                           void props.controller.acceptEffortPicker();
                         }}
                       >
-                        {`${selected() ? '❯' : ' '} ${choice.label}${active() ? ' (current)' : ''}`}
+                        {
+                          sliceCells(
+                            `${selected() ? '❯' : ' '} ${choice.label}${active() ? ' (current)' : ''}`,
+                            0,
+                            Math.max(10, terminal().width - 6),
+                          ).text
+                        }
                       </text>
                     );
                   }}
                 </For>
+                <text fg={dim()}>
+                  {`${overlay().index + 1} of ${choices().length} · type to filter`}
+                </text>
               </Show>
             </box>
           );
@@ -401,7 +437,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
       <Match when={state.overlay.kind === 'agent-picker' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'agent-picker' }>>) => {
           const choices = () => props.controller.agentChoices(overlay().query);
-          const start = () => Math.max(0, overlay().index - visibleRows + 1);
+          const view = () => pickerWindow(overlay().index, choices().length, pickerRows());
           const current = () => props.controller.currentAgentID();
           return (
             <box
@@ -416,9 +452,9 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                 when={choices().length > 0}
                 fallback={<text fg={dim()}>No matching agents.</text>}
               >
-                <For each={choices().slice(start(), start() + visibleRows)}>
+                <For each={choices().slice(view().start, view().end)}>
                   {(agent, index) => {
-                    const absolute = () => start() + index();
+                    const absolute = () => view().start + index();
                     const selected = () => absolute() === overlay().index;
                     const active = () => agent.id === current();
                     return (
@@ -429,14 +465,20 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                           void props.controller.acceptAgentPicker();
                         }}
                       >
-                        {`${selected() ? '❯' : ' '} ${agent.id}`}
-                        <span style={{ fg: dim() }}>
-                          {`  ${active() ? '(current) ' : ''}${agent.description ?? ''}`}
-                        </span>
+                        {
+                          sliceCells(
+                            `${selected() ? '❯' : ' '} ${agent.id}  ${active() ? '(current) ' : ''}${agent.description ?? ''}`,
+                            0,
+                            Math.max(10, terminal().width - 6),
+                          ).text
+                        }
                       </text>
                     );
                   }}
                 </For>
+                <text fg={dim()}>
+                  {`${overlay().index + 1} of ${choices().length} · type to filter`}
+                </text>
               </Show>
             </box>
           );
@@ -445,7 +487,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
       <Match when={state.overlay.kind === 'copy-picker' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'copy-picker' }>>) => {
           const choices = () => props.controller.copyChoices(overlay().query);
-          const start = () => Math.max(0, overlay().index - visibleRows + 1);
+          const view = () => pickerWindow(overlay().index, choices().length, pickerRows());
           return (
             <box {...frame('Copy exact text · type to filter · Enter copy')}>
               <text fg={props.theme.text}>{`> ${overlay().query}`}</text>
@@ -455,22 +497,31 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                   <text fg={dim()}>No tool output, diff or code block in this session.</text>
                 }
               >
-                <For each={choices().slice(start(), start() + visibleRows)}>
+                <For each={choices().slice(view().start, view().end)}>
                   {(item, index) => {
-                    const selected = () => start() + index() === overlay().index;
+                    const selected = () => view().start + index() === overlay().index;
                     return (
                       <text
                         fg={selected() ? props.theme.accent : props.theme.text}
                         onMouseDown={() => {
-                          props.controller.selectCopyPickerIndex(start() + index());
+                          props.controller.selectCopyPickerIndex(view().start + index());
                           void props.controller.acceptCopyPicker();
                         }}
                       >
-                        {`${selected() ? '❯' : ' '} ${item.label}`}
+                        {
+                          sliceCells(
+                            `${selected() ? '❯' : ' '} ${item.label}`,
+                            0,
+                            Math.max(10, terminal().width - 6),
+                          ).text
+                        }
                       </text>
                     );
                   }}
                 </For>
+                <text fg={dim()}>
+                  {`${overlay().index + 1} of ${choices().length} · type to filter`}
+                </text>
               </Show>
               <text fg={dim()}>Unretained or server-truncated payloads are labelled above.</text>
             </box>
@@ -491,19 +542,25 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
         {(overlay: Accessor<Extract<Overlay, { kind: 'rewind-picker' }>>) => {
           const choices = () =>
             props.controller.rewindChoices(overlay().sessionID, overlay().serverID);
-          const start = () => Math.max(0, overlay().index - visibleRows + 1);
+          const view = () => pickerWindow(overlay().index, choices().length, pickerRows());
           return (
             <box {...frame('Rewind · ↑↓ prompt · Enter stage · Esc cancel')}>
               <text fg={props.theme.text}>
-                {`Earlier prompt to revert file changes to (${choices().length} in loaded history):`}
+                {`Earlier prompt to revert file changes to (${choices().length} in loaded history) · ${overlay().index + 1} of ${choices().length}:`}
               </text>
-              <For each={choices().slice(start(), start() + visibleRows)}>
+              <For each={choices().slice(view().start, view().end)}>
                 {(choice, index) => {
-                  const position = () => start() + index();
+                  const position = () => view().start + index();
                   const selected = () => position() === overlay().index;
                   return (
                     <text fg={selected() ? props.theme.accent : props.theme.text}>
-                      {`${selected() ? '❯' : ' '} ${choice.ordinal}. ${rewindTimeLabel(choice.createdAt)}  ${choice.text}`}
+                      {
+                        sliceCells(
+                          `${selected() ? '❯' : ' '} ${choice.ordinal}. ${rewindTimeLabel(choice.createdAt)}  ${choice.text}`,
+                          0,
+                          Math.max(10, terminal().width - 6),
+                        ).text
+                      }
                     </text>
                   );
                 }}
@@ -531,7 +588,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
             <text fg={props.theme.text}>
               {`Undo changes since your last message: ${diffSummary(overlay().files)}`}
             </text>
-            <For each={overlay().files.slice(0, visibleRows)}>
+            <For each={overlay().files.slice(0, pickerRows())}>
               {(file) => (
                 <text fg={dim()}>{`  ${file.file}  +${file.additions} −${file.deletions}`}</text>
               )}
@@ -723,6 +780,10 @@ function FormDialog(props: {
     const current = field();
     return current?.kind === 'multi' && current.custom ? current : undefined;
   };
+  const customChoice = () => {
+    const current = field();
+    return current?.kind === 'choice' && current.custom ? current : undefined;
+  };
   const dimensions = useTerminalDimensions();
   const choiceRows = () => Math.max(3, Math.min(12, dimensions().height - 18));
   const choiceView = () => {
@@ -784,6 +845,15 @@ function FormDialog(props: {
                   </span>
                 </Show>
                 {paint().after}
+              </text>
+            </Show>
+            <Show when={customChoice()}>
+              <text fg={props.theme.dim}>
+                {props.editor.choiceCustom
+                  ? 'custom value will be submitted · ↑↓ choose a listed option'
+                  : props.editor.text !== ''
+                    ? 'listed option will be submitted · type to edit the saved custom draft'
+                    : '↑↓ choose a listed option · type a custom value'}
               </text>
             </Show>
             <Show when={current().kind === 'external' ? current() : undefined}>

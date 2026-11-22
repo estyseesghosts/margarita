@@ -77,6 +77,7 @@ import {
   pasteFormText,
   startEditor,
   toggleOption,
+  visibleFields,
 } from '../domain/form.ts';
 import {
   acceptProposal,
@@ -184,7 +185,7 @@ import {
   type LocalCommandName,
   parseInput,
 } from '../domain/slash-command.ts';
-import { boundedToolChildren } from '../domain/tool-children.ts';
+import { pagedToolChildren, toolChildBudget } from '../domain/tool-children.ts';
 import {
   cachedToolResult,
   completenessLabel,
@@ -414,6 +415,21 @@ export class AppController {
   private escapeTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly transcriptInFlight = new Map<string, Promise<void>>();
   private readonly transcriptDirty = new Set<string>();
+  /**
+   * Admission/commit order for canonical transcript reads (#262). Concurrent reads for one
+   * server-qualified session are legitimate, but a slower older response must never replace
+   * a newer committed page. The counter is monotonic for the process lifetime; the map keeps
+   * the newest committed generation per session.
+   */
+  private transcriptReadSeq = 0;
+  private readonly transcriptCommitted = new Map<string, number>();
+  /**
+   * Admission order for `session.get` summary reads (#263). The newest admitted read wins:
+   * an older response that resolves later is dropped instead of overwriting a fresher
+   * title, usage, agent or revert state.
+   */
+  private summaryReadSeq = 0;
+  private readonly summaryAdmitted = new Map<string, number>();
   private readonly summaryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private transcriptOrder: string[] = [];
   /** Per-host stream status: the viewed conversation's footer must reflect its own host,
@@ -1401,6 +1417,10 @@ export class AppController {
     this.runningEventSeq.delete(key);
     this.invalidateJobRefresh(key);
     this.inputRequestRevisions.delete(key);
+    // A recreated ID must start a new read order; the process-wide counters stay monotonic,
+    // so an older in-flight response can never look current again (#262, #263).
+    this.summaryAdmitted.delete(key);
+    this.transcriptCommitted.delete(key);
     // Selection caches belong to the session lifetime: a deleted or recreated ID must never
     // inherit an earlier switch, failure marker or revision (#253).
     this.confirmedAgents.delete(key);
@@ -1888,12 +1908,18 @@ export class AppController {
     const epoch = this.sessionEpoch(key);
     const backend = this.backendFor(serverID);
     const revision = this.modelSwitchRevisions.get(key);
+    const sequence = ++this.summaryReadSeq;
+    this.summaryAdmitted.set(key, sequence);
     try {
       const session = await backend.getSession(sessionID);
       // A deleted/unpaired/recreated session must not be recreated by a late summary read.
       if (!this.isSessionCurrent(key, epoch) || !this.isRegisteredBackend(serverID, backend))
         return;
       if (this.modelSwitchRevisions.get(key) !== revision) return;
+      // A newer ordinary summary read supersedes this response even in the same lifetime.
+      // Dropping the older result is safer than letting it restore a title/usage/revert
+      // snapshot that the newer accepted read already replaced (#263).
+      if (this.summaryAdmitted.get(key) !== sequence) return;
       // reconcile replaces the stored summary wholesale: absent `revert` is removed again.
       // Never lose the server stamp: a backend that omits it must not orphan the row.
       this.setState(
@@ -1976,19 +2002,14 @@ export class AppController {
     const sessionForms = formsResult.status === 'fulfilled' ? formsResult.value : undefined;
     if (formsResult.status === 'rejected') errors.forms = errorText(formsResult.reason);
     const cachedForms = this.state.forms[key] ?? [];
-    // A successful per-session listing is authoritative and may remove an answered form.
-    // A failed one proves nothing, so keep cached forms owned by the attached session;
-    // location-only forms are replaced by the successful location listing below (#258).
-    let forms =
-      sessionForms ??
-      (locationFormsResult.status === 'fulfilled'
-        ? cachedForms.filter((form) => form.sessionID === sessionID)
-        : cachedForms);
+    const allowed = this.requestSessionScope(sessionID, serverID);
+    // A successful per-session listing is authoritative for the attached session's own
+    // forms. A failed one proves nothing, so keep cached forms owned by that session.
+    let forms = sessionForms ?? cachedForms.filter((form) => form.sessionID === sessionID);
     if (locationFormsResult.status === 'fulfilled') {
       // Only the location-wide forms that belong to this conversation may appear:
       // the global MCP sentinel, or a descendant (child-session) form. Never leak a
       // sibling session's question into this transcript (#209).
-      const allowed = this.requestSessionScope(sessionID, serverID);
       const merged = new Map(forms.map((form) => [form.id, form]));
       for (const form of locationFormsResult.value) {
         // With a successful per-session listing, that route is authoritative for the
@@ -2008,9 +2029,21 @@ export class AppController {
         }
       }
       forms = [...merged.values()];
-    } else if (locationFormsResult.status === 'rejected') {
-      // The per-session route remains authoritative; a missing location route is not a
-      // reason to discard valid session forms.
+    } else {
+      // The location route failed. Keep the location-owned forms that were previously
+      // confirmed instead of discarding them with the failed snapshot: a transport error
+      // does not prove the global or child request was settled (#264). The stale marker
+      // in `requestErrors` keeps the partial data visible rather than authoritative.
+      const locationOwned = cachedForms.filter(
+        (form) =>
+          form.sessionID === 'global' ||
+          (form.sessionID !== sessionID && allowed.has(form.sessionID)),
+      );
+      const merged = new Map(forms.map((form) => [form.id, form]));
+      for (const form of locationOwned) {
+        if (!merged.has(form.id)) merged.set(form.id, form);
+      }
+      forms = [...merged.values()];
       errors.forms ??= errorText(locationFormsResult.reason);
     }
 
@@ -2019,7 +2052,15 @@ export class AppController {
         this.setState('permissions', key, permissionsResult.value);
       }
       if (forms !== undefined) this.setState('forms', key, forms);
-      this.setState('requestErrors', key, errors);
+      // Replace the per-session record: a successful retry must remove an old error, and a
+      // later failure in one category must not leave the other category's stale text.
+      this.setState(
+        'requestErrors',
+        produce((all) => {
+          if (Object.keys(errors).length === 0) delete all[key];
+          else all[key] = errors;
+        }),
+      );
       const route = this.state.route;
       const nextPermissionID =
         permissionsResult.status === 'fulfilled' ? permissionsResult.value[0]?.id : undefined;
@@ -2086,6 +2127,13 @@ export class AppController {
     const route = this.state.route;
     if (route.kind !== 'conversation') return;
     void this.track('requests', this.refreshInputRequests(route.sessionID, route.serverID));
+  }
+
+  /** Last partial-failure detail for the attached conversation's input requests (#264). */
+  currentRequestError(): { permissions?: string; forms?: string } | undefined {
+    const route = this.state.route;
+    if (route.kind !== 'conversation') return undefined;
+    return this.state.requestErrors[this.keyFor(route.serverID, route.sessionID)];
   }
 
   // ---------------------------------------------------------------- transcripts
@@ -2220,6 +2268,10 @@ export class AppController {
     // A transcript read may outlive the session it was started for. Ownership is checked
     // after the await, immediately before any cache write (#252).
     if (this.state.sessions[key] === undefined) return;
+    // Admission order across *all* callers (SSE refresh and direct attach), not only the
+    // serialized schedule path. Two ordinary reads of one live session may overlap; the
+    // one admitted later wins even when an older response arrives last (#262).
+    const generation = ++this.transcriptReadSeq;
     let page: MessagePage;
     try {
       page = await backend.listMessages(sessionID, transcriptPageSize);
@@ -2241,6 +2293,8 @@ export class AppController {
     ) {
       return;
     }
+    // A newer accepted page is a watermark: this older snapshot must not replace it.
+    if (generation <= (this.transcriptCommitted.get(key) ?? 0)) return;
     const existing = this.state.transcripts[key];
     const merged = mergeLatest(existing?.messages ?? [], page.messages);
     // Cached messages older than this page keep their own cursor/retry state; otherwise the
@@ -2266,6 +2320,7 @@ export class AppController {
       }),
     );
     this.touchTranscript(key);
+    this.transcriptCommitted.set(key, generation);
     // The latest page is canonical for the session's current agent. Adopt a genuinely
     // newer switch (possibly made in another client) without letting an older cached
     // transcript message displace a fresh local acknowledgement (#253).
@@ -6256,11 +6311,12 @@ export class AppController {
     this.setState('overlay', { ...overlay, editor });
     if (outcome === 'submit') {
       // An external-only elicitation is completed by the provider/browser flow. Enter,
-      // Tab or a click cannot prove that flow finished, so never send an empty answer (#257).
-      const hasAnswerableField = form.fields.some(
-        (field) => field.kind !== 'external' && !field.hidden,
-      );
-      if (!hasAnswerableField && form.fields.some((field) => field.kind === 'external')) {
+      // Tab or a click cannot prove that flow finished, so never send an empty answer.
+      // Eligibility uses the editor's *effective* fields: a hidden or conditionally
+      // invisible text field must not make an all-external step look answerable (#257, #266).
+      const visible = visibleFields(form, editor.answers);
+      const hasAnswerableField = visible.some((field) => field.kind !== 'external');
+      if (!hasAnswerableField && visible.some((field) => field.kind === 'external')) {
         this.showNotice(
           'This question is completed in the browser. Opening or copying the URL is not an answer; it stays pending until the server finishes it.',
           'warn',
@@ -6297,8 +6353,7 @@ export class AppController {
         editor: {
           ...overlay.editor,
           cursor: index,
-          text: '',
-          textCursor: 0,
+          choiceCustom: false,
           problem: undefined,
         },
       });
@@ -6577,17 +6632,11 @@ export class AppController {
     return prefix === undefined ? 0 : (this.state.childPages[`${prefix}${toolID}`] ?? 0);
   }
 
-  private childLimitFor(tool: ToolCall): number {
+  private childBudgetFor(tool: ToolCall) {
     const prefix = this.expansionPrefix();
     const userExpanded =
       prefix !== undefined && this.state.expandedDiffs[`${prefix}${tool.id}`] === true;
-    const expanded =
-      this.state.detailed ||
-      userExpanded ||
-      tool.status === 'error' ||
-      tool.executionError !== undefined ||
-      tool.children?.some((child) => child.status === 'error') === true;
-    return userExpanded ? 40 : this.state.detailed ? 20 : expanded ? 10 : 5;
+    return toolChildBudget({ detailed: this.state.detailed, userExpanded });
   }
 
   /**
@@ -6598,9 +6647,9 @@ export class AppController {
   moveFocusedChildPage(direction: -1 | 1): boolean {
     const tool = this.focusedChildTool();
     if (tool?.children === undefined || tool.children.length === 0) return false;
-    const view = boundedToolChildren(
+    const view = pagedToolChildren(
       tool.children,
-      this.childLimitFor(tool),
+      this.childBudgetFor(tool),
       this.childPageFor(tool.id),
     );
     if (view.pages <= 1) return false;

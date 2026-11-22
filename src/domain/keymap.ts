@@ -24,6 +24,7 @@ export const actionIDs = [
   'transcript.childNext',
   'transcript.inspect',
   'form.open',
+  'requests.retry',
   'history.search',
   'composer.stash',
   'composer.editor',
@@ -81,6 +82,8 @@ export const defaultBindings: Readonly<Record<ActionID, readonly string[]>> = {
   'transcript.inspect': ['i'],
   // Alt+Q opens the pending agent question without disturbing a nonempty draft.
   'form.open': ['alt+q'],
+  // Retry the request reconciliation after a partial permission/form fetch failure.
+  'requests.retry': ['alt+r'],
   'history.search': ['ctrl+r'],
   'composer.stash': ['ctrl+s'],
   'composer.editor': ['ctrl+g'],

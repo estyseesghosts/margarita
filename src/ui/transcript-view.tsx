@@ -36,7 +36,7 @@ import type { ShellBackgroundState } from '../domain/shell-job.ts';
 import { stickyPrompt, truncatePrompt } from '../domain/sticky-prompt.ts';
 import { clipLineToCells } from '../domain/text-width.ts';
 import { type ThrobberFacts } from '../domain/throbber.ts';
-import { type BoundedToolChildren, boundedToolChildren } from '../domain/tool-children.ts';
+import { pagedToolChildren, toolChildBudget, type ToolChildPage } from '../domain/tool-children.ts';
 import {
   activeTool,
   attachBackgroundNotices,
@@ -414,6 +414,7 @@ export function Transcript(props: TranscriptProps) {
           the reader is scrolled far up the transcript (#237, #213). */}
       <PermissionCard controller={props.controller} theme={props.theme} />
       <FormCard controller={props.controller} theme={props.theme} keymap={props.keymap} />
+      <RequestStatusCard controller={props.controller} theme={props.theme} keymap={props.keymap} />
       <Show when={sticky()}>
         {(text: Accessor<string>) => (
           <box
@@ -918,6 +919,10 @@ function ToolView(props: {
       : undefined,
   );
   const lineWidth = () => Math.max(8, props.width - 4);
+  // Child detail rows sit behind a `    ↳ ` prefix inside a padded box. Measuring them at
+  // the full row width would let that prefix wrap one extra physical row and break the
+  // aggregate page budget (#268).
+  const childDetailWidth = () => Math.max(8, props.width - 10);
   const resultPreviewKind = (): PreviewKind => {
     const preview = semanticPreview(props.tool);
     return preview.kind;
@@ -956,13 +961,17 @@ function ToolView(props: {
       failed() ||
       scriptFailed() ||
       props.tool.children.some((c) => c.status === 'error'));
-  // A nested execute can report hundreds of MCP calls. Bound the widgets independently
-  // of the per-child preview caps; failures are prioritized, and expanding or detailed
-  // mode only widens the window, never renders the whole list (#260).
-  const childLimit = () =>
-    props.userExpanded === true ? 40 : props.detailed ? 20 : props.expanded ? 10 : 5;
+  // A nested execute can report hundreds of MCP calls. Bound the *aggregate physical rows*
+  // of the page, not only its widget count: labels plus each child's error/output rows must
+  // fit the mode budget. Failures are prioritized; detailed/expanded only widen the budget
+  // (#260, #268).
+  const childBudget = () =>
+    toolChildBudget({
+      detailed: props.detailed,
+      userExpanded: props.userExpanded === true,
+    });
   const childView = createMemo(() =>
-    boundedToolChildren(props.tool.children ?? [], childLimit(), props.childPageFor(props.tool.id)),
+    pagedToolChildren(props.tool.children ?? [], childBudget(), props.childPageFor(props.tool.id)),
   );
 
   const bullet = () =>
@@ -1012,46 +1021,56 @@ function ToolView(props: {
         {() => (
           <box flexDirection="column" paddingLeft={2}>
             <For each={childView().visible}>
-              {(child) => {
+              {(row) => {
+                const child = row.child;
                 const color = () =>
                   child.status === 'error'
                     ? props.theme.error
                     : child.status === 'running' || child.status === 'streaming'
                       ? props.theme.accent
                       : props.theme.dim;
+                // The page budget decides how many detail rows this child may print.
                 const error = () =>
-                  child.error === undefined
+                  child.error === undefined || row.errorRows === 0
                     ? undefined
-                    : boundedTailPreview(sanitizeText(child.error), 4, lineWidth());
+                    : boundedTailPreview(
+                        sanitizeText(child.error),
+                        row.errorRows,
+                        childDetailWidth(),
+                      );
                 const output = () =>
-                  child.output === undefined
+                  child.output === undefined || row.outputRows === 0
                     ? undefined
-                    : boundedPreview(sanitizeText(child.output), 4, lineWidth());
+                    : boundedPreview(
+                        sanitizeText(child.output),
+                        row.outputRows,
+                        childDetailWidth(),
+                      );
                 return (
                   <box flexDirection="column">
                     <text fg={color()}>
-                      {`└ ${childStatusMark(child.status)} ${childLabel(child.name, props.mcpServers)}${childInputSummary(child.input)}${childTimingLabel(child)}`}
+                      {truncateToWidth(
+                        `└ ${childStatusMark(child.status)} ${childLabel(child.name, props.mcpServers)}${childInputSummary(child.input)}${childTimingLabel(child)}`,
+                        lineWidth(),
+                      )}
                     </text>
-                    {/* A failed child always names itself; detailed mode adds its available reason. */}
+                    {/* A failed child always names itself; the allocated rows add its reason. */}
                     <Show when={error()}>
                       {(bounded: Accessor<{ text: string }>) => (
                         <text fg={props.theme.error}>{`    ↳ ${indent(bounded().text)}`}</text>
                       )}
                     </Show>
-                    <Show when={props.detailed ? output() : undefined}>
+                    <Show when={output()}>
                       {(bounded: Accessor<{ text: string }>) => (
                         <text fg={props.theme.dim}>{`    ↳ ${indent(bounded().text)}`}</text>
                       )}
                     </Show>
-                    <Show
-                      when={
-                        props.detailed && child.status === 'error' && child.error === undefined
-                          ? true
-                          : undefined
-                      }
-                    >
+                    <Show when={row.missingReason}>
                       <text fg={props.theme.dim}>
-                        {'    ↳ the server did not report a separate reason for this child'}
+                        {truncateToWidth(
+                          '    ↳ the server did not report a separate reason for this child',
+                          lineWidth(),
+                        )}
                       </text>
                     </Show>
                   </box>
@@ -1200,8 +1219,8 @@ function childInputSummary(input: ToolCallChild['input']): string {
 }
 
 /** One bounded row describing a capped child list; hidden identities stay in the domain. */
-function childSummaryLine(view: BoundedToolChildren, width: number): string {
-  const visibleFailed = view.visible.filter((child) => child.status === 'error').length;
+function childSummaryLine(view: ToolChildPage, width: number): string {
+  const visibleFailed = view.visible.filter((row) => row.child.status === 'error').length;
   const counts = [
     view.summary.failed === 0
       ? undefined
@@ -1220,7 +1239,7 @@ function childSummaryLine(view: BoundedToolChildren, width: number): string {
 
 /** Separate line so page controls are never truncated by the status counts. */
 function childPageLine(
-  view: BoundedToolChildren,
+  view: ToolChildPage,
   width: number,
   paging?: { previous: string | undefined; next: string | undefined },
 ): string {
@@ -1367,6 +1386,45 @@ function FormCard(props: { controller: AppController; theme: Theme; keymap: Keym
 
 function label(choice: string): string {
   return choice === 'once' ? 'Allow once' : choice === 'always' ? 'Always allow' : 'Reject';
+}
+
+/**
+ * Nonblocking partial-data notice: one request endpoint can fail while the other succeeds,
+ * or a location-wide form snapshot can be unavailable (#214, #258, #264). Cached requests
+ * stay visible; the user gets an explicit retry instead of a false "nothing pending".
+ */
+function RequestStatusCard(props: { controller: AppController; theme: Theme; keymap: Keymap }) {
+  const detail = () => {
+    const error = props.controller.currentRequestError();
+    if (error === undefined) return undefined;
+    const parts = [error.forms, error.permissions].filter(
+      (entry): entry is string => entry !== undefined && entry !== '',
+    );
+    return parts.length === 0 ? undefined : parts.join(' · ');
+  };
+  const retry = () => actionHint(props.keymap, 'requests.retry') ?? 'Alt+R';
+  return (
+    <Show when={detail()}>
+      {(text: Accessor<string>) => (
+        <box
+          border
+          borderStyle="rounded"
+          borderColor={props.theme.warn}
+          title=" Request refresh incomplete "
+          flexDirection="column"
+          paddingLeft={1}
+          paddingRight={1}
+          marginTop={1}
+          flexShrink={0}
+        >
+          <text fg={props.theme.warn}>
+            {`Some questions or permissions may be missing: ${text()}`}
+          </text>
+          <text fg={props.theme.dim}>{`Cached requests stay visible · ${retry()} retry`}</text>
+        </box>
+      )}
+    </Show>
+  );
 }
 
 /** A conversation not yet created on the server: welcome panel plus the prompt below. */

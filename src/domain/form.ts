@@ -307,12 +307,21 @@ export type FormEditor = Readonly<{
   formID: string;
   index: number;
   answers: FormAnswers;
-  /** Typed text for text/number fields (and custom choices). */
+  /** Typed text for text/number fields (and the saved custom draft of a choice). */
   text: string;
   /** Grapheme-safe caret in `text` (#232). */
   textCursor: number;
   /** Highlighted option for choice/multi/boolean fields. */
   cursor: number;
+  /**
+   * Whether the current single-choice field commits its custom draft instead of the
+   * highlighted listed option (#265). Browsing options never destroys the draft.
+   */
+  choiceCustom: boolean;
+  /** Per-choice-field custom draft and active source, restored when navigating back. */
+  choiceDrafts: Readonly<
+    Record<string, Readonly<{ text: string; cursor: number; custom: boolean }>>
+  >;
   /** In-progress custom multiselect value; `addingCustom` opens the entry row. */
   customDraft?: string | undefined;
   /** Grapheme-safe caret in `customDraft` (#232). */
@@ -341,6 +350,8 @@ export function startEditor(form: FormRequest): FormEditor {
       text: '',
       textCursor: 0,
       cursor: 0,
+      choiceCustom: false,
+      choiceDrafts: {},
       customCursor: 0,
       carets: {},
     },
@@ -382,14 +393,38 @@ function enterField(form: FormRequest, editor: FormEditor, index: number): FormE
   let cursor = 0;
   if (field?.kind === 'text' && typeof value === 'string') text = value;
   if (field?.kind === 'number' && typeof value === 'number') text = String(value);
+  let choiceCustom = false;
   if (field?.kind === 'choice' && typeof value === 'string') {
     const found = field.options.findIndex((option) => option.value === value);
     if (found >= 0) cursor = found;
-    else if (field.custom) text = value;
+    else if (field.custom) {
+      text = value;
+      choiceCustom = true;
+    }
+  }
+  // A custom draft typed before browsing listed options survives the round trip (#265).
+  const draft =
+    field?.kind === 'choice' && field.custom ? editor.choiceDrafts[field.key] : undefined;
+  if (draft !== undefined) {
+    text = draft.text;
+    cursor = draft.custom
+      ? cursor
+      : Math.max(
+          0,
+          field?.kind === 'choice'
+            ? field.options.findIndex((option) => option.value === value)
+            : 0,
+        );
+    choiceCustom = draft.custom;
   }
   if (field?.kind === 'boolean') cursor = value === false ? 1 : 0;
-  const saved = field === undefined ? undefined : editor.carets[field.key];
-  const textCursor = saved === undefined ? text.length : Math.min(saved, text.length);
+  const saved = draft === undefined && field !== undefined ? editor.carets[field.key] : undefined;
+  const textCursor =
+    draft !== undefined
+      ? Math.min(draft.cursor, text.length)
+      : saved === undefined
+        ? text.length
+        : Math.min(saved, text.length);
   return {
     formID: editor.formID,
     answers: editor.answers,
@@ -397,6 +432,8 @@ function enterField(form: FormRequest, editor: FormEditor, index: number): FormE
     text,
     textCursor,
     cursor,
+    choiceCustom,
+    choiceDrafts: editor.choiceDrafts,
     customCursor: 0,
     carets: editor.carets,
   };
@@ -411,9 +448,23 @@ function rememberCaret(form: FormRequest, editor: FormEditor): FormEditor {
   ) {
     return editor;
   }
-  return {
+  const next = {
     ...editor,
     carets: { ...editor.carets, [field.key]: editor.textCursor },
+  };
+  if (field.kind !== 'choice') return next;
+  // Browsing listed options must be reversible: keep the custom draft, its caret and which
+  // source was active, so returning to custom entry restores exactly what was typed (#265).
+  return {
+    ...next,
+    choiceDrafts: {
+      ...editor.choiceDrafts,
+      [field.key]: {
+        text: editor.text,
+        cursor: editor.textCursor,
+        custom: editor.choiceCustom,
+      },
+    },
   };
 }
 
@@ -435,8 +486,12 @@ function commitField(form: FormRequest, editor: FormEditor): FormEditor {
     }
     case 'choice': {
       const option = field.options[editor.cursor];
-      if (field.custom && editor.text !== '') answers[field.key] = editor.text;
-      else if (option !== undefined) answers[field.key] = option.value;
+      // The active source decides the answer. A saved draft is not a selection just
+      // because it contains text (#255, #265).
+      if (field.custom && editor.choiceCustom) {
+        if (editor.text !== '') answers[field.key] = editor.text;
+        else delete answers[field.key];
+      } else if (option !== undefined) answers[field.key] = option.value;
       break;
     }
     case 'boolean':
@@ -524,8 +579,9 @@ function editField(editor: FormEditor, field: FormField, key: FormKey): FormEdit
       key.name === 'home' ||
       key.name === 'end')
   ) {
-    // Moving onto a listed choice is an explicit selection; stale custom text must not win
-    // at commit time (#255). Left/Right still edit that text while it is active.
+    // Moving onto a listed choice is an explicit selection, but browsing must not destroy
+    // the custom draft. Only the commit source changes; the saved text stays available
+    // when the user returns to custom entry (#255, #265).
     const step =
       key.name === 'up'
         ? -1
@@ -545,7 +601,7 @@ function editField(editor: FormEditor, field: FormField, key: FormKey): FormEdit
     return {
       ...editor,
       cursor: next,
-      ...(field.kind === 'choice' ? { text: '', textCursor: 0 } : {}),
+      ...(field.kind === 'choice' ? { choiceCustom: false } : {}),
     };
   }
   if (field.kind === 'multi') {
@@ -586,6 +642,7 @@ function editField(editor: FormEditor, field: FormField, key: FormKey): FormEdit
     ...editor,
     text: next.text,
     textCursor: next.cursor,
+    ...(field.kind === 'choice' ? { choiceCustom: true } : {}),
     problem: undefined,
   });
   if (key.name === 'left') return setText(key.ctrl ? moveWordLeft(buffer) : moveLeft(buffer));
@@ -624,7 +681,13 @@ export function pasteFormText(
   ) {
     const next = insertText({ text: editor.text, cursor: editor.textCursor }, text);
     return {
-      editor: { ...editor, text: next.text, textCursor: next.cursor, problem: undefined },
+      editor: {
+        ...editor,
+        text: next.text,
+        textCursor: next.cursor,
+        ...(field.kind === 'choice' ? { choiceCustom: true } : {}),
+        problem: undefined,
+      },
     };
   }
   if (field.kind === 'multi' && field.custom) {

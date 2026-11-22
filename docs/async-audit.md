@@ -17,12 +17,12 @@ Legend: **origin** = value captured before the first `await` (a `SessionRef`/`se
 | 1340 | `loadMoreSessions` | 4 | `backendFor(serverID)` | – | fixed (#196) · test: async-audit-regressions |
 | 1516 | `applyCliOverrides` | 6 | `backendFor(serverID)` | `activeServerID()` | safe (pattern): explicit owner |
 | 1637 | `resync` | 3 | – | `state.route` | reviewed by reading: safe · post-await route reads are comparisons against the captured origin (guards); stale results are dropped |
-| 1768 | `refreshSummary` | 1 | `backendFor(serverID)` | `activeServerID()` | fixed (#252): session lifetime + backend check before write · test: async-audit-regressions |
+| 1768 | `refreshSummary` | 1 | `backendFor(serverID)` | `activeServerID()` | fixed (#252, #263): session lifetime + backend + summary admission watermark before write · test: async-audit-regressions |
 | 1791 | `refreshInbox` | 1 | `backendFor(serverID)` | `activeServerID()` | fixed (#252): session lifetime check before write |
-| 1810 | `refreshInputRequests` | 1 | `backendFor(serverID)` | `activeServerID()`, `state.route` | fixed (#252): session lifetime check before write · post-await route reads compare the captured origin |
+| 1810 | `refreshInputRequests` | 1 | `backendFor(serverID)` | `activeServerID()`, `state.route` | fixed (#252, #264): session lifetime check before write; location-owned forms retained stale when the location route fails · post-await route reads compare the captured origin |
 | 1871 | `refreshWorkers` | 1 | `backendFor(serverID)` | `activeServerID()` | safe (pattern): explicit owner |
 | 1892 | `refreshShellJobs` | 1 | `backendFor(serverID)` | `activeServerID()` | safe (pattern): explicit owner |
-| 1945 | `fetchLatest` | 1 | `backendFor(serverID)` | `activeServerID()` | fixed (#252): session lifetime, backend and owner checks before write · test: async-audit-regressions |
+| 1945 | `fetchLatest` | 1 | `backendFor(serverID)` | `activeServerID()` | fixed (#252, #262): session lifetime, backend and owner checks before write; newest admitted read is the commit watermark · test: async-audit-regressions |
 | 1978 | `loadOlder` | 1 | `backendFor(serverID)` | `activeServerID()` | fixed (#252): late pages cannot recreate a deleted/evicted transcript · test: async-audit-regressions |
 | 2059 | `loadConversation` | 1 | – | `activeServerID()` | fixed (#199) · test: async-audit-regressions |
 | 2297 | `pasteBytes` | 2 | – | `state.route` | reviewed by reading: safe · route/overlay/session reads happen synchronously before the first `await`; later calls use the captured owner |
@@ -105,6 +105,9 @@ Legend: **origin** = value captured before the first `await` (a `SessionRef`/`se
 | #198 stream callbacks from a replaced subscription | fixed, regression test (`server-manager.test.ts`) |
 | #199 `loadConversation` omitted the owner for the goal refresh | fixed, regression test |
 | #252 late summary/transcript/inbox/request reads resurrected deleted or recreated sessions | fixed with monotonic per-session lifetimes; regression tests in `async-audit-regressions.test.ts` |
+| #262 overlapping transcript reads let a slower older page replace a newer committed page | fixed with a monotonic per-session commit watermark independent of the lifetime epoch; regression test in `async-audit-regressions.test.ts` |
+| #263 two ordinary summaries of one live session could commit out of order | fixed with a per-session admission sequence: a newer admitted read always wins, and a failed newer read leaves the last confirmed snapshot untouched; regression test in `async-audit-regressions.test.ts` |
+| #264 a failed location-wide form listing discarded confirmed global/child requests | fixed by retaining location-owned cached forms with the existing partial-error marker; regression test in `form-routing.test.ts` |
 | #253 an older confirmed-agent cache outranked a newer external switch, and survived deletion | fixed with evidence + transcript watermark and lifetime-scoped caches; regression tests in `controller.test.ts` |
 | `this.backend` is a getter over the *current route's* server | intentional; every post-`await` use in the file goes through `backendFor(owner)`; `interrupt` and `rename` were made explicit as hardening |
 
@@ -112,6 +115,7 @@ Legend: **origin** = value captured before the first `await` (a `SessionRef`/`se
 
 - Backend calls are bound to the `serverID` captured before the first `await`; `backendFor` fails closed for unknown hosts.
 - Session-scoped writes additionally capture a monotonic *session lifetime* epoch. Deletion, host removal and ID reuse bump it; a response that started in an earlier lifetime is a no-op even when the host is still registered.
+- Within one lifetime, `session.get` summaries are ordered by admission: the newest admitted read wins and an older response that resolves later is dropped. Transcript page reads carry a separate commit watermark, so overlapping live fetches cannot replace a newer accepted page. A newer read that fails leaves the last confirmed snapshot in place; it does not revive an older pending one.
 - A late result may update origin-scoped cached state if the host is still registered and the request epoch is current, but never takes focus, closes a different overlay or writes another route's composer.
 - Client-local paths and files are never derived from a remote server's directory.
 
