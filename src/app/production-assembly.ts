@@ -260,10 +260,25 @@ export async function createProductionAssembly(
     listFiles: async (root) => {
       if (input.listFiles !== undefined) return input.listFiles(root);
       const scan = await scanProjectFiles(root);
-      if (scan.truncated !== undefined && scan.truncated !== 'files') {
+      if (
+        scan.truncated !== undefined &&
+        scan.truncated !== 'files' &&
+        scan.truncated !== 'aborted'
+      ) {
         debugLog.write('file-scan-truncated', { reason: scan.truncated });
         controller.showNotice(
           `File suggestions may be incomplete (scan stopped: ${scan.truncated} limit).`,
+          'dim',
+        );
+      }
+      if (scan.unreadable.count > 0) {
+        debugLog.write('file-scan-unreadable', {
+          count: scan.unreadable.count,
+          samples: scan.unreadable.samples,
+        });
+        const plural = scan.unreadable.count === 1 ? 'directory' : 'directories';
+        controller.showNotice(
+          `File suggestions may be incomplete (${scan.unreadable.count} unreadable ${plural}).`,
           'dim',
         );
       }
