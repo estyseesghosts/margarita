@@ -33,6 +33,18 @@ compiled PTY/TUI trace; the JSON report labels those metrics as unavailable inst
 inventing values. Use `scripts/test-pty-smoke.sh` and `scripts/test-tmux.sh` for terminal
 behaviour, not for numeric performance claims.
 
+## Formatting counters (#286)
+
+`src/perf/format-counts.ts` counts the expensive client-side derivations that the UI owns:
+Markdown content revisions handed to the native renderable, diff normalization, diff
+clamping and semantic tool previews. It is disabled by default (a no-op) and records no
+transcript content. Tests enable it explicitly to prove that an unrelated state update or a
+re-sent latest page does not re-run formatting for unchanged rows.
+
+Native Markdown parse/reparse, layout and changed-cell counts are still unavailable for the
+same renderer reason above; the counter is a revision boundary, not a claim about native
+work.
+
 ## Reproducibility rules
 
 - Use the same commit, machine, terminal size, Bun version and power mode for comparisons.

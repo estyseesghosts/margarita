@@ -67,6 +67,7 @@ import {
   windowNodes,
 } from '../domain/transcript.ts';
 import { workerNodes, type WorkerStatus, workerStatusLabel } from '../domain/worker.ts';
+import { countFormat } from '../perf/format-counts.ts';
 import { markerText } from './marker-text.ts';
 import { QueuedPreview } from './queued-preview.tsx';
 import { createSyntaxStyle } from './syntax.ts';
@@ -639,13 +640,10 @@ function NodeView(props: {
         {(node: Accessor<NodeOf<'text'>>) => (
           <box marginTop={1} flexDirection="row">
             <text fg={theme().text}>● </text>
-            <markdown
-              content={sanitizeText(node().text)}
-              syntaxStyle={props.syntax}
-              treeSitterClient={getTreeSitterClient()}
-              fg={theme().text}
-              flexGrow={1}
-              flexShrink={1}
+            <MarkdownBody
+              content={() => sanitizeText(node().text)}
+              syntax={props.syntax}
+              theme={props.theme}
             />
           </box>
         )}
@@ -666,13 +664,10 @@ function NodeView(props: {
                 <i>{node().done ? '∴ Reasoning (model-provided)' : '∴ Reasoning (in progress…)'}</i>
               </text>
               <box paddingLeft={1} flexDirection="column">
-                <markdown
-                  content={bounded().text}
-                  syntaxStyle={props.syntax}
-                  treeSitterClient={getTreeSitterClient()}
-                  fg={theme().text}
-                  flexGrow={1}
-                  flexShrink={1}
+                <MarkdownBody
+                  content={() => bounded().text}
+                  syntax={props.syntax}
+                  theme={props.theme}
                 />
                 <Show when={bounded().hiddenRows > 0}>
                   <text fg={theme().dim}>
@@ -952,6 +947,28 @@ function indent(text: string): string {
   return text.split('\n').join('\n    ');
 }
 
+/**
+ * One Markdown row. The content memo is the client-side revision boundary: when the node
+ * object is unchanged, it never reruns, so the native renderable is not handed new content
+ * on unrelated updates (#286). Native parse/layout counts are unavailable in OpenTUI.
+ */
+function MarkdownBody(props: { content: () => string; syntax: SyntaxStyle; theme: Theme }) {
+  const content = createMemo(() => {
+    countFormat('markdown-content');
+    return props.content();
+  });
+  return (
+    <markdown
+      content={content()}
+      syntaxStyle={props.syntax}
+      treeSitterClient={getTreeSitterClient()}
+      fg={props.theme.text}
+      flexGrow={1}
+      flexShrink={1}
+    />
+  );
+}
+
 /** One compact, individually disclosable tool row inside an expanded group (#281). */
 function ToolDisclosure(props: {
   controller: AppController;
@@ -1035,7 +1052,12 @@ function ToolView(props: {
   /** Mouse disclosure for a standalone compact row (#281). */
   onActivate?: (() => void) | undefined;
 }) {
-  const edit = createMemo(() => (props.tool.status === 'error' ? undefined : editDiff(props.tool)));
+  const edit = createMemo(() => {
+    if (props.tool.status === 'error') return undefined;
+    const result = editDiff(props.tool);
+    if (result !== undefined) countFormat('diff-normalize');
+    return result;
+  });
   // A completed edit-like call with no usable patch must say so instead of degrading to a
   // bare row: the server gave us nothing to show, which is different from no change at all.
   const unavailable = createMemo(() =>
@@ -1057,12 +1079,13 @@ function ToolView(props: {
   // Cap the patch before materializing a native <diff>; never reparse a mid-hunk slice.
   const clamped = createMemo(() => {
     const shown = edit();
-    return shown === undefined
-      ? undefined
-      : clampDiffPatch(
-          shown.diff,
-          previewBudget('diff', props.detailed, props.userExpanded === true),
-        );
+    if (shown === undefined) return undefined;
+    const clampedPatch = clampDiffPatch(
+      shown.diff,
+      previewBudget('diff', props.detailed, props.userExpanded === true),
+    );
+    countFormat('diff-clamp');
+    return clampedPatch;
   });
   const showFullDiff = () => (clamped()?.hidden ?? 0) === 0;
   const clampHint = () =>
@@ -1076,6 +1099,7 @@ function ToolView(props: {
       props.tool.status === 'error'
         ? boundedTailPreview(text, resultRows(), lineWidth())
         : boundedPreview(text, resultRows(), lineWidth());
+    countFormat('tool-preview');
     return { ...bounded, kind: preview.kind };
   });
   const failed = () => props.tool.status === 'error';

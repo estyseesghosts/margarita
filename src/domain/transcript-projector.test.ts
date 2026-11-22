@@ -125,6 +125,29 @@ describe('incremental transcript projector (#283)', () => {
     }
   });
 
+  test('a refetched page with equal content reuses nodes; content edits do not', () => {
+    const projector = createTranscriptProjector();
+    const first = history(4);
+    const nodes = project(projector, first);
+    const refetched = first.map((message) => structuredClone(message));
+    const reused = project(projector, refetched);
+    expect(reused).toEqual(nodes);
+    expect(projector.lastStats()?.messagesFolded).toBe(0);
+    expect(projector.lastStats()?.messagesReused).toBe(first.length);
+    expect(reused[0]).toBe(nodes[0]);
+
+    // Same IDs and timestamps, same-length text: only content equality can tell.
+    const edited = refetched.map((message, index) =>
+      index === 0 && message.kind === 'user'
+        ? { ...message, text: message.text.replace('request', 'REQUEST') }
+        : message,
+    );
+    const updated = project(projector, edited);
+    expect(updated).toEqual(reference(edited));
+    expect(updated).not.toBe(reused);
+    expect(projector.lastStats()?.messagesFolded).toBe(1);
+  });
+
   test('a tail append reuses the unchanged prefix and folds only new messages', () => {
     const projector = createTranscriptProjector();
     const first = history(3);

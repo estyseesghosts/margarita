@@ -564,7 +564,10 @@ export type TranscriptProjector = Readonly<{
 }>;
 
 type MessageCacheEntry = Readonly<{
+  /** Nodes derived from the message alone; expensive Markdown/diff work lives here. */
+  content: readonly TranscriptNode[];
   markerKey: string;
+  /** Content plus the marker node for `markerKey`; reused only while the marker agrees. */
   nodes: readonly TranscriptNode[];
 }>;
 
@@ -591,6 +594,7 @@ export function createTranscriptProjector(): TranscriptProjector {
   let signature: string | undefined;
   let mergeCache: MergeCache = new Map();
   let baseLists: readonly (readonly TranscriptNode[])[] = [];
+  let previousMessages: readonly TranscriptMessage[] = [];
   let finalNodes: readonly TranscriptNode[] = [];
   let endOffsetByMessage: number[] = [];
   let stats: ProjectionStats | undefined;
@@ -602,6 +606,7 @@ export function createTranscriptProjector(): TranscriptProjector {
       messageCache = new WeakMap();
       mergeCache = new Map();
       baseLists = [];
+      previousMessages = [];
       finalNodes = [];
       endOffsetByMessage = [];
     }
@@ -609,18 +614,38 @@ export function createTranscriptProjector(): TranscriptProjector {
     let messagesFolded = 0;
     let messagesReused = 0;
     const nextBaseLists: (readonly TranscriptNode[])[] = [];
-    for (const message of messages) {
+    for (const [index, message] of messages.entries()) {
       const marker = options.markers?.get(message.id);
       const markerKey = marker === undefined ? '' : markerFingerprint(marker);
-      const cached = messageCache.get(message);
-      if (cached !== undefined && cached.markerKey === markerKey) {
-        nextBaseLists.push(cached.nodes);
+      // A server page arrives as fresh objects even when its content is unchanged, so a
+      // reference miss falls back to content equality against the same slot. This keeps
+      // derived nodes (and their mounted rows) stable across live page refreshes without
+      // assuming append-only history (#205/#262).
+      const previous = previousMessages[index];
+      const candidate =
+        messageCache.get(message) ??
+        (previous === undefined ? undefined : messageCache.get(previous));
+      const contentUnchanged =
+        candidate !== undefined &&
+        (previous === undefined || previous === message || Bun.deepEquals(previous, message));
+      if (contentUnchanged && candidate !== undefined) {
+        // A segment marker may move or change phase without changing the message. Reuse the
+        // content nodes and only rebuild the tiny marker tail, so a streaming activity update
+        // cannot force Markdown/diff formatting again (#286).
+        const nodes =
+          candidate.markerKey === markerKey
+            ? candidate.nodes
+            : marker === undefined
+              ? candidate.content
+              : [...candidate.content, executionNode(marker)];
+        messageCache.set(message, { content: candidate.content, markerKey, nodes });
+        nextBaseLists.push(nodes);
         messagesReused += 1;
         continue;
       }
-      const nodes = foldMessageNodes(message, options);
-      if (marker !== undefined) nodes.push(executionNode(marker));
-      messageCache.set(message, { markerKey, nodes });
+      const content = foldMessageNodes(message, options);
+      const nodes = marker === undefined ? content : [...content, executionNode(marker)];
+      messageCache.set(message, { content, markerKey, nodes });
       nextBaseLists.push(nodes);
       messagesFolded += 1;
     }
@@ -672,6 +697,7 @@ export function createTranscriptProjector(): TranscriptProjector {
       prefixNodesReused: prefixLength,
     };
     baseLists = nextBaseLists;
+    previousMessages = messages;
     finalNodes = nextFinal;
     stats = nextStats;
     return nextFinal;

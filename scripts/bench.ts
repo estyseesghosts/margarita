@@ -15,6 +15,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import { emptyComposer, insertText, moveLeft } from '../src/domain/composer.ts';
+import { type ExecutionMarker, executionMarkers } from '../src/domain/execution-segment.ts';
 import { groupSessions } from '../src/domain/overview-groups.ts';
 import type { SessionSummary } from '../src/domain/session.ts';
 import type { AssistantPart, TranscriptMessage } from '../src/domain/transcript.ts';
@@ -77,8 +78,22 @@ function messageCount(size: number): TranscriptMessage[] {
       model: { providerID: 'mock', modelID: 'mock-1' },
       parts,
     });
+    // Completed turns end in an idle marker, the same boundary the real execution
+    // projector uses to bound incremental work.
+    messages.push({
+      kind: 'idle',
+      id: `i${serial++}`,
+      createdAt: turn + 3,
+      outcome: 'succeeded',
+    });
   }
   return messages.slice(0, size);
+}
+
+function markersFor(messages: readonly TranscriptMessage[]): ReadonlyMap<string, ExecutionMarker> {
+  return new Map(
+    executionMarkers(messages, false).map((marker) => [marker.afterMessageId, marker]),
+  );
 }
 
 function sessions(size: number): SessionSummary[] {
@@ -109,6 +124,7 @@ function scenarios(): Scenario[] {
           expandedGroups: new Set(),
           expandedDiffs: new Set(),
           mcpServers: ['lotus'],
+          markers: markersFor(messages),
         }),
       note: 'compact fold of the loaded history',
     });
@@ -120,7 +136,7 @@ function scenarios(): Scenario[] {
       expandedDiffs: new Set<string>(),
       mcpServers: ['lotus'],
     };
-    projector.project(projected, foldOptions);
+    projector.project(projected, { ...foldOptions, markers: markersFor(projected) });
     let updateSerial = 0;
     result.push({
       name: 'projectorTailUpdate',
@@ -130,14 +146,16 @@ function scenarios(): Scenario[] {
         updateSerial += 1;
         const index = projected.findLastIndex((message) => message.kind === 'assistant');
         const target = projected[index];
-        if (target?.kind !== 'assistant') return projector.project(projected, foldOptions);
+        if (target?.kind !== 'assistant') {
+          return projector.project(projected, { ...foldOptions, markers: markersFor(projected) });
+        }
         const next = [...projected];
         next[index] = {
           ...target,
           parts: [...target.parts, { kind: 'text', text: `update ${updateSerial}` }],
         };
         projected = next;
-        return projector.project(projected, foldOptions);
+        return projector.project(projected, { ...foldOptions, markers: markersFor(projected) });
       },
       note: 'one appended assistant part in the newest turn',
       detail: () => projector.lastStats(),

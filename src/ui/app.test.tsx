@@ -16,6 +16,7 @@ import { directoryKey } from '../domain/path-identity.ts';
 import { projectLabel } from '../domain/project-label.ts';
 import { cellWidth } from '../domain/text-width.ts';
 import type { ToolCallChild, TranscriptMessage } from '../domain/transcript.ts';
+import { formatCounts, resetFormatCounts, setFormatCounters } from '../perf/format-counts.ts';
 import { App } from './app.tsx';
 import { editExternally } from './external-editor.ts';
 import { pickTheme } from './theme.ts';
@@ -1577,6 +1578,99 @@ function editDiffBackend(tool: {
   };
   return backend;
 }
+
+describe('transcript row identity (#286)', () => {
+  test('unrelated updates and a streamed tail do not reformat unchanged rows', async () => {
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'inspect it', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            { kind: 'text', text: 'Here is the **answer** with details.' },
+            {
+              kind: 'tool',
+              tool: {
+                id: 'r1',
+                name: 'read',
+                status: 'completed',
+                input: { filePath: 'src/a.ts' },
+                output: Array.from({ length: 40 }, (_, row) => `row ${row}`).join('\n'),
+                startedAt: 2,
+                completedAt: 3,
+              },
+            },
+            {
+              kind: 'tool',
+              tool: {
+                id: 'e1',
+                name: 'edit',
+                status: 'completed',
+                input: { path: 'src/a.ts', oldString: 'x', newString: 'y' },
+                diff: '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,1 +1,1 @@\n-x\n+y',
+                startedAt: 2,
+                completedAt: 3,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    setFormatCounters(true);
+    resetFormatCounts();
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    expect(formatCounts()['markdown-content']).toBeGreaterThan(0);
+    expect(formatCounts()['tool-preview']).toBeGreaterThan(0);
+    expect(formatCounts()['diff-normalize']).toBeGreaterThan(0);
+
+    // An unrelated composer edit must not touch any transcript row.
+    resetFormatCounts();
+    controller.setComposer({ text: 'draft', cursor: 5 });
+    await settle(setup);
+    expect(formatCounts()).toEqual({
+      'markdown-content': 0,
+      'diff-normalize': 0,
+      'diff-clamp': 0,
+      'tool-preview': 0,
+    });
+
+    // The server re-sends the whole latest page as fresh objects plus one new tail row.
+    const prior = backend.messages['ses_a'] ?? [];
+    backend.messages = {
+      ses_a: [
+        ...prior.map((message) => structuredClone(message)),
+        {
+          kind: 'assistant',
+          id: 'm3',
+          createdAt: 4,
+          completedAt: 5,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [{ kind: 'text', text: 'New answer at the tail.' }],
+        },
+      ],
+    };
+    resetFormatCounts();
+    controller.onEvents('local', [], true);
+    await settle(setup);
+    await settle(setup);
+    const afterTail = formatCounts();
+    expect(afterTail['markdown-content']).toBeGreaterThan(0);
+    expect(afterTail['tool-preview']).toBe(0);
+    expect(afterTail['diff-normalize']).toBe(0);
+    expect(afterTail['diff-clamp']).toBe(0);
+    controller.dispose();
+    setFormatCounters(false);
+  });
+});
 
 describe('successful edit diffs (issue #22)', () => {
   test('an edit with a server-provided patch renders the diff, not a bare row', async () => {
