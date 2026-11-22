@@ -8,6 +8,32 @@ import type { WorkerJob } from './worker.ts';
 /** Frontend projection of server messages; adapters map wire types into these. */
 export type ToolStatus = 'streaming' | 'running' | 'completed' | 'error';
 
+/** A file returned by a tool. Data URIs are described, never retained as encoded bytes. */
+export type ToolFileReference = Readonly<{
+  /** Safe display name: the server's name, else a MIME-derived label. */
+  name: string;
+  /** MIME type when the server supplied or the data URI declared one. */
+  mime?: string;
+  /** Verifiable decoded byte count for data URIs; omitted when unknown. */
+  size?: number;
+  /** A normal file/resource URI; never a `data:` payload. */
+  uri?: string;
+}>;
+
+/** One nested Code Mode operation reported in `execute.metadata.toolCalls`. */
+export type ToolCallChild = Readonly<{
+  /** Stable `${parentID}:${index}` identity across progress snapshots. */
+  id: string;
+  parentID: string;
+  /** Source order in the upstream `toolCalls` list. */
+  index: number;
+  /** Qualified name as reported (for example `lotus.get_issue`). */
+  name: string;
+  status: ToolStatus;
+  /** Bounded, sanitized display input; never the full script. */
+  input?: Readonly<Record<string, string | number | boolean>>;
+}>;
+
 export type ToolCall = Readonly<{
   id: string;
   name: string;
@@ -24,6 +50,12 @@ export type ToolCall = Readonly<{
   diff?: string;
   /** The file the server said an edit touched (from its metadata), when input lacks one. */
   diffFile?: string;
+  /** Structured file content parts; encoded data is never part of `output`. */
+  files?: readonly ToolFileReference[];
+  /** Nested Code Mode calls, in start order; only present when the server supplied them. */
+  children?: readonly ToolCallChild[];
+  /** `execute` returned a script error while the outer tool still completed. */
+  executionError?: string;
   error?: string;
   startedAt: number;
   completedAt?: number;
@@ -33,6 +65,66 @@ export type AssistantPart =
   | { kind: 'text'; text: string }
   | { kind: 'reasoning'; text: string; done: boolean }
   | { kind: 'tool'; tool: ToolCall };
+
+/**
+ * How much of a retained payload the source actually supplied (#221). `complete` means the
+ * server supplied everything it had; display clipping is never reported here.
+ */
+export type SourceCompleteness = 'complete' | 'frontend-elided' | 'server-truncated';
+
+/** One inspectable tool result: full retained text, diff and structured files. */
+export type ToolResultPayload = Readonly<{
+  /** Printable text without display prefixes; absent for files-only results. */
+  text?: string;
+  diff?: string;
+  files: readonly ToolFileReference[];
+  completeness: SourceCompleteness;
+}>;
+
+/** What the bounded transcript cache can offer when retrieval is unavailable. */
+export function cachedToolResult(tool: ToolCall): ToolResultPayload {
+  return {
+    ...(tool.output === undefined ? {} : { text: tool.output }),
+    ...(tool.diff === undefined ? {} : { diff: tool.diff }),
+    files: tool.files ?? [],
+    completeness:
+      tool.outputTruncated === 'server'
+        ? 'server-truncated'
+        : tool.outputTruncated === 'frontend'
+          ? 'frontend-elided'
+          : 'complete',
+  };
+}
+
+/** Human-readable provenance for the inspector header; never claims more than was supplied. */
+export function completenessLabel(completeness: SourceCompleteness): string {
+  switch (completeness) {
+    case 'complete':
+      return 'complete';
+    case 'frontend-elided':
+      return 'preview only — the middle was elided by this client';
+    case 'server-truncated':
+      return 'truncated by the server';
+    default:
+      return assertNever(completeness);
+  }
+}
+
+/** Locate the message that owns a tool part, for on-demand retrieval (#221). */
+export function findToolMessage(
+  messages: readonly TranscriptMessage[],
+  toolID: string,
+): { messageID: string; tool: ToolCall } | undefined {
+  for (const message of messages) {
+    if (message.kind !== 'assistant') continue;
+    for (const part of message.parts) {
+      if (part.kind === 'tool' && part.tool.id === toolID) {
+        return { messageID: message.id, tool: part.tool };
+      }
+    }
+  }
+  return undefined;
+}
 
 export type TranscriptMessage =
   | { kind: 'user'; id: string; createdAt: number; text: string; attachments: readonly string[] }
@@ -74,7 +166,8 @@ export type TranscriptMessage =
   | { kind: 'compaction'; id: string; createdAt: number; state: 'running' | 'completed' | 'failed' }
   | { kind: 'note'; id: string; createdAt: number; text: string; source: 'synthetic' | 'system' };
 
-export type ToolCategory = 'read' | 'search' | 'edit' | 'shell' | 'web' | 'delegate' | 'other';
+export type ToolCategory =
+  'read' | 'search' | 'edit' | 'shell' | 'code' | 'web' | 'delegate' | 'other';
 
 /** The display/identity facts the transcript fold needs to recognize calls. */
 export type ToolIdentityHints = Readonly<{
@@ -87,7 +180,15 @@ export type TranscriptNode =
   | { kind: 'text'; key: string; text: string }
   | { kind: 'reasoning'; key: string; text: string; done: boolean }
   | { kind: 'reasoning-unavailable'; key: string; tokens: number }
-  | { kind: 'tool'; key: string; tool: ToolCall; category: ToolCategory; expanded: boolean }
+  | {
+      kind: 'tool';
+      key: string;
+      tool: ToolCall;
+      category: ToolCategory;
+      expanded: boolean;
+      /** The user explicitly grew this item beyond the mode default (#219). */
+      userExpanded?: boolean;
+    }
   | {
       kind: 'tool-group';
       key: string;
@@ -153,7 +254,8 @@ const categoryByName: Readonly<Record<string, ToolCategory>> = {
   multiedit: 'edit',
   bash: 'shell',
   shell: 'shell',
-  execute: 'shell',
+  // Code Mode is a script host, not a shell; nested calls carry the real activity (#217).
+  execute: 'code',
   webfetch: 'web',
   websearch: 'web',
   fetch: 'web',
@@ -185,7 +287,14 @@ export function toolIdentity(name: string, mcpServers: readonly string[] = []): 
   const builtin = categoryByName[name.toLowerCase()];
   if (builtin !== undefined) return { kind: 'builtin', category: builtin };
   const matched = mcpServers
-    .map((server) => ({ server, prefix: `${mcpNamespace(server)}_` }))
+    .flatMap((server) => {
+      const namespace = mcpNamespace(server);
+      return [
+        { server, prefix: `${namespace}_` },
+        // Code Mode reports nested calls with a qualified `<server>.<tool>` name.
+        { server, prefix: `${namespace}.` },
+      ];
+    })
     .filter((entry) => entry.prefix.length > 1 && name.startsWith(entry.prefix))
     .toSorted((left, right) => right.prefix.length - left.prefix.length)[0];
   if (matched === undefined) return { kind: 'external' };
@@ -203,7 +312,8 @@ export function classifyTool(name: string): ToolCategory {
  * MCP call keeps its error visible (issue #74).
  */
 function isFoldable(tool: ToolCall, mcpServers: readonly string[]): boolean {
-  if (tool.status === 'error') return false;
+  if (tool.status === 'error' || tool.executionError !== undefined) return false;
+  if (tool.children?.some((child) => child.status === 'error') === true) return false;
   if (builtinCategories.has(tool.name.toLowerCase())) {
     const category = classifyTool(tool.name);
     return (
@@ -211,6 +321,7 @@ function isFoldable(tool: ToolCall, mcpServers: readonly string[]): boolean {
       category === 'search' ||
       category === 'web' ||
       category === 'shell' ||
+      category === 'code' ||
       category === 'edit'
     );
   }
@@ -370,14 +481,20 @@ function foldAssistant(
 ): void {
   let pending: ToolCall[] = [];
   let sawReasoningText = false;
+  const needsExpansion = (tool: ToolCall) =>
+    options.detailed ||
+    tool.status === 'error' ||
+    tool.executionError !== undefined ||
+    tool.children?.some((child) => child.status === 'error') === true ||
+    options.expandedDiffs?.has(tool.id) === true;
   const emitTool = (tool: ToolCall) => {
     out.push({
       kind: 'tool',
       key: tool.id,
       tool,
       category: classifyTool(tool.name),
-      expanded:
-        options.detailed || tool.status === 'error' || options.expandedDiffs?.has(tool.id) === true,
+      expanded: needsExpansion(tool),
+      ...(options.expandedDiffs?.has(tool.id) === true ? { userExpanded: true } : {}),
     });
   };
   const emitGroup = (tools: ToolCall[]) => {
@@ -436,10 +553,8 @@ function foldAssistant(
           key: part.tool.id,
           tool: part.tool,
           category: classifyTool(part.tool.name),
-          expanded:
-            options.detailed ||
-            part.tool.status === 'error' ||
-            options.expandedDiffs?.has(part.tool.id) === true,
+          expanded: needsExpansion(part.tool),
+          ...(options.expandedDiffs?.has(part.tool.id) === true ? { userExpanded: true } : {}),
         });
         return;
       case 'text': {
@@ -491,10 +606,28 @@ const verbs: Readonly<Record<ToolCategory, (count: number) => string>> = {
   search: (count) => `Searched for ${count} ${count === 1 ? 'pattern' : 'patterns'}`,
   edit: (count) => `Edited ${count} ${count === 1 ? 'file' : 'files'}`,
   shell: (count) => `Ran ${count} shell ${count === 1 ? 'command' : 'commands'}`,
+  code: (count) => `Ran ${count} code ${count === 1 ? 'script' : 'scripts'}`,
   web: (count) => `Fetched ${count} ${count === 1 ? 'page' : 'pages'}`,
   delegate: (count) => `Delegated ${count} ${count === 1 ? 'task' : 'tasks'}`,
   other: (count) => `Ran ${count} other ${count === 1 ? 'tool' : 'tools'}`,
 };
+
+/** Nested Code Mode operations replace their `execute` wrapper in activity summaries. */
+function summaryEntries(tools: readonly ToolCall[]): readonly { name: string }[] {
+  const entries: { name: string }[] = [];
+  for (const tool of tools) {
+    if (
+      classifyTool(tool.name) === 'code' &&
+      tool.children !== undefined &&
+      tool.children.length > 0
+    ) {
+      entries.push(...tool.children.map((child) => ({ name: child.name })));
+    } else {
+      entries.push({ name: tool.name });
+    }
+  }
+  return entries;
+}
 
 function callVerb(count: number, server: string | undefined): string {
   const times = `${count} ${count === 1 ? 'time' : 'times'}`;
@@ -515,7 +648,7 @@ export function summarizeTools(
   // One ordered bucket list, in first-appearance order: the reference layout reads
   // "Reading 2 files, calling lotus 4 times, running 2 shell commands".
   const counts = new Map<string, { phrase: (count: number) => string; count: number }>();
-  for (const tool of tools) {
+  for (const tool of summaryEntries(tools)) {
     const identity = toolIdentity(tool.name, mcpServers);
     const key =
       identity.kind === 'builtin'
@@ -549,6 +682,7 @@ const activityLabels: Readonly<Record<ToolCategory, string>> = {
   search: 'Searching',
   edit: 'Editing',
   shell: 'Running',
+  code: 'Running script',
   web: 'Fetching',
   delegate: 'Delegating',
   other: 'Working',
@@ -637,6 +771,26 @@ export function liveToolLine(
 ): LiveTool | undefined {
   const active = activeTool(tools);
   if (active === undefined) return undefined;
+  if (classifyTool(active.name) === 'code' && active.children !== undefined) {
+    const child = active.children
+      .filter((entry) => entry.status === 'running' || entry.status === 'streaming')
+      .at(-1);
+    if (child !== undefined) {
+      const identity = toolIdentity(child.name, mcpServers);
+      if (identity.kind === 'mcp') {
+        return {
+          text: `${identity.server}: ${identity.tool}`,
+          startedAt: active.startedAt,
+          shell: false,
+        };
+      }
+      return {
+        text: truncatePrompt(sanitizeTerminalText(child.name), liveToolNameMaxWidth),
+        startedAt: active.startedAt,
+        shell: false,
+      };
+    }
+  }
   const identity = toolIdentity(active.name, mcpServers);
   const shell = classifyTool(active.name) === 'shell';
   if (identity.kind === 'mcp')
@@ -725,4 +879,139 @@ export function formatToolTiming(tool: ToolCall, formatClock: (at: number) => st
   if (tool.completedAt === undefined) return started;
   const seconds = Math.max(0, tool.completedAt - tool.startedAt) / 1000;
   return `${started} · ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds).toString()}s`;
+}
+
+export type PreviewKind = 'output' | 'shell' | 'diff' | 'code' | 'reasoning';
+
+/**
+ * Inline display rows per kind. Detailed mode is materially more generous than compact,
+ * but both are bounded; the inspector is the route to full retained content (#219).
+ */
+export const previewBudgets: Readonly<
+  Record<'compact' | 'detailed', Readonly<Record<PreviewKind, number>>>
+> = {
+  compact: { output: 12, shell: 20, diff: 16, code: 12, reasoning: 12 },
+  detailed: { output: 48, shell: 60, diff: 64, code: 44, reasoning: 80 },
+};
+
+/** Hard ceiling for one inline item even when the user expands it. */
+export const maxInlinePreviewRows = 100;
+
+export function previewBudget(kind: PreviewKind, detailed: boolean, expanded = false): number {
+  if (expanded) return maxInlinePreviewRows;
+  return previewBudgets[detailed ? 'detailed' : 'compact'][kind];
+}
+
+/**
+ * Width-aware row budget: wrapped lines count as multiple rendered rows. Returns the text
+ * that fits and how many rendered rows remain hidden. Never claims the source was
+ * truncated; this is display clipping only.
+ */
+export function boundedPreview(
+  text: string,
+  maxRows: number,
+  width: number,
+): { text: string; hiddenRows: number } {
+  const safeWidth = Math.max(1, width);
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const shown: string[] = [];
+  let rows = 0;
+  for (const [index, line] of lines.entries()) {
+    const lineRows = Math.max(1, Math.ceil(Math.max(1, line.length) / safeWidth));
+    if (rows + lineRows > maxRows) {
+      if (shown.length === 0) shown.push(line);
+      const consumed = Math.max(1, shown.length);
+      let hidden = 0;
+      for (const remaining of lines.slice(consumed)) {
+        hidden += Math.max(1, Math.ceil(Math.max(1, remaining.length) / safeWidth));
+      }
+      return { text: shown.join('\n'), hiddenRows: hidden };
+    }
+    shown.push(line);
+    rows += lineRows;
+    if (index === lines.length - 1) return { text: shown.join('\n'), hiddenRows: 0 };
+  }
+  return { text: shown.join('\n'), hiddenRows: 0 };
+}
+
+/** A short semantic label for a tool result; never inferred from a line's wording. */
+export function semanticResultKind(tool: ToolCall): 'shell' | 'code' | 'json' | 'text' {
+  const category = classifyTool(tool.name);
+  if (category === 'code') return 'code';
+  if (category === 'shell') return 'shell';
+  if (tool.output !== undefined) {
+    const trimmed = tool.output.trim();
+    if (
+      (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+      (trimmed.startsWith('[') && trimmed.endsWith(']'))
+    ) {
+      return 'json';
+    }
+  }
+  return 'text';
+}
+
+/**
+ * Pretty-printed JSON for a preview, or `undefined` when the text is not valid JSON.
+ * The original text stays authoritative and untouched for the inspector (#220).
+ */
+export function prettyJson(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (trimmed === '') return undefined;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (parsed === null || typeof parsed !== 'object') return undefined;
+    return JSON.stringify(parsed, undefined, 2);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Which display budget a result uses. JSON stays in the ordinary output class; the
+ * difference is presentation (pretty-printed), not row count (#220).
+ */
+export function semanticPreviewKind(tool: ToolCall): PreviewKind {
+  const kind = semanticResultKind(tool);
+  if (kind === 'shell') return 'shell';
+  if (kind === 'code') return 'code';
+  return 'output';
+}
+
+/** The text and budget kind to show for a result preview; never mutates the source. */
+export function semanticPreview(tool: ToolCall): { text: string; kind: PreviewKind } {
+  const text = tool.output ?? '';
+  if (semanticResultKind(tool) === 'json') {
+    return { text: prettyJson(text) ?? text, kind: 'output' };
+  }
+  return { text, kind: semanticPreviewKind(tool) };
+}
+
+/**
+ * Tail-biased bound for diagnostics: keeps the last rows where an error usually is.
+ * `hiddenRows` counts rows above the retained tail, not source truncation.
+ */
+export function boundedTailPreview(
+  text: string,
+  maxRows: number,
+  width: number,
+): { text: string; hiddenRows: number } {
+  const safeWidth = Math.max(1, width);
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const shown: string[] = [];
+  let rows = 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index] ?? '';
+    const lineRows = Math.max(1, Math.ceil(Math.max(1, line.length) / safeWidth));
+    if (rows + lineRows > maxRows && shown.length > 0) {
+      let hidden = 0;
+      for (const remaining of lines.slice(0, index + 1)) {
+        hidden += Math.max(1, Math.ceil(Math.max(1, remaining.length) / safeWidth));
+      }
+      return { text: shown.toReversed().join('\n'), hiddenRows: hidden };
+    }
+    shown.push(line);
+    rows += lineRows;
+  }
+  return { text: shown.toReversed().join('\n'), hiddenRows: 0 };
 }

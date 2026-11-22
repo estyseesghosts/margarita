@@ -52,15 +52,18 @@ export function routeKey(
   if (state.overlay.kind !== 'none') return routeOverlay(controller, keymap, key);
   if (state.route.kind === 'conversation' && controller.pendingPermission() !== undefined) {
     if (routePermission(controller, key)) return true;
-  } else if (
-    state.route.kind === 'conversation' &&
-    controller.pendingForm() !== undefined &&
-    state.composer.text === '' &&
-    key.name === 'return'
-  ) {
-    // Enter on an empty prompt opens the pending agent question.
-    controller.openForm();
-    return true;
+  } else if (state.route.kind === 'conversation' && controller.pendingForm() !== undefined) {
+    if (actionFor(keymap, key) === 'form.open') {
+      // A dedicated action works with a nonempty composer; Enter with an empty prompt
+      // remains the zero-learning path (#213).
+      controller.openForm();
+      return true;
+    }
+    if (state.composer.text === '' && key.name === 'return') {
+      // Enter on an empty prompt opens the pending agent question.
+      controller.openForm();
+      return true;
+    }
   }
   if (state.completion !== undefined && routeCompletion(controller, key)) return true;
 
@@ -104,6 +107,13 @@ function runAction(controller: AppController, action: ActionID, services: Router
       return true;
     case 'transcript.groupNext':
       controller.moveGroupFocus(1);
+      return true;
+    case 'transcript.inspect':
+      // `i` stays ordinary text unless the conversation has a focused row and no draft.
+      if (controller.state.composer.text !== '') return false;
+      return controller.openInspector();
+    case 'form.open':
+      if (controller.pendingForm() !== undefined) controller.openForm();
       return true;
     case 'transcript.pageUp':
       services.scroll('pageUp');
@@ -180,6 +190,10 @@ function runAction(controller: AppController, action: ActionID, services: Router
 
 function routeOverlay(controller: AppController, keymap: Keymap, key: KeyInput): boolean {
   const overlay = controller.state.overlay;
+  if (overlay.kind === 'inspector') {
+    controller.inspectorKey(key);
+    return true;
+  }
   if (overlay.kind === 'diff' && !(key.ctrl && key.name === 'c')) {
     controller.diffKey(key);
     return true;

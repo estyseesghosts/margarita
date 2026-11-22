@@ -19,6 +19,7 @@ import type { SessionSummary } from '../domain/session.ts';
 import type { ToolCall, TranscriptMessage } from '../domain/transcript.ts';
 import type { WorkerJob } from '../domain/worker.ts';
 import { AppController } from './controller.ts';
+import type { ControllerDeps } from './controller.ts';
 import { routeKey } from './key-router.ts';
 
 function deferred<T>() {
@@ -35,6 +36,7 @@ function makeController(
   listFiles: (root: string) => Promise<string[]>,
   backend: FakeBackend = new FakeBackend(),
   now: () => number = () => 10_000,
+  overrides: Partial<ControllerDeps> = {},
 ) {
   return new AppController({
     backend,
@@ -47,6 +49,7 @@ function makeController(
     saveLocalState: async () => {},
     listFiles,
     requestExit: () => {},
+    ...overrides,
   });
 }
 
@@ -1963,12 +1966,131 @@ describe('oversized inline diff focus', () => {
     controller.dispose();
   });
 
-  test('detailed mode shows everything expanded and offers no collapsible rows', async () => {
+  test('detailed mode focuses individual tools instead of groups', async () => {
     const { controller } = conversationWithEdit();
     await attach(controller, 'ses_a');
     controller.toggleDetails();
     expect(controller.state.detailed).toBe(true);
-    expect(controller.collapsibleItems()).toEqual([]);
+    expect(controller.collapsibleItems()).toEqual([
+      { key: 'tool:t1', kind: 'tool' },
+      { key: 'tool:d1', kind: 'tool' },
+      { key: 'tool:t4', kind: 'tool' },
+      { key: 'tool:t5', kind: 'tool' },
+    ]);
+    controller.dispose();
+  });
+});
+
+function inspectorFixture(overrides: Partial<ControllerDeps> = {}) {
+  const backend = new FakeBackend();
+  backend.sessions = [fakeSession('ses_a')];
+  const preview = Array.from({ length: 600 }, (_, index) => `row${index}`).join('\n');
+  const full = `${preview}\nrow600\nrow601`;
+  backend.messages = {
+    ses_a: [
+      assistantWithTools('m1', [
+        {
+          id: 'b1',
+          name: 'bash',
+          status: 'completed',
+          input: { command: 'make test' },
+          output: preview,
+          outputTruncated: 'frontend',
+          startedAt: 1,
+          completedAt: 2,
+        },
+      ]),
+    ],
+  };
+  backend.toolResults['ses_a:b1'] = { text: full, files: [], completeness: 'complete' };
+  const controller = makeController(
+    () => Promise.resolve([]),
+    backend,
+    () => 10_000,
+    overrides,
+  );
+  return { backend, controller, preview, full };
+}
+
+describe('output inspector (#221, #222)', () => {
+  test('opens the focused tool with cached content, then the complete server result', async () => {
+    const { controller, preview, full } = inspectorFixture();
+    await attach(controller, 'ses_a');
+
+    expect(controller.openInspector()).toBe(true);
+    const overlay = () => {
+      const value = controller.state.overlay;
+      if (value.kind !== 'inspector') throw new Error('inspector not open');
+      return value;
+    };
+    expect(overlay().payload?.completeness).toBe('frontend-elided');
+    expect(overlay().payload?.text).toBe(preview);
+    await flush();
+    expect(overlay().loading).toBe(false);
+    expect(overlay().payload?.completeness).toBe('complete');
+    expect(overlay().payload?.text).toBe(full);
+    expect(overlay().error).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('retrieval failure keeps the preview visible and explains why', async () => {
+    const { backend, controller } = inspectorFixture();
+    await attach(controller, 'ses_a');
+    backend.toolResultError = new BackendError('not-found', 'message.get', 'expired');
+    controller.openInspector();
+    await flush();
+    const overlay = controller.state.overlay;
+    if (overlay.kind !== 'inspector') throw new Error('inspector not open');
+    expect(overlay.payload?.completeness).toBe('frontend-elided');
+    expect(overlay.error).toContain('expired');
+    expect(overlay.error).toContain('retained preview');
+    controller.dispose();
+  });
+
+  test('search jumps to matches; copy and save report real completeness', async () => {
+    const copied: string[] = [];
+    const saved: { path: string; text: string }[] = [];
+    const { controller, full } = inspectorFixture({
+      copyText: async (text) => {
+        copied.push(text);
+        return { method: 'clipboard' };
+      },
+      writeFile: async (path, text) => {
+        saved.push({ path, text });
+      },
+    });
+    await attach(controller, 'ses_a');
+    controller.openInspector();
+    await flush();
+
+    controller.inspectorKey({ name: 'r', ctrl: false, alt: false, shift: false, text: 'row600' });
+    const overlay = controller.state.overlay;
+    if (overlay.kind !== 'inspector') throw new Error('inspector not open');
+    expect(overlay.offset).toBe(600);
+    expect(controller.inspectorMatches()).toEqual([600]);
+
+    await controller.inspectCopy();
+    expect(copied).toEqual([full]);
+    expect(controller.state.notice?.text).toContain('complete');
+
+    await controller.inspectSave();
+    expect(saved[0]?.text).toBe(full);
+    expect(controller.state.notice?.text).toContain('Saved');
+    controller.dispose();
+  });
+
+  test('windowed view exposes only the requested rows and preserves the offset', async () => {
+    const { controller } = inspectorFixture();
+    await attach(controller, 'ses_a');
+    controller.openInspector();
+    await flush();
+    controller.inspectorKey({ name: 'end', ctrl: false, alt: false, shift: false });
+    controller.inspectorKey({ name: 'home', ctrl: false, alt: false, shift: false });
+    const view = controller.inspectorView(20);
+    expect(view.lines).toHaveLength(20);
+    expect(view.offset).toBe(0);
+    expect(view.total).toBe(602);
+    expect(view.lines[0]).toBe('row0');
     controller.dispose();
   });
 });

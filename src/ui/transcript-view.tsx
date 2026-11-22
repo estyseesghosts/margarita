@@ -33,11 +33,18 @@ import {
   activeTool,
   attachBackgroundNotices,
   backgroundHint,
+  boundedPreview,
+  boundedTailPreview,
   describeTool,
   foldTranscript,
   formatToolTiming,
   type LiveTool,
+  previewBudget,
+  type PreviewKind,
+  semanticPreview,
   type ToolCall,
+  type ToolCallChild,
+  toolIdentity,
   type TranscriptNode,
   windowNodes,
 } from '../domain/transcript.ts';
@@ -62,8 +69,6 @@ export type TranscriptProps = Readonly<{
   /** Receives the scroll function for key routing while this transcript is mounted. */
   onScrollHandle?: (scroll: ((move: ScrollMove) => void) | undefined) => void;
 }>;
-
-const outputPreviewLines = 12;
 
 type NodeOf<K extends TranscriptNode['kind']> = Extract<TranscriptNode, { kind: K }>;
 
@@ -278,7 +283,7 @@ export function Transcript(props: TranscriptProps) {
           <QueuedPreview items={queued()} theme={props.theme} width={props.width} />
         </Show>
         <PermissionCard controller={props.controller} theme={props.theme} />
-        <FormCard controller={props.controller} theme={props.theme} />
+        <FormCard controller={props.controller} theme={props.theme} keymap={props.keymap} />
       </scrollbox>
       <Show when={sticky()}>
         {(text: Accessor<string>) => (
@@ -382,7 +387,8 @@ function isRunningExecution(node: TranscriptNode): boolean {
 function isNodeFocused(node: TranscriptNode, focusedGroup: string | undefined): boolean {
   if (focusedGroup === undefined) return false;
   if (node.kind === 'tool-group') return focusedGroup === node.key;
-  if (node.kind === 'tool') return focusedGroup === `diff:${node.tool.id}`;
+  if (node.kind === 'tool')
+    return focusedGroup === `tool:${node.tool.id}` || focusedGroup === `diff:${node.tool.id}`;
   if (node.kind === 'worker') return focusedGroup === node.key;
   return false;
 }
@@ -444,14 +450,38 @@ function NodeView(props: {
         )}
       </Match>
       <Match when={props.node.kind === 'reasoning' ? props.node : undefined}>
-        {(node: Accessor<NodeOf<'reasoning'>>) => (
-          <box marginTop={1} flexDirection="column" paddingLeft={2}>
-            <text fg={theme().dim}>
-              <i>{node().done ? '∴ Reasoning (model-provided)' : '∴ Reasoning (in progress…)'}</i>
-            </text>
-            <text fg={theme().dim}>{sanitizeText(node().text)}</text>
-          </box>
-        )}
+        {(node: Accessor<NodeOf<'reasoning'>>) => {
+          // Model-provided reasoning is Markdown in detailed mode, bounded by rendered
+          // rows (#223). Compact mode never emits this node at all.
+          const bounded = () =>
+            boundedPreview(
+              sanitizeText(node().text),
+              previewBudget('reasoning', props.detailed),
+              Math.max(8, props.width - 4),
+            );
+          return (
+            <box marginTop={1} flexDirection="column" paddingLeft={2}>
+              <text fg={theme().dim}>
+                <i>{node().done ? '∴ Reasoning (model-provided)' : '∴ Reasoning (in progress…)'}</i>
+              </text>
+              <box paddingLeft={1} flexDirection="column">
+                <markdown
+                  content={bounded().text}
+                  syntaxStyle={props.syntax}
+                  treeSitterClient={getTreeSitterClient()}
+                  fg={theme().text}
+                  flexGrow={1}
+                  flexShrink={1}
+                />
+                <Show when={bounded().hiddenRows > 0}>
+                  <text fg={theme().dim}>
+                    {`… ${bounded().hiddenRows} more rows · inspect to read the rest`}
+                  </text>
+                </Show>
+              </box>
+            </box>
+          );
+        }}
       </Match>
       <Match when={props.node.kind === 'reasoning-unavailable' ? props.node : undefined}>
         {(node: Accessor<NodeOf<'reasoning-unavailable'>>) => (
@@ -471,6 +501,7 @@ function NodeView(props: {
             width={props.width}
             focused={props.focused}
             mcpServers={props.mcpServers}
+            userExpanded={node().userExpanded === true}
           />
         )}
       </Match>
@@ -522,6 +553,7 @@ function NodeView(props: {
                         width={props.width}
                         focused={false}
                         mcpServers={props.mcpServers}
+                        userExpanded={false}
                       />
                       <Show when={activeID() === tool.id ? hintText() : undefined}>
                         {(text: Accessor<string>) => (
@@ -537,34 +569,47 @@ function NodeView(props: {
         }}
       </Match>
       <Match when={props.node.kind === 'shell' ? props.node : undefined}>
-        {(node: Accessor<NodeOf<'shell'>>) => (
-          <box flexDirection="column" marginTop={1}>
-            <text fg={theme().text}>{`! ${sanitizeText(node().command)}`}</text>
-            <text
-              fg={
-                node().exitCode !== undefined && node().exitCode !== 0
-                  ? theme().error
-                  : node().status === 'timeout' && props.backgroundShell(node().shellID)
-                    ? theme().warn
-                    : theme().dim
-              }
-            >
-              {`  └ ${node().status}${node().exitCode === undefined ? '' : ` (exit ${node().exitCode})`}${node().status === 'timeout' && props.backgroundShell(node().shellID) ? ' · still running in background' : ''}`}
-            </text>
-            <Show when={node().output}>
-              {(output: Accessor<string>) => (
+        {(node: Accessor<NodeOf<'shell'>>) => {
+          const bounded = () =>
+            boundedPreview(
+              sanitizeText(node().output ?? ''),
+              previewBudget('shell', props.detailed),
+              Math.max(8, props.width - 4),
+            );
+          return (
+            <box flexDirection="column" marginTop={1}>
+              <text fg={theme().text}>
+                {`! ${truncateToWidth(sanitizeText(node().command), Math.max(8, props.width - 3))}`}
+              </text>
+              <text
+                fg={
+                  node().exitCode !== undefined && node().exitCode !== 0
+                    ? theme().error
+                    : node().status === 'timeout' && props.backgroundShell(node().shellID)
+                      ? theme().warn
+                      : theme().dim
+                }
+              >
+                {`  └ ${node().status}${node().exitCode === undefined ? '' : ` (exit ${node().exitCode})`}${node().status === 'timeout' && props.backgroundShell(node().shellID) ? ' · still running in background' : ''}`}
+              </text>
+              <Show when={node().output}>
                 <box flexDirection="column">
-                  <text fg={theme().dim}>{preview(output())}</text>
+                  <text fg={theme().dim}>{bounded().text.split('\n').join('\n    ')}</text>
+                  <Show when={bounded().hiddenRows > 0}>
+                    <text fg={theme().dim}>
+                      {`    … ${bounded().hiddenRows} more rows · ${props.detailed ? 'inspect' : 'Ctrl+O'} to read the rest`}
+                    </text>
+                  </Show>
                   <Show when={node().outputTruncated === 'server'}>
                     <text fg={theme().warn}>
                       {'  └ output truncated by the server; full text not shown'}
                     </text>
                   </Show>
                 </box>
-              )}
-            </Show>
-          </box>
-        )}
+              </Show>
+            </box>
+          );
+        }}
       </Match>
       <Match when={props.node.kind === 'notice' ? props.node : undefined}>
         {(node: Accessor<NodeOf<'notice'>>) => (
@@ -680,6 +725,10 @@ function ExecutionMarkerView(props: {
   );
 }
 
+function indent(text: string): string {
+  return text.split('\n').join('\n    ');
+}
+
 function ToolView(props: {
   tool: ToolCall;
   expanded: boolean;
@@ -689,6 +738,8 @@ function ToolView(props: {
   width: number;
   focused: boolean;
   mcpServers: readonly string[];
+  /** The user explicitly grew this item beyond its mode default (#219). */
+  userExpanded?: boolean;
 }) {
   const edit = createMemo(() => (props.tool.status === 'error' ? undefined : editDiff(props.tool)));
   // A completed edit-like call with no usable patch must say so instead of degrading to a
@@ -698,17 +749,46 @@ function ToolView(props: {
       ? (toolPath(props.tool) ?? 'unknown')
       : undefined,
   );
-  // Compact mode clips the patch to an explicit display-line budget; the full patch is
-  // never truncated mid-hunk and re-parsed. Small diffs stay fully visible.
+  const lineWidth = () => Math.max(8, props.width - 4);
+  const resultPreviewKind = (): PreviewKind => {
+    const preview = semanticPreview(props.tool);
+    return preview.kind;
+  };
+  const resultRows = () =>
+    previewBudget(resultPreviewKind(), props.detailed, props.userExpanded === true);
+  // Cap the patch before materializing a native <diff>; never reparse a mid-hunk slice.
   const clamped = createMemo(() => {
     const shown = edit();
-    return shown === undefined ? undefined : clampDiffPatch(shown.diff);
+    return shown === undefined
+      ? undefined
+      : clampDiffPatch(
+          shown.diff,
+          previewBudget('diff', props.detailed, props.userExpanded === true),
+        );
   });
-  const showFullDiff = () => props.expanded || (clamped()?.hidden ?? 0) === 0;
-  const lineWidth = () => Math.max(8, props.width - 4);
-  // Ctrl+O shows the retained output (unelided beyond the configured cap) and timing.
-  const render = (text: string) => (props.detailed ? full(text) : preview(text));
+  const showFullDiff = () => (clamped()?.hidden ?? 0) === 0;
+  const clampHint = () =>
+    props.detailed
+      ? `… ${clamped()?.hidden ?? 0} more lines · inspect to read the rest`
+      : `… ${clamped()?.hidden ?? 0} more lines · Enter to expand`;
+  const resultPreview = createMemo(() => {
+    const preview = semanticPreview(props.tool);
+    const text = sanitizeText(preview.text);
+    const bounded =
+      props.tool.status === 'error'
+        ? boundedTailPreview(text, resultRows(), lineWidth())
+        : boundedPreview(text, resultRows(), lineWidth());
+    return { ...bounded, kind: preview.kind };
+  });
   const failed = () => props.tool.status === 'error';
+  const scriptFailed = () => props.tool.executionError !== undefined;
+  const childrenVisible = () =>
+    props.tool.children !== undefined &&
+    (props.expanded ||
+      failed() ||
+      scriptFailed() ||
+      props.tool.children.some((c) => c.status === 'error'));
+
   const bullet = () =>
     failed()
       ? props.theme.error
@@ -731,15 +811,68 @@ function ToolView(props: {
         <Show when={props.detailed}>
           <text fg={props.theme.dim}>{`  ${formatToolTiming(props.tool, clock)}`}</text>
         </Show>
+        <Show when={props.focused}>
+          <text fg={props.theme.accent}>{props.detailed ? '  (I)' : '  (Enter)'}</text>
+        </Show>
       </box>
+      <Show when={props.tool.executionError}>
+        {(error: Accessor<string>) => (
+          <text fg={props.theme.error}>{`  └ script failed: ${sanitizeText(error())}`}</text>
+        )}
+      </Show>
+      <Show when={props.tool.files !== undefined && props.tool.files.length > 0}>
+        <For each={props.tool.files ?? []}>
+          {(file) => (
+            <text fg={props.theme.dim}>
+              {`  └ ${file.name}${file.mime === undefined ? '' : ` · ${file.mime}`}${file.size === undefined ? '' : ` · ${formatBytes(file.size)}`}${file.uri === undefined ? '' : ` · ${sanitizeText(file.uri)}`}`}
+            </text>
+          )}
+        </For>
+      </Show>
+      <Show when={childrenVisible() ? props.tool.children : undefined}>
+        {(children: Accessor<NonNullable<ToolCall['children']>>) => (
+          <box flexDirection="column" paddingLeft={2}>
+            <For each={children()}>
+              {(child) => (
+                <text
+                  fg={
+                    child.status === 'error'
+                      ? props.theme.error
+                      : child.status === 'running' || child.status === 'streaming'
+                        ? props.theme.accent
+                        : props.theme.dim
+                  }
+                >
+                  {`└ ${childStatusMark(child.status)} ${childLabel(child.name, props.mcpServers)}${childInputSummary(child.input)}`}
+                </text>
+              )}
+            </For>
+          </box>
+        )}
+      </Show>
       {/* Failures are never hidden, even in compact mode. */}
       <Show when={unavailable() !== undefined}>
         <text fg={props.theme.dim}>{'  └ diff unavailable for this change'}</text>
       </Show>
       <Show when={props.tool.error}>
-        {(error: Accessor<string>) => (
-          <text fg={props.theme.error}>{`  └ ${render(error())}`}</text>
-        )}
+        {(error: Accessor<string>) => {
+          const bounded = () =>
+            boundedTailPreview(
+              sanitizeText(error()),
+              previewBudget('output', props.detailed, props.userExpanded === true),
+              lineWidth(),
+            );
+          return (
+            <>
+              <text fg={props.theme.error}>{`  └ ${indent(bounded().text)}`}</text>
+              <Show when={bounded().hiddenRows > 0}>
+                <text fg={props.theme.error}>
+                  {`    … ${bounded().hiddenRows} earlier rows hidden · inspect for the full error`}
+                </text>
+              </Show>
+            </>
+          );
+        }}
       </Show>
       <Show when={edit()}>
         {(shown: Accessor<NonNullable<ReturnType<typeof editDiff>>>) => (
@@ -757,7 +890,7 @@ function ToolView(props: {
                     )}
                   </For>
                   <text fg={props.focused ? props.theme.accent : props.theme.dim}>
-                    {`${props.focused ? '▸ ' : '  '}… ${clamped()?.hidden ?? 0} more lines · Enter to expand`}
+                    {`${props.focused ? '▸ ' : '  '}${clampHint()}`}
                   </text>
                 </box>
               }
@@ -786,7 +919,14 @@ function ToolView(props: {
           edit() === undefined && props.expanded && props.tool.output !== undefined && !failed()
         }
       >
-        <text fg={props.theme.dim}>{`  └ ${render(props.tool.output ?? '')}`}</text>
+        <box flexDirection="column">
+          <text fg={props.theme.dim}>{`  └ ${indent(resultPreview().text)}`}</text>
+          <Show when={resultPreview().hiddenRows > 0}>
+            <text fg={props.theme.dim}>
+              {`    … ${resultPreview().hiddenRows} more rows · inspect to read the rest`}
+            </text>
+          </Show>
+        </box>
       </Show>
       <Show when={props.tool.outputTruncated !== undefined}>
         <text fg={props.theme.warn}>
@@ -801,6 +941,33 @@ function ToolView(props: {
 
 function plural(count: number): string {
   return `${count} ${count === 1 ? 'line' : 'lines'}`;
+}
+
+function childStatusMark(status: ToolCallChild['status']): string {
+  if (status === 'completed') return '✓';
+  if (status === 'error') return '✗';
+  return '…';
+}
+
+function childLabel(name: string, mcpServers: readonly string[]): string {
+  const identity = toolIdentity(name, mcpServers);
+  return identity.kind === 'mcp' ? `${identity.server}.${identity.tool}` : sanitizeText(name);
+}
+
+function childInputSummary(input: ToolCallChild['input']): string {
+  if (input === undefined) return '';
+  const value = Object.values(input).find(
+    (entry) => typeof entry === 'string' && entry.trim() !== '',
+  );
+  if (typeof value !== 'string') return '';
+  const line = value.split('\n')[0] ?? value;
+  return `  ${truncatePrompt(sanitizeText(line), 72)}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** Compact-mode colours for a clipped patch line; semantics match the full <diff> view. */
@@ -830,19 +997,8 @@ function changeSummary(counts: { additions: number; deletions: number }): string
   return `Added ${plural(counts.additions)}, removed ${plural(counts.deletions)}`;
 }
 
-function full(text: string): string {
-  return sanitizeText(text).split('\n').join('\n    ');
-}
-
 function clock(at: number): string {
   return new Date(at).toLocaleTimeString(undefined, { hour12: false });
-}
-
-function preview(text: string): string {
-  const lines = sanitizeText(text).split('\n');
-  if (lines.length <= outputPreviewLines) return lines.join('\n    ');
-  const hidden = lines.length - outputPreviewLines;
-  return [...lines.slice(0, outputPreviewLines), `… ${hidden} more lines (Ctrl+O)`].join('\n    ');
 }
 
 function PermissionCard(props: { controller: AppController; theme: Theme }) {
@@ -898,10 +1054,11 @@ function PermissionCard(props: { controller: AppController; theme: Theme }) {
   );
 }
 
-/** A pending agent question. It never takes focus by itself; Enter on an empty prompt opens it. */
-function FormCard(props: { controller: AppController; theme: Theme }) {
+/** A pending agent question. It never takes focus by itself; a dedicated key opens it. */
+function FormCard(props: { controller: AppController; theme: Theme; keymap: Keymap }) {
   const pending = () =>
     props.controller.pendingPermission() === undefined ? props.controller.pendingForm() : undefined;
+  const openHint = () => actionHint(props.keymap, 'form.open') ?? 'Alt+Q';
   return (
     <Show when={pending()}>
       {(form: Accessor<FormRequest>) => (
@@ -920,7 +1077,7 @@ function FormCard(props: { controller: AppController; theme: Theme }) {
             <b>{form().title}</b>
           </text>
           <text fg={props.theme.dim}>
-            {`${form().fields.length} field${form().fields.length === 1 ? '' : 's'} · Enter on an empty prompt to answer`}
+            {`${form().fields.length} field${form().fields.length === 1 ? '' : 's'} · ${openHint()} to answer · Enter on an empty prompt also opens it`}
           </text>
         </box>
       )}

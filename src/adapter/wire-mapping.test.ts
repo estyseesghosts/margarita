@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { JsonValue, SessionMessageAssistant, SessionMessageInfo } from '@opencode/client';
+import type {
+  JsonValue,
+  SessionMessageAssistant,
+  SessionMessageInfo,
+  ToolContent,
+} from '@opencode/client';
 
 import { maxToolOutputChars, toTranscriptMessage, toWorkerJob } from './wire-mapping.ts';
 
@@ -193,5 +198,119 @@ describe('tool output retention (issue #7)', () => {
   test('server-flagged truncation is reported as server-side, not frontend', () => {
     const tool = toolOutput(assistantWithTool('full small output', { truncated: true }));
     expect(tool.outputTruncated).toBe('server');
+  });
+});
+
+function executeTool(
+  content: [ToolContent, ...ToolContent[]],
+  metadata?: Record<string, JsonValue>,
+): SessionMessageAssistant {
+  return {
+    type: 'assistant',
+    id: 'msg_exec',
+    agent: 'build',
+    model: { id: 'm', providerID: 'p' },
+    content: [
+      {
+        type: 'tool',
+        id: 'tool_exec',
+        name: 'execute',
+        time: { created: 1, completed: 2 },
+        state: {
+          status: 'completed',
+          input: { code: 'await lotus.step_frame()' },
+          content,
+          ...(metadata === undefined ? {} : { metadata }),
+        },
+      },
+    ],
+    time: { created: 1, completed: 2 },
+  };
+}
+
+describe('Code Mode nested calls and file parts (#216, #218)', () => {
+  test('ordered nested calls keep stable parent/index identities', () => {
+    const tool = toolOutput(
+      executeTool([{ type: 'text', text: 'done' }], {
+        toolCalls: [
+          { tool: 'lotus.step_frame', status: 'completed', input: { frame: 1 } },
+          { tool: 'lotus.get_issue', status: 'running', input: { number: 217 } },
+          { tool: 'read', status: 'error', input: { filePath: 'src/a.ts' } },
+        ],
+      }),
+    );
+    expect(tool.children?.map((child) => child.id)).toEqual([
+      'tool_exec:0',
+      'tool_exec:1',
+      'tool_exec:2',
+    ]);
+    expect(tool.children?.map((child) => child.name)).toEqual([
+      'lotus.step_frame',
+      'lotus.get_issue',
+      'read',
+    ]);
+    expect(tool.children?.map((child) => child.status)).toEqual(['completed', 'running', 'error']);
+  });
+
+  test('malformed children are skipped without losing the parent call', () => {
+    const tool = toolOutput(
+      executeTool([{ type: 'text', text: 'ok' }], {
+        toolCalls: [
+          { tool: 'lotus.ok', status: 'completed', input: { line: 'x\u001b[2J'.repeat(500) } },
+          null,
+          { tool: '', status: 'completed' },
+          { tool: 'lotus.bad', status: 'parked' },
+        ],
+      }),
+    );
+    expect(tool.children).toHaveLength(1);
+    expect(tool.children?.[0]?.input?.['line']).not.toContain('\u001b');
+    expect(String(tool.children?.[0]?.input?.['line']).length).toBeLessThanOrEqual(201);
+    const bare = toolOutput(executeTool([{ type: 'text', text: 'ok' }], { toolCalls: 'nope' }));
+    expect(bare.children).toBeUndefined();
+    expect(bare.output).toBe('ok');
+  });
+
+  test('metadata.error marks a completed execute as a visible failure', () => {
+    const tool = toolOutput(
+      executeTool([{ type: 'text', text: 'partial' }], {
+        error: true,
+        toolCalls: [{ tool: 'lotus.fail', status: 'error' }],
+      }),
+    );
+    expect(tool.status).toBe('completed');
+    expect(tool.executionError).toBe('Code Mode execution failed.');
+  });
+
+  test('data URI files become metadata only and never flood output', () => {
+    const payload = `data:image/png;base64,${'A'.repeat(100_000)}`;
+    const tool = toolOutput(
+      executeTool([
+        { type: 'text', text: 'image ready' },
+        { type: 'file', uri: payload, mime: 'image/png', name: 'shot.png' },
+        { type: 'file', uri: 'file:///tmp/report.pdf', mime: 'application/pdf' },
+      ]),
+    );
+    expect(tool.output).toBe('image ready');
+    expect(tool.output).not.toContain('base64');
+    expect(tool.files?.map((file) => file.name)).toEqual(['shot.png', 'report.pdf']);
+    expect(tool.files?.[0]).toMatchObject({ mime: 'image/png', size: 75_000 });
+    expect(tool.files?.[0]?.uri).toBeUndefined();
+    expect(tool.files?.[1]?.uri).toBe('file:///tmp/report.pdf');
+  });
+
+  test('a files-only result has no printable output but keeps metadata', () => {
+    const tool = toolOutput(
+      executeTool([
+        {
+          type: 'file',
+          uri: 'data:application/octet-stream;base64,AAAA',
+          mime: 'application/octet-stream',
+        },
+      ]),
+    );
+    expect(tool.output).toBeUndefined();
+    expect(tool.files).toHaveLength(1);
+    expect(tool.files?.[0]?.size).toBe(3);
   });
 });

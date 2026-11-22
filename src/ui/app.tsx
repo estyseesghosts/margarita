@@ -91,7 +91,7 @@ export function App(props: AppProps) {
 
   usePaste((event) => {
     if (state.overlay.kind === 'help') controller.closeOverlay();
-    if (state.overlay.kind !== 'none') return;
+    if (state.overlay.kind !== 'none' && state.overlay.kind !== 'form') return;
     void controller.pasteBytes(event.bytes, event.metadata);
   });
 
@@ -140,11 +140,24 @@ export function App(props: AppProps) {
           <Overview controller={controller} theme={props.theme} now={now()} ascii={props.ascii} />
         </Match>
       </Switch>
-      <Show when={state.overlay.kind !== 'none'}>
+      <Show when={state.overlay.kind !== 'none' && state.overlay.kind !== 'inspector'}>
         <OverlayView controller={controller} keymap={props.keymap} theme={props.theme} />
       </Show>
       <ComposerView controller={controller} theme={props.theme} width={width()} />
       <Footer controller={controller} theme={props.theme} width={width()} />
+      {/* Absolute so the conversation stays mounted (scroll anchor + draft survive) (#222). */}
+      <Show when={state.overlay.kind === 'inspector'}>
+        <box
+          position="absolute"
+          top={0}
+          left={0}
+          width="100%"
+          height="100%"
+          backgroundColor={props.theme.panelBg}
+        >
+          <OverlayView controller={controller} keymap={props.keymap} theme={props.theme} />
+        </box>
+      </Show>
     </box>
   );
 }

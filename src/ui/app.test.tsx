@@ -451,6 +451,7 @@ describe('app', () => {
             key: 'branch',
             title: 'Branch',
             required: true,
+            hidden: false,
             when: [],
             kind: 'choice',
             custom: false,
@@ -1104,7 +1105,10 @@ describe('oversized inline diff clamping (issue 27)', () => {
     setup.mockInput.pressEnter();
     await settle(setup);
     expect(controller.state.expandedDiffs['ses_a w1']).toBe(true);
-    expect(setup.captureCharFrame()).not.toContain('more lines · Enter to expand');
+    // Inline expansion grows to the bounded maximum, never to the whole patch (#219).
+    const expandedFrame = setup.captureCharFrame();
+    expect(expandedFrame).toMatch(/… \d+ more lines · Enter to expand/);
+    expect(expandedFrame).not.toContain('row139');
     expect(controller.state.composer.text).toBe(''); // not a submit, not a draft
 
     setup.mockInput.pressEnter();
@@ -1147,6 +1151,214 @@ describe('oversized inline diff clamping (issue 27)', () => {
     const frame = setup.captureCharFrame();
     expect(frame).toContain('Added 1 line');
     expect(frame).not.toContain('more lines');
+  });
+});
+
+describe('bounded detail and reasoning previews (#219, #223)', () => {
+  test('detailed mode shows a 60-row shell preview with a truthful hidden-row count', async () => {
+    const output = Array.from({ length: 200 }, (_, index) => `line${index}`).join('\n');
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'run the suite', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'b1',
+                name: 'bash',
+                status: 'completed',
+                input: { command: 'make test' },
+                output,
+                startedAt: 2,
+                completedAt: 3,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressKey('o', { ctrl: true });
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('… 140 more rows · inspect to read the rest');
+    expect(frame).not.toContain('line199');
+    expect(frame).not.toContain('output truncated');
+  });
+
+  test('detailed reasoning renders as Markdown, fully when short and bounded when long', async () => {
+    const backend = backendWithSession();
+    const userMessage = {
+      kind: 'user' as const,
+      id: 'm1',
+      createdAt: 1,
+      text: 'think',
+      attachments: [],
+    };
+    backend.messages = {
+      ses_a: [
+        userMessage,
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'reasoning',
+              text: [
+                'Let me weigh the options.',
+                '',
+                '- **first** the cache',
+                '- then the render path',
+                '',
+                '```ts',
+                'const rows = 48;',
+                '```',
+              ].join('\n'),
+              done: true,
+            },
+            { kind: 'text', text: 'Done.' },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressKey('o', { ctrl: true });
+    await settle(setup);
+    const short = setup.captureCharFrame();
+    expect(short).toContain('∴ Reasoning (model-provided)');
+    expect(short).toContain('Let me weigh the options.');
+    expect(short).toContain('const rows = 48;');
+    expect(short).not.toContain('more rows');
+
+    backend.messages = {
+      ses_a: [
+        userMessage,
+        {
+          kind: 'assistant',
+          id: 'm3',
+          createdAt: 4,
+          completedAt: 5,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'reasoning',
+              text: Array.from({ length: 200 }, (_, index) => `reasoning${index}`).join('\n'),
+              done: true,
+            },
+          ],
+        },
+      ],
+    };
+    controller.onEvents('local', [], true);
+    await settle(setup);
+    const long = setup.captureCharFrame();
+    expect(long).toContain('… 120 more rows · inspect to read the rest');
+    expect(long).not.toContain('reasoning199');
+  });
+});
+
+describe('full-result inspector (#222)', () => {
+  test('opens from detailed focus, searches, and returns with the draft intact', async () => {
+    const backend = backendWithSession();
+    const preview = Array.from({ length: 300 }, (_, index) => `output${index}`).join('\n');
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'run it', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'b1',
+                name: 'bash',
+                status: 'completed',
+                input: { command: 'make test' },
+                output: preview,
+                outputTruncated: 'frontend',
+                startedAt: 2,
+                completedAt: 3,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    backend.toolResults['ses_a:b1'] = {
+      text: `${preview}\nneedle-in-the-tail`,
+      files: [],
+      completeness: 'complete',
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressKey('o', { ctrl: true });
+    await settle(setup);
+    setup.mockInput.pressArrow('down', { ctrl: true });
+    await settle(setup);
+    expect(controller.state.focusedGroup).toBe('tool:b1');
+
+    setup.mockInput.pressKey('i');
+    await settle(setup);
+    const open = setup.captureCharFrame();
+    expect(open).toContain('Inspector · bash');
+    expect(open).toContain('source: complete');
+    expect(open).toContain('Ctrl+Y copy');
+
+    // Typing appends to the inspector search, not the composer.
+    for (const character of 'needle') setup.mockInput.pressKey(character);
+    await settle(setup);
+    const searched = controller.state.overlay;
+    if (searched.kind !== 'inspector') throw new Error('inspector closed');
+    expect(searched.query).toBe('needle');
+    expect(searched.offset).toBe(300);
+    expect(setup.captureCharFrame()).toContain('needle-in-the-tail');
+    expect(controller.state.composer.text).toBe('');
+
+    controller.setComposer({ text: 'draft survives', cursor: 0 });
+    setup.mockInput.pressEscape();
+    await settle(setup);
+    // First Escape clears the active search; the second returns to the conversation.
+    const cleared = controller.state.overlay;
+    expect(cleared.kind === 'inspector' && cleared.query).toBe('');
+    setup.mockInput.pressEscape();
+    await settle(setup);
+    expect(controller.state.overlay.kind).toBe('none');
+    expect(controller.state.composer.text).toBe('draft survives');
+    expect(setup.captureCharFrame()).not.toContain('Inspector · bash');
+  });
+
+  test('plain i keeps typing when no row is focused', async () => {
+    const backend = backendWithSession();
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressKey('i');
+    await settle(setup);
+    expect(controller.state.overlay.kind).toBe('none');
+    expect(controller.state.composer.text).toBe('i');
   });
 });
 

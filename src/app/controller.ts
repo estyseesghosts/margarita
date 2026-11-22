@@ -65,6 +65,7 @@ import {
   editorKey,
   type FormKey,
   type FormRequest,
+  pasteFormText,
   startEditor,
 } from '../domain/form.ts';
 import {
@@ -85,6 +86,13 @@ import {
 } from '../domain/goal-plan.ts';
 import { greetingPeriod } from '../domain/greeting-time.ts';
 import { selectGreeting } from '../domain/greetings.ts';
+import {
+  inspectorDocument,
+  inspectorText,
+  inspectorWindow,
+  nextMatch,
+  searchLines,
+} from '../domain/inspector.ts';
 import {
   defaultVariant,
   effectiveVariant,
@@ -135,6 +143,7 @@ import {
   searchHistory,
 } from '../domain/prompt-history.ts';
 import { type RewindCandidate, rewindCandidates } from '../domain/rewind.ts';
+import { sanitizeTerminalText } from '../domain/sanitize-text.ts';
 import {
   legacyProjectKeys,
   localServerID,
@@ -163,7 +172,11 @@ import {
   parseInput,
 } from '../domain/slash-command.ts';
 import {
+  cachedToolResult,
+  completenessLabel,
+  findToolMessage,
   foldTranscript,
+  type ToolCall,
   type TranscriptMessage,
   type TranscriptNode,
   transcriptWindowStep,
@@ -1815,25 +1828,92 @@ export class AppController {
     const key = this.keyFor(serverID, sessionID);
     const revision = ++this.inputRequestRevision;
     this.inputRequestRevisions.set(key, revision);
-    const [permissions, forms] = await Promise.all([
+    const directory = this.state.sessions[key]?.directory;
+    // Permissions and forms reconcile independently: one failed endpoint must never
+    // hide a valid request from the other (#214).
+    const [permissionsResult, formsResult, locationFormsResult] = await Promise.allSettled([
       backend.listPermissions(sessionID),
       backend.listForms(sessionID),
+      directory !== undefined && backend.listLocationForms !== undefined
+        ? backend.listLocationForms(directory)
+        : Promise.resolve<FormRequest[]>([]),
     ]);
     if (this.inputRequestRevisions.get(key) !== revision) return;
     if (!this.isRegisteredBackend(serverID, backend)) return;
+
+    const errors: { permissions?: string; forms?: string } = {};
+    if (permissionsResult.status === 'rejected') {
+      errors.permissions = errorText(permissionsResult.reason);
+    }
+    let forms: FormRequest[] | undefined;
+    if (formsResult.status === 'fulfilled') forms = formsResult.value;
+    if (formsResult.status === 'rejected') errors.forms = errorText(formsResult.reason);
+    if (locationFormsResult.status === 'fulfilled' && forms !== undefined) {
+      // Only the location-wide forms that belong to this conversation may appear:
+      // the global MCP sentinel, or a descendant (child-session) form. Never leak a
+      // sibling session's question into this transcript (#209).
+      const allowed = this.requestSessionScope(sessionID, serverID);
+      const merged = new Map(forms.map((form) => [form.id, form]));
+      for (const form of locationFormsResult.value) {
+        // The attached session's own forms already came from the authoritative session
+        // route; merging them again would let an older location snapshot revive a form
+        // that a newer session refresh just removed.
+        if (form.sessionID === sessionID) continue;
+        if (form.sessionID === 'global' || allowed.has(form.sessionID)) {
+          if (!merged.has(form.id)) merged.set(form.id, form);
+        }
+      }
+      forms = [...merged.values()];
+    } else if (locationFormsResult.status === 'rejected') {
+      // The per-session route remains authoritative; a missing location route is not a
+      // reason to discard valid session forms.
+      errors.forms ??= errorText(locationFormsResult.reason);
+    }
+
     batch(() => {
-      this.setState('permissions', key, permissions);
-      this.setState('forms', key, forms);
+      if (permissionsResult.status === 'fulfilled') {
+        this.setState('permissions', key, permissionsResult.value);
+      }
+      if (forms !== undefined) this.setState('forms', key, forms);
+      this.setState('requestErrors', key, errors);
       const route = this.state.route;
       if (
-        permissions.length === 0 &&
         route.kind === 'conversation' &&
         route.serverID === serverID &&
-        route.sessionID === sessionID
+        route.sessionID === sessionID &&
+        (permissionsResult.status !== 'fulfilled' || permissionsResult.value.length === 0)
       ) {
         this.setState('permissionChoice', 0);
       }
     });
+  }
+
+  /** The attached session plus its descendants on the same server. */
+  private requestSessionScope(sessionID: string, serverID: string): Set<string> {
+    const scope = new Set([sessionID]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const session of Object.values(this.state.sessions)) {
+        if (
+          session.serverID === serverID &&
+          session.parentID !== undefined &&
+          scope.has(session.parentID) &&
+          !scope.has(session.id)
+        ) {
+          scope.add(session.id);
+          changed = true;
+        }
+      }
+    }
+    return scope;
+  }
+
+  /** Retries input requests for the attached conversation after a partial failure. */
+  retryInputRequests(): void {
+    const route = this.state.route;
+    if (route.kind !== 'conversation') return;
+    void this.track('requests', this.refreshInputRequests(route.sessionID, route.serverID));
   }
 
   // ---------------------------------------------------------------- transcripts
@@ -2307,6 +2387,7 @@ export class AppController {
     const run = async (): Promise<void> => {
       if (this.disposed) return;
 
+      const formOrigin = this.pasteFormOrigin();
       const declaredMime = metadata?.mimeType?.toLowerCase();
       const textDeclared =
         metadata?.kind === 'text' ||
@@ -2325,6 +2406,23 @@ export class AppController {
           if (declaredMime !== undefined && isSupportedAttachmentMime(declaredMime))
             mime = declaredMime;
         }
+      }
+
+      if (formOrigin !== undefined) {
+        if (mime !== undefined || binaryDeclared) {
+          this.showNotice(
+            'Questions accept pasted text only; attach files from the composer.',
+            'warn',
+          );
+          return;
+        }
+        const text = decodePastedText(bytes);
+        if (text === undefined) {
+          this.showNotice('Pasted data is not text.', 'warn');
+          return;
+        }
+        this.pasteIntoForm(text, formOrigin);
+        return;
       }
 
       if (mime !== undefined) {
@@ -2356,6 +2454,42 @@ export class AppController {
     };
     this.pasteChain = this.pasteChain.then(run).catch(() => undefined);
     await this.pasteChain;
+  }
+
+  /** The open question overlay, captured with its token so an async paste cannot retarget. */
+  private pasteFormOrigin(): { token: number } | undefined {
+    return this.state.overlay.kind === 'form'
+      ? { token: this.state.overlay.requestToken }
+      : undefined;
+  }
+
+  /**
+   * One text paste into the active question field. It is deliberately not routed through
+   * the composer: newlines stay literal, shortcut-looking text is not interpreted, and a
+   * route/overlay change drops the transaction instead of leaking it (#210).
+   */
+  private pasteIntoForm(text: string, origin: { token: number }): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'form' || overlay.requestToken !== origin.token) {
+      this.showNotice('Question changed before the paste landed; nothing was inserted.', 'warn');
+      return;
+    }
+    const form = this.openFormRequest();
+    if (form === undefined) {
+      this.showNotice('This question was answered or withdrawn.', 'dim');
+      return;
+    }
+    const clean = sanitizeTerminalText(text);
+    const bounded = clean.length > 65_536 ? clean.slice(0, 65_536) : clean;
+    const result = pasteFormText(form, overlay.editor, bounded);
+    if (result.error !== undefined) {
+      this.showNotice(result.error, 'warn');
+      return;
+    }
+    this.setState('overlay', { ...overlay, editor: result.editor });
+    if (bounded.length < clean.length) {
+      this.showNotice('Paste truncated to 65,536 characters.', 'warn');
+    }
   }
 
   /** True when no route or overlay change has occurred since `originKey` was captured. */
@@ -5448,6 +5582,7 @@ export class AppController {
       kind: 'form',
       serverID: session.serverID,
       sessionID: session.id,
+      formSessionID: form.sessionID,
       requestToken: this.formToken,
       editor: startEditor(form),
     });
@@ -5481,11 +5616,11 @@ export class AppController {
     if (outcome === 'submit') {
       const answer = buildAnswer(form, editor.answers);
       void this.finishForm(origin, (backend) =>
-        backend.replyForm(origin.sessionID, origin.editor.formID, answer),
+        backend.replyForm(origin.formSessionID, origin.editor.formID, answer),
       );
     } else if (outcome === 'decline') {
       void this.finishForm(origin, (backend) =>
-        backend.cancelForm(origin.sessionID, origin.editor.formID),
+        backend.cancelForm(origin.formSessionID, origin.editor.formID),
       );
     }
   }
@@ -5495,7 +5630,7 @@ export class AppController {
     send: (backend: Backend) => Promise<void>,
   ): Promise<void> {
     const formID = origin.editor.formID;
-    const key = JSON.stringify([origin.serverID, origin.sessionID, formID]);
+    const key = JSON.stringify([origin.serverID, origin.sessionID, origin.formSessionID, formID]);
     if (this.answeringForms.has(key)) return;
     this.answeringForms.add(key);
     const closeOrigin = () => {
@@ -5504,6 +5639,7 @@ export class AppController {
         current.kind === 'form' &&
         current.serverID === origin.serverID &&
         current.sessionID === origin.sessionID &&
+        current.formSessionID === origin.formSessionID &&
         current.editor.formID === formID &&
         current.requestToken === origin.requestToken
       ) {
@@ -5616,13 +5752,16 @@ export class AppController {
   /**
    * Collapsible transcript items in render order: tool groups, standalone edit tools
    * whose inline diff exceeds the compact preview budget (keys `diff:<toolID>`), and
-   * server-confirmed workers (keys `worker:<jobID>`). Groups/diffs are omitted in detailed
-   * mode where everything is already expanded; workers stay focusable in both modes.
+   * server-confirmed workers (keys `worker:<jobID>`). Detailed mode focuses individual
+   * tool results (keys `tool:<toolID>`) because everything is already expanded (#222).
    */
-  collapsibleItems(): { key: string; kind: 'group' | 'diff' | 'worker' }[] {
+  collapsibleItems(): { key: string; kind: 'group' | 'diff' | 'worker' | 'tool' }[] {
     return this.conversationNodes().flatMap(
-      (node): { key: string; kind: 'group' | 'diff' | 'worker' }[] => {
+      (node): { key: string; kind: 'group' | 'diff' | 'worker' | 'tool' }[] => {
         if (node.kind === 'worker') return [{ key: node.key, kind: 'worker' as const }];
+        if (node.kind === 'tool' && this.state.detailed) {
+          return [{ key: `tool:${node.tool.id}`, kind: 'tool' as const }];
+        }
         if (this.state.detailed) return [];
         if (node.kind === 'tool-group') return [{ key: node.key, kind: 'group' as const }];
         if (node.kind === 'tool' && node.tool.status !== 'error' && hasOversizedDiff(node.tool)) {
@@ -5659,8 +5798,24 @@ export class AppController {
       return false;
     }
     if (item.kind === 'diff') this.toggleDiffExpanded(item.key.slice('diff:'.length));
-    else this.toggleGroup(item.key);
+    else if (item.kind === 'tool') {
+      // Detailed tools are already expanded; only an oversized diff can grow further.
+      const tool = this.toolByID(item.key.slice('tool:'.length));
+      if (tool !== undefined && hasOversizedDiff(tool)) this.toggleDiffExpanded(tool.id);
+    } else this.toggleGroup(item.key);
     return true;
+  }
+
+  /** The rendered tool call with this ID, if it is in the attached conversation. */
+  private toolByID(id: string): ToolCall | undefined {
+    for (const node of this.conversationNodes()) {
+      if (node.kind === 'tool' && node.tool.id === id) return node.tool;
+      if (node.kind === 'tool-group') {
+        const tool = node.tools.find((entry) => entry.id === id);
+        if (tool !== undefined) return tool;
+      }
+    }
+    return undefined;
   }
 
   toggleDiffExpanded(id: string): void {
@@ -5677,6 +5832,282 @@ export class AppController {
 
   clearGroupFocus(): void {
     if (this.state.focusedGroup !== undefined) this.setState('focusedGroup', undefined);
+  }
+
+  // ---------------------------------------------------------------- output inspector (#222)
+
+  /** Rows per PageUp/PageDown inside the inspector; the view windows by viewport height. */
+  private static readonly INSPECTOR_PAGE_ROWS = 20;
+
+  /** The focused tool, or the last tool when nothing tool-like is selected. */
+  private inspectableTool(): { tool: ToolCall; messageID: string } | undefined {
+    const nodes = this.conversationNodes();
+    const tools = nodes.flatMap((node) =>
+      node.kind === 'tool' ? [node.tool] : node.kind === 'tool-group' ? [...node.tools] : [],
+    );
+    const focused = this.state.focusedGroup;
+    let candidate: ToolCall | undefined;
+    if (focused !== undefined && (focused.startsWith('tool:') || focused.startsWith('diff:'))) {
+      const id = focused.slice(focused.indexOf(':') + 1);
+      candidate = tools.find((tool) => tool.id === id);
+    } else if (focused !== undefined && focused.startsWith('group:')) {
+      const group = nodes.find((node) => node.kind === 'tool-group' && node.key === focused);
+      candidate = group?.kind === 'tool-group' ? group.tools.at(-1) : undefined;
+    }
+    candidate ??= tools.at(-1);
+    if (candidate === undefined) return undefined;
+    const found = findToolMessage(this.loadedMessages(), candidate.id);
+    return found === undefined ? undefined : { tool: found.tool, messageID: found.messageID };
+  }
+
+  /**
+   * Opens the focused tool's retained result. Cached head/tail content shows immediately;
+   * the original message is fetched once, on this deliberate request only (#221).
+   */
+  openInspector(): boolean {
+    const route = this.state.route;
+    if (route.kind !== 'conversation') return false;
+    const target = this.inspectableTool();
+    if (target === undefined) {
+      this.showNotice('Nothing to inspect in this conversation yet.', 'warn');
+      return false;
+    }
+    const first = Object.values(target.tool.input).find(
+      (value): value is string => typeof value === 'string' && value.trim() !== '',
+    );
+    const detail =
+      first === undefined
+        ? ''
+        : ` · ${sanitizeTerminalText(first.split('\n')[0] ?? first).slice(0, 72)}`;
+    this.setOverlay({
+      kind: 'inspector',
+      serverID: route.serverID,
+      sessionID: route.sessionID,
+      messageID: target.messageID,
+      toolID: target.tool.id,
+      title: `${target.tool.name}${detail}`,
+      query: '',
+      offset: 0,
+      loading: true,
+      payload: cachedToolResult(target.tool),
+    });
+    void this.loadInspector(route.serverID, route.sessionID, target.messageID, target.tool.id);
+    return true;
+  }
+
+  private inspectorIsCurrent(generation: number, toolID: string): boolean {
+    const overlay = this.state.overlay;
+    return (
+      this.interactionGeneration === generation &&
+      overlay.kind === 'inspector' &&
+      overlay.toolID === toolID
+    );
+  }
+
+  private async loadInspector(
+    serverID: string,
+    sessionID: string,
+    messageID: string,
+    toolID: string,
+  ): Promise<void> {
+    const generation = this.interactionGeneration;
+    try {
+      const backend = this.backendFor(serverID);
+      const fetched =
+        backend.getToolResult === undefined
+          ? undefined
+          : await backend.getToolResult(sessionID, messageID, toolID);
+      if (!this.inspectorIsCurrent(generation, toolID)) return;
+      const overlay = this.state.overlay;
+      if (overlay.kind !== 'inspector') return;
+      if (fetched === undefined) {
+        this.setState('overlay', {
+          ...overlay,
+          loading: false,
+          error:
+            'on-demand retrieval is unavailable for this server · showing the retained preview',
+        });
+        return;
+      }
+      this.setState('overlay', { ...overlay, loading: false, payload: fetched, error: undefined });
+    } catch (error) {
+      if (!this.inspectorIsCurrent(generation, toolID)) return;
+      const overlay = this.state.overlay;
+      if (overlay.kind !== 'inspector') return;
+      this.setState('overlay', {
+        ...overlay,
+        loading: false,
+        error: `full result unavailable: ${errorText(error)} · showing the retained preview`,
+      });
+    }
+  }
+
+  private inspectorDoc(): ReturnType<typeof inspectorDocument> | undefined {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'inspector') return undefined;
+    if (overlay.payload === undefined) return { lines: [], kind: 'text' };
+    return inspectorDocument(overlay.payload);
+  }
+
+  /** The visible window for the inspector view; materializes only `rows` lines. */
+  inspectorView(rows: number): { lines: readonly string[]; offset: number; total: number } {
+    const document = this.inspectorDoc();
+    const overlay = this.state.overlay;
+    if (document === undefined || overlay.kind !== 'inspector') {
+      return { lines: [], offset: 0, total: 0 };
+    }
+    return inspectorWindow(document.lines, overlay.offset, rows);
+  }
+
+  inspectorMatches(): number[] {
+    const document = this.inspectorDoc();
+    const overlay = this.state.overlay;
+    if (document === undefined || overlay.kind !== 'inspector') return [];
+    return searchLines(document.lines, overlay.query);
+  }
+
+  private setInspectorState(patch: Partial<Extract<Overlay, { kind: 'inspector' }>>): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'inspector') return;
+    this.setState('overlay', { ...overlay, ...patch });
+  }
+
+  private moveInspector(delta: number): void {
+    const overlay = this.state.overlay;
+    const document = this.inspectorDoc();
+    if (overlay.kind !== 'inspector' || document === undefined) return;
+    const max = Math.max(0, document.lines.length - 1);
+    this.setState('overlay', {
+      ...overlay,
+      offset: Math.min(max, Math.max(0, overlay.offset + delta)),
+    });
+  }
+
+  private setInspectorQuery(query: string): void {
+    const document = this.inspectorDoc();
+    if (document === undefined) return;
+    const matches = searchLines(document.lines, query);
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'inspector') return;
+    this.setState('overlay', {
+      ...overlay,
+      query,
+      offset: matches[0] ?? overlay.offset,
+    });
+  }
+
+  /**
+   * Inspector keys. Escape clears a search before closing; Enter jumps to the next match,
+   * Shift+Enter to the previous one. Ctrl+Y copies the source payload and Ctrl+S saves it.
+   */
+  inspectorKey(
+    key: Readonly<{ name: string; ctrl: boolean; alt: boolean; shift: boolean; text?: string }>,
+  ): void {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'inspector') return;
+    if (key.ctrl && key.name === 'y') {
+      void this.inspectCopy();
+      return;
+    }
+    if (key.ctrl && key.name === 's') {
+      void this.inspectSave();
+      return;
+    }
+    if (key.ctrl && key.name === 'c') {
+      this.closeOverlay();
+      return;
+    }
+    if (key.name === 'escape') {
+      if (overlay.query !== '') this.setInspectorQuery('');
+      else this.closeOverlay();
+      return;
+    }
+    switch (key.name) {
+      case 'up':
+        this.moveInspector(-1);
+        return;
+      case 'down':
+        this.moveInspector(1);
+        return;
+      case 'pageup':
+        this.moveInspector(-AppController.INSPECTOR_PAGE_ROWS);
+        return;
+      case 'pagedown':
+        this.moveInspector(AppController.INSPECTOR_PAGE_ROWS);
+        return;
+      case 'home':
+        this.moveInspector(-overlay.offset);
+        return;
+      case 'end': {
+        const total = this.inspectorDoc()?.lines.length ?? 1;
+        this.moveInspector(total);
+        return;
+      }
+      case 'return': {
+        const matches = this.inspectorMatches();
+        if (matches.length > 0) {
+          const next = nextMatch(
+            matches,
+            overlay.offset + (key.shift ? -1 : 0),
+            key.shift ? -1 : 1,
+          );
+          this.setInspectorState({ offset: next });
+        }
+        return;
+      }
+      case 'backspace':
+        this.setInspectorQuery(overlay.query.slice(0, -1));
+        return;
+      default:
+        if (key.text !== undefined && key.text !== '/') {
+          this.setInspectorQuery(overlay.query + key.text);
+        } else if (key.text === '/') {
+          this.setInspectorQuery('');
+        }
+    }
+  }
+
+  /** Copy exactly what the source supplied, labeled with its real completeness. */
+  async inspectCopy(): Promise<void> {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'inspector' || overlay.payload === undefined) return;
+    const text = inspectorText(overlay.payload);
+    if (text === '') {
+      this.showNotice('This result has no text to copy; file metadata is shown instead.', 'warn');
+      return;
+    }
+    try {
+      const result = await this.copyToDestination(text);
+      const suffix = ` · ${completenessLabel(overlay.payload.completeness)}`;
+      this.showNotice(
+        result.method === 'clipboard'
+          ? `Clipboard sequence emitted (no terminal acknowledgement)${suffix}.`
+          : `Clipboard unavailable; saved ${result.path ?? 'a local file'}${suffix}.`,
+        'dim',
+      );
+    } catch (error) {
+      this.showNotice(`Copy failed: ${errorText(error)}`, 'error');
+    }
+  }
+
+  /** Save exactly what the source supplied to a client-local file. */
+  async inspectSave(): Promise<void> {
+    const overlay = this.state.overlay;
+    if (overlay.kind !== 'inspector' || overlay.payload === undefined) return;
+    const text = inspectorText(overlay.payload);
+    if (text === '') {
+      this.showNotice('This result has no text to save; file metadata is shown instead.', 'warn');
+      return;
+    }
+    const dir = this.deps.copyFallbackDir ?? this.deps.cwd;
+    const path = join(dir, `marg-inspect-${process.pid}-${this.deps.now()}.txt`);
+    const write = this.deps.writeFile ?? (async (file, body) => void (await Bun.write(file, body)));
+    try {
+      await write(path, text);
+      this.showNotice(`Saved ${path} · ${completenessLabel(overlay.payload.completeness)}.`, 'dim');
+    } catch (error) {
+      this.showNotice(`Save failed: ${errorText(error)}`, 'error');
+    }
   }
 
   setOverlay(overlay: Overlay): void {

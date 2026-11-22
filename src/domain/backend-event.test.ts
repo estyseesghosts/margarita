@@ -44,6 +44,34 @@ describe('normalizeEvent', () => {
       sessionID: 's',
     });
   });
+  test('nested form.created events keep the owning session (#208)', () => {
+    expect(
+      normalizeEvent({
+        type: 'form.created',
+        data: { form: { id: 'f1', sessionID: 'ses_child', title: 'Q', fields: [] } },
+      }),
+    ).toEqual({ kind: 'input-requests-changed', sessionID: 'ses_child' });
+    expect(
+      normalizeEvent({ type: 'form.created', data: { form: { id: 'f1', title: 'Q' } } }),
+    ).toBeUndefined();
+    expect(normalizeEvent({ type: 'form.created', data: {} })).toBeUndefined();
+  });
+  test('older flat form.created events still resolve their session', () => {
+    expect(
+      normalizeEvent({ type: 'form.created', data: { id: 'f1', sessionID: 'ses_a' } }),
+    ).toEqual({ kind: 'input-requests-changed', sessionID: 'ses_a' });
+  });
+  test('form settlements accept flat and nested payloads', () => {
+    expect(
+      normalizeEvent({ type: 'form.replied', data: { id: 'f1', sessionID: 'ses_a' } }),
+    ).toEqual({ kind: 'input-requests-changed', sessionID: 'ses_a' });
+    expect(
+      normalizeEvent({
+        type: 'form.cancelled',
+        data: { form: { id: 'f1', sessionID: 'global' } },
+      }),
+    ).toEqual({ kind: 'input-requests-changed', sessionID: 'global' });
+  });
   test('reconnect marker and unknown events', () => {
     expect(normalizeEvent({ type: 'server.connected', data: {} })).toEqual({ kind: 'connected' });
     expect(normalizeEvent({ type: 'pty.created', data: { sessionID: 's' } })).toBeUndefined();

@@ -20,7 +20,7 @@ import type { CatalogModel } from '../src/domain/model-resolution.ts';
 import type { NativeGoal } from '../src/domain/native-goal.ts';
 import type { SessionSummary } from '../src/domain/session.ts';
 import type { ShellJob } from '../src/domain/shell-job.ts';
-import type { TranscriptMessage } from '../src/domain/transcript.ts';
+import type { ToolResultPayload, TranscriptMessage } from '../src/domain/transcript.ts';
 import type { WorkerJob } from '../src/domain/worker.ts';
 
 /** In-memory backend for UI and controller tests. Records every mutating call. */
@@ -126,6 +126,41 @@ export class FakeBackend implements Backend {
       ...(start > 0 ? { olderCursor: String(start) } : {}),
       hasEarlier: start > 0,
     };
+  }
+
+  /** Explicit full results keyed `${sessionID}:${toolID}`; absent falls back to the cache. */
+  toolResults: Record<string, ToolResultPayload> = {};
+  /** When set, getToolResult throws (expired output/disconnect tests). */
+  toolResultError: Error | undefined;
+
+  async getToolResult(
+    sessionID: string,
+    _messageID: string,
+    toolID: string,
+  ): Promise<ToolResultPayload> {
+    this.calls.push({ name: 'getToolResult', args: [sessionID, _messageID, toolID] });
+    if (this.toolResultError !== undefined) throw this.toolResultError;
+    const explicit = this.toolResults[`${sessionID}:${toolID}`];
+    if (explicit !== undefined) return explicit;
+    for (const message of this.messages[sessionID] ?? []) {
+      if (message.kind !== 'assistant') continue;
+      for (const part of message.parts) {
+        if (part.kind === 'tool' && part.tool.id === toolID) {
+          return {
+            ...(part.tool.output === undefined ? {} : { text: part.tool.output }),
+            ...(part.tool.diff === undefined ? {} : { diff: part.tool.diff }),
+            files: part.tool.files ?? [],
+            completeness:
+              part.tool.outputTruncated === 'server'
+                ? 'server-truncated'
+                : part.tool.outputTruncated === 'frontend'
+                  ? 'frontend-elided'
+                  : 'complete',
+          };
+        }
+      }
+    }
+    throw new BackendError('not-found', 'message.get', `${toolID} is not available`);
   }
   /** In-memory inbox; Margarita treats FIFO order as server order. */
   inbox: QueuedInput[] = [];
@@ -381,6 +416,10 @@ export class FakeBackend implements Backend {
   }
   async listForms(sessionID: string): Promise<FormRequest[]> {
     return this.forms.filter((form) => form.sessionID === sessionID);
+  }
+  async listLocationForms(_directory: string): Promise<FormRequest[]> {
+    this.calls.push({ name: 'listLocationForms', args: [_directory] });
+    return this.forms;
   }
   async replyForm(
     sessionID: string,

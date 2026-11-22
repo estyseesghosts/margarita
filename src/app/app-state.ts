@@ -16,7 +16,7 @@ import type { ProjectRef } from '../domain/server-identity.ts';
 import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { ShellJob } from '../domain/shell-job.ts';
-import type { TranscriptMessage } from '../domain/transcript.ts';
+import type { ToolResultPayload, TranscriptMessage } from '../domain/transcript.ts';
 import type { WorkerJob } from '../domain/worker.ts';
 
 /** A transient Ctrl+B confirmation bound to one tool call of one session (#135). */
@@ -49,7 +49,16 @@ export type Overlay =
   | { kind: 'history-search'; query: string; before: number }
   | { kind: 'servers'; index: number }
   | { kind: 'unpair-confirm'; serverID: string; label: string }
-  | { kind: 'form'; serverID: string; sessionID: string; requestToken: number; editor: FormEditor }
+  | {
+      kind: 'form';
+      serverID: string;
+      /** Conversation hosting the card (the form may belong to a global/child session). */
+      sessionID: string;
+      /** The form's own wire session; replies and cancels must use this exact owner. */
+      formSessionID: string;
+      requestToken: number;
+      editor: FormEditor;
+    }
   | { kind: 'tasks'; index: number; target?: { serverID: string; sessionID: string } }
   | {
       kind: 'rewind-picker';
@@ -71,7 +80,28 @@ export type Overlay =
       files: FileDiff[];
       busy: boolean;
     }
-  | DiffOverlay;
+  | DiffOverlay
+  | InspectorOverlay;
+
+/** Focused, full-result overlay for one tool part (#222). */
+export type InspectorOverlay = {
+  kind: 'inspector';
+  serverID: string;
+  sessionID: string;
+  messageID: string;
+  toolID: string;
+  /** One-line identity, e.g. `bash · make test`. */
+  title: string;
+  /** Case-insensitive search over payload lines; empty shows the document start. */
+  query: string;
+  /** First visible document line (0-based), independent of the conversation scroll. */
+  offset: number;
+  loading: boolean;
+  /** The payload being shown; cached content until retrieval succeeds. */
+  payload?: ToolResultPayload | undefined;
+  /** Retrieval failure or fallback reason; shown verbatim, never hidden. */
+  error?: string | undefined;
+};
 
 /** Read-only viewer over server-reported `session.diff` results. */
 export type DiffOverlay = {
@@ -117,6 +147,8 @@ export type AppState = {
   running: Record<string, boolean>;
   permissions: Record<string, PermissionPrompt[]>;
   forms: Record<string, FormRequest[]>;
+  /** Per-session input-request fetch failures; absent means both categories are known. */
+  requestErrors: Record<string, { permissions?: string; forms?: string }>;
   /** Goal/plan sidecar per session; absent until loaded. */
   goals: Record<string, GoalPlanV1>;
   /**
@@ -254,6 +286,7 @@ export function initialState(directory: string, serverID: string = localServerID
     running: {},
     permissions: {},
     forms: {},
+    requestErrors: {},
     goals: {},
     nativeGoals: {},
     awaitingSteer: {},

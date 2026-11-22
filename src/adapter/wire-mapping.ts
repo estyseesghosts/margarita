@@ -22,7 +22,15 @@ import { sanitizeTerminalText } from '../domain/sanitize-text.ts';
 import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary, StagedRevert } from '../domain/session.ts';
 import type { ShellJob } from '../domain/shell-job.ts';
-import type { AssistantPart, ToolCall, TranscriptMessage } from '../domain/transcript.ts';
+import type {
+  AssistantPart,
+  ToolCall,
+  ToolCallChild,
+  ToolFileReference,
+  ToolResultPayload,
+  ToolStatus,
+  TranscriptMessage,
+} from '../domain/transcript.ts';
 import type { WorkerJob, WorkerStatus } from '../domain/worker.ts';
 
 /**
@@ -171,36 +179,139 @@ export function toQueuedInput(item: SessionInboxInfo): QueuedInput {
 /** Default cap for tool output retained in the transcript (head+tail are both kept). */
 export const maxToolOutputChars = 64_000;
 
-function toolText(
+/** Describes one file content part without ever retaining `data:` payload bytes (#218). */
+function toolFile(entry: Record<string, unknown>): ToolFileReference | undefined {
+  const rawUri = typeof entry['uri'] === 'string' ? entry['uri'] : undefined;
+  const rawName = typeof entry['name'] === 'string' ? entry['name'].trim() : '';
+  const rawMime = typeof entry['mime'] === 'string' ? entry['mime'].trim() : '';
+  if (rawUri !== undefined && rawUri.startsWith('data:')) {
+    const comma = rawUri.indexOf(',');
+    const header = comma === -1 ? rawUri.slice(5) : rawUri.slice(5, comma);
+    const parts = header.split(';');
+    const declaredMime = parts[0]?.trim() ?? '';
+    const mime = rawMime === '' ? (declaredMime === '' ? undefined : declaredMime) : rawMime;
+    const payload = comma === -1 ? '' : rawUri.slice(comma + 1);
+    const base64 = parts.slice(1).some((part) => part.trim().toLowerCase() === 'base64');
+    let size: number | undefined;
+    if (base64) {
+      const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0;
+      size = Math.max(0, Math.floor((payload.length * 3) / 4) - padding);
+    } else if (comma !== -1) {
+      try {
+        size = new TextEncoder().encode(decodeURIComponent(payload)).length;
+      } catch {
+        size = undefined;
+      }
+    }
+    const name = rawName !== '' ? rawName : (mime ?? 'file');
+    return {
+      name: sanitizeTerminalText(name),
+      ...(mime === undefined ? {} : { mime: sanitizeTerminalText(mime) }),
+      ...(size === undefined ? {} : { size }),
+    };
+  }
+  const uri = rawUri === undefined ? '' : sanitizeTerminalText(rawUri);
+  const fileName = uri === '' ? '' : (uri.split(/[\\/]/).at(-1) ?? '');
+  const name = rawName !== '' ? rawName : fileName !== '' ? fileName : rawMime || 'file';
+  return {
+    name: sanitizeTerminalText(name),
+    ...(rawMime === '' ? {} : { mime: sanitizeTerminalText(rawMime) }),
+    ...(uri === '' ? {} : { uri }),
+  };
+}
+
+function toolContent(
   content: unknown,
   maxChars: number,
-): { text: string; truncated: boolean } | undefined {
+): { text: string; truncated: boolean; files: ToolFileReference[] } | undefined {
   if (!Array.isArray(content)) return undefined;
-  const text = content
-    .map((entry: unknown) => {
-      if (!isRecord(entry)) return '';
-      if (entry['type'] === 'text' && typeof entry['text'] === 'string') return entry['text'];
-      if (entry['type'] === 'file' && typeof entry['uri'] === 'string') {
-        return `[file ${entry['uri']}]`;
-      }
-      return '';
-    })
-    .join('\n');
+  const files: ToolFileReference[] = [];
+  const textParts: string[] = [];
+  for (const entry of content) {
+    if (!isRecord(entry)) continue;
+    if (entry['type'] === 'text' && typeof entry['text'] === 'string')
+      textParts.push(entry['text']);
+    if (entry['type'] === 'file') {
+      const file = toolFile(entry);
+      if (file !== undefined) files.push(file);
+    }
+  }
+  const text = textParts.join('\n');
   // Bounded, but keep both ends: failures usually live in the tail.
   if (text.length > maxChars) {
     const head = Math.floor(maxChars / 2);
     const tail = maxChars - head;
     const omitted = text.length - maxChars;
     const capped = `${text.slice(0, head)}\n… ${omitted} characters omitted from the middle of this output (${text.length} chars total) …\n${text.slice(text.length - tail)}`;
-    return { text: sanitizeTerminalText(capped), truncated: true };
+    return { text: sanitizeTerminalText(capped), truncated: true, files };
   }
-  return { text: sanitizeTerminalText(text), truncated: false };
+  return { text: sanitizeTerminalText(text), truncated: false, files };
 }
 
 export type WireMappingOptions = Readonly<{
   /** Override the output cap (defaults to `maxToolOutputChars`). */
   maxToolOutputChars?: number;
 }>;
+
+const childStatuses = new Set<string>(['streaming', 'running', 'completed', 'error']);
+const childInputMaxChars = 200;
+
+function isToolStatus(value: string): value is ToolStatus {
+  return childStatuses.has(value);
+}
+
+/** Bounded scalar display input from one nested call; never the enclosing script. */
+function childInput(value: unknown): Record<string, string | number | boolean> | undefined {
+  if (!isRecord(value)) return undefined;
+  const result: Record<string, string | number | boolean> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === 'string') {
+      result[key] = sanitizeTerminalText(
+        entry.length > childInputMaxChars ? `${entry.slice(0, childInputMaxChars)}…` : entry,
+      );
+    } else if (typeof entry === 'number' || typeof entry === 'boolean') {
+      result[key] = entry;
+    }
+  }
+  return Object.keys(result).length === 0 ? undefined : result;
+}
+
+/** Strictly reads `metadata.toolCalls`; malformed entries are skipped, never guessed (#216). */
+function toolChildren(
+  metadata: Record<string, unknown>,
+  parentID: string,
+): ToolCallChild[] | undefined {
+  const raw = metadata['toolCalls'];
+  if (!Array.isArray(raw)) return undefined;
+  const children: ToolCallChild[] = [];
+  raw.forEach((entry, index) => {
+    if (!isRecord(entry)) return;
+    const name = typeof entry['tool'] === 'string' ? entry['tool'] : undefined;
+    const status = entry['status'];
+    if (name === undefined || name === '' || typeof status !== 'string') return;
+    if (!isToolStatus(status)) return;
+    const input = childInput(entry['input']);
+    children.push({
+      id: `${parentID}:${index}`,
+      parentID,
+      index,
+      name: sanitizeTerminalText(name),
+      status,
+      ...(input === undefined ? {} : { input }),
+    });
+  });
+  return children.length === 0 ? undefined : children;
+}
+
+function executionError(metadata: Record<string, unknown>): string | undefined {
+  const raw = metadata['error'];
+  if (raw === true) return 'Code Mode execution failed.';
+  if (typeof raw === 'string' && raw.trim() !== '') return sanitizeTerminalText(raw);
+  if (isRecord(raw) && typeof raw['message'] === 'string' && raw['message'].trim() !== '') {
+    return sanitizeTerminalText(raw['message']);
+  }
+  return undefined;
+}
 
 function toToolCall(
   part: Extract<SessionMessageAssistant['content'][number], { type: 'tool' }>,
@@ -213,8 +324,8 @@ function toToolCall(
       ? status
       : 'running';
   const input = isRecord(state) && isRecord(state['input']) ? state['input'] : {};
-  const output = isRecord(state)
-    ? toolText(state['content'], mapping.maxToolOutputChars ?? maxToolOutputChars)
+  const content = isRecord(state)
+    ? toolContent(state['content'], mapping.maxToolOutputChars ?? maxToolOutputChars)
     : undefined;
   const error =
     isRecord(state) && isRecord(state['error']) && typeof state['error']['message'] === 'string'
@@ -253,9 +364,11 @@ function toToolCall(
   const serverTruncated = metadata['truncated'] === true;
   const outputTruncated = serverTruncated
     ? 'server'
-    : output?.truncated === true
+    : content?.truncated === true
       ? 'frontend'
       : undefined;
+  const children = toolChildren(metadata, part.id);
+  const scriptError = executionError(metadata);
   return {
     id: part.id,
     name: sanitizeTerminalText(part.name),
@@ -263,11 +376,40 @@ function toToolCall(
     input,
     startedAt: part.time.created,
     ...(part.time.completed === undefined ? {} : { completedAt: part.time.completed }),
-    ...(output === undefined || output.text === '' ? {} : { output: output.text }),
+    ...(content === undefined || content.text === '' ? {} : { output: content.text }),
     ...(outputTruncated === undefined ? {} : { outputTruncated }),
+    ...(content === undefined || content.files.length === 0 ? {} : { files: content.files }),
+    ...(children === undefined ? {} : { children }),
+    ...(scriptError === undefined ? {} : { executionError: scriptError }),
     ...(error === undefined ? {} : { error }),
     ...(diff === undefined || diff === '' ? {} : { diff }),
     ...(diffFile === undefined ? {} : { diffFile }),
+  };
+}
+
+/**
+ * Full retained result for one tool part, fetched on demand for the inspector (#221).
+ * Uses the same mapping as the transcript but without the frontend character cap; a
+ * server-declared truncation stays visible in `completeness`.
+ */
+export function toToolResult(
+  message: SessionMessageAssistant,
+  toolID: string,
+): ToolResultPayload | undefined {
+  const part = message.content.find(
+    (entry): entry is Extract<(typeof message.content)[number], { type: 'tool' }> =>
+      entry.type === 'tool' && entry.id === toolID,
+  );
+  if (part === undefined) return undefined;
+  const tool = toToolCall(part, { maxToolOutputChars: Number.MAX_SAFE_INTEGER });
+  const state: unknown = part.state;
+  const metadata = isRecord(state) && isRecord(state['metadata']) ? state['metadata'] : {};
+  const completeness = metadata['truncated'] === true ? 'server-truncated' : 'complete';
+  return {
+    ...(tool.output === undefined ? {} : { text: tool.output }),
+    ...(tool.diff === undefined ? {} : { diff: tool.diff }),
+    files: tool.files ?? [],
+    completeness,
   };
 }
 
@@ -425,6 +567,7 @@ function toFormField(field: WireFormField): FormField {
       ? {}
       : { description: sanitizeTerminalText(field.description) }),
     required: 'required' in field && (field.required ?? false),
+    hidden: 'hidden' in field ? field.hidden : false,
     when: ('when' in field ? (field.when ?? []) : []).flatMap((condition) =>
       typeof condition.value === 'string' ||
       typeof condition.value === 'number' ||
@@ -433,11 +576,28 @@ function toFormField(field: WireFormField): FormField {
         : [],
     ),
   };
+  const stringConstraints = (): {
+    format?: 'email' | 'uri' | 'date' | 'date-time';
+    minLength?: number;
+    maxLength?: number;
+    pattern?: string;
+  } => {
+    if (field.type !== 'string') return {};
+    const minLength = finite(field.minLength);
+    const maxLength = finite(field.maxLength);
+    return {
+      ...(field.format === undefined ? {} : { format: field.format }),
+      ...(minLength === undefined ? {} : { minLength }),
+      ...(maxLength === undefined ? {} : { maxLength }),
+      ...(field.pattern === undefined ? {} : { pattern: field.pattern }),
+    };
+  };
   switch (field.type) {
     case 'string':
       if (field.options !== undefined && field.options.length > 0) {
         return {
           ...base,
+          ...stringConstraints(),
           kind: 'choice',
           options: options(field.options),
           custom: field.custom === true,
@@ -446,6 +606,7 @@ function toFormField(field: WireFormField): FormField {
       }
       return {
         ...base,
+        ...stringConstraints(),
         kind: 'text',
         ...(field.placeholder === undefined
           ? {}
@@ -457,6 +618,7 @@ function toFormField(field: WireFormField): FormField {
         ...base,
         kind: 'multi',
         options: options(field.options),
+        custom: field.custom === true,
         ...(field.minItems === undefined ? {} : { minItems: field.minItems }),
         ...(field.maxItems === undefined ? {} : { maxItems: field.maxItems }),
         ...(field.default === undefined ? {} : { default: field.default }),

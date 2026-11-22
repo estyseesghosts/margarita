@@ -10,7 +10,7 @@ import { type NativeGoal, toNativeGoal } from '../domain/native-goal.ts';
 import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { ShellJob } from '../domain/shell-job.ts';
-import type { TranscriptMessage } from '../domain/transcript.ts';
+import type { ToolResultPayload, TranscriptMessage } from '../domain/transcript.ts';
 import type { WorkerJob } from '../domain/worker.ts';
 import type { Connection } from './connection.ts';
 import {
@@ -26,6 +26,7 @@ import {
   toQueuedInput,
   toSessionSummary,
   toShellJob,
+  toToolResult,
   toTranscriptMessage,
   toWorkerJob,
 } from './wire-mapping.ts';
@@ -143,6 +144,11 @@ export interface Backend {
   /** Server-confirmed shell jobs, used to tell a timed-out shell is still running (#103). */
   listShellJobs(sessionID: string): Promise<readonly ShellJob[]>;
   listMessages(sessionID: string, limit: number, cursor?: string): Promise<MessagePage>;
+  /**
+   * Fetches one tool part's original retained content on demand (#221). Never replaces
+   * the bounded transcript cache; a missing/expired part is a failure, not empty output.
+   */
+  getToolResult?(sessionID: string, messageID: string, toolID: string): Promise<ToolResultPayload>;
   listInbox(sessionID: string): Promise<QueuedInput[]>;
   cancelQueued(sessionID: string, inboxID: string): Promise<void>;
   /** Server-side fuzzy file search scoped to `directory`; used for remote `@` mentions. */
@@ -178,6 +184,11 @@ export interface Backend {
   listMcpServers(directory: string): Promise<string[]>;
   listPermissions(sessionID: string): Promise<PermissionPrompt[]>;
   listForms(sessionID: string): Promise<FormRequest[]>;
+  /**
+   * Pending forms for a whole location (including the `global` MCP sentinel). Optional
+   * because test/older backends may not expose the location route (#209).
+   */
+  listLocationForms?(directory: string): Promise<FormRequest[]>;
   replyForm(sessionID: string, formID: string, answer: Record<string, FormValue>): Promise<void>;
   /** Native OpenCode goal for the session (plugin RPC `opencode.goal/get`); null when unset. */
   getGoal(sessionID: string, directory?: string): Promise<NativeGoal | null>;
@@ -313,6 +324,28 @@ class OpenCodeBackend implements Backend {
       hasEarlier: older.hasEarlier,
       ...(older.retryable === undefined ? {} : { retryable: older.retryable }),
     };
+  }
+
+  async getToolResult(
+    sessionID: string,
+    messageID: string,
+    toolID: string,
+  ): Promise<ToolResultPayload> {
+    const message = await call('message.get', () =>
+      this.client.session.message.get({ sessionID, messageID }),
+    );
+    if (message.type !== 'assistant') {
+      throw new BackendError(
+        'not-found',
+        'message.get',
+        `${messageID} is not an assistant message`,
+      );
+    }
+    const payload = toToolResult(message, toolID);
+    if (payload === undefined) {
+      throw new BackendError('not-found', 'message.get', `${toolID} is not in ${messageID}`);
+    }
+    return payload;
   }
 
   async findProjectFiles(directory: string, query: string, limit: number): Promise<string[]> {
@@ -534,6 +567,14 @@ class OpenCodeBackend implements Backend {
       this.client.session.form.list({ sessionID }),
     );
     return forms.map(toFormRequest);
+  }
+
+  /** Pending forms for one location; used to surface global MCP elicitations (#209). */
+  async listLocationForms(directory: string): Promise<FormRequest[]> {
+    const result = await call('form.list', () =>
+      this.client.form.list({ location: { directory } }),
+    );
+    return result.data.map(toFormRequest);
   }
 
   async replyForm(

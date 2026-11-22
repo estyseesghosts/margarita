@@ -7,14 +7,16 @@ import {
   firstInvalid,
   type FormField,
   type FormRequest,
+  multiChoices,
   parseNumber,
+  pasteFormText,
   startEditor,
   toggleOption,
   validateField,
   visibleFields,
 } from './form.ts';
 
-const base = { required: false, when: [] };
+const base = { required: false, hidden: false, when: [] };
 
 function press(name: string, text?: string) {
   return { name, shift: false, ctrl: false, ...(text === undefined ? {} : { text }) };
@@ -123,6 +125,7 @@ describe('forms', () => {
       key: 'm',
       title: 'Pick',
       kind: 'multi',
+      custom: false,
       maxItems: 1,
       options: [
         { value: 'a', label: 'A' },
@@ -132,5 +135,87 @@ describe('forms', () => {
     expect(toggleOption(field, ['b'], 'a')).toEqual(['a', 'b']);
     expect(toggleOption(field, ['a', 'b'], 'a')).toEqual(['b']);
     expect(validateField(field, ['a', 'b'])).toBe('Pick at most 1.');
+  });
+
+  test('string constraints are validated locally with actionable messages (#211)', () => {
+    const email: FormField & { kind: 'text' } = {
+      ...base,
+      key: 'email',
+      title: 'Email',
+      kind: 'text',
+      required: true,
+      format: 'email',
+      minLength: 6,
+      maxLength: 40,
+      pattern: '^[^@]+@',
+    };
+    expect(validateField(email, 'x')).toBe('Must be at least 6 characters.');
+    expect(validateField(email, 'xxxxx@y')).toBe('Enter an email address.');
+    expect(validateField(email, 'user@example.test')).toBeUndefined();
+    expect(validateField({ ...email, pattern: '(' }, 'user@example.test')).toBeUndefined();
+    expect(validateField({ ...email, pattern: '.*', format: 'date' }, '2026-02-30')).toBe(
+      'Enter a date (YYYY-MM-DD).',
+    );
+    expect(
+      validateField({ ...email, pattern: '.*', format: 'date' }, '2026-11-22'),
+    ).toBeUndefined();
+  });
+
+  test('hidden fields never render but server defaults still reach the reply (#212)', () => {
+    const hiddenForm: FormRequest = {
+      ...form,
+      fields: [
+        ...form.fields,
+        {
+          ...base,
+          key: 'token',
+          title: 'Internal',
+          kind: 'text',
+          hidden: true,
+          default: 'server-value',
+        },
+      ],
+    };
+    expect(visibleFields(hiddenForm, {}).map((field) => field.key)).toEqual(['env', 'docs']);
+    const editor = startEditor(hiddenForm);
+    expect(buildAnswer(hiddenForm, { ...editor.answers, env: 'staging' })).toEqual({
+      env: 'staging',
+      token: 'server-value',
+    });
+  });
+
+  test('custom multiselect values can be added, preserved and removed (#212)', () => {
+    const field: FormField & { kind: 'multi' } = {
+      ...base,
+      key: 'tags',
+      title: 'Tags',
+      kind: 'multi',
+      custom: true,
+      options: [{ value: 'a', label: 'A' }],
+    };
+    const customForm: FormRequest = { ...form, fields: [field] };
+    let editor = startEditor(customForm);
+    editor = editorKey(customForm, editor, press('a', 'a')).editor;
+    expect(editor.addingCustom).toBe(true);
+    for (const char of ['x', 'y']) editor = editorKey(customForm, editor, press(char, char)).editor;
+    editor = editorKey(customForm, editor, press('return')).editor;
+    expect(editor.answers['tags']).toEqual(['xy']);
+    expect(multiChoices(field, ['a', 'xy']).map((choice) => choice.value)).toEqual(['a', 'xy']);
+    editor = { ...editor, cursor: 1 };
+    editor = editorKey(customForm, editor, press('x', 'x')).editor;
+    expect(editor.answers['tags']).toEqual([]);
+  });
+
+  test('pasting into a question edits only the active text-like field (#210)', () => {
+    const textForm: FormRequest = {
+      ...form,
+      fields: [{ ...base, key: 'answer', title: 'Answer', kind: 'text', required: true }],
+    };
+    const editor = startEditor(textForm);
+    const pasted = pasteFormText(textForm, editor, 'first\nsecond');
+    expect(pasted.error).toBeUndefined();
+    expect(pasted.editor.text).toBe('first\nsecond');
+    const docs = { ...startEditor(form), index: 1 };
+    expect(pasteFormText(form, docs, 'nope').error).toContain('browser');
   });
 });

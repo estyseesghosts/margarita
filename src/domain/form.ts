@@ -15,20 +15,31 @@ type FieldBase = Readonly<{
   title: string;
   description?: string;
   required: boolean;
+  /** Protocol-hidden fields are never prompts; their server-provided defaults still reply. */
+  hidden: boolean;
   when: readonly FormCondition[];
 }>;
 
+type StringConstraints = Readonly<{
+  format?: 'email' | 'uri' | 'date' | 'date-time';
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+}>;
+
 export type FormField =
-  | (FieldBase & { kind: 'text'; placeholder?: string; default?: string })
+  | (FieldBase & { kind: 'text'; placeholder?: string; default?: string } & StringConstraints)
   | (FieldBase & {
       kind: 'choice';
       options: readonly FormOption[];
       custom: boolean;
       default?: string;
-    })
+    } & StringConstraints)
   | (FieldBase & {
       kind: 'multi';
       options: readonly FormOption[];
+      /** Whether arbitrary values may be added alongside the listed options. */
+      custom: boolean;
       minItems?: number;
       maxItems?: number;
       default?: readonly string[];
@@ -53,15 +64,18 @@ export type FormRequest = Readonly<{
 export type FormValue = string | number | boolean | readonly string[];
 export type FormAnswers = Readonly<Record<string, FormValue>>;
 
-/** Fields whose `when` conditions hold for the answers so far, in order. */
+/** Whether a field's `when` conditions hold for the answers so far. */
+function conditionsHold(field: FormField, answers: FormAnswers): boolean {
+  return field.when.every((condition) => {
+    const value = answers[condition.key];
+    const equal = value === condition.value;
+    return condition.op === 'eq' ? equal : !equal;
+  });
+}
+
+/** Fields whose `when` conditions hold and which the user may actually edit, in order. */
 export function visibleFields(form: FormRequest, answers: FormAnswers): FormField[] {
-  return form.fields.filter((field) =>
-    field.when.every((condition) => {
-      const value = answers[condition.key];
-      const equal = value === condition.value;
-      return condition.op === 'eq' ? equal : !equal;
-    }),
-  );
+  return form.fields.filter((field) => !field.hidden && conditionsHold(field, answers));
 }
 
 /** The starting answer for a field: its default, else empty. */
@@ -99,6 +113,15 @@ export function validateField(field: FormField, value: FormValue | undefined): s
   const empty = value === undefined || value === '' || (Array.isArray(value) && value.length === 0);
   if (empty) return field.required && field.kind !== 'external' ? 'Required.' : undefined;
   switch (field.kind) {
+    case 'text':
+    case 'choice': {
+      if (field.kind === 'choice' && !field.custom && typeof value === 'string') {
+        if (!field.options.some((option) => option.value === value)) {
+          return 'Pick one of the options.';
+        }
+      }
+      return typeof value === 'string' ? validateString(field, value) : undefined;
+    }
     case 'number': {
       if (typeof value !== 'number')
         return field.integer ? 'Enter a whole number.' : 'Enter a number.';
@@ -106,17 +129,9 @@ export function validateField(field: FormField, value: FormValue | undefined): s
       if (field.maximum !== undefined && value > field.maximum) return `At most ${field.maximum}.`;
       return undefined;
     }
-    case 'choice':
-      if (
-        !field.custom &&
-        typeof value === 'string' &&
-        !field.options.some((option) => option.value === value)
-      ) {
-        return 'Pick one of the options.';
-      }
-      return undefined;
     case 'multi': {
-      const count = Array.isArray(value) ? value.length : 0;
+      const values = Array.isArray(value) ? value : [];
+      const count = values.length;
       if (field.minItems !== undefined && count < field.minItems) {
         return `Pick at least ${field.minItems}.`;
       }
@@ -130,11 +145,77 @@ export function validateField(field: FormField, value: FormValue | undefined): s
   }
 }
 
-/** The reply body: only visible, answered, non-external fields. */
+/**
+ * Applies the v2 string constraints locally so an avoidable round trip never reaches
+ * `session.form.reply`. The server remains the final authority; an unsupported or
+ * malformed pattern is ignored rather than making every answer impossible (#211).
+ */
+function validateString(
+  field: FormField & { kind: 'text' | 'choice' },
+  value: string,
+): string | undefined {
+  if (field.minLength !== undefined && value.length < field.minLength) {
+    return `Must be at least ${field.minLength} character${field.minLength === 1 ? '' : 's'}.`;
+  }
+  if (field.maxLength !== undefined && value.length > field.maxLength) {
+    return `Must be at most ${field.maxLength} character${field.maxLength === 1 ? '' : 's'}.`;
+  }
+  if (field.pattern !== undefined) {
+    try {
+      if (!new RegExp(field.pattern).test(value)) return 'Does not match the requested format.';
+    } catch {
+      // An unsupported pattern is the server's problem; do not block a plausible answer.
+    }
+  }
+  switch (field.format) {
+    case 'email':
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? undefined : 'Enter an email address.';
+    case 'uri':
+      return isUri(value) ? undefined : 'Enter a URI.';
+    case 'date':
+      return isValidDate(value, false) ? undefined : 'Enter a date (YYYY-MM-DD).';
+    case 'date-time':
+      return isValidDate(value, true) ? undefined : 'Enter a date and time.';
+    default:
+      return undefined;
+  }
+}
+
+function isUri(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol !== '' && value.includes(':');
+  } catch {
+    return false;
+  }
+}
+
+function isValidDate(value: string, withTime: boolean): boolean {
+  if (withTime) return !Number.isNaN(Date.parse(value)) && value.includes('T');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parts = value.split('-').map(Number);
+  const year = parts[0] ?? 0;
+  const month = parts[1] ?? 0;
+  const day = parts[2] ?? 0;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+  );
+}
+
+/** The reply body: visible answered fields, plus hidden server defaults. */
 export function buildAnswer(form: FormRequest, answers: FormAnswers): Record<string, FormValue> {
   const result: Record<string, FormValue> = {};
-  for (const field of visibleFields(form, answers)) {
+  for (const field of form.fields) {
     if (field.kind === 'external') continue;
+    if (field.hidden) {
+      // Hidden fields are protocol values, not prompts. Include only what the server
+      // itself supplied as a default (initialValue); never invent a value.
+      const value = answers[field.key];
+      if (value !== undefined && value !== '') result[field.key] = value;
+      continue;
+    }
+    if (!conditionsHold(field, answers)) continue;
     const value = answers[field.key];
     if (value === undefined || value === '') continue;
     result[field.key] = value;
@@ -155,7 +236,7 @@ export function firstInvalid(
   return undefined;
 }
 
-/** Multiselect toggle that keeps option order stable. */
+/** Multiselect toggle that keeps listed and custom values in stable order. */
 export function toggleOption(
   field: FormField & { kind: 'multi' },
   current: readonly string[],
@@ -164,7 +245,29 @@ export function toggleOption(
   const chosen = new Set(current);
   if (chosen.has(value)) chosen.delete(value);
   else chosen.add(value);
-  return field.options.map((option) => option.value).filter((option) => chosen.has(option));
+  const listed = field.options.map((option) => option.value).filter((entry) => chosen.has(entry));
+  // Preserve custom values (already chosen but not listed) in their original order.
+  const custom = current.filter(
+    (entry) => !field.options.some((option) => option.value === entry) && chosen.has(entry),
+  );
+  return [...listed, ...custom];
+}
+
+/** All selectable multi values: predefined options then custom values still chosen. */
+export function multiChoices(
+  field: FormField & { kind: 'multi' },
+  current: readonly string[] | undefined,
+): { value: string; label: string; custom: boolean }[] {
+  const chosen = Array.isArray(current) ? current : [];
+  const listed = field.options.map((option) => ({
+    value: option.value,
+    label: option.label,
+    custom: false,
+  }));
+  const custom = chosen
+    .filter((value) => !field.options.some((option) => option.value === value))
+    .map((value) => ({ value, label: value, custom: true }));
+  return [...listed, ...custom];
 }
 
 /** In-progress answers for one form, edited one visible field at a time. */
@@ -176,7 +279,10 @@ export type FormEditor = Readonly<{
   text: string;
   /** Highlighted option for choice/multi/boolean fields. */
   cursor: number;
-  problem?: string;
+  /** In-progress custom multiselect value; `addingCustom` opens the entry row. */
+  customDraft?: string | undefined;
+  addingCustom?: boolean | undefined;
+  problem?: string | undefined;
 }>;
 
 export type FormKey = Readonly<{ name: string; text?: string; shift: boolean; ctrl: boolean }>;
@@ -195,8 +301,12 @@ export function currentField(form: FormRequest, editor: FormEditor): FormField |
   return visibleFields(form, editor.answers)[editor.index];
 }
 
-function optionCount(field: FormField): number {
-  if (field.kind === 'choice' || field.kind === 'multi') return field.options.length;
+function optionCount(field: FormField, answers: FormAnswers): number {
+  if (field.kind === 'choice') return field.options.length;
+  if (field.kind === 'multi') {
+    const current = answers[field.key];
+    return multiChoices(field, Array.isArray(current) ? current : []).length;
+  }
   return field.kind === 'boolean' ? 2 : 0;
 }
 
@@ -270,19 +380,58 @@ function advance(
 
 /** Typing and option keys for the current field; navigation is handled by `editorKey`. */
 function editField(editor: FormEditor, field: FormField, key: FormKey): FormEditor {
-  const count = optionCount(field);
+  const count = optionCount(field, editor.answers);
+  if (field.kind === 'multi' && field.custom && editor.addingCustom === true) {
+    if (key.name === 'escape') return { ...editor, addingCustom: false, customDraft: '' };
+    if (key.name === 'return') {
+      const value = (editor.customDraft ?? '').trim();
+      if (value === '') return { ...editor, addingCustom: false, customDraft: '' };
+      const current = editor.answers[field.key];
+      const chosen = Array.isArray(current) ? current : [];
+      if (chosen.includes(value)) {
+        return { ...editor, addingCustom: false, customDraft: '', problem: 'Already chosen.' };
+      }
+      return {
+        ...editor,
+        answers: { ...editor.answers, [field.key]: [...chosen, value] },
+        addingCustom: false,
+        customDraft: '',
+      };
+    }
+    if (key.name === 'backspace') {
+      return { ...editor, customDraft: (editor.customDraft ?? '').slice(0, -1) };
+    }
+    if (key.text !== undefined && key.text !== '' && !key.ctrl) {
+      return { ...editor, customDraft: (editor.customDraft ?? '') + key.text };
+    }
+    return editor;
+  }
   if (count > 0 && (key.name === 'up' || key.name === 'down')) {
     const step = key.name === 'up' ? -1 : 1;
     return { ...editor, cursor: (editor.cursor + step + count) % count };
   }
   if (field.kind === 'multi') {
-    const option = field.options[editor.cursor];
-    if (key.name !== 'space' || option === undefined) return editor;
+    if (field.custom && key.text === 'a' && !key.ctrl) {
+      return { ...editor, addingCustom: true, customDraft: '' };
+    }
     const current = editor.answers[field.key];
     const chosen = Array.isArray(current) ? current : [];
+    const choices = multiChoices(field, chosen);
+    const choice = choices[editor.cursor];
+    if (field.custom && choice?.custom === true && (key.name === 'x' || key.name === 'delete')) {
+      return {
+        ...editor,
+        answers: {
+          ...editor.answers,
+          [field.key]: chosen.filter((value) => value !== choice.value),
+        },
+        cursor: Math.max(0, editor.cursor - 1),
+      };
+    }
+    if (key.name !== 'space' || choice === undefined) return editor;
     return {
       ...editor,
-      answers: { ...editor.answers, [field.key]: toggleOption(field, chosen, option.value) },
+      answers: { ...editor.answers, [field.key]: toggleOption(field, chosen, choice.value) },
     };
   }
   if (field.kind === 'boolean') {
@@ -302,6 +451,39 @@ function editField(editor: FormEditor, field: FormField, key: FormKey): FormEdit
 }
 
 /**
+ * Inserts one pasted-text transaction into the active text-like field. Never interprets
+ * newlines or shortcut-looking text as keys, and never touches another field or session.
+ */
+export function pasteFormText(
+  form: FormRequest,
+  editor: FormEditor,
+  text: string,
+): { editor: FormEditor; error?: string } {
+  const field = currentField(form, editor);
+  if (field === undefined) return { editor, error: 'No field is selected.' };
+  if (field.kind === 'multi' && field.custom && editor.addingCustom === true) {
+    return { editor: { ...editor, customDraft: (editor.customDraft ?? '') + text } };
+  }
+  if (
+    field.kind === 'text' ||
+    field.kind === 'number' ||
+    (field.kind === 'choice' && field.custom)
+  ) {
+    return { editor: { ...editor, text: editor.text + text, problem: undefined } };
+  }
+  if (field.kind === 'multi' && field.custom) {
+    return {
+      editor: { ...editor, addingCustom: true, customDraft: text },
+    };
+  }
+  const reason =
+    field.kind === 'external'
+      ? 'Open external prompts in a browser.'
+      : 'This field does not accept text.';
+  return { editor, error: reason };
+}
+
+/**
  * One key against the form editor. Enter/Tab validates and advances (submitting
  * after the last field), Shift+Tab goes back, Esc closes leaving the form pending,
  * Ctrl+X declines it.
@@ -311,10 +493,14 @@ export function editorKey(
   editor: FormEditor,
   key: FormKey,
 ): { editor: FormEditor; outcome: FormOutcome } {
-  if (key.name === 'escape') return { editor, outcome: 'close' };
   if (key.ctrl && key.name === 'x') return { editor, outcome: 'decline' };
   const field = currentField(form, editor);
   if (field === undefined) return { editor, outcome: 'close' };
+  // A custom multiselect entry owns typing/Enter/Esc until it is added or cancelled.
+  if (editor.addingCustom === true && field.kind === 'multi') {
+    return { editor: editField(editor, field, key), outcome: undefined };
+  }
+  if (key.name === 'escape') return { editor, outcome: 'close' };
   if (key.name === 'return' || (key.name === 'tab' && !key.shift)) {
     return advance(form, editor, field);
   }

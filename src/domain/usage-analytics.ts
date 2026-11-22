@@ -36,7 +36,7 @@ export type ContextReading = Readonly<{
 }>;
 
 export type ToolCategoryKey =
-  'read' | 'search' | 'edit' | 'shell' | 'web' | 'delegate' | 'mcp' | 'other';
+  'read' | 'search' | 'edit' | 'shell' | 'code' | 'web' | 'delegate' | 'mcp' | 'other';
 
 export type UsageAnalytics = Readonly<{
   serverID: string;
@@ -216,6 +216,7 @@ export function projectUsage(input: UsageInput): UsageAnalytics {
     search: 0,
     edit: 0,
     shell: 0,
+    code: 0,
     web: 0,
     delegate: 0,
     mcp: 0,

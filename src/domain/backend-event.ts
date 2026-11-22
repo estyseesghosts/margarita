@@ -95,6 +95,13 @@ export function normalizeEvent(raw: unknown): BackendEvent | undefined {
   if (catalogEvents.has(type)) return { kind: 'catalog-changed' };
   const data = raw['data'];
   if (!isRecord(data)) return undefined;
+  // OpenCode v2 nests the owning session inside `form.created.data.form`; settlement
+  // events keep it flat. Read request events before the generic flat-session gate so a
+  // live question is not silently dropped (#208).
+  if (requestEvents.has(type)) {
+    const sessionID = requestSessionID(data, type);
+    return sessionID === undefined ? undefined : { kind: 'input-requests-changed', sessionID };
+  }
   const sessionID = data['sessionID'];
   if (typeof sessionID !== 'string') return undefined;
 
@@ -135,12 +142,25 @@ export function normalizeEvent(raw: unknown): BackendEvent | undefined {
     return { kind: 'revert-changed', sessionID, action: 'committed' };
   }
   if (inboxEvents.has(type)) return { kind: 'inbox-changed', sessionID };
-  if (requestEvents.has(type)) return { kind: 'input-requests-changed', sessionID };
   // The goal plugin publishes `changed` through the session event bus with this rpc-scoped type.
   if (type === 'rpc.opencode.goal.changed') {
     return { kind: 'goal-changed', sessionID, goal: toNativeGoal(data['goal']) };
   }
   return undefined;
+}
+
+/** The owning session for a request event: nested for `form.created`, flat otherwise. */
+function requestSessionID(data: Record<string, unknown>, type: string): string | undefined {
+  if (type === 'form.created') {
+    const form = data['form'];
+    if (isRecord(form) && typeof form['sessionID'] === 'string') return form['sessionID'];
+  }
+  const flat = data['sessionID'];
+  if (typeof flat === 'string') return flat;
+  // Be tolerant of servers that settle a form with the nested form payload too; never
+  // accept a malformed id, but do not lose a valid settlement because of shape drift.
+  const form = data['form'];
+  return isRecord(form) && typeof form['sessionID'] === 'string' ? form['sessionID'] : undefined;
 }
 
 export function readTokens(value: unknown): TokenUsage | undefined {

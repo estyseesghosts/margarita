@@ -31,6 +31,7 @@ const activityByCategory: Readonly<Record<ToolCategory, string>> = {
   search: 'Searching',
   edit: 'Editing',
   shell: 'Running',
+  code: 'Running script',
   web: 'Fetching',
   delegate: 'Delegating',
   other: 'Working',

@@ -1,3 +1,4 @@
+import { useTerminalDimensions } from '@opentui/solid';
 import type { Accessor } from 'solid-js';
 import { For, Match, Show, Switch } from 'solid-js';
 
@@ -10,6 +11,7 @@ import {
   type FormEditor,
   type FormField,
   type FormRequest,
+  multiChoices,
   visibleFields,
 } from '../domain/form.ts';
 import { type Goal, progress, type TaskState } from '../domain/goal-plan.ts';
@@ -17,8 +19,10 @@ import { actionHint, actionIDs, formatBinding, type Keymap } from '../domain/key
 import { formatModelRef } from '../domain/model-ref.ts';
 import type { NativeGoal } from '../domain/native-goal.ts';
 import { rewindTimeLabel } from '../domain/rewind.ts';
+import { sanitizeTerminalText } from '../domain/sanitize-text.ts';
 import type { SessionSummary, TokenUsage } from '../domain/session.ts';
 import { localCommands } from '../domain/slash-command.ts';
+import { completenessLabel } from '../domain/transcript.ts';
 import { formatCost, formatTokenCount } from '../domain/usage-format.ts';
 import type { Theme } from './theme.ts';
 
@@ -94,6 +98,77 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
           </text>
         </box>
       </Match>
+      <Match when={state.overlay.kind === 'inspector' ? state.overlay : undefined}>
+        {(overlay: Accessor<Extract<Overlay, { kind: 'inspector' }>>) => {
+          const dimensions = useTerminalDimensions();
+          const rows = () => Math.max(4, dimensions().height - 12);
+          const view = () => props.controller.inspectorView(rows());
+          const matches = () => props.controller.inspectorMatches();
+          const matchCount = () => matches().length;
+          const shown = () => view();
+          return (
+            <box
+              border
+              borderStyle="rounded"
+              borderColor={props.theme.border}
+              title={` Inspector · ${overlay().title} · Esc returns `}
+              flexDirection="column"
+              paddingLeft={1}
+              paddingRight={1}
+              flexGrow={1}
+              flexShrink={1}
+            >
+              <box flexDirection="row">
+                <text fg={props.theme.dim}>
+                  {`${view().total.toLocaleString()} lines · showing ${shown().offset + 1}–${shown().offset + shown().lines.length}`}
+                </text>
+                <text
+                  fg={props.theme.dim}
+                >{` · source: ${completenessLabel(overlay().payload?.completeness ?? 'complete')}`}</text>
+                <Show when={overlay().loading}>
+                  <text fg={props.theme.accent}>{' · fetching original…'}</text>
+                </Show>
+              </box>
+              <Show when={overlay().error}>
+                {(error: Accessor<string>) => <text fg={props.theme.warn}>{`  ${error()}`}</text>}
+              </Show>
+              <Show
+                when={overlay().query !== ''}
+                fallback={
+                  <text fg={props.theme.dim}>
+                    {'/ search · Enter next match · Ctrl+Y copy · Ctrl+S save'}
+                  </text>
+                }
+              >
+                <text fg={props.theme.accent}>
+                  {`/${overlay().query}  · ${matchCount()} ${matchCount() === 1 ? 'match' : 'matches'} · Enter next · Shift+Enter previous`}
+                </text>
+              </Show>
+              <box flexDirection="column" flexGrow={1} flexShrink={1}>
+                <For each={shown().lines}>
+                  {(line, index) => {
+                    const lineNumber = () => shown().offset + index() + 1;
+                    const isMatch = () => matches().includes(shown().offset + index());
+                    return (
+                      <box flexDirection="row">
+                        <text
+                          fg={props.theme.dim}
+                        >{`${lineNumber().toString().padStart(6)}  `}</text>
+                        <text fg={isMatch() ? props.theme.accent : props.theme.text}>
+                          {sanitizeTerminalText(line)}
+                        </text>
+                      </box>
+                    );
+                  }}
+                </For>
+                <Show when={view().total === 0}>
+                  <text fg={props.theme.dim}>{'  no retained text for this result'}</text>
+                </Show>
+              </box>
+            </box>
+          );
+        }}
+      </Match>
       <Match when={state.overlay.kind === 'usage'}>
         <box {...frame('Usage · session analytics')}>
           <text fg={props.theme.text}>
@@ -134,7 +209,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
             {`  tool turns ${usage().toolUsingTurns}/${usage().completedUserTurns} (${analyticsPercent(usage().toolTurnPercent)} of user turns) · tool calls ${usage().toolCalls}`}
           </text>
           <text fg={dim()}>
-            {`  read ${usage().toolCategories.read} · search ${usage().toolCategories.search} · edit ${usage().toolCategories.edit} · shell ${usage().toolCategories.shell} · web ${usage().toolCategories.web} · delegate ${usage().toolCategories.delegate} · MCP ${usage().toolCategories.mcp} · other ${usage().toolCategories.other}`}
+            {`  read ${usage().toolCategories.read} · search ${usage().toolCategories.search} · edit ${usage().toolCategories.edit} · shell ${usage().toolCategories.shell} · code ${usage().toolCategories.code} · web ${usage().toolCategories.web} · delegate ${usage().toolCategories.delegate} · MCP ${usage().toolCategories.mcp} · other ${usage().toolCategories.other}`}
           </text>
           <text fg={dim()}>
             {`  completed ${usage().toolCompleted} · failed ${usage().toolFailed} · running ${usage().toolRunning} · other ${usage().toolOther} · failure ${analyticsPercent(usage().toolFailurePercent)} of known outcomes`}
@@ -532,18 +607,29 @@ function FormDialog(props: { form: FormRequest; editor: FormEditor; theme: Theme
   const choices = () => {
     const current = field();
     if (current === undefined) return [];
-    if (current.kind === 'choice' || current.kind === 'multi') {
+    if (current.kind === 'choice') {
       const chosen = value();
       return current.options.map((option) => ({
         label: option.label,
         description: option.description,
-        checked: current.kind === 'multi' && Array.isArray(chosen) && chosen.includes(option.value),
+        checked: typeof chosen === 'string' && chosen === option.value,
+        custom: false,
+      }));
+    }
+    if (current.kind === 'multi') {
+      const raw = value();
+      const chosen: readonly string[] = Array.isArray(raw) ? raw : [];
+      return multiChoices(current, chosen).map((choice) => ({
+        label: choice.label,
+        description: choice.custom ? 'custom value' : undefined,
+        checked: chosen.includes(choice.value),
+        custom: choice.custom,
       }));
     }
     if (current.kind === 'boolean') {
       return [
-        { label: 'Yes', description: undefined, checked: false },
-        { label: 'No', description: undefined, checked: false },
+        { label: 'Yes', description: undefined, checked: false, custom: false },
+        { label: 'No', description: undefined, checked: false, custom: false },
       ];
     }
     return [];
@@ -553,8 +639,13 @@ function FormDialog(props: { form: FormRequest; editor: FormEditor; theme: Theme
     return (
       current?.kind === 'text' ||
       current?.kind === 'number' ||
-      (current?.kind === 'choice' && current.custom)
+      (current?.kind === 'choice' && current.custom) ||
+      (current?.kind === 'multi' && current.custom && props.editor.addingCustom === true)
     );
+  };
+  const customMulti = () => {
+    const current = field();
+    return current?.kind === 'multi' && current.custom ? current : undefined;
   };
   return (
     <box {...props.frame(`${props.form.title} · ${props.editor.index + 1}/${fields().length}`)}>
@@ -584,7 +675,11 @@ function FormDialog(props: { form: FormRequest; editor: FormEditor; theme: Theme
               }}
             </For>
             <Show when={typed()}>
-              <text fg={props.theme.text}>{`> ${props.editor.text}`}</text>
+              <text fg={props.theme.text}>
+                {`> ${
+                  current().kind === 'multi' ? (props.editor.customDraft ?? '') : props.editor.text
+                }`}
+              </text>
             </Show>
             <Show when={current().kind === 'external' ? current() : undefined}>
               {(external: Accessor<FormField & { kind: 'external' }>) => (
@@ -600,6 +695,9 @@ function FormDialog(props: { form: FormRequest; editor: FormEditor; theme: Theme
       <text fg={props.theme.dim}>
         Enter next · Shift+Tab back · ↑↓ choose · Space toggle · Esc later · Ctrl+X decline
       </text>
+      <Show when={customMulti()}>
+        <text fg={props.theme.dim}>a add custom value · x remove selected custom value</text>
+      </Show>
     </box>
   );
 }

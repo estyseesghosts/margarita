@@ -5,11 +5,18 @@ import {
   type AssistantPart,
   attachBackgroundNotices,
   backgroundHint,
+  boundedPreview,
+  boundedTailPreview,
   describeTool,
   foldTranscript,
   formatToolTiming,
   groupKey,
+  maxInlinePreviewRows,
   nodeIndexForTool,
+  prettyJson,
+  previewBudget,
+  semanticPreview,
+  semanticResultKind,
   type ToolCall,
   type TranscriptMessage,
   type TranscriptNode,
@@ -546,6 +553,98 @@ describe('MCP activity in compact groups (issue #74)', () => {
   });
 });
 
+const child = (
+  parentID: string,
+  index: number,
+  name: string,
+  status: ToolCall['status'] = 'completed',
+) => ({ id: `${parentID}:${index}`, parentID, index, name, status });
+
+const code = (
+  id: string,
+  children: ReturnType<typeof child>[] | undefined,
+  status: ToolCall['status'] = 'completed',
+): AssistantPart => ({
+  kind: 'tool',
+  tool: {
+    id,
+    name: 'execute',
+    status,
+    input: { code: 'await lotus.step_frame()' },
+    startedAt: 0,
+    ...(children === undefined ? {} : { children }),
+  },
+});
+
+describe('Code Mode child activity (#217)', () => {
+  test('four nested Lotus calls count as Lotus, not as a shell command', () => {
+    const nodes = foldTranscript(
+      [
+        assistant([
+          code(
+            'exec',
+            Array.from({ length: 4 }, (_, index) => child('exec', index, 'lotus.step_frame')),
+          ),
+        ]),
+      ],
+      withMcp(['lotus']),
+    );
+    expect(kinds(nodes)).toEqual(['group(1)']);
+    expect(summaryOf(nodes)).toBe('Called lotus 4 times');
+  });
+
+  test('mixed direct and nested activity counts each operation once', () => {
+    const nodes = foldTranscript(
+      [
+        assistant([
+          tool('r1', 'read'),
+          mcp('d1', 'lotus_get_issue'),
+          code('exec', [
+            child('exec', 0, 'lotus.step_frame'),
+            child('exec', 1, 'read'),
+            child('exec', 2, 'bash'),
+          ]),
+          tool('s1', 'bash'),
+        ]),
+      ],
+      withMcp(['lotus']),
+    );
+    expect(summaryOf(nodes)).toBe('Read 2 files, called lotus 2 times, ran 2 shell commands');
+  });
+
+  test('a failed child never folds out of sight, even when the parent completed', () => {
+    const nodes = foldTranscript(
+      [assistant([code('exec', [child('exec', 0, 'lotus.fail', 'error')])])],
+      withMcp(['lotus']),
+    );
+    expect(kinds(nodes)).toEqual(['tool']);
+    const entry = nodes[0];
+    expect(entry?.kind === 'tool' && entry.category).toBe('code');
+    expect(entry?.kind === 'tool' && entry.expanded).toBe(true);
+  });
+
+  test('compact live activity follows the running nested operation', () => {
+    const nodes = foldTranscript(
+      [
+        assistant([
+          code(
+            'exec',
+            [
+              child('exec', 0, 'lotus.step_frame', 'completed'),
+              child('exec', 1, 'lotus.get_issue', 'running'),
+            ],
+            'running',
+          ),
+        ]),
+      ],
+      withMcp(['lotus']),
+    );
+    const group = nodes[0];
+    expect(group?.kind === 'tool-group' && group.live?.text).toBe('lotus: get_issue');
+    expect(group?.kind === 'tool-group' && group.live?.shell).toBe(false);
+  });
+});
+
 describe('live action beneath a collapsed group (issue #75)', () => {
   test('a running shell command is the live line while collapsed', () => {
     const nodes = foldTranscript(
@@ -936,5 +1035,66 @@ describe('foldTranscript visible-text temporal invariant (#167, #168)', () => {
     // Reload/reconnect derives nodes from the same canonical messages, not cache state.
     expect(texts(foldTranscript([...messages], compact))).toEqual(compactTexts);
     expect(texts(foldTranscript(messages, detailed))).toEqual(compactTexts);
+  });
+});
+
+const previewLines = (count: number, prefix = 'line'): string =>
+  Array.from({ length: count }, (_, index) => `${prefix}${index}`).join('\n');
+
+describe('bounded preview policy (#219, #220)', () => {
+  test('detailed budgets are materially larger than compact and both stay bounded', () => {
+    for (const kind of ['output', 'shell', 'diff', 'code', 'reasoning'] as const) {
+      const compactBudget = previewBudget(kind, false);
+      const detailedBudget = previewBudget(kind, true);
+      expect(detailedBudget).toBeGreaterThan(compactBudget);
+      expect(detailedBudget).toBeLessThanOrEqual(maxInlinePreviewRows);
+      expect(previewBudget(kind, false, true)).toBe(maxInlinePreviewRows);
+    }
+  });
+
+  test('a 200-line log shows more rows in detailed mode, never all 200 inline', () => {
+    const text = previewLines(200);
+    const compactView = boundedPreview(text, previewBudget('output', false), 80);
+    const detailedView = boundedPreview(text, previewBudget('output', true), 80);
+    expect(compactView.text.split('\n')).toHaveLength(12);
+    expect(detailedView.text.split('\n')).toHaveLength(48);
+    expect(compactView.hiddenRows).toBe(188);
+    expect(detailedView.hiddenRows).toBe(152);
+    expect(detailedView.text).not.toContain('line199');
+  });
+
+  test('wrapped lines consume multiple rendered rows', () => {
+    const text = `${'x'.repeat(160)}\nshort`;
+    const bounded = boundedPreview(text, 4, 40);
+    expect(bounded.text).toBe('x'.repeat(160));
+    expect(bounded.hiddenRows).toBe(1);
+  });
+
+  test('tail preview keeps the diagnosis and counts the hidden head', () => {
+    const text = `${previewLines(50)}\nerror: cannot find module`;
+    const bounded = boundedTailPreview(text, 6, 80);
+    expect(bounded.text).toContain('error: cannot find module');
+    expect(bounded.text.split('\n')).toHaveLength(6);
+    expect(bounded.hiddenRows).toBe(45);
+  });
+
+  test('pretty JSON reformats valid objects and leaves invalid text alone', () => {
+    expect(prettyJson('{"a":1,"b":[2]}')).toBe('{\n  "a": 1,\n  "b": [\n    2\n  ]\n}');
+    expect(prettyJson('not json')).toBeUndefined();
+    expect(prettyJson('42')).toBeUndefined();
+  });
+
+  test('semantic previews pretty-print JSON but keep the source untouched', () => {
+    const call: ToolCall = {
+      id: 't1',
+      name: 'readMcpResource',
+      status: 'completed',
+      input: {},
+      output: '{"name":"resource","size":2}',
+      startedAt: 0,
+    };
+    expect(semanticResultKind(call)).toBe('json');
+    expect(semanticPreview(call).text).toContain('\n  "name": "resource"');
+    expect(call.output).toBe('{"name":"resource","size":2}');
   });
 });

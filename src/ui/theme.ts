@@ -15,6 +15,8 @@ export type Theme = Readonly<{
   agentPalette: readonly string[];
   border: string;
   selectionBg: string;
+  /** Opaque backdrop for full-screen overlays (the inspector). */
+  panelBg: string;
   addedBg: string;
   removedBg: string;
 }>;
@@ -34,6 +36,7 @@ const dark: Theme = {
   agentPalette: ['#e5a44a', '#6fd08c', '#e07b9a', '#7ab8c1'],
   border: '#5a5a5a',
   selectionBg: '#444466',
+  panelBg: '#101010',
   addedBg: '#1f3a26',
   removedBg: '#46232a',
 };
@@ -54,6 +57,7 @@ const light: Theme = {
   agentPalette: ['#8a4b00', '#226b3a', '#9c2b52', '#005f6b'],
   border: '#9a9a9a',
   selectionBg: '#d0d8f0',
+  panelBg: '#ffffff',
   addedBg: '#d6f0d6',
   removedBg: '#f6d5d9',
 };
@@ -74,6 +78,7 @@ const highContrast: Theme = {
   agentPalette: ['#ffff00', '#55ff55', '#ff5555', '#00aaff'],
   border: '#ffffff',
   selectionBg: '#0000aa',
+  panelBg: '#000000',
   addedBg: '#003300',
   removedBg: '#550000',
 };
@@ -93,6 +98,7 @@ const plain: Theme = {
   agentPalette: ['#ffffff'],
   border: '#ffffff',
   selectionBg: '#000000',
+  panelBg: '#000000',
   addedBg: '#000000',
   removedBg: '#000000',
 };

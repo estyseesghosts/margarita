@@ -20,6 +20,8 @@ export const actionIDs = [
   'transcript.bottom',
   'transcript.groupPrevious',
   'transcript.groupNext',
+  'transcript.inspect',
+  'form.open',
   'history.search',
   'composer.stash',
   'composer.editor',
@@ -68,6 +70,11 @@ export const defaultBindings: Readonly<Record<ActionID, readonly string[]>> = {
   'transcript.bottom': ['ctrl+end'],
   'transcript.groupPrevious': ['ctrl+up'],
   'transcript.groupNext': ['ctrl+down'],
+  // Plain `i` only opens the inspector for a focused row with an empty composer; otherwise
+  // the router lets it type normally (#222).
+  'transcript.inspect': ['i'],
+  // Alt+Q opens the pending agent question without disturbing a nonempty draft.
+  'form.open': ['alt+q'],
   'history.search': ['ctrl+r'],
   'composer.stash': ['ctrl+s'],
   'composer.editor': ['ctrl+g'],

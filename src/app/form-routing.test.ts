@@ -29,7 +29,9 @@ function form(title: string): FormRequest {
     id: formID,
     sessionID,
     title,
-    fields: [{ kind: 'text', key: 'answer', title: 'Answer', required: false, when: [] }],
+    fields: [
+      { kind: 'text', key: 'answer', title: 'Answer', required: false, hidden: false, when: [] },
+    ],
   };
 }
 
@@ -233,6 +235,56 @@ describe('form reply ownership (issue #171)', () => {
     held.resolve([form('stale')]);
     await flush();
     expect(controller.state.forms[remoteKey]).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('a failed form listing never hides a permission retrieved independently (#214)', async () => {
+    const { controller, local } = harness();
+    local.permissions = [{ id: 'perm_1', sessionID, action: 'shell', resources: [], save: [] }];
+    local.forms = [];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    local.listForms = async () => {
+      throw new BackendError('transport', 'session.form.list', 'offline');
+    };
+    controller.onEvents('local', [{ kind: 'input-requests-changed', sessionID }], false);
+    await flush();
+    expect(controller.pendingPermission()?.id).toBe('perm_1');
+    expect(controller.state.requestErrors[sessionID]?.forms).toContain('offline');
+    expect(controller.state.requestErrors[sessionID]?.permissions).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('a global MCP elicitation is surfaced and answered on its real session (#209)', async () => {
+    const { controller, local } = harness();
+    local.forms = [{ ...form('global question'), id: 'form_global', sessionID: 'global' }];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    expect(controller.pendingForm()?.id).toBe('form_global');
+    controller.openForm();
+    controller.formKey(submit);
+    await flush();
+    const reply = local.calls.find((call) => call.name === 'replyForm');
+    expect(reply?.args[0]).toBe('global');
+    expect(controller.state.forms[sessionID]).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('a text paste lands in the active question field, not the composer (#210)', async () => {
+    const { controller, local } = harness();
+    local.forms = [form('paste target')];
+    await controller.bootstrap();
+    controller.openSession(sessionID, 'local');
+    await flush();
+    controller.openForm();
+    await controller.pasteBytes(new TextEncoder().encode('line one\nline two'));
+    expect(controller.state.overlay.kind === 'form' && controller.state.overlay.editor.text).toBe(
+      'line one\nline two',
+    );
+    expect(controller.state.composer.text).toBe('');
+    expect(local.calls.filter((call) => call.name === 'replyForm')).toHaveLength(0);
     controller.dispose();
   });
 });
