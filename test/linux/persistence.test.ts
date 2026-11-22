@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { acquireFileLock, InvalidLockError, LockTimeoutError } from '../../src/config/file-lock.ts';
 import { emptyState, loadState, saveState } from '../../src/config/local-state.ts';
 import { appPaths } from '../../src/config/paths.ts';
 
@@ -106,6 +107,48 @@ describe.skipIf(process.platform === 'win32')('cross-process state writes (#185)
     expect(await next.exited).toBe(0);
     expect((await loadState(path)).state.history['/after']).toHaveLength(3);
   }, 60_000);
+
+  test('a held lock times out with guidance and the persistent path is not removed', async () => {
+    const dir = await temp();
+    const lockPath = join(dir, 'state.json.lock');
+    const first = await acquireFileLock(lockPath, { timeoutMs: 200 });
+    let timedOut: unknown;
+    try {
+      await acquireFileLock(lockPath, { timeoutMs: 50, retryMs: 5 });
+    } catch (error) {
+      timedOut = error;
+    }
+    expect(timedOut).toBeInstanceOf(LockTimeoutError);
+    expect(existsSync(lockPath)).toBe(true);
+    await first.release();
+    const next = await acquireFileLock(lockPath, { timeoutMs: 200 });
+    await next.release();
+  }, 30_000);
+
+  test('legacy or partial lock files are reported, never silently deleted (#185)', async () => {
+    const dir = await temp();
+    const lockPath = join(dir, 'state.json.lock');
+    await writeFile(lockPath, 'legacy lock from an older writer');
+    let legacyError: unknown;
+    try {
+      await acquireFileLock(lockPath, { timeoutMs: 50 });
+    } catch (error) {
+      legacyError = error;
+    }
+    expect(legacyError).toBeInstanceOf(InvalidLockError);
+    expect(legacyError instanceof Error ? legacyError.message : '').toContain('remove this lock');
+    expect(await readFile(lockPath, 'utf8')).toBe('legacy lock from an older writer');
+
+    await writeFile(lockPath, '');
+    let partialError: unknown;
+    try {
+      await acquireFileLock(lockPath, { timeoutMs: 50 });
+    } catch (error) {
+      partialError = error;
+    }
+    expect(partialError).toBeInstanceOf(InvalidLockError);
+    expect((await stat(lockPath)).size).toBe(0);
+  }, 30_000);
 });
 
 describe.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
@@ -154,13 +197,13 @@ describe.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
 const tinyDir = process.env['MARGARITA_TINY_DIR'];
 describe.skipIf(tinyDir === undefined)('low disk space (#185)', () => {
   test('a failed save on a full filesystem is reported and the previous state survives', async () => {
-    const { mkdir, writeFile } = await import('node:fs/promises');
+    const { mkdir, writeFile: writeBallast } = await import('node:fs/promises');
     const dir = join(tinyDir ?? '', `case-${Date.now()}`);
     dirs.push(dir);
     await mkdir(dir);
     const path = join(dir, 'state.json');
     await saveState(path, { ...emptyState, history: { '/p': ['kept'] } });
-    await writeFile(join(dir, 'ballast'), Buffer.alloc(200 * 1024)).catch(() => undefined);
+    await writeBallast(join(dir, 'ballast'), Buffer.alloc(200 * 1024)).catch(() => undefined);
     let failed = false;
     try {
       await saveState(path, { ...emptyState, history: { '/p': ['x'.repeat(100_000)] } });
