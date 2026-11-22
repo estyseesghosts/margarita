@@ -81,7 +81,7 @@ Legend: **origin** = value captured before the first `await` (a `SessionRef`/`se
 | 5493 | `finishForm` | 2 | `backendFor(origin.serverID)` | `state.overlay` | reviewed by reading: safe · route/overlay/session reads happen synchronously before the first `await`; later calls use the captured owner |
 | 5831 | `refreshRewindPreview` | 1 | `backendFor(overlay.serverID)` | `state.overlay` | reviewed by reading: safe · post-await route reads are comparisons against the captured origin (guards); stale results are dropped |
 | 5856 | `acceptRewindPicker` | 1 | – | `state.overlay` | reviewed by reading: safe · route/overlay/session reads happen synchronously before the first `await`; later calls use the captured owner |
-| 5933 | `loadGoal` | 1 | – | `activeServerID()` | reviewed by reading: safe · route/overlay/session reads happen synchronously before the first `await`; later calls use the captured owner |
+| 5933 | `loadGoal` | 1 | – | `activeServerID()` | fixed (#278): session lifetime + goal revision captured before the store read; a deleted/reused ID or newer local commit rejects the snapshot · test: controller.test |
 | 5961 | `changeGoal` | 2 | – | `currentSession()` | reviewed by reading: safe · route/overlay/session reads happen synchronously before the first `await`; later calls use the captured owner |
 | 5997 | `applyGoalChange` | 1 | – | – | safe (pattern): no backend selection |
 | 6039 | `planCommand` | 6 | – | – | safe (pattern): no backend selection |
@@ -111,6 +111,7 @@ Legend: **origin** = value captured before the first `await` (a `SessionRef`/`se
 | #253 an older confirmed-agent cache outranked a newer external switch, and survived deletion | fixed with evidence + transcript watermark and lifetime-scoped caches; regression tests in `controller.test.ts` |
 | #272 a summary snapshot could roll back a live usage event received while it was in flight | fixed with a per-session usage-event watermark; summaries and session listings preserve the newer cost/tokens; regression test in `async-audit-regressions.test.ts` |
 | #275 a resync marked the newly attached route's transcript stale, and an older resync could act after a newer one | fixed with a per-host resync generation plus per-session commit watermarks; detached transcripts become stale, refreshed attached ones stay fresh; regression tests in `async-audit-regressions.test.ts` |
+| #278 a held goal-store read could apply an old lifetime's goal to a deleted/recreated session | fixed by capturing the session lifetime and goal revision at admission; regression tests in `controller.test.ts` |
 | `this.backend` is a getter over the *current route's* server | intentional; every post-`await` use in the file goes through `backendFor(owner)`; `interrupt` and `rename` were made explicit as hardening |
 
 ## Ownership policy (intentional behaviour)

@@ -7545,14 +7545,23 @@ export class AppController {
     serverID: string = this.activeServerID(),
   ): Promise<void> {
     const key = this.keyFor(serverID, sessionID);
+    // Capture the lifetime and the last goal revision admitted *before* the read. A session
+    // deleted and recreated under the same ID has a new epoch, and any newer local commit
+    // supersedes this snapshot even when its revision number happens to match (#278).
+    const epoch = this.sessionEpoch(key);
     const existed = this.state.sessions[key] !== undefined;
+    const revisionAtStart = this.goalRevisions.get(key);
     try {
       const doc = await this.goalStore.load({ serverID, sessionID });
       if (doc === undefined || this.disposed) return;
-      // A session deleted or unpaired while the read was in flight must not be resurrected.
+      if (!this.isSessionCurrent(key, epoch)) return;
+      // A new-session read is allowed while the session is still unindexed; it is rejected
+      // once the lifetime changed or a local/newer goal state was committed meanwhile.
       if (existed && this.state.sessions[key] === undefined) return;
+      if (this.goalRevisions.get(key) !== revisionAtStart) return;
       this.commitGoalUI(key, doc);
     } catch (error) {
+      if (!this.isSessionCurrent(key, epoch)) return;
       this.showNotice(`Goal file unreadable: ${errorText(error)}`, 'warn');
     }
   }

@@ -6425,4 +6425,59 @@ describe('monotonic goal plan UI state (#161)', () => {
     expect(controller.state.goals['ses_a']).toBeUndefined();
     controller.dispose();
   });
+
+  test('a read from a deleted lifetime cannot appear in the same-ID replacement (#278)', async () => {
+    const first = deferred<ReturnType<typeof revDoc>>();
+    let loads = 0;
+    const store: GoalStore = {
+      load: () => {
+        loads += 1;
+        return loads === 1 ? first.promise : Promise.resolve(revDoc(0, 'new lifetime'));
+      },
+      save: async (doc) => ({ ...doc, revision: doc.revision + 1 }),
+    };
+    const controller = goalController(store);
+    await attach(controller, 'ses_a');
+    controller.onEvents('local', [{ kind: 'session-deleted', sessionID: 'ses_a' }], false);
+    // The server re-lists the same ID as a new lifetime.
+    await controller.loadSessions('local');
+    controller.openSession('ses_a', 'local');
+    await flush();
+    expect(controller.state.goals['ses_a']?.goal?.title).toBe('new lifetime');
+    expect(controller.state.goals['ses_a']?.revision).toBe(0);
+
+    first.resolve(revDoc(5, 'old lifetime'));
+    await flush();
+    expect(controller.state.goals['ses_a']?.goal?.title).toBe('new lifetime');
+    expect(controller.state.goals['ses_a']?.revision).toBe(0);
+    controller.dispose();
+  });
+
+  test('an unindexed new session still loads its local goal draft (#278)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [];
+    const store: GoalStore = {
+      load: async () => revDoc(0, 'draft'),
+      save: async (doc) => ({ ...doc, revision: doc.revision + 1 }),
+    };
+    const controller = new AppController({
+      backend,
+      config: defaultConfig,
+      localState: emptyState,
+      platform: 'linux',
+      cwd: '/work/kohjoh',
+      version: '0.0.1',
+      now: () => 10_000,
+      saveLocalState: async () => {},
+      listFiles: () => Promise.resolve([]),
+      requestExit: () => {},
+      goalStore: store,
+    });
+    await controller.bootstrap();
+    controller.openSession('ses_new', 'local');
+    await flush();
+    expect(controller.state.sessions['ses_new']).toBeUndefined();
+    expect(controller.state.goals['ses_new']?.goal?.title).toBe('draft');
+    controller.dispose();
+  });
 });
