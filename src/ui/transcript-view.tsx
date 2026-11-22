@@ -722,25 +722,49 @@ function NodeView(props: {
       </Match>
       <Match when={props.node.kind === 'tool' ? props.node : undefined}>
         {(node: Accessor<NodeOf<'tool'>>) => (
-          <ToolView
-            tool={node().tool}
-            expanded={node().expanded}
-            detailed={props.detailed}
-            theme={theme()}
-            syntax={props.syntax}
-            width={props.width}
-            focused={props.focused}
-            mcpServers={props.mcpServers}
-            childPagePreviousKey={props.childPagePreviousKey}
-            childPageNextKey={props.childPageNextKey}
-            childPageFor={props.childPageFor}
-            userExpanded={node().userExpanded === true}
-            onActivate={
-              !props.detailed && hasOversizedDiff(node().tool)
-                ? () => props.controller.toggleDiffExpanded(node().tool.id)
-                : undefined
+          <Show
+            when={
+              !props.detailed &&
+              !node().expanded &&
+              !isEditLike(node().tool) &&
+              !hasOversizedDiff(node().tool)
             }
-          />
+            fallback={
+              <ToolView
+                tool={node().tool}
+                expanded={node().expanded}
+                detailed={props.detailed}
+                theme={theme()}
+                syntax={props.syntax}
+                width={props.width}
+                focused={props.focused}
+                mcpServers={props.mcpServers}
+                childPagePreviousKey={props.childPagePreviousKey}
+                childPageNextKey={props.childPageNextKey}
+                childPageFor={props.childPageFor}
+                userExpanded={node().userExpanded === true}
+                onActivate={
+                  !props.detailed && hasOversizedDiff(node().tool)
+                    ? () => props.controller.toggleDiffExpanded(node().tool.id)
+                    : undefined
+                }
+              />
+            }
+          >
+            <ToolDisclosure
+              controller={props.controller}
+              tool={node().tool}
+              detailed={props.detailed}
+              theme={theme()}
+              syntax={props.syntax}
+              width={props.width}
+              focused={props.controller.state.focusedGroup === `tool:${node().tool.id}`}
+              mcpServers={props.mcpServers}
+              childPagePreviousKey={props.childPagePreviousKey}
+              childPageNextKey={props.childPageNextKey}
+              childPageFor={props.childPageFor}
+            />
+          </Show>
         )}
       </Match>
       <Match when={props.node.kind === 'tool-group' ? props.node : undefined}>

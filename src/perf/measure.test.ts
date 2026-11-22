@@ -62,4 +62,17 @@ describe('performance measurement helpers (#282)', () => {
     expect(stats.count).toBe(3);
     expect(stats.p50Ms).toBe(3);
   });
+
+  test('a deliberately inserted 100 ms stage is visible in every sample (#301)', async () => {
+    const stats = await sampleOperation(
+      async () => {
+        await Bun.sleep(100);
+      },
+      3,
+      0,
+    );
+    expect(stats.count).toBe(3);
+    expect(stats.minMs).toBeGreaterThanOrEqual(90);
+    expect(stats.p50Ms).toBeGreaterThanOrEqual(90);
+  });
 });

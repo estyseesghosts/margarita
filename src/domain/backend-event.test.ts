@@ -55,6 +55,18 @@ describe('normalizeEvent', () => {
       jobs: true,
     });
   });
+
+  test('a tool call asks for an immediate and one deferred job probe (#297)', () => {
+    expect(normalizeEvent({ type: 'session.tool.called', data: { sessionID: 's' } })).toEqual({
+      kind: 'transcript-changed',
+      sessionID: 's',
+      jobProbe: true,
+    });
+    expect(normalizeEvent({ type: 'session.tool.progress', data: { sessionID: 's' } })).toEqual({
+      kind: 'transcript-changed',
+      sessionID: 's',
+    });
+  });
   test('permission events', () => {
     expect(normalizeEvent({ type: 'permission.asked', data: { sessionID: 's' } })).toEqual({
       kind: 'input-requests-changed',

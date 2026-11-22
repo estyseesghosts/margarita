@@ -56,7 +56,7 @@ import {
 } from '../domain/composer.ts';
 import { type Copyable, copyableFromMessages } from '../domain/copyable.ts';
 import { type DiffScope, type FileDiff, patchLinesFor, turnStart } from '../domain/diff.ts';
-import { hasOversizedDiff } from '../domain/edit-diff.ts';
+import { hasOversizedDiff, isEditLike } from '../domain/edit-diff.ts';
 import { projectExecution } from '../domain/execution.ts';
 import {
   activeMention,
@@ -287,6 +287,16 @@ export type ConversationView = Readonly<{
 export type CopyResult = Readonly<{ method: 'clipboard' | 'file'; path?: string }>;
 
 /**
+ * A local project listing plus whether the scan covered the whole tree. `detail` is a
+ * user-facing, path-redacted reason for incompleteness (#300).
+ */
+export type ProjectFileListing = Readonly<{
+  files: readonly string[];
+  complete: boolean;
+  detail?: string;
+}>;
+
+/**
  * Route/draft identity captured before suspending the renderer for the external editor
  * (#271). Applying a late result is allowed only while this owner and draft still match.
  */
@@ -335,7 +345,12 @@ export type ControllerDeps = Readonly<{
   version: string;
   now: () => number;
   saveLocalState: (state: LocalState) => Promise<SaveResult | void>;
-  listFiles: (root: string) => Promise<string[]>;
+  /**
+   * Local project listing. A plain string array is treated as a complete authoritative scan;
+   * a listing carries completeness so the controller can keep partial candidates retryable
+   * instead of caching them forever (#300).
+   */
+  listFiles: (root: string) => Promise<string[] | ProjectFileListing>;
   /**
    * True when the connection has no shared filesystem with the server (explicit remote
    * URL). Remote mentions are resolved via the server's file APIs instead of Bun.file.
@@ -399,6 +414,14 @@ const reconcileConcurrency = 8;
 const ancestryVerifyConcurrency = 4;
 const ancestryVerifyTimeoutMs = 2_000;
 const ancestryVerifyBudgetMs = 4_000;
+/**
+ * Partial @file scans stay usable but are not authoritative forever. Retry delays grow so
+ * persistent EACCES/deadline failures do not scan once per keystroke (#300).
+ */
+const incompleteFileRetryBaseMs = 2_000;
+const incompleteFileRetryMaxMs = 60_000;
+/** One delayed job-list probe after a tool call, to catch asynchronous job registration. */
+const jobStartProbeDelayMs = 300;
 const exportPageSize = 500;
 /** Lines a diff patch scrolls per PageUp/PageDown; matches the rendered window. */
 export const diffPageLines = 18;
@@ -548,6 +571,7 @@ export class AppController {
   /** Single-flight coalescing for worker/shell refreshes (#284). */
   private readonly jobRefreshes = new Map<string, Promise<void>>();
   private readonly jobRefreshDirty = new Set<string>();
+  private readonly jobStartProbes = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly transcriptJobsDirty = new Set<string>();
   private readonly debugLog: DebugLog;
 
@@ -566,16 +590,29 @@ export class AppController {
   }): void {
     this.debugLog.write('keypress', event);
   }
-  private fileCache: { root: string; files: string[] } | undefined;
-  private readonly fileScans = new Map<string, Promise<string[]>>();
+  private fileCache:
+    | {
+        key: string;
+        files: string[];
+        complete: boolean;
+        scannedAt: number;
+        failures: number;
+        detail?: string;
+      }
+    | undefined;
+  private readonly fileScans = new Map<string, Promise<ProjectFileListing>>();
   private completionRequest = 0;
   /** Bumped whenever the completion context changes (route, project, tab or server), so an
    * in-flight file scan can be rejected even when its directory string and mention did not. */
   private completionGeneration = 0;
   private disposed = false;
   private persisted: LocalState;
-  /** Bumped by every composer write; lets an editor result detect intervening edits (#271). */
-  private composerRevision = 0;
+  /**
+   * Per-route draft edit generations. A route keeps its revision while it is parked, so editing
+   * a different route cannot invalidate an untouched draft. Restoring a draft does not bump it;
+   * every content/cursor/attachment edit does (#299).
+   */
+  private readonly draftRevisions = new Map<string, number>();
   private editorRecoverySeq = 0;
   /** Canonical per-scope pin operations, kept in sync with the latest merged disk state. */
   private pinOperations: Readonly<Record<string, PinnedModelOperation>>;
@@ -664,6 +701,8 @@ export class AppController {
     this.summaryTimers.clear();
     for (const timer of this.transcriptRetryTimers.values()) clearTimeout(timer);
     this.transcriptRetryTimers.clear();
+    for (const timer of this.jobStartProbes.values()) clearTimeout(timer);
+    this.jobStartProbes.clear();
   }
 
   /**
@@ -1628,6 +1667,7 @@ export class AppController {
       this.transcriptRetryTimers.delete(retryKey);
     }
     this.transcriptRetryAttempts.delete(retryKey);
+    this.clearJobStartProbe(key);
     const expansionPrefix = `${key} `;
     this.setState(
       produce((state) => {
@@ -1990,6 +2030,9 @@ export class AppController {
     for (const key of this.jobRefreshEpoch.keys()) {
       if (parseSessionKey(key).serverID === serverID) this.invalidateJobRefresh(key);
     }
+    for (const key of this.jobStartProbes.keys()) {
+      if (parseSessionKey(key).serverID === serverID) this.clearJobStartProbe(key);
+    }
     this.setState(
       produce((state) => {
         for (const key of Object.keys(state.backgrounded)) {
@@ -2144,9 +2187,14 @@ export class AppController {
       case 'transcript-changed':
         if (this.state.sessions[this.keyFor(serverID, event.sessionID)] === undefined)
           this.scheduleSummary(event.sessionID, serverID);
-        if (attached === event.sessionID)
-          this.scheduleTranscript(event.sessionID, serverID, event.jobs === true);
-        else this.markStale(event.sessionID, serverID);
+        if (attached === event.sessionID) {
+          this.scheduleTranscript(
+            event.sessionID,
+            serverID,
+            event.jobs === true || event.jobProbe === true,
+          );
+          if (event.jobProbe === true) this.scheduleJobStartProbe(event.sessionID, serverID);
+        } else this.markStale(event.sessionID, serverID);
         return;
       case 'inbox-changed':
         if (attached === event.sessionID)
@@ -2837,6 +2885,30 @@ export class AppController {
     void this.track('jobs', run);
   }
 
+  /**
+   * A tool call can create a worker slightly after its event. Probe once after a short delay
+   * in addition to the immediate hint; later calls coalesce into the pending probe (#297).
+   */
+  private scheduleJobStartProbe(sessionID: string, serverID: string = this.activeServerID()): void {
+    const key = this.keyFor(serverID, sessionID);
+    if (this.jobStartProbes.has(key)) return;
+    const timer = setTimeout(() => {
+      this.jobStartProbes.delete(key);
+      if (this.disposed) return;
+      if (!this.serverIDs().includes(serverID)) return;
+      if (this.state.sessions[key] === undefined) return;
+      this.scheduleJobRefresh(sessionID, serverID);
+    }, jobStartProbeDelayMs);
+    this.jobStartProbes.set(key, timer);
+  }
+
+  private clearJobStartProbe(key: string): void {
+    const timer = this.jobStartProbes.get(key);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.jobStartProbes.delete(key);
+  }
+
   /** Throttled canonical refetch: at most one request in flight per session. */
   private scheduleTranscript(
     sessionID: string,
@@ -3284,7 +3356,7 @@ export class AppController {
       this.setState('overlay', { kind: 'none' });
       this.setState('completion', undefined);
       this.setState('focusedGroup', undefined);
-      this.writeComposer(this.state.drafts['overview'] ?? emptyComposer);
+      this.writeComposer(this.state.drafts['overview'] ?? emptyComposer, false);
       this.setState('attachments', [...(this.state.draftAttachments['overview'] ?? [])]);
       this.setState('overview', 'project', project);
       // Keep the selection on the project we came from instead of jumping to whatever
@@ -3319,9 +3391,16 @@ export class AppController {
    * Replaces the composer with a fresh object. A path setter would shallow-merge into
    * the stored object, which may be shared (a draft, or the `emptyComposer` constant).
    */
-  private writeComposer(composer: Composer): void {
-    this.composerRevision += 1;
+  private writeComposer(composer: Composer, draftEdit = true): void {
+    if (draftEdit) {
+      const key = this.routeKey(this.state.route);
+      this.draftRevisions.set(key, this.draftRevision(key) + 1);
+    }
     this.setState({ composer: { ...composer } });
+  }
+
+  private draftRevision(key: string): number {
+    return this.draftRevisions.get(key) ?? 0;
   }
 
   private saveDraft(): void {
@@ -3350,7 +3429,7 @@ export class AppController {
   /** Restores a route's saved text and its attachments together. */
   private restoreDraft(key: string): void {
     batch(() => {
-      this.writeComposer(this.state.drafts[key] ?? emptyComposer);
+      this.writeComposer(this.state.drafts[key] ?? emptyComposer, false);
       this.setState('attachments', [...(this.state.draftAttachments[key] ?? [])]);
     });
   }
@@ -3924,7 +4003,7 @@ export class AppController {
       text: this.state.composer.text,
       cursor: this.state.composer.cursor,
       attachmentIDs: this.state.attachments.map((attachment) => attachment.id),
-      revision: this.composerRevision,
+      revision: this.draftRevision(key),
     };
   }
 
@@ -3939,7 +4018,11 @@ export class AppController {
   ): Promise<'composer' | 'draft' | 'recovery'> {
     const currentKey = this.routeKey(this.state.route);
     if (currentKey === origin.routeKey) {
-      if (this.matchesEditOrigin(this.state.composer, this.state.attachments, origin)) {
+      if (
+        this.originStillExists(origin) &&
+        this.draftRevision(origin.routeKey) === origin.revision &&
+        this.matchesEditOrigin(this.state.composer, this.state.attachments, origin)
+      ) {
         this.setComposer(composerFrom(text));
         return 'composer';
       }
@@ -3948,7 +4031,11 @@ export class AppController {
     }
     const draft = this.state.drafts[origin.routeKey] ?? emptyComposer;
     const attachments = this.state.draftAttachments[origin.routeKey] ?? [];
-    if (this.originStillExists(origin) && this.matchesEditOrigin(draft, attachments, origin)) {
+    if (
+      this.originStillExists(origin) &&
+      this.draftRevision(origin.routeKey) === origin.revision &&
+      this.matchesEditOrigin(draft, attachments, origin)
+    ) {
       this.setState('drafts', origin.routeKey, composerFrom(text));
       this.showNotice(`External edit saved to the ${origin.label} draft.`, 'dim');
       return 'draft';
@@ -4064,7 +4151,7 @@ export class AppController {
       ? await this.backendFor(serverID)
           .findProjectFiles(root, partial, 50)
           .catch(() => [] as string[]) // best-effort completion; unreadable server is silent here
-      : await this.filesFor(root);
+      : (await this.filesFor(root, serverID)).files;
     const mention = activeMention(this.state.composer.text, this.state.composer.cursor);
     if (
       request !== this.completionRequest || // a newer mention superseded this one
@@ -4110,24 +4197,57 @@ export class AppController {
   }
 
   /**
-   * Shared, single-flight scan per directory. Concurrent mentions during one scan all await the
-   * same traversal; the result is cached per root until the project changes.
+   * Shared, single-flight scan per host-qualified directory. Concurrent mentions during one
+   * scan all await the same traversal. Complete results are authoritative; incomplete results
+   * retain their partial matches but become retryable after a bounded backoff (#300).
    */
-  private filesFor(root: string): Promise<string[]> {
+  private filesFor(root: string, serverID: string): Promise<ProjectFileListing> {
+    const key = `${serverID}\u0000${root}`;
     const cache = this.fileCache;
-    if (cache?.root === root) return Promise.resolve(cache.files);
-    const existing = this.fileScans.get(root);
+    if (cache?.key === key) {
+      const notBefore =
+        cache.scannedAt +
+        Math.min(
+          incompleteFileRetryMaxMs,
+          incompleteFileRetryBaseMs * 2 ** Math.max(0, cache.failures - 1),
+        );
+      if (cache.complete || this.deps.now() < notBefore) {
+        return Promise.resolve({
+          files: cache.files,
+          complete: cache.complete,
+          ...(cache.detail === undefined ? {} : { detail: cache.detail }),
+        });
+      }
+    }
+    const existing = this.fileScans.get(key);
     if (existing !== undefined) return existing;
     const work = this.deps
       .listFiles(root)
-      .then((files) => {
-        this.fileCache = { root, files };
-        return files;
+      .then((result) => {
+        const listing = Array.isArray(result) ? { files: result, complete: true } : result;
+        const previous = this.fileCache?.key === key ? this.fileCache : undefined;
+        const detail =
+          listing.complete || listing.detail !== undefined
+            ? listing.detail
+            : 'scan did not cover the whole project';
+        this.fileCache = {
+          key,
+          files: [...listing.files],
+          complete: listing.complete,
+          scannedAt: this.deps.now(),
+          failures: listing.complete ? 0 : (previous?.failures ?? 0) + 1,
+          ...(detail === undefined ? {} : { detail }),
+        };
+        return {
+          files: this.fileCache.files,
+          complete: this.fileCache.complete,
+          ...(detail === undefined ? {} : { detail }),
+        };
       })
       .finally(() => {
-        this.fileScans.delete(root);
+        this.fileScans.delete(key);
       });
-    this.fileScans.set(root, work);
+    this.fileScans.set(key, work);
     return work;
   }
 
@@ -5449,6 +5569,9 @@ export class AppController {
     }
     for (const key of this.jobRefreshEpoch.keys()) {
       if (parseSessionKey(key).serverID === serverID) this.invalidateJobRefresh(key);
+    }
+    for (const key of this.jobStartProbes.keys()) {
+      if (parseSessionKey(key).serverID === serverID) this.clearJobStartProbe(key);
     }
     // Retire every session lifetime for the host and drop selection caches keyed to it, so
     // an unpair/re-pair cannot resurrect a late summary, transcript or switch (#252, #253).
@@ -7477,11 +7600,15 @@ export class AppController {
         }
         if (this.state.detailed) return [];
         if (node.kind === 'tool') {
-          // Standalone compact failures stay expanded and standalone edits keep their
-          // inline diff; only oversized diffs are a disclosure target there (#281).
-          return node.tool.status !== 'error' && hasOversizedDiff(node.tool)
-            ? [{ key: `diff:${node.tool.id}`, kind: 'diff' as const }]
-            : [];
+          // Failures stay expanded and edits keep their inline diff. Other standalone calls
+          // (notably delegated task/agent tools) get the same local disclosure as grouped
+          // rows, without requiring global detailed mode (#298).
+          if (node.expanded || isEditLike(node.tool)) {
+            return hasOversizedDiff(node.tool)
+              ? [{ key: `diff:${node.tool.id}`, kind: 'diff' as const }]
+              : [];
+          }
+          return [{ key: `tool:${node.tool.id}`, kind: 'tool' as const }];
         }
         if (node.kind === 'tool-group') {
           const group = [{ key: node.key, kind: 'group' as const }];

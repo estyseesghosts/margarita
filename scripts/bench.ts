@@ -12,8 +12,12 @@
  */
 
 import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 
+import type { SessionMessageInfo } from '@opencode/client';
+
+import { toTranscriptMessage } from '../src/adapter/wire-mapping.ts';
+import { mergeLatest } from '../src/app/controller.ts';
 import {
   caretPaint,
   composerFrom,
@@ -200,7 +204,7 @@ async function memoryReport(): Promise<unknown> {
   };
 }
 
-function scenarios(): Scenario[] {
+async function scenarios(): Promise<Scenario[]> {
   const sizes = smoke ? [120] : [120, 1000, 10_000];
   const result: Scenario[] = [];
   for (const size of sizes) {
@@ -208,7 +212,7 @@ function scenarios(): Scenario[] {
     result.push({
       name: 'foldTranscript',
       size,
-      iterations: smoke ? 1 : size >= 10_000 ? 3 : 8,
+      iterations: smoke ? 1 : 30,
       run: () =>
         foldTranscript(messages, {
           detailed: false,
@@ -232,7 +236,7 @@ function scenarios(): Scenario[] {
     result.push({
       name: 'projectorTailUpdate',
       size,
-      iterations: smoke ? 1 : size >= 10_000 ? 3 : 8,
+      iterations: smoke ? 1 : 30,
       run: () => {
         updateSerial += 1;
         const index = projected.findLastIndex((message) => message.kind === 'assistant');
@@ -251,10 +255,45 @@ function scenarios(): Scenario[] {
       note: 'one appended assistant part in the newest turn',
       detail: () => projector.lastStats(),
     });
+    const pageSize = Math.min(120, messages.length);
+    const pageProjector = createTranscriptProjector();
+    let pageHistory = messages;
+    pageProjector.project(pageHistory, { ...foldOptions, markers: markersFor(pageHistory) });
+    let pageObjectsRecreated = 0;
+    result.push({
+      name: 'livePageReconcile',
+      size,
+      iterations: smoke ? 1 : 30,
+      run: () => {
+        // A real latest-page fetch yields fresh DTO objects. Clone the page content into new
+        // objects, change only its tail, then reconcile and project exactly as a streamed
+        // update does (#301).
+        const page = structuredClone(pageHistory.slice(-pageSize));
+        const index = page.findLastIndex((message) => message.kind === 'assistant');
+        const target = page[index];
+        if (target?.kind === 'assistant') {
+          page[index] = {
+            ...target,
+            parts: [...target.parts, { kind: 'text', text: `refreshed ${updateSerial++}` }],
+          };
+        }
+        const next = mergeLatest(pageHistory, page);
+        pageObjectsRecreated = page.length;
+        pageHistory = next;
+        return pageProjector.project(next, { ...foldOptions, markers: markersFor(next) });
+      },
+      note: 'fresh 120-message page objects through mergeLatest and the projector',
+      detail: () => ({
+        ...pageProjector.lastStats(),
+        pageSize,
+        pageObjectsRecreated,
+        pageObjectsReused: 0,
+      }),
+    });
     result.push({
       name: 'projectUsage',
       size,
-      iterations: smoke ? 1 : size >= 10_000 ? 3 : 8,
+      iterations: smoke ? 1 : 30,
       run: () =>
         projectUsage({
           serverID: 'local',
@@ -321,6 +360,39 @@ function scenarios(): Scenario[] {
       note: 'ordinary typing with no @ on the cursor line',
     });
   }
+  const fixturePath = join(
+    import.meta.dir,
+    '..',
+    'test',
+    'fixtures',
+    'opencode-2.3.0',
+    'messages-tool.json',
+  );
+  const fixtureFile = Bun.file(fixturePath);
+  if (await fixtureFile.exists()) {
+    // Recorded from a disposable OpenCode 2.3.0 service; replay it through the real wire
+    // mapper instead of hand-building domain objects (#301).
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- recorded SDK response
+    const fixture = (await fixtureFile.json()) as { data: SessionMessageInfo[] };
+    if (fixture.data.length > 0) {
+      result.push({
+        name: 'wireMapPage',
+        size: fixture.data.length * 40,
+        iterations: smoke ? 1 : 30,
+        run: () => {
+          const mapped = [];
+          for (let repeat = 0; repeat < 40; repeat += 1) {
+            for (const raw of fixture.data) {
+              const message = toTranscriptMessage(raw);
+              if (message !== undefined) mapped.push(message);
+            }
+          }
+          return mapped;
+        },
+        note: 'SDK DTO -> canonical transcript mapping for a 40x recorded tool turn',
+      });
+    }
+  }
   return result;
 }
 
@@ -334,7 +406,7 @@ const reports: {
   note?: string;
   detail?: unknown;
 }[] = [];
-for (const scenario of scenarios()) {
+for (const scenario of await scenarios()) {
   const stats = await sampleOperation(scenario.run, scenario.iterations, smoke ? 0 : 1);
   const memory = process.memoryUsage();
   reports.push({
@@ -349,13 +421,32 @@ for (const scenario of scenarios()) {
 }
 
 const memory = await memoryReport();
+function gitRevision(): string {
+  try {
+    const result = Bun.spawnSync(['git', 'rev-parse', 'HEAD']);
+    return result.stdout.toString().trim() || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+const openTuiPackage = await Bun.file('node_modules/@opentui/core/package.json')
+  .json()
+  .catch(() => ({ version: 'unknown' }));
 const report = {
   kind: 'margarita-performance' as const,
-  version: 1,
+  version: 2,
   generatedAt: new Date().toISOString(),
   platform: process.platform,
   arch: process.arch,
   bun: Bun.version,
+  versions: {
+    bun: Bun.version,
+    openTui: typeof openTuiPackage.version === 'string' ? openTuiPackage.version : 'unknown',
+  },
+  gitRevision: gitRevision(),
+  dimensions: ['80x24', '40x12'],
+  targetFps: 60,
+  seed: 1,
   smoke,
   before: { heapUsedBytes: before.heapUsed, rssBytes: before.rss },
   scenarios: reports,
@@ -385,6 +476,8 @@ console.log(
         size: entry.size,
         p50Ms: Number(entry.stats.p50Ms.toFixed(3)),
         p95Ms: Number(entry.stats.p95Ms.toFixed(3)),
+        p99Ms: Number(entry.stats.p99Ms.toFixed(3)),
+        samples: entry.stats.count,
         heapUsedBytes: entry.heapUsedBytes,
       })),
     },

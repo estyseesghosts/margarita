@@ -19,7 +19,7 @@ import type { SessionSummary } from '../domain/session.ts';
 import type { ToolCall, TranscriptMessage } from '../domain/transcript.ts';
 import type { WorkerJob } from '../domain/worker.ts';
 import { AppController } from './controller.ts';
-import type { ControllerDeps } from './controller.ts';
+import type { ControllerDeps, ProjectFileListing } from './controller.ts';
 import { routeKey } from './key-router.ts';
 
 function deferred<T>() {
@@ -33,7 +33,7 @@ function deferred<T>() {
 }
 
 function makeController(
-  listFiles: (root: string) => Promise<string[]>,
+  listFiles: (root: string) => Promise<string[] | ProjectFileListing>,
   backend: FakeBackend = new FakeBackend(),
   now: () => number = () => 10_000,
   overrides: Partial<ControllerDeps> = {},
@@ -232,6 +232,63 @@ describe('@file completion', () => {
     scan.resolve(['old-project-file.ts']);
     await flush();
 
+    expect(controller.state.completion).toBeUndefined();
+    controller.dispose();
+  });
+
+  test('an incomplete scan keeps partial matches but retries after a bounded backoff (#300)', async () => {
+    let now = 10_000;
+    let scans = 0;
+    const controller = makeController(
+      async () => {
+        scans += 1;
+        return scans === 1
+          ? { files: ['src/a.ts'], complete: false, detail: 'scan stopped: time limit' }
+          : { files: ['src/a.ts', 'src/ab.ts'], complete: true };
+      },
+      new FakeBackend(),
+      () => now,
+    );
+
+    controller.setComposer(composerFrom('@src/a'));
+    await flush();
+    expect(scans).toBe(1);
+    expect(controller.state.completion?.items.map((item) => item.label)).toEqual(['@src/a.ts']);
+
+    // Inside the backoff window the partial snapshot is still usable without another traversal.
+    controller.setComposer(composerFrom('@src/ab'));
+    await flush();
+    expect(scans).toBe(1);
+
+    now += 4_000;
+    controller.setComposer(composerFrom('@src/a'));
+    await flush();
+    expect(scans).toBe(2);
+    expect(controller.state.completion?.items.map((item) => item.label)).toEqual([
+      '@src/a.ts',
+      '@src/ab.ts',
+    ]);
+
+    // A complete snapshot is authoritative and is reused indefinitely.
+    controller.setComposer(composerFrom('@src/ab'));
+    await flush();
+    expect(scans).toBe(2);
+    controller.dispose();
+  });
+
+  test('persistent incomplete scans do not rescan for every typed character (#300)', async () => {
+    let scans = 0;
+    const controller = makeController(async () => {
+      scans += 1;
+      return { files: ['a.ts'], complete: false, detail: '1 unreadable directory' };
+    });
+
+    for (let index = 0; index < 30; index += 1) {
+      controller.setComposer(composerFrom(`@a${'b'.repeat(index)}`));
+    }
+    await flush();
+
+    expect(scans).toBe(1);
     expect(controller.state.completion).toBeUndefined();
     controller.dispose();
   });
@@ -6148,6 +6205,66 @@ describe('background worker lifecycle (#101)', () => {
     controller.dispose();
   });
 
+  test('a tool call probes jobs now and once after registration delay (#297)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    const calls = (name: string) => backend.calls.filter((call) => call.name === name).length;
+    const workers = calls('listSubagentJobs');
+
+    controller.onEvents(
+      'local',
+      [{ kind: 'transcript-changed', sessionID: 'ses_a', jobProbe: true }],
+      false,
+    );
+    await Bun.sleep(120);
+    await flush();
+    const afterImmediate = calls('listSubagentJobs');
+    expect(afterImmediate).toBeGreaterThan(workers);
+
+    // A tool's job can register after the call event; the deferred probe catches it.
+    await Bun.sleep(300);
+    await flush();
+    expect(calls('listSubagentJobs')).toBeGreaterThan(afterImmediate);
+
+    // Progress and text deltas never add another probe.
+    const settled = calls('listSubagentJobs');
+    for (let index = 0; index < 20; index += 1) {
+      controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    }
+    await Bun.sleep(250);
+    await flush();
+    expect(calls('listSubagentJobs')).toBe(settled);
+    controller.dispose();
+  });
+
+  test('a deleted session drops a pending tool-start job probe (#297)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    const calls = (name: string) => backend.calls.filter((call) => call.name === name).length;
+    const workers = calls('listSubagentJobs');
+
+    controller.onEvents(
+      'local',
+      [{ kind: 'transcript-changed', sessionID: 'ses_a', jobProbe: true }],
+      false,
+    );
+    await Bun.sleep(120);
+    await flush();
+    const afterImmediate = calls('listSubagentJobs');
+    expect(afterImmediate).toBeGreaterThan(workers);
+    controller.onEvents('local', [{ kind: 'session-deleted', sessionID: 'ses_a' }], false);
+    await Bun.sleep(400);
+    await flush();
+    expect(calls('listSubagentJobs')).toBe(afterImmediate);
+    controller.dispose();
+  });
+
   test('detach keeps last confirmed workers stale and resync reconciles from the server', async () => {
     const backend = new FakeBackend();
     backend.sessions = [fakeSession('ses_a')];
@@ -7152,6 +7269,65 @@ describe('external editor result ownership (#271)', () => {
 
     expect(await controller.applyExternalEdit(origin, 'edited alpha')).toBe('recovery');
     expect(written.map((entry) => entry.text)).toEqual(['edited alpha']);
+    controller.dispose();
+  });
+
+  test('a same-route edit that returns to the original text still rejects the result', async () => {
+    const { controller, written } = editorFixture();
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    controller.setComposer(composerFrom('alpha'));
+    const origin = controller.captureExternalEditOrigin();
+    controller.setComposer(composerFrom('beta'));
+    controller.setComposer(composerFrom('alpha'));
+
+    expect(await controller.applyExternalEdit(origin, 'edited alpha')).toBe('recovery');
+    expect(controller.state.composer.text).toBe('alpha');
+    expect(written.map((entry) => entry.text)).toEqual(['edited alpha']);
+    controller.dispose();
+  });
+
+  test('a parked draft edited away from and back to the same text rejects the result', async () => {
+    const { controller, written } = editorFixture();
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    controller.setComposer(composerFrom('alpha'));
+    const origin = controller.captureExternalEditOrigin();
+    controller.openSession('ses_b');
+    await flush();
+    controller.openSession('ses_a');
+    await flush();
+    controller.setComposer(composerFrom('beta'));
+    controller.setComposer(composerFrom('alpha'));
+    controller.openSession('ses_b');
+    await flush();
+    controller.setComposer(composerFrom('beta'));
+
+    expect(await controller.applyExternalEdit(origin, 'edited alpha')).toBe('recovery');
+    expect(controller.state.drafts['ses_a']?.text).toBe('alpha');
+    expect(controller.state.composer.text).toBe('beta');
+    expect(written.map((entry) => entry.text)).toEqual(['edited alpha']);
+    controller.dispose();
+  });
+
+  test('a route round trip without edits preserves the untouched draft identity', async () => {
+    const { controller, written } = editorFixture();
+    await controller.bootstrap();
+    controller.openSession('ses_a');
+    await flush();
+    controller.setComposer(composerFrom('alpha'));
+    const origin = controller.captureExternalEditOrigin();
+    controller.openSession('ses_b');
+    await flush();
+    controller.setComposer(composerFrom('beta'));
+    controller.openSession('ses_a');
+    await flush();
+
+    expect(await controller.applyExternalEdit(origin, 'edited alpha')).toBe('composer');
+    expect(controller.state.composer.text).toBe('edited alpha');
+    expect(written).toEqual([]);
     controller.dispose();
   });
 });

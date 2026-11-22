@@ -282,7 +282,20 @@ export async function createProductionAssembly(
           'dim',
         );
       }
-      return scan.files;
+      return {
+        files: scan.files,
+        complete: !scan.incomplete,
+        ...(scan.incomplete
+          ? {
+              detail:
+                scan.truncated !== undefined && scan.truncated !== 'files'
+                  ? `scan stopped: ${scan.truncated} limit`
+                  : scan.unreadable.count > 0
+                    ? `${scan.unreadable.count} unreadable ${scan.unreadable.count === 1 ? 'directory' : 'directories'}`
+                    : 'scan did not cover the whole project',
+            }
+          : {}),
+      };
     },
     ...(input.remoteFilesystem === undefined ? {} : { remoteFilesystem: input.remoteFilesystem }),
     requestExit: input.requestExit,

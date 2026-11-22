@@ -3388,6 +3388,102 @@ describe('individual tool disclosure (#281)', () => {
     expect(controller.isToolExpanded('bashB')).toBe(false);
     controller.dispose();
   });
+
+  test('a standalone delegated tool discloses its own details (#298)', async () => {
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'delegate the research', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'task1',
+                name: 'task',
+                status: 'completed',
+                input: { description: 'research', prompt: 'look at the repository' },
+                output: 'delegated result body',
+                startedAt: 1,
+                completedAt: 2,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend, { width: 80, height: 24 });
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    let frame = setup.captureCharFrame();
+    expect(frame).toContain('task research');
+    expect(frame).not.toContain('delegated result body');
+    expect(controller.collapsibleItems()).toEqual([{ key: 'tool:task1', kind: 'tool' }]);
+
+    controller.moveGroupFocus(1);
+    expect(controller.state.focusedGroup).toBe('tool:task1');
+    controller.toggleFocusedGroup();
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).toContain('delegated result body');
+    expect(controller.isToolExpanded('task1')).toBe(true);
+
+    // Clicking the same row collapses it without touching global detailed mode.
+    const row = frame.split('\n').findIndex((line) => line.includes('task research'));
+    expect(row).toBeGreaterThanOrEqual(0);
+    await setup.mockMouse.click(3, row);
+    await settle(setup);
+    frame = setup.captureCharFrame();
+    expect(frame).not.toContain('delegated result body');
+    expect(controller.state.detailed).toBe(false);
+    controller.dispose();
+  });
+
+  test('a standalone failure stays visible and is not collapsed by disclosure state (#298)', async () => {
+    const backend = backendWithSession();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'run the task', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 'task1',
+                name: 'task',
+                status: 'error',
+                input: { description: 'research', prompt: 'look at the repository' },
+                error: 'delegated task failed',
+                startedAt: 1,
+                completedAt: 2,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { controller, setup } = await mount(backend, { width: 80, height: 24 });
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('delegated task failed');
+    expect(controller.collapsibleItems()).toEqual([]);
+    controller.dispose();
+  });
 });
 
 describe('streaming does not recenter a scrolled-away focused tool (#296)', () => {

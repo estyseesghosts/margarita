@@ -141,4 +141,65 @@ describe.skipIf(!enabled)('writable service: event stream and project directorie
     expect(betaFiles.some((path) => path.includes('only-in-beta'))).toBe(true);
     expect(betaFiles.some((path) => path.includes('only-in-alpha'))).toBe(false);
   }, 30_000);
+
+  test('a running subagent job is visible before it completes and settles afterwards (#297)', async () => {
+    const source = service.backend;
+    let jobCalls = 0;
+    const wrappedBackend: typeof source = new Proxy(source, {
+      get(target, property, receiver) {
+        if (property === 'listSubagentJobs') {
+          return async (sessionID: string) => {
+            jobCalls += 1;
+            return target.listSubagentJobs(sessionID);
+          };
+        }
+        const value: unknown = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const subscription = collectEvents({ ...service, backend: wrappedBackend });
+    await waitFor('stream to connect', async () =>
+      subscription.events.some((event) => event.kind === 'connected') ? true : undefined,
+    );
+    const session = await newSession();
+    const startedAt = performance.now();
+    await source.prompt(session.id, {
+      text: 'TOOL subagent {"description":"hold job","prompt":"HOLD subagent","agent":"general"}',
+      files: [],
+    });
+    const workerID = await waitFor(
+      'running subagent job',
+      async () => {
+        const jobs = await wrappedBackend.listSubagentJobs(session.id);
+        return jobs.find((job) => job.status === 'running')?.id;
+      },
+      10_000,
+    );
+    const visibleAfterMs = performance.now() - startedAt;
+    expect(visibleAfterMs).toBeLessThan(10_000);
+    expect(jobCalls).toBeGreaterThan(0);
+    expect(
+      subscription.events.some(
+        (event) =>
+          event.kind === 'transcript-changed' &&
+          event.sessionID === session.id &&
+          event.jobProbe === true,
+      ),
+    ).toBe(true);
+
+    service.model.release();
+    await waitFor(
+      'subagent job to settle',
+      async () => {
+        const jobs = await service.backend.listSubagentJobs(session.id);
+        const current = jobs.find((job) => job.id === workerID);
+        return current === undefined || current.status !== 'running' ? true : undefined;
+      },
+      15_000,
+    );
+    await subscription.stop();
+    console.log(
+      `#297 subagent visible after ${Math.round(visibleAfterMs)} ms; ${jobCalls} job-list calls`,
+    );
+  }, 40_000);
 });

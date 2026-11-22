@@ -21,6 +21,11 @@ export type BackendEvent =
       sessionID: string;
       /** This event may have changed worker/shell jobs, so reconcile them too (#284). */
       jobs?: true;
+      /**
+       * A tool started: jobs can register shortly after the call itself, so ask once now and
+       * once after a bounded delay without refreshing on every progress/text event (#297).
+       */
+      jobProbe?: true;
     }
   | { kind: 'inbox-changed'; sessionID: string }
   | { kind: 'input-requests-changed'; sessionID: string }
@@ -154,6 +159,7 @@ export function normalizeEvent(raw: unknown): BackendEvent | undefined {
       kind: 'transcript-changed',
       sessionID,
       ...(jobHintEvents.has(type) ? { jobs: true as const } : {}),
+      ...(type === 'session.tool.called' ? { jobProbe: true as const } : {}),
     };
   }
   if (summaryEvents.has(type)) return { kind: 'session-changed', sessionID };

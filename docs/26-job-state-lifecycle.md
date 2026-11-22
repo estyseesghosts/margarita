@@ -12,6 +12,10 @@ Deletion and unpair clear the same records: `forgetSession` removes `workers`/`s
 
 `refreshWorkers` and `refreshShellJobs` each carry **independent per-session epochs**. A response that arrives after the session was deleted, unpaired, disconnected or superseded by a newer refresh is discarded; ownership is rechecked against the server-qualified key before writing. An unsupported RPC is never treated as "job completed".
 
+## Job request timing (#284, #297)
+
+`experimental.job.list` is not requested for text or reasoning deltas. A tool call is a bounded probe hint: one immediate request and one deferred request 300 ms later, because a subagent job can be registered after the call event itself. Further tool starts coalesce into the pending probe, and `session.tool.progress` never adds a request. Shell/step/idle completion events still reconcile both job lists. The deferred probe is tied to the server-qualified session: deletion, unpair or teardown clears it before it can write. A live v2 disposable-service test starts a real `subagent` tool, observes a running job card before the child completes, and then releases it and observes settlement.
+
 ## Transient background confirmations (#129, #135)
 
 Ctrl+B moves running tool calls to the background. The confirmation is rendered **inside the transcript**, not in the composer/footer, so the prompt bar never shifts (#129). It is **transient call status**, not persistent history:
