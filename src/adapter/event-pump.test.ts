@@ -202,6 +202,40 @@ describe('first-event watchdog (#342)', () => {
     await stop();
   });
 
+  test('a late frame from a timed-out attempt cannot publish status or batches (#342)', async () => {
+    const timers = fakeWatchdog();
+    const statuses: StreamStatus[] = [];
+    const batches: unknown[] = [];
+    const { promise: lateGate, resolve: releaseLate } = Promise.withResolvers<void>();
+    let connections = 0;
+    const stop = startEventPump({
+      timeToFirstEventMs: 1000,
+      scheduleTimeout: timers.schedule,
+      sleep: async () => {},
+      random: () => 0.5,
+      source: (signal) => {
+        connections += 1;
+        if (connections === 1) {
+          return (async function* () {
+            // Delivered only after the watchdog has aborted this attempt.
+            await lateGate;
+            yield { kind: 'connected' };
+          })();
+        }
+        return neverYieldingSource(signal);
+      },
+      onStatus: (status) => statuses.push(status),
+      onBatch: (events, resync) => batches.push({ events, resync }),
+    });
+    await waitFor(() => timers.count() === 1);
+    timers.fireAll();
+    releaseLate();
+    await waitFor(() => connections === 2);
+    expect(statuses).not.toContain('live');
+    expect(batches).toEqual([]);
+    await stop();
+  });
+
   test('stop during a pending opening is bounded and publishes nothing afterward', async () => {
     const timers = fakeWatchdog();
     const statuses: StreamStatus[] = [];
