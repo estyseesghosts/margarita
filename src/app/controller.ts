@@ -209,6 +209,7 @@ import {
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { descendantScope } from './descendant-scope.ts';
 import { DraftRegistry } from './draft-registry.ts';
+import { EditHistory } from './edit-history.ts';
 import { errorText, refreshOutcome } from './error-text.ts';
 import { GoalRevisionGuard } from './goal-revision-guard.ts';
 import { GreetingSelector } from './greeting-selector.ts';
@@ -231,9 +232,6 @@ import {
 } from './transcript-retry.ts';
 import { UsageAnalyticsSelector } from './usage-selector.ts';
 
-/** A point an edit can be undone/redone back to. Attachments are kept, never duplicated. */
-type UndoSnapshot = Readonly<{ composer: Composer }>;
-
 /**
  * A catalog confirmed for one exact `(server, canonical directory)` scope (#134). Both agent
  * lists are captured together at load time so completion and submission resolve `@name` against
@@ -247,10 +245,6 @@ type CatalogSnapshot = Readonly<{
   models: readonly CatalogModel[];
 }>;
 
-const undoLimit = 100;
-const typingCoalesceMs = 750;
-const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-
 /**
  * The single source of truth for which overlay each footer control owns. A second click on
  * the same control toggles that exact overlay shut; every other overlay stays guarded (#139).
@@ -260,19 +254,6 @@ const footerOverlay: Readonly<Record<FooterAction, Overlay['kind']>> = {
   model: 'model-picker',
   context: 'usage',
 };
-
-/** True when two texts differ by exactly one grapheme cluster (an insertion or deletion). */
-function isSingleGraphemeStep(before: string, after: string): boolean {
-  if (before === after) return false;
-  const a = [...graphemes.segment(before)].map((part) => part.segment);
-  const b = [...graphemes.segment(after)].map((part) => part.segment);
-  if (Math.abs(a.length - b.length) !== 1) return false;
-  let index = 0;
-  while (index < a.length && index < b.length && a[index] === b[index]) index += 1;
-  return b.length > a.length
-    ? a.slice(index).join('') === b.slice(index + 1).join('')
-    : a.slice(index + 1).join('') === b.slice(index).join('');
-}
 
 /** One row of the `/servers` list. Never contains a secret. */
 export type ServerListing = Readonly<{
@@ -567,11 +548,8 @@ export class AppController {
   private killBuffer = '';
   /** Sole owner of stable greeting selection (#318); process-lifetime only. */
   private readonly greetings = new GreetingSelector();
-  /** Bounded, route-scoped undo/redo of user edits; never shared across drafts. */
-  private readonly undoStacks = new Map<string, UndoSnapshot[]>();
-  private readonly redoStacks = new Map<string, UndoSnapshot[]>();
-  private lastEditAt = 0;
-  private lastEditRoute = '';
+  /** Sole owner of bounded route-scoped undo/redo history (#311). */
+  private readonly editHistory = new EditHistory();
   /** Sole owner of the memoized inspector document (#315). */
   private readonly inspectorCache = new InspectorDocumentCache();
   /**
@@ -3771,58 +3749,24 @@ export class AppController {
 
   /** Records a user edit so it can be undone; consecutive typing collapses into one step. */
   private recordEdit(next: Composer): void {
-    const key = this.routeKey(this.state.route);
-    const before = this.state.composer;
-    if (before.text === next.text) return;
-    const coalesce =
-      this.lastEditRoute === key &&
-      this.now() - this.lastEditAt <= typingCoalesceMs &&
-      isSingleGraphemeStep(before.text, next.text);
-    if (!coalesce) {
-      const stack = this.undoStacks.get(key) ?? [];
-      stack.push({ composer: { ...before } });
-      if (stack.length > undoLimit) stack.shift();
-      this.undoStacks.set(key, stack);
-      this.redoStacks.set(key, []);
-    }
-    this.lastEditAt = this.now();
-    this.lastEditRoute = key;
+    this.editHistory.record(this.routeKey(this.state.route), this.state.composer, next, this.now());
   }
 
   /** Undo the last edit on this route; restoring does not touch attachments. */
   undo(): void {
-    const key = this.routeKey(this.state.route);
-    const stack = this.undoStacks.get(key) ?? [];
-    const previous = stack.pop();
-    if (previous === undefined) return;
-    const redo = this.redoStacks.get(key) ?? [];
-    redo.push({ composer: { ...this.state.composer } });
-    this.undoStacks.set(key, stack);
-    this.redoStacks.set(key, redo);
-    this.lastEditRoute = '';
-    this.writeComposer(previous.composer);
+    const previous = this.editHistory.undo(this.routeKey(this.state.route), this.state.composer);
+    if (previous !== undefined) this.writeComposer(previous);
   }
 
   /** Redo an edit that was just undone on this route. */
   redo(): void {
-    const key = this.routeKey(this.state.route);
-    const stack = this.redoStacks.get(key) ?? [];
-    const next = stack.pop();
-    if (next === undefined) return;
-    const undo = this.undoStacks.get(key) ?? [];
-    undo.push({ composer: { ...this.state.composer } });
-    this.redoStacks.set(key, stack);
-    this.undoStacks.set(key, undo);
-    this.lastEditRoute = '';
-    this.writeComposer(next.composer);
+    const next = this.editHistory.redo(this.routeKey(this.state.route), this.state.composer);
+    if (next !== undefined) this.writeComposer(next);
   }
 
   /** Sending an acknowledged prompt checkpoints the draft: no undo across sent turns. */
   private clearEdits(): void {
-    const key = this.routeKey(this.state.route);
-    this.undoStacks.delete(key);
-    this.redoStacks.delete(key);
-    this.lastEditRoute = '';
+    this.editHistory.clear(this.routeKey(this.state.route));
   }
 
   setComposer(composer: Composer): void {

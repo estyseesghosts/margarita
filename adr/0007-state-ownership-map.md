@@ -215,12 +215,12 @@ These are concrete source observations, not hypotheses:
   scans come from `src/app/project-files.ts`, pure text operations from
   `src/domain/composer.ts`, attachment rules from `src/domain/attachment.ts`.
 - **Readers / writers:** composer-view, key-router and pickers read it; keystrokes, paste, editor results, history loads and draft saves write it.
-- **Mutable state:** `killBuffer` (548), `greetingCache`/`recentGreetings`
-  (550-551), `undoStacks`/`redoStacks`/`lastEditAt`/`lastEditRoute` (553-556),
-  `fileCache`/`fileScans` (609/619), `completionRequest`/`completionGeneration`
-  (620/623), `pasteChain` (640), `editorRecoverySeq` (632),
-  `AppState.drafts/draftAttachments/stashes/composer`. Route keys and per-route
-  revisions are now owned by `src/app/draft-registry.ts` (first #311 slice).
+- **Mutable state:** `killBuffer` (548), `fileCache`/`fileScans` (609/619),
+  `completionRequest`/`completionGeneration` (620/623), `pasteChain` (640),
+  `editorRecoverySeq` (632), `AppState.drafts/draftAttachments/stashes/composer`.
+  Route keys/revisions are owned by `src/app/draft-registry.ts` (first #311 slice)
+  and bounded route-scoped undo/redo by `src/app/edit-history.ts` (second #311
+  slice, five tests).
 - **Async/teardown:** paste and editor transactions capture origin before IO;
   serialized pastes reject stale completion scans; file scans never block paint.
 - **Intended owner:** `RouteScopedComposer` with route/session identity,
