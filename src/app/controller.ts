@@ -224,6 +224,15 @@ import { RevisionCache } from './revision-cache.ts';
 import { attachedSessionFor, routeServerFor } from './route-server.ts';
 import { SessionFetcher } from './session-fetch.ts';
 import { mergeCommittedSessions, sessionFlags, sessionPage } from './session-snapshot.ts';
+import {
+  admissionBlock,
+  type AdmissionCommand,
+  classifySendError,
+  composerClearance,
+  isOriginRoute,
+  resolveAdmission,
+  type SendOutcome,
+} from './submission-admission.ts';
 import { planTranscriptEviction } from './transcript-eviction.ts';
 import { TranscriptFlightTracker } from './transcript-flight.ts';
 import { TranscriptGenerations } from './transcript-generations.ts';
@@ -4424,9 +4433,11 @@ export class AppController {
   ): Promise<boolean> {
     const admitKey = this.keyFor(origin.serverID, origin.sessionID);
     if (
-      this.admissions.isAdmitting(admitKey) ||
-      this.modelDispatchBlocked(origin.serverID, origin.sessionID) ||
-      this.agentDispatchBlocked(origin.serverID, origin.sessionID)
+      admissionBlock({
+        alreadyAdmitting: this.admissions.isAdmitting(admitKey),
+        modelBlocked: this.modelDispatchBlocked(origin.serverID, origin.sessionID),
+        agentBlocked: this.agentDispatchBlocked(origin.serverID, origin.sessionID),
+      }) !== null
     )
       return false;
     this.admissions.begin(admitKey);
@@ -4434,61 +4445,89 @@ export class AppController {
     // the server responds, and that newer load must not be repainted by this admission (#160).
     const historyGeneration = this.state.historyGeneration;
     try {
-      if (!(await send())) return false;
-      this.debugLog.write('action', { action: 'submit', ok: true });
-      if (text.trim() !== '')
-        this.rememberPrompt(text, directory, origin.serverID, historyGeneration);
-      // Only clear the composer if we are still on the originating session: a route change
-      // mid-request means the composer now belongs to another session and must not be wiped.
-      const route = this.state.route;
-      if (
-        route.kind === 'conversation' &&
-        route.serverID === origin.serverID &&
-        route.sessionID === origin.sessionID
-      ) {
-        this.clearComposer(text, sentAttachments);
+      let outcome: SendOutcome;
+      try {
+        outcome = (await send()) ? { kind: 'accepted' } : { kind: 'declined' };
+      } catch (error) {
+        outcome = classifySendError(error);
       }
-      return true;
-    } catch (error) {
-      this.debugLog.write('action', {
-        action: 'submit',
-        ok: false,
-        errorKind: error instanceof BackendError ? error.kind : 'unknown',
-      });
-      if (error instanceof BackendError && error.kind === 'transport') {
-        // The request may have landed. Show server state instead of resending blindly.
-        this.showNotice(transportNotice, 'error');
-        if (
-          this.state.route.kind === 'conversation' &&
-          this.state.route.serverID === origin.serverID &&
-          this.state.route.sessionID === origin.sessionID
-        ) {
-          this.scheduleTranscript(origin.sessionID);
-          void this.track('inbox', this.refreshInbox(origin.sessionID, origin.serverID));
-        }
-      } else {
-        this.showNotice(errorText(error), 'error');
-      }
-      return false;
+      const resolution = resolveAdmission(
+        {
+          serverID: origin.serverID,
+          sessionID: origin.sessionID,
+          text,
+          directory,
+          historyGeneration,
+          routeIsOrigin: isOriginRoute(this.state.route, origin.serverID, origin.sessionID),
+          transportNotice,
+          sentAttachments,
+        },
+        outcome,
+      );
+      for (const command of resolution.commands) this.executeAdmissionCommand(command);
+      return resolution.outcome === 'admitted';
     } finally {
       this.admissions.end(admitKey);
     }
   }
 
+  /** Executes one admitted submission effect against this controller's owned capabilities. */
+  private executeAdmissionCommand(command: AdmissionCommand): void {
+    switch (command.kind) {
+      case 'log-accepted':
+        this.debugLog.write('action', { action: 'submit', ok: true });
+        return;
+      case 'log-failed':
+        this.debugLog.write('action', {
+          action: 'submit',
+          ok: false,
+          errorKind: command.errorKind,
+        });
+        return;
+      case 'remember-prompt':
+        this.rememberPrompt(
+          command.text,
+          command.directory,
+          command.serverID,
+          command.historyGeneration,
+        );
+        return;
+      case 'clear-composer':
+        this.clearComposer(command.text, command.sentAttachments);
+        return;
+      case 'show-notice':
+        this.showNotice(command.message, 'error');
+        return;
+      case 'schedule-transcript':
+        // The request may have landed. Show server state instead of resending blindly.
+        this.scheduleTranscript(command.sessionID);
+        return;
+      case 'refresh-inbox':
+        void this.track('inbox', this.refreshInbox(command.sessionID, command.serverID));
+        return;
+      default:
+        return;
+    }
+  }
+
   private clearComposer(submitted: string, sentAttachments: readonly Attachment[] = []): void {
-    const sent = new Set(sentAttachments.map((attachment) => attachment.id));
+    const clearance = composerClearance(
+      this.state.composer.text,
+      submitted,
+      sentAttachments.map((attachment) => attachment.id),
+    );
     batch(() => {
-      if (this.state.composer.text === submitted) {
+      if (clearance.clearText) {
         this.writeComposer(emptyComposer);
         this.clearEdits();
         this.setState('completion', undefined);
         this.setState('focusedGroup', undefined);
       }
       // Sent attachments are gone even if the user typed more while the request was in flight.
-      if (sent.size > 0) {
+      if (clearance.sentIDs.size > 0) {
         this.setState(
           'attachments',
-          this.state.attachments.filter((attachment) => !sent.has(attachment.id)),
+          this.state.attachments.filter((attachment) => !clearance.sentIDs.has(attachment.id)),
         );
       }
     });

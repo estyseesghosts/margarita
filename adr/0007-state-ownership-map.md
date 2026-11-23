@@ -249,16 +249,26 @@ These are concrete source observations, not hypotheses:
   model/agent checks from the scoped catalog; local commands are not server RPCs.
 - **Readers / writers:** admission UI and CLI read it; submit, steer, createSessionWithPrompt and local command handlers write it.
 - **Mutable state:** `pendingCompactions` (490), draft revision and attachment set
-  at admission time. The single-flight per-session admission lock is now owned by
-  `src/app/admission-gate.ts` (first #312 slice, three tests).
+  at admission time. The single-flight per-session admission lock is owned by
+  `src/app/admission-gate.ts` (first #312 slice). The full
+  `preparing → admitted | failed | unknown` decision is now pure in
+  `src/app/submission-admission.ts` (second #312 slice, ten tests):
+  `admissionBlock` reports the first gate refusal, `classifySendError` separates
+  an unknown transport write from a confirmed failure, `resolveAdmission`
+  returns the ordered effects, and `composerClearance` preserves newer text
+  while removing only sent attachments.
 - **Async/teardown:** one server-qualified per-session admission lock; unknown
   write outcome means no automatic retry; route changes during await preserve a
   newer draft; created session ID is retained even when the prompt fails.
-- **Intended owner:** `SubmissionCoordinator` with a typed
-  `preparing → admitted | failed | unknown` result and a narrow adapter API;
-  no second lock in the composer service and no direct backend calls in views.
-- **Tests:** `src/app/controller.test.ts`, `src/app/async-audit-regressions.test.ts`,
-  `test/prompt-flow.test.ts`, `test/session-control.test.ts`.
+- **Owner:** `resolveAdmission` in `src/app/submission-admission.ts`; the facade
+  only observes gate/route state and executes the returned commands. Still to
+  extract: new-session creation recovery (`createSessionWithPrompt`) and the
+  transport adapter itself; no second lock in the composer service and no direct
+  backend calls in views.
+- **Tests:** `src/app/submission-admission.test.ts` (10),
+  `src/app/admission-gate.test.ts` (3), `src/app/controller.test.ts`,
+  `src/app/async-audit-regressions.test.ts`, `test/prompt-flow.test.ts`,
+  `test/session-control.test.ts`.
 
 ### 8. Model and agent catalogs, confirmation and selection (#313)
 
