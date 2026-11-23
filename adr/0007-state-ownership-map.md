@@ -153,8 +153,9 @@ These are concrete source observations, not hypotheses:
   slice, five tests). The retryability rule, exponential backoff and per-session
   attempt counters live in `src/app/transcript-retry.ts` (second #309 slice,
   four tests), and read generations/commit watermarks in
-  `src/app/transcript-generations.ts` (third #309 slice, three tests); timer
-  scheduling and notices stay in the controller.
+  `src/app/transcript-generations.ts` (third #309 slice, three tests), and the
+  single-flight/dirty-hint coalescer in `src/app/transcript-flight.ts` (fourth
+  #309 slice, four tests); timer scheduling and notices stay in the controller.
 - **Async/teardown:** single-flight reads, bounded retries, failure backoff,
   active/in-flight sessions exempt from eviction; timers cleared in `dispose()`
   at 712.

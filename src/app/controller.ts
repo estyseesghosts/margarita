@@ -221,6 +221,7 @@ import { inputRequestRefreshTargets } from './request-targets.ts';
 import { SessionFetcher } from './session-fetch.ts';
 import { mergeCommittedSessions, sessionFlags, sessionPage } from './session-snapshot.ts';
 import { planTranscriptEviction } from './transcript-eviction.ts';
+import { TranscriptFlightTracker } from './transcript-flight.ts';
 import { TranscriptGenerations } from './transcript-generations.ts';
 import {
   retryDelay,
@@ -511,8 +512,8 @@ export class AppController {
   /** Timestamp (ms, from `deps.now`) of the most recent idle Escape tap, for double-tap detection. */
   private escapeAt: number | undefined;
   private escapeTimer: ReturnType<typeof setTimeout> | undefined;
-  private readonly transcriptInFlight = new Map<string, Promise<void>>();
-  private readonly transcriptDirty = new Set<string>();
+  /** Sole owner of single-flight reads and coalesced dirty hints (#309). */
+  private readonly transcriptFlights = new TranscriptFlightTracker();
   /** Bounded retry state for a failed canonical refetch (#295). */
   private readonly transcriptRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Sole owner of bounded transcript retry attempts (#309). */
@@ -592,7 +593,6 @@ export class AppController {
   private readonly jobRefreshes = new Map<string, Promise<void>>();
   private readonly jobRefreshDirty = new Set<string>();
   private readonly jobStartProbes = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly transcriptJobsDirty = new Set<string>();
   private readonly debugLog: DebugLog;
 
   /**
@@ -2806,11 +2806,7 @@ export class AppController {
       clearTimeout(retryTimer);
       this.transcriptRetryTimers.delete(key);
     }
-    if (this.transcriptInFlight.has(key)) {
-      this.transcriptDirty.add(key);
-      if (refreshJobs) this.transcriptJobsDirty.add(key);
-      return;
-    }
+    if (this.transcriptFlights.coalesce(key, refreshJobs)) return;
     const run = (async () => {
       let failure: unknown;
       try {
@@ -2818,13 +2814,12 @@ export class AppController {
       } catch (error) {
         failure = error;
       } finally {
-        this.transcriptInFlight.delete(key);
+        this.transcriptFlights.end(key);
       }
       // Always settle the coalesced hints, including after a rejected read. Draining them
       // only on success dropped an already-observed update when no later event arrived
       // (#295), and left the flags cached for an unrelated refresh.
-      const dirty = this.transcriptDirty.delete(key);
-      const dirtyJobs = this.transcriptJobsDirty.delete(key);
+      const { dirty, dirtyJobs } = this.transcriptFlights.drain(key);
       if (failure !== undefined) {
         await this.handleTranscriptFailure(
           sessionID,
@@ -2840,7 +2835,7 @@ export class AppController {
       await delay(80);
       if (dirty && !this.disposed) this.scheduleTranscript(sessionID, serverID, dirtyJobs);
     })();
-    this.transcriptInFlight.set(key, run);
+    this.transcriptFlights.begin(key, run);
     void this.track('transcript', run);
   }
 
@@ -3127,7 +3122,7 @@ export class AppController {
   /** Session keys whose transcript read is still allowed to commit. */
   private inFlightTranscriptKeys(): ReadonlySet<string> {
     const keys = new Set<string>();
-    for (const entry of this.transcriptInFlight.keys()) {
+    for (const entry of this.transcriptFlights.inFlightKeys()) {
       const separator = entry.indexOf(' ');
       if (separator <= 0) continue;
       keys.add(this.keyFor(entry.slice(0, separator), entry.slice(separator + 1)));
