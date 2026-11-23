@@ -5179,6 +5179,9 @@ export class AppController {
     this.setStateTouchingOverview(
       produce((state) => {
         delete state.mcpCatalogs[serverID];
+        // A re-paired host must start unenumerated; old "complete" evidence cannot
+        // validate a new server lifetime (#327).
+        delete state.serverPages[serverID];
         for (const [key, summary] of Object.entries(state.sessions)) {
           if (summary.serverID === serverID) delete state.sessions[key];
         }

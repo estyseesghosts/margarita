@@ -61,11 +61,15 @@ export function mergeCommittedSessions(
   return { ...current, ...found, ...merged };
 }
 
-/** Derives one host's page metadata from its refresh result. */
+/**
+ * Derives one host's page metadata from its refresh result. An absent cursor
+ * proves exhaustion only when the listing actually succeeded: a failed read has
+ * no cursor either, but its rows were never enumerated (#327).
+ */
 export function sessionPage(result: Pick<SnapshotResult, 'ok' | 'cursor' | 'error'>): SessionPage {
   return {
     ...(result.cursor === undefined ? {} : { cursor: result.cursor }),
-    complete: result.cursor === undefined,
+    complete: result.ok && result.cursor === undefined,
     loading: false,
     ...(result.ok ? {} : { error: result.error ?? 'Could not reach the server' }),
   };

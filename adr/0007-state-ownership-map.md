@@ -111,8 +111,11 @@ These are concrete source observations, not hypotheses:
   `clearRuntimeStateForServer()` are the current teardown points. Paged reads and
   definite-not-found reconciliation lives in `src/app/session-fetch.ts`
   (second #308 slice), and the pure merge/page/flag rules for committing a verified
-  snapshot are in `src/app/session-snapshot.ts` (third #308 slice) with eight
-  focused tests. Event admission routing is now pure in `src/app/event-admission.ts`
+  snapshot are in `src/app/session-snapshot.ts` (third #308 slice) with nine
+  focused tests. `sessionPage` confirms completeness only after a successful
+  exhaustive read — an absent cursor from a failed read is not proof (#327) —
+  and `forgetServer()` drops the host's page so a re-pair starts unenumerated.
+  Event admission routing is now pure in `src/app/event-admission.ts`
   (fourth #308 slice); the facade only executes the returned commands.
 - **Intended owner:** `HostSessionIndex` with contract
   `initialize(hosts)`, `refresh(host)`, `loadMore(host)`, `applyEvent(host, event)`,

@@ -453,6 +453,8 @@ describe('startup shell before indexing (#287)', () => {
     expect(controller.state.startup.phase).toBe('ready');
     expect(controller.state.sessions['ses_local']).toBeDefined();
     expect(controller.state.serverPages['srv_remote']?.error).toContain('ECONNREFUSED');
+    expect(controller.state.serverPages['srv_remote']?.complete).toBe(false);
+    expect(controller.state.sessionsComplete).toBe(false);
     controller.dispose();
   });
 
@@ -5548,12 +5550,14 @@ describe('server management commands', () => {
     const key = 'server:srv_1/session:ses_a';
     controller.state.sessions[key] = remoteSession;
     controller.state.running[key] = true;
+    controller.state.serverPages['srv_1'] = { complete: true, loading: false };
 
     controller.setComposer(composerFrom('/unpair buildbox'));
     await controller.submit();
     expect(harness.calls).toEqual(['unpair:srv_1']);
     expect(controller.state.sessions[key]).toBeUndefined();
     expect(controller.state.running[key]).toBeUndefined();
+    expect(controller.state.serverPages['srv_1']).toBeUndefined();
     controller.dispose();
   });
 

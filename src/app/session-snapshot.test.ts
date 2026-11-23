@@ -100,18 +100,33 @@ describe('session page and flag derivation (#308)', () => {
     });
   });
 
-  test('a terminal result is complete; a failure records an error', () => {
+  test('a successful terminal result is complete; a failure is not (#327)', () => {
     expect(sessionPage(result())).toEqual({ complete: true, loading: false });
     expect(sessionPage(result({ ok: false, error: 'offline' }))).toEqual({
-      complete: true,
+      complete: false,
       loading: false,
       error: 'offline',
     });
     expect(sessionPage(result({ ok: false, error: undefined }))).toEqual({
-      complete: true,
+      complete: false,
       loading: false,
       error: 'Could not reach the server',
     });
+  });
+
+  test('a failed host page never makes a single-host resync globally complete (#327)', () => {
+    const pages = {
+      local: sessionPage(result({ ok: false, error: 'offline' })),
+      remote: sessionPage(result({ serverID: 'remote' })),
+    };
+    const flags = sessionFlags(
+      [result({ serverID: 'remote' })],
+      1,
+      () => Object.values(pages).every((page) => page.complete),
+      'remote',
+    );
+    expect(flags.complete).toBe(false);
+    expect(pages['local']?.complete).toBe(false);
   });
 
   test('full-refresh flags come from the applied results', () => {
