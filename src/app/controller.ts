@@ -7,6 +7,7 @@ import { createStore, produce, reconcile, type SetStoreFunction, unwrap } from '
 import {
   type Backend,
   BackendError,
+  type BackendErrorKind,
   type Delivery,
   type DiffRange,
   type MessagePage,
@@ -590,6 +591,14 @@ export class AppController {
 
   /** Identity ledger so a repeated recall cannot duplicate a recovered queued message (#335). */
   private readonly recoveredInbox = new Set<string>();
+  /**
+   * Original first-prompt envelopes kept separately when navigation saved a divergent draft
+   * before the write failed. The newer edit is never merged with these bytes (#339).
+   */
+  private readonly failedPromptRecoveries = new Map<
+    string,
+    { text: string; attachments: readonly Attachment[] }
+  >();
   /** Each open form has a unique token, and replies are guarded per server/session/form. */
   private formToken = 0;
   private readonly answeringForms = new Set<string>();
@@ -829,6 +838,7 @@ export class AppController {
     this.ancestry.dispose();
     this.creations.clear();
     this.recoveredInbox.clear();
+    this.failedPromptRecoveries.clear();
     // Disposal retires every permission reply lock; late callbacks find no matching token
     // and cannot publish into the disposed controller (#340).
     this.answeringPermissions.clear();
@@ -1781,6 +1791,7 @@ export class AppController {
     // A held permission reply for this lifetime must not keep its lock after deletion, so a
     // recreated same-ID session is not blocked and late replies cannot mutate state (#340).
     this.retirePermissionReplies((host, sess) => host === serverID && sess === sessionID);
+    this.failedPromptRecoveries.delete(key);
     const expansionPrefix = `${key} `;
     this.setStateTouchingOverview(
       produce((state) => {
@@ -4614,6 +4625,7 @@ export class AppController {
             );
           }
         });
+        this.failedPromptRecoveries.delete(command.key);
         return;
       }
       case 'clear-parked-draft': {
@@ -4636,6 +4648,7 @@ export class AppController {
             );
           }
         });
+        this.failedPromptRecoveries.delete(command.key);
         return;
       }
       case 'show-notice':
@@ -5004,6 +5017,9 @@ export class AppController {
         this.writeComposer(composerFrom(text));
         this.setState('attachments', [...attachments]);
       }
+      // A write that failed with a transport/unknown error may still have been accepted by the
+      // server. Record the kind so the final notice never claims a definite non-delivery (#339).
+      let promptErrorKind: BackendErrorKind | undefined;
       const sent = await this.admit(
         { serverID: sessionServerID, sessionID: session.id },
         text,
@@ -5028,11 +5044,18 @@ export class AppController {
             this.agentDispatchBlocked(sessionServerID, session.id)
           )
             return false;
-          await backend.prompt(session.id, {
-            text,
-            files,
-            ...(agents.length === 0 ? {} : { agents }),
-          });
+          try {
+            await backend.prompt(session.id, {
+              text,
+              files,
+              ...(agents.length === 0 ? {} : { agents }),
+            });
+          } catch (error) {
+            // Align with classifySendError: only a normalized transport failure is the
+            // ambiguous "transport-unknown" outcome; other kinds are definite failures.
+            promptErrorKind = error instanceof BackendError ? error.kind : undefined;
+            throw error; // admit() classifies and reports it; we only retain the kind.
+          }
           return true;
         },
         undefined,
@@ -5044,7 +5067,15 @@ export class AppController {
         // created session's draft so they can be recovered, and report against the new
         // session without touching the route the user is viewing.
         this.stashPromptDraft(sessionServerID, session.id, text, attachments);
-        this.showNotice(`Session ${session.id} was created but the prompt was not sent.`, 'error');
+        // Distinguish a definite refusal from an uncertain write: never label a transport or
+        // unknown failure as "definitely not sent", and never resubmit it (#339).
+        const uncertain = promptErrorKind === 'transport';
+        this.showNotice(
+          uncertain
+            ? `Session ${session.id} was created; the prompt may or may not have been delivered. Check the transcript before resending.`
+            : `Session ${session.id} was created but the prompt was not sent.`,
+          uncertain ? 'warn' : 'error',
+        );
       }
       return session.id;
     } finally {
@@ -5074,6 +5105,16 @@ export class AppController {
       existing.map((attachment) => attachment.id),
       attachments.map((attachment) => attachment.id),
     );
+    if (recovery.disposition === 'divergent') {
+      // The user edited the parked draft after creation. Keep those bytes untouched and expose
+      // the original envelope through an explicit recovery slot instead of merging into it.
+      this.failedPromptRecoveries.set(key, { text, attachments: [...attachments] });
+      this.showNotice(
+        `Session ${sessionID} was created but the prompt was not sent. The original is preserved separately; the edited draft was kept.`,
+        'warn',
+      );
+      return;
+    }
     const byId = new Map(attachments.map((attachment) => [attachment.id, attachment]));
     batch(() => {
       if (recovery.text !== undefined)
@@ -5085,6 +5126,14 @@ export class AppController {
         this.setState('draftAttachments', key, [...existing, ...missing]);
       }
     });
+  }
+
+  /** The separately preserved first-prompt envelope for a session, if one is pending (#339). */
+  failedPromptRecoveryFor(
+    serverID: string,
+    sessionID: string,
+  ): { text: string; attachments: readonly Attachment[] } | undefined {
+    return this.failedPromptRecoveries.get(this.keyFor(serverID, sessionID));
   }
 
   /**
@@ -5658,6 +5707,9 @@ export class AppController {
     // An in-flight activity retry for this host must not revive running flags on a re-pair
     // under the same ID; other hosts keep their independent retry budgets (#341).
     this.clearActivityRetry(serverID);
+    for (const key of this.failedPromptRecoveries.keys()) {
+      if (parseSessionKey(key).serverID === serverID) this.failedPromptRecoveries.delete(key);
+    }
     // Retire every host-owned timer so an unpair/re-pair cannot run a stale continuation
     // against a replacement registration (#333). Other hosts keep their pending work.
     this.retireDelaysWhere((key) => key.startsWith(hostPrefix));

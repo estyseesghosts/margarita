@@ -3200,6 +3200,71 @@ describe('createSession does not steal focus or mutate another draft (issue #113
     }
   });
 
+  test('a transport-unknown first prompt is never labeled definitely unsent (#339)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.promptError = new BackendError('transport', 'session.prompt', 'connection lost');
+    const controller = makeController(() => Promise.resolve([]), backend);
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      await controller.createSessionWithPrompt(
+        { serverID: 'local', directory: '/work/kohjoh' },
+        'B prompt',
+      );
+      expect(controller.state.notice?.text).toContain('may or may not have been delivered');
+      expect(controller.state.notice?.tone).toBe('warn');
+      // The uncertain write is never automatically resubmitted.
+      expect(backend.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('a divergent edited draft keeps its content and exposes the original separately (#339)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    const created = deferred<SessionSummary>();
+    backend.createSessionHook = () => created.promise;
+    backend.promptError = new BackendError('invalid', 'session.prompt', 'rejected');
+    // Hold the write until the parked draft has been edited to divergent content.
+    const gate = deferred<void>();
+    const originalPrompt = backend.prompt.bind(backend);
+    backend.prompt = async (...args) => {
+      await gate.promise;
+      return originalPrompt(...args);
+    };
+    const controller = makeController(() => Promise.resolve([]), backend);
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      const promise = controller.createSessionWithPrompt(
+        { serverID: 'local', directory: '/work/kohjoh' },
+        'original',
+      );
+      created.resolve({ ...fakeSession('ses_b'), directory: '/work/kohjoh' });
+      await flush();
+
+      // Navigate away parks the original, edit the parked draft to divergent content, then
+      // navigate back out so that edit is saved.
+      controller.openSession('ses_a');
+      await flush();
+      controller.openSession('ses_b');
+      await flush();
+      controller.setComposer(composerFrom('newer edit'));
+      controller.openSession('ses_a');
+      await flush();
+      gate.resolve();
+      await promise;
+
+      // Newer bytes survive untouched and the original is recoverable separately.
+      expect((controller.state.drafts['ses_b'] ?? {}).text).toBe('newer edit');
+      expect(controller.failedPromptRecoveryFor('local', 'ses_b')?.text).toBe('original');
+    } finally {
+      controller.dispose();
+    }
+  });
+
   test('a failed first prompt parked by navigation is not duplicated (#339)', async () => {
     const backend = new FakeBackend();
     backend.sessions = [fakeSession('ses_a')];

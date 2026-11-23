@@ -231,13 +231,20 @@ export function failedPromptRecovery(
   submittedText: string,
   currentAttachmentIDs: readonly string[],
   submittedAttachmentIDs: readonly string[],
-): { text: string | undefined; missingAttachmentIDs: readonly string[] } {
+): {
+  text: string | undefined;
+  missingAttachmentIDs: readonly string[];
+  disposition: 'already-present' | 'merged' | 'divergent';
+} {
   const present = new Set(currentAttachmentIDs);
+  // A draft that already holds the envelope (parked by navigation) or a newer edit containing
+  // it needs no merge. A genuinely empty draft receives the text once. A divergent edit must
+  // keep its content and expose the original separately, never by merging duplicate bytes.
+  const already = submittedText === '' || currentText.includes(submittedText);
   return {
-    // When the draft already holds the envelope (parked by navigation) or a newer edit that
-    // contains it, do not insert a second copy; a genuinely empty draft gets the text once.
-    text: currentText.includes(submittedText) || submittedText === '' ? undefined : submittedText,
+    text: already ? undefined : submittedText,
     missingAttachmentIDs: submittedAttachmentIDs.filter((id) => !present.has(id)),
+    disposition: already ? 'already-present' : currentText.trim() === '' ? 'merged' : 'divergent',
   };
 }
 

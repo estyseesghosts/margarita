@@ -251,25 +251,36 @@ describe('submission admission state machine (#312)', () => {
     expect(failedPromptRecovery('hello', 'hello', ['a1'], ['a1'])).toEqual({
       text: undefined,
       missingAttachmentIDs: [],
+      disposition: 'already-present',
     });
     // A newer edit containing the original is preserved without a second copy.
     expect(failedPromptRecovery('hello world', 'hello', ['a1'], ['a1'])).toEqual({
       text: undefined,
       missingAttachmentIDs: [],
+      disposition: 'already-present',
     });
     // An empty parked draft receives the text once and only genuinely new attachment IDs.
     expect(failedPromptRecovery('', 'hello', ['a1'], ['a1', 'a2'])).toEqual({
       text: 'hello',
       missingAttachmentIDs: ['a2'],
+      disposition: 'merged',
     });
     // Attachment IDs with a shared basename are deduplicated by stable ID, never by name.
     expect(failedPromptRecovery('hello', 'hello', ['a1'], ['a1', 'a2'])).toEqual({
       text: undefined,
       missingAttachmentIDs: ['a2'],
+      disposition: 'already-present',
     });
     expect(failedPromptRecovery('', '', [], [])).toEqual({
       text: undefined,
       missingAttachmentIDs: [],
+      disposition: 'already-present',
+    });
+    // A divergent newer edit keeps its content; the original is exposed separately.
+    expect(failedPromptRecovery('newer text', 'hello', ['a2'], ['a1', 'a2'])).toEqual({
+      text: 'hello',
+      missingAttachmentIDs: ['a1'],
+      disposition: 'divergent',
     });
   });
 
