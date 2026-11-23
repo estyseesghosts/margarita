@@ -212,6 +212,7 @@ import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { DraftRegistry } from './draft-registry.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
+import { RefreshGenerations } from './refresh-generations.ts';
 
 /** A point an edit can be undone/redone back to. Attachments are kept, never duplicated. */
 type UndoSnapshot = Readonly<{ composer: Composer }>;
@@ -516,9 +517,8 @@ export class AppController {
    */
   private summaryReadSeq = 0;
   private readonly summaryAdmitted = new Map<string, number>();
-  /** Monotonic order of live usage events; lets a summary snapshot keep newer usage (#272). */
-  private usageEventSequence = 0;
-  private readonly usageEvidence = new Map<string, number>();
+  /** Sole owner of refresh/session/event generations (#308). */
+  private readonly generations = new RefreshGenerations();
   private readonly summaryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private transcriptOrder: string[] = [];
   /** Per-host stream status: the viewed conversation's footer must reflect its own host,
@@ -1376,14 +1376,6 @@ export class AppController {
   }
 
   /**
-   * Monotonic sequence for execution events, per qualified session key, plus the counter
-   * they draw from. A session refresh stores the counter when its request begins; an event
-   * stamped later is newer than that snapshot and must win over it (issue #80).
-   */
-  private runningEventSequence = 0;
-  private readonly runningEventSeq = new Map<string, number>();
-
-  /**
    * Reconciles one host's running flags against a complete active set. A session the host no
    * longer reports running is cleared — including a flag left behind by a completion event
    * missed while disconnected (#80). Only this host's keys are touched, and a per-key event
@@ -1395,7 +1387,7 @@ export class AppController {
     active: ReadonlySet<string>,
     snapshotSeq: number,
   ): void {
-    const superseded = (key: string) => (this.runningEventSeq.get(key) ?? 0) > snapshotSeq;
+    const superseded = (key: string) => this.generations.eventSequence(key) > snapshotSeq;
     this.setState(
       produce((state) => {
         for (const key of Object.keys(state.running)) {
@@ -1438,8 +1430,8 @@ export class AppController {
         const epoch = this.nextRefreshEpoch(targetID);
         // Captured before the first request: any execution event stamped after this point is
         // newer than the snapshot and must not be overwritten by it.
-        const snapshotSeq = this.runningEventSequence;
-        const usageSeq = this.usageEventSequence;
+        const snapshotSeq = this.generations.eventClock();
+        const usageSeq = this.generations.usageClock();
         try {
           const loaded = await this.loadServerSessions(targetID, epoch);
           return {
@@ -1516,7 +1508,7 @@ export class AppController {
           const fresh: Record<string, SessionSummary> = {};
           for (const [key, summary] of Object.entries(result.fresh)) {
             const existing = current[key];
-            const liveUsageAdvanced = (this.usageEvidence.get(key) ?? 0) > result.usageSeq;
+            const liveUsageAdvanced = this.generations.usageEvidence(key) > result.usageSeq;
             fresh[key] =
               liveUsageAdvanced && existing !== undefined
                 ? {
@@ -1586,37 +1578,26 @@ export class AppController {
     await Promise.all(requestRefreshes);
   }
 
-  /** Per-host refresh epochs: a host whose load starts a newer refresh retires the older. */
-  private readonly refreshEpoch = new Map<string, number>();
-
+  // Generation checks are owned by RefreshGenerations; these thin wrappers keep the
+  // existing call sites stable while capabilities migrate (#305).
   private nextRefreshEpoch(serverID: string): number {
-    const next = (this.refreshEpoch.get(serverID) ?? 0) + 1;
-    this.refreshEpoch.set(serverID, next);
-    return next;
+    return this.generations.nextRefresh(serverID);
   }
 
   private isRefreshCurrent(serverID: string, epoch: number): boolean {
-    return this.refreshEpoch.get(serverID) === epoch;
+    return this.generations.isRefreshCurrent(serverID, epoch);
   }
 
-  /**
-   * Monotonic per-session lifetimes (#252). A read captures the epoch before its first
-   * await; deletion, host removal or ID reuse bumps it, so a late response can never
-   * resurrect or overwrite state that belonged to an earlier lifetime. The counter is
-   * bumped instead of deleted so it cannot restart at a value an old response still holds.
-   */
-  private readonly sessionEpochs = new Map<string, number>();
-
   private sessionEpoch(key: string): number {
-    return this.sessionEpochs.get(key) ?? 0;
+    return this.generations.sessionEpoch(key);
   }
 
   private isSessionCurrent(key: string, epoch: number): boolean {
-    return (this.sessionEpochs.get(key) ?? 0) === epoch;
+    return this.generations.isSessionCurrent(key, epoch);
   }
 
   private invalidateSession(key: string): void {
-    this.sessionEpochs.set(key, this.sessionEpoch(key) + 1);
+    this.generations.invalidateSession(key);
   }
 
   private async loadServerSessions(
@@ -1730,7 +1711,7 @@ export class AppController {
     );
     this.transcriptOrder = this.transcriptOrder.filter((entry) => entry !== key);
     this.goalVersions.delete(key);
-    this.runningEventSeq.delete(key);
+    this.generations.forgetEvents(key);
     this.invalidateJobRefresh(key);
     this.inputRequestRevisions.delete(key);
     // A recreated ID must start a new read order; the process-wide counters stay monotonic,
@@ -1747,7 +1728,7 @@ export class AppController {
     this.modelSwitchRevisions.delete(key);
     this.verifiedDescendants.delete(key);
     // A recreated ID starts without usage evidence, so a new summary can establish usage.
-    this.usageEvidence.delete(key);
+    this.generations.forgetUsage(key);
     const route = this.state.route;
     if (
       route.kind === 'conversation' &&
@@ -1785,7 +1766,7 @@ export class AppController {
       servers.map(async (serverID) => {
         const epoch = this.nextRefreshEpoch(serverID);
         // Snapshot boundary: events stamped after this are newer than the active set below.
-        const snapshotSeq = this.runningEventSequence;
+        const snapshotSeq = this.generations.eventClock();
         let backend;
         try {
           backend = this.backendFor(serverID);
@@ -2086,19 +2067,15 @@ export class AppController {
     );
   }
 
-  /** Per-host reconnect generation: a superseded resync must not act after a newer one. */
-  private readonly resyncEpochs = new Map<string, number>();
-
   /**
    * A stream (re)connect means we may have missed events for that host: refetch that
    * host's snapshot only. Other servers are untouched; the route keeps what it has.
    */
   private async resync(serverID: string): Promise<void> {
-    const epoch = (this.resyncEpochs.get(serverID) ?? 0) + 1;
-    this.resyncEpochs.set(serverID, epoch);
+    const epoch = this.generations.nextResync(serverID);
     const currentResync = (): boolean =>
       !this.disposed &&
-      this.resyncEpochs.get(serverID) === epoch &&
+      this.generations.isResyncCurrent(serverID, epoch) &&
       this.serverIDs().includes(serverID);
     // Transcript freshness is judged against what was committed *before* this resync:
     // a session read that lands during it is genuinely fresh, not a stale replay.
@@ -2188,7 +2165,7 @@ export class AppController {
         // Only a listed session can display usage, but the evidence stamp is what keeps a
         // summary snapshot that began earlier from rolling it back (#272).
         if (this.state.sessions[key] !== undefined) {
-          this.usageEvidence.set(key, (this.usageEventSequence += 1));
+          this.generations.nextUsageSequence(key);
           this.setState('sessions', key, { cost: event.cost, tokens: event.tokens });
         }
         return;
@@ -2196,7 +2173,7 @@ export class AppController {
       case 'execution': {
         const key = this.keyFor(serverID, event.sessionID);
         // Stamp the event so a snapshot that began before it can never overwrite it.
-        this.runningEventSeq.set(key, (this.runningEventSequence += 1));
+        this.generations.nextEventSequence(key);
         this.setState('running', key, event.state === 'started');
         // A background confirmation is transient call status: it lives only inside the turn
         // that produced it. Any execution transition (including a new turn) retires it (#135).
@@ -2277,7 +2254,7 @@ export class AppController {
     const sequence = ++this.summaryReadSeq;
     this.summaryAdmitted.set(key, sequence);
     // Usage events stamped after this point are newer than the snapshot being fetched.
-    const usageAtStart = this.usageEvidence.get(key) ?? 0;
+    const usageAtStart = this.generations.usageEvidence(key);
     try {
       const session = await backend.getSession(sessionID);
       // A deleted/unpaired/recreated session must not be recreated by a late summary read.
@@ -2293,7 +2270,7 @@ export class AppController {
       // A live usage event received while this read was pending is newer evidence than the
       // snapshot, so keep its cost/tokens while accepting the snapshot's other fields (#272).
       const current = this.state.sessions[key];
-      const liveUsageAdvanced = (this.usageEvidence.get(key) ?? 0) > usageAtStart;
+      const liveUsageAdvanced = this.generations.usageEvidence(key) > usageAtStart;
       const next = this.withConfirmedModel(key, { ...session, serverID });
       const committed =
         liveUsageAdvanced && current !== undefined
@@ -5594,14 +5571,14 @@ export class AppController {
     }
     // Retire every session lifetime for the host and drop selection caches keyed to it, so
     // an unpair/re-pair cannot resurrect a late summary, transcript or switch (#252, #253).
-    for (const key of this.sessionEpochs.keys()) {
+    for (const key of this.generations.sessionKeys()) {
       if (parseSessionKey(key).serverID === serverID) this.invalidateSession(key);
     }
     for (const key of this.verifiedDescendants.keys()) {
       if (parseSessionKey(key).serverID === serverID) this.verifiedDescendants.delete(key);
     }
-    for (const key of this.usageEvidence.keys()) {
-      if (parseSessionKey(key).serverID === serverID) this.usageEvidence.delete(key);
+    for (const key of this.generations.usageKeys()) {
+      if (parseSessionKey(key).serverID === serverID) this.generations.forgetUsage(key);
     }
     for (const cache of [
       this.confirmedAgents,
@@ -6540,7 +6517,7 @@ export class AppController {
     // the await (#147).
     const key = this.keyFor(session.serverID, session.id);
     const routeKey = this.routeKey(this.state.route);
-    const turnGeneration = this.runningEventSeq.get(key) ?? 0;
+    const turnGeneration = this.generations.eventSequence(key);
     const captured = this.runningToolIDs(session.id, session.serverID);
     try {
       await this.backendFor(session.serverID).backgroundTools(session.id);
@@ -6550,7 +6527,7 @@ export class AppController {
         this.disposed ||
         this.state.sessions[key]?.serverID !== session.serverID ||
         this.routeKey(this.state.route) !== routeKey ||
-        (this.runningEventSeq.get(key) ?? 0) !== turnGeneration
+        this.generations.eventSequence(key) !== turnGeneration
       )
         return;
       const toolIDs = new Set(

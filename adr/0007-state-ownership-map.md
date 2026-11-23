@@ -103,9 +103,9 @@ These are concrete source observations, not hypotheses:
   and live events; health from the owning `Backend`/connection manager.
 - **Readers / writers:** overview groups/rows, conversation footer and CLI target resolution read it; bootstrap, loadSessions, onEvents and resync write it.
 - **Mutable state:** `streamByServer` (525), `summaryReadSeq` / `summaryAdmitted`
-  (516-517), `usageEventSequence` / `usageEvidence` (519-520), `summaryTimers`
-  (521), `transcriptOrder` (522), `serverPages` in `AppState`, refresh epochs
-  from 1584-1612.
+  (516-517), `summaryTimers` (521), `transcriptOrder` (522), `serverPages` in
+  `AppState`. Host/session/resync epochs and event/usage stamps are now owned by
+  `src/app/refresh-generations.ts` (first #308 slice).
 - **Async/teardown:** per-host refresh epochs, host-qualified keys, timers in
   `summaryTimers`; `forgetServer()` at 5580 and `clearRuntimeStateForServer()`
   at 2043 are the current teardown points.
