@@ -586,6 +586,30 @@ export class AppController {
   /** Each open form has a unique token, and replies are guarded per server/session/form. */
   private formToken = 0;
   private readonly answeringForms = new Set<string>();
+  /**
+   * Per-request permission reply admission, keyed by server/session/permission identity.
+   * A held reply on one host must not block an independent permission on another host, and
+   * a late completion must not release a newer request that reused the same raw IDs (#340).
+   * The token lets teardown retire an old flight without it unlocking a replacement.
+   */
+  private readonly answeringPermissions = new Map<string, number>();
+  private permissionReplySeq = 0;
+
+  /** Retires host-owned permission reply locks without touching other hosts (#340). */
+  private retirePermissionReplies(matches: (serverID: string, sessionID: string) => boolean): void {
+    for (const key of this.answeringPermissions.keys()) {
+      const parsed: unknown = JSON.parse(key);
+      if (!Array.isArray(parsed) || parsed.length < 2) continue;
+      const [serverID, sessionID] = parsed;
+      if (
+        typeof serverID === 'string' &&
+        typeof sessionID === 'string' &&
+        matches(serverID, sessionID)
+      )
+        this.answeringPermissions.delete(key);
+    }
+    if (this.answeringPermissions.size === 0) this.setState('answering', false);
+  }
   /** Sole owner of request refresh revisions and both publication batches (#310). */
   private readonly inbox: RequestInboxCoordinator;
   /** Last killed composer text for Ctrl+Y; each kill replaces it (documented policy). */
@@ -784,6 +808,9 @@ export class AppController {
     this.ancestry.dispose();
     this.creations.clear();
     this.recoveredInbox.clear();
+    // Disposal retires every permission reply lock; late callbacks find no matching token
+    // and cannot publish into the disposed controller (#340).
+    this.answeringPermissions.clear();
   }
 
   /**
@@ -1654,6 +1681,9 @@ export class AppController {
     }
     this.transcriptRetries.reset(retryKey);
     this.clearJobStartProbe(key);
+    // A held permission reply for this lifetime must not keep its lock after deletion, so a
+    // recreated same-ID session is not blocked and late replies cannot mutate state (#340).
+    this.retirePermissionReplies((host, sess) => host === serverID && sess === sessionID);
     const expansionPrefix = `${key} `;
     this.setStateTouchingOverview(
       produce((state) => {
@@ -5451,6 +5481,9 @@ export class AppController {
     // Only this host's reads are retired; other hosts keep their background progress.
     const hostPrefix = `${serverID} `;
     this.transcriptFlights.retireWhere((key) => key.startsWith(hostPrefix));
+    // A held permission reply on this host must not keep a lock after unpair; a re-pair must
+    // not inherit it, and other hosts keep their independent replies (#340).
+    this.retirePermissionReplies((host) => host === serverID);
     // Retire every host-owned timer so an unpair/re-pair cannot run a stale continuation
     // against a replacement registration (#333). Other hosts keep their pending work.
     this.retireDelaysWhere((key) => key.startsWith(hostPrefix));
@@ -7014,31 +7047,49 @@ export class AppController {
   async answerPermission(decision?: PermissionDecision): Promise<void> {
     const session = this.currentSession();
     const pending = this.pendingPermission();
-    if (pending === undefined || session === undefined || this.state.answering) return;
+    if (pending === undefined || session === undefined) return;
+    const serverID = session.serverID;
+    const sessionID = pending.sessionID;
+    const permissionID = pending.id;
+    // Capture the owning backend and the immutable request identity before any await. A held
+    // reply on one host must not block an independent permission on another host, and a late
+    // completion must not unlock a replacement that reused the raw IDs (#340).
+    const backend = this.backendFor(serverID);
+    const key = JSON.stringify([serverID, sessionID, permissionID]);
+    if (this.answeringPermissions.has(key)) return;
+    const token = ++this.permissionReplySeq;
+    this.answeringPermissions.set(key, token);
     const choice = decision ?? this.permissionChoices()[this.state.permissionChoice] ?? 'reject';
     this.setState('answering', true);
     try {
-      // The permission belongs to its owning host, not whatever route is active now.
-      await this.backendFor(session.serverID).replyPermission(
-        pending.sessionID,
-        pending.id,
-        choice,
-      );
-    } catch (error) {
-      if (
-        error instanceof BackendError &&
-        (error.kind === 'not-found' || error.kind === 'conflict')
-      ) {
-        this.showNotice('Already answered elsewhere.', 'dim');
-      } else {
-        this.showNotice(errorText(error), 'error');
+      try {
+        // The permission belongs to its captured host, not whatever route is active now.
+        await backend.replyPermission(sessionID, permissionID, choice);
+      } catch (error) {
+        if (
+          error instanceof BackendError &&
+          (error.kind === 'not-found' || error.kind === 'conflict')
+        ) {
+          this.showNotice('Already answered elsewhere.', 'dim');
+        } else {
+          this.showNotice(errorText(error), 'error');
+        }
       }
-    }
-    // Close only after the server confirms the request is gone.
-    try {
-      await this.refreshInputRequests(pending.sessionID, session.serverID);
+      // Re-check the captured owner before publishing anything: a re-pair or deletion during
+      // the RPC must not mutate the replacement host's state (#340).
+      if (this.disposed || !this.isRegisteredBackend(serverID, backend)) return;
+      // Refresh only the captured host/session, never whatever route is now active. A failed
+      // refresh is a separate local-sync diagnostic; the confirmed reply stays confirmed.
+      try {
+        await this.refreshInputRequests(sessionID, serverID);
+      } catch (error) {
+        this.showNotice(`Could not refresh permissions: ${errorText(error)}`, 'error');
+      }
     } finally {
-      this.setState('answering', false);
+      // Only the owning flight may release its key; a retired scope or a replacement token
+      // must not be unlocked by an old completion (#340).
+      if (this.answeringPermissions.get(key) === token) this.answeringPermissions.delete(key);
+      if (this.answeringPermissions.size === 0) this.setState('answering', false);
     }
   }
 

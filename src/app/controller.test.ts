@@ -6182,6 +6182,80 @@ describe('escape key handling (issue #90)', () => {
   });
 });
 
+function twoHostPermissionController() {
+  const local = new FakeBackend();
+  const remote = new FakeBackend();
+  remote.serverID = 'srv_1';
+  const sessionID = 'ses_same';
+  local.sessions = [fakeSession(sessionID)];
+  remote.sessions = [{ ...fakeSession(sessionID), serverID: 'srv_1' }];
+  const controller = new AppController({
+    backend: local,
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/kohjoh',
+    version: '0.0.1',
+    now: () => 10_000,
+    saveLocalState: async () => {},
+    listFiles: () => Promise.resolve([]),
+    requestExit: () => {},
+    serverIDs: () => ['srv_1'],
+    backendFor: (serverID: string) => (serverID === 'srv_1' ? remote : local),
+  });
+  return { controller, local, remote, sessionID };
+}
+
+describe('permission reply admission is scoped per request (#340)', () => {
+  test('a held reply on one host does not block an independent permission on another (#340)', async () => {
+    const { controller, local, remote, sessionID } = twoHostPermissionController();
+    try {
+      await controller.bootstrap();
+      controller.openSession(sessionID, 'local');
+      await flush();
+      local.permissions = [{ id: 'p_a', sessionID, action: 'run shell', resources: [], save: [] }];
+      controller.onEvents('local', [{ kind: 'input-requests-changed', sessionID }], false);
+      await flush();
+      expect(controller.pendingPermission()?.id).toBe('p_a');
+
+      // Hold host A's reply indefinitely. Count explicitly: an override does not record a
+      // FakeBackend call until the original method runs.
+      const gate = deferred<void>();
+      let heldReplyCalls = 0;
+      const originalReply = local.replyPermission.bind(local);
+      local.replyPermission = async (...args) => {
+        heldReplyCalls += 1;
+        await gate.promise;
+        return originalReply(...args);
+      };
+      const answerA = controller.answerPermission('once');
+      await flush();
+      expect(heldReplyCalls).toBe(1);
+
+      // Navigate to host B with an identical raw session ID; its independent permission must
+      // be answerable while A is still held, and its busy state must not inherit A's lock.
+      controller.openSession(sessionID, 'srv_1');
+      await flush();
+      remote.permissions = [
+        { id: 'p_b', sessionID, action: 'read files', resources: [], save: [] },
+      ];
+      controller.onEvents('srv_1', [{ kind: 'input-requests-changed', sessionID }], false);
+      await flush();
+      expect(controller.pendingPermission()?.id).toBe('p_b');
+      expect(controller.state.answering).toBe(true);
+
+      await controller.answerPermission('once');
+      expect(remote.calls.filter((call) => call.name === 'replyPermission')).toHaveLength(1);
+
+      gate.resolve();
+      await answerA;
+      expect(controller.state.answering).toBe(false);
+    } finally {
+      controller.dispose();
+    }
+  });
+});
+
 describe('copy picker (#105)', () => {
   test('copies exact tool output bytes and reports the truncation boundary', async () => {
     const backend = new FakeBackend();
