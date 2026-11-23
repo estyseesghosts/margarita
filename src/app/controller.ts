@@ -745,6 +745,8 @@ export class AppController {
     this.transcriptRetryTimers.clear();
     for (const timer of this.jobStartProbes.values()) clearTimeout(timer);
     this.jobStartProbes.clear();
+    this.transcriptFlights.dispose();
+    this.ancestry.dispose();
   }
 
   /**
@@ -1558,6 +1560,9 @@ export class AppController {
     // deleting its state (#252, #295).
     this.invalidateSession(key);
     const retryKey = `${serverID} ${sessionID}`;
+    // A hung read for the old lifetime must not occupy the key after the session is
+    // recreated; its late completion is rejected by the new flight's identity (#333).
+    this.transcriptFlights.retire(retryKey);
     const retryTimer = this.transcriptRetryTimers.get(retryKey);
     if (retryTimer !== undefined) {
       clearTimeout(retryTimer);
@@ -2491,6 +2496,8 @@ export class AppController {
     refreshJobs = false,
   ): void {
     const key = `${serverID} ${sessionID}`;
+    const qualifiedKey = this.keyFor(serverID, sessionID);
+    const epoch = this.sessionEpoch(qualifiedKey);
     // A fresh signal supersedes a pending backoff retry; it must not wait behind it.
     const retryTimer = this.transcriptRetryTimers.get(key);
     if (retryTimer !== undefined) {
@@ -2498,19 +2505,27 @@ export class AppController {
       this.transcriptRetryTimers.delete(key);
     }
     if (this.transcriptFlights.coalesce(key, refreshJobs)) return;
+    const flight = this.transcriptFlights.begin(key);
     const run = (async () => {
       let failure: unknown;
       try {
         await this.fetchLatest(sessionID, serverID);
       } catch (error) {
         failure = error;
-      } finally {
-        this.transcriptFlights.end(key);
+      }
+      // A deleted/unpaired lifetime may have retired this flight while the read hung.
+      // Its late result must not close a replacement, drain its hints or schedule a
+      // retry for a session that now has a different generation (#333).
+      if (!this.transcriptFlights.isCurrent(flight)) return;
+      if (this.disposed || !this.isSessionCurrent(qualifiedKey, epoch)) {
+        this.transcriptFlights.end(flight);
+        return;
       }
       // Always settle the coalesced hints, including after a rejected read. Draining them
       // only on success dropped an already-observed update when no later event arrived
       // (#295), and left the flags cached for an unrelated refresh.
-      const { dirty, dirtyJobs } = this.transcriptFlights.drain(key);
+      const { dirty, dirtyJobs } = this.transcriptFlights.drain(flight);
+      this.transcriptFlights.end(flight);
       if (failure !== undefined) {
         await this.handleTranscriptFailure(
           sessionID,
@@ -2526,7 +2541,6 @@ export class AppController {
       await delay(80);
       if (dirty && !this.disposed) this.scheduleTranscript(sessionID, serverID, dirtyJobs);
     })();
-    this.transcriptFlights.begin(key, run);
     void this.track('transcript', run);
   }
 
@@ -5131,6 +5145,8 @@ export class AppController {
     const route = this.state.route;
     if (route.kind !== 'overview' && route.serverID === serverID) this.openOverview();
     this.inbox.forgetServer(serverID);
+    // Only this host's reads are retired; other hosts keep their background progress.
+    this.transcriptFlights.retireWhere((key) => key.startsWith(`${serverID} `));
     for (const key of this.generations.jobKeys()) {
       if (parseSessionKey(key).serverID === serverID) this.invalidateJobRefresh(key);
     }

@@ -175,21 +175,27 @@ These are concrete source observations, not hypotheses:
   four tests), and read generations/commit watermarks in
   `src/app/transcript-generations.ts` (third #309 slice, three tests), and the
   single-flight/dirty-hint coalescer in `src/app/transcript-flight.ts` (fourth
-  #309 slice, four tests). The resync stale/fresh rule and the failure
+  #309 slice, six tests). Its flights now carry an identity: `begin` returns a
+  token, `drain`/`end` reject a retired flight, and `retire`/`retireWhere`/
+  `dispose` drop only the affected lifetimes (#331/#333). The count and byte
+  eviction planner in `src/app/transcript-eviction.ts` separates protected
+  entries before either cap, so the active route and a live read are never
+  sliced out (nine tests). The resync stale/fresh rule and the failure
   classification rule are now pure in `src/app/transcript-freshness.ts` (fifth
   #309 slice, nine tests): `planResyncStaleFlags` keeps only an attached session
   that committed a newer page fresh, and `classifyTranscriptFailure` orders
   stale marking, independent job hints, retry reset and bounded retry scheduling.
   Timers, notices and store writes still stay in the controller.
 - **Async/teardown:** single-flight reads, bounded retries, failure backoff,
-  active/in-flight sessions exempt from eviction; timers cleared in `dispose()`
-  at 712.
+  active/in-flight sessions exempt from both eviction caps; deletion, unpair and
+  disposal retire the matching flights before their late completions can drain
+  hints or schedule retries (#333). Timers cleared in `dispose()`.
 - **Intended owner:** `TranscriptRepository/Coordinator` with
   `open`, `refresh`, `applyHint`, `loadOlder`, `invalidate`, `forgetHost`,
   `dispose`, returning immutable read-only views.
 - **Tests:** `src/app/transcript-freshness.test.ts` (9),
-  `src/app/transcript-eviction.test.ts` (5), `src/app/transcript-retry.test.ts` (4),
-  `src/app/transcript-generations.test.ts` (3), `src/app/transcript-flight.test.ts` (4),
+  `src/app/transcript-eviction.test.ts` (9), `src/app/transcript-retry.test.ts` (4),
+  `src/app/transcript-generations.test.ts` (3), `src/app/transcript-flight.test.ts` (6),
   `src/app/controller.test.ts`, `src/app/merge-latest.test.ts`,
   `src/domain/transcript-projector.test.ts`, `scripts/bench.ts` scenarios
   `projectorTailUpdate`, `livePageReconcile`.
@@ -226,8 +232,10 @@ These are concrete source observations, not hypotheses:
   tests), with `AppState.permissions/forms/requestErrors` written only through
   its commands. Verified child→ancestor evidence and in-flight ancestry walks
   are owned by `AncestryVerifier` in `src/app/ancestry-verifier.ts` (second
-  impure #310 slice, nine tests), which exposes a read-only evidence view to the
-  pure scope rule.
+  impure #310 slice, eleven tests), which exposes a read-only evidence view to the
+  pure scope rule. Each walk now has a token; the verifier owns its timeout and
+  retires timed-out or torn-down walks so a recovered backend can retry and a
+  late RPC cannot publish evidence (#332).
 - **Async/teardown:** bounded ancestry verification, independent endpoint
   freshness, per-key revision cancellation on session removal or unpair. The
   attached-session/sibling scope rule and input-request event routing are pure
@@ -255,7 +263,7 @@ These are concrete source observations, not hypotheses:
   (server, owning session, actual form session, form ID, token) and
   `answer`/`cancel` results remain to extract. Overlay focus stays in UI state.
 - **Tests:** `src/app/request-inbox-coordinator.test.ts` (9),
-  `src/app/ancestry-verifier.test.ts` (9),
+  `src/app/ancestry-verifier.test.ts` (11),
   `src/app/request-inbox.test.ts` (8),
   `src/app/descendant-scope.test.ts` (3), `src/app/request-targets.test.ts` (5),
   `src/app/form-routing.test.ts`, `src/app/multi-server-events.test.ts`,

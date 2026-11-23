@@ -55,11 +55,21 @@ export interface DescendantVerification {
   readonly error?: string;
 }
 
+/** One deduplicated walk; its token lets retirement ignore a late completion. */
+interface AncestryLookup {
+  readonly token: number;
+  readonly childKey: string;
+  readonly ancestorKey: string;
+  readonly serverID: string;
+  readonly promise: Promise<DescendantCheck>;
+}
+
 /** Owns ancestry evidence and the bounded verification of unknown child owners. */
 export class AncestryVerifier {
   private readonly evidenceByKey = new Map<string, VerifiedDescendant>();
   private readonly serverByKey = new Map<string, string>();
-  private readonly lookups = new Map<string, Promise<DescendantCheck>>();
+  private readonly lookups = new Map<string, AncestryLookup>();
+  private nextToken = 1;
 
   constructor(private readonly deps: AncestryVerifierDeps) {}
 
@@ -68,13 +78,18 @@ export class AncestryVerifier {
     return this.evidenceByKey;
   }
 
-  /** Drops one session's evidence after deletion or ID reuse. */
+  /** Drops one session's evidence and pending walks after deletion or ID reuse. */
   forgetSession(key: string): void {
     this.evidenceByKey.delete(key);
     this.serverByKey.delete(key);
+    for (const [lookupKey, lookup] of this.lookups) {
+      if (lookup.childKey === key || lookup.ancestorKey === key) {
+        this.retireLookup(lookupKey, lookup.token);
+      }
+    }
   }
 
-  /** Drops every cached relationship belonging to an unpaired host. */
+  /** Drops every cached relationship and pending walk belonging to an unpaired host. */
   forgetServer(serverID: string): void {
     for (const [key, owner] of this.serverByKey) {
       if (owner === serverID) {
@@ -82,6 +97,21 @@ export class AncestryVerifier {
         this.serverByKey.delete(key);
       }
     }
+    for (const [lookupKey, lookup] of this.lookups) {
+      if (lookup.serverID === serverID) this.retireLookup(lookupKey, lookup.token);
+    }
+  }
+
+  /** Clears all owned walks and evidence; late completions become inert (#332). */
+  dispose(): void {
+    this.lookups.clear();
+    this.evidenceByKey.clear();
+    this.serverByKey.clear();
+  }
+
+  /** Removes a lookup only while it is still the flight that created it. */
+  private retireLookup(lookupKey: string, token: number): void {
+    if (this.lookups.get(lookupKey)?.token === token) this.lookups.delete(lookupKey);
   }
 
   /** Verifies one child, reusing lifetime-matched evidence and deduplicating concurrent walks. */
@@ -106,27 +136,35 @@ export class AncestryVerifier {
     }
     const lookupKey = `${childKey}|${ancestorKey}|${childEpoch}|${ancestorEpoch}`;
     const existing = this.lookups.get(lookupKey);
-    if (existing !== undefined) return existing;
-    const work = this.walkAncestry(
+    if (existing !== undefined) return existing.promise;
+    const token = this.nextToken;
+    this.nextToken += 1;
+    const walk = this.walkAncestry(
       childID,
       ancestorID,
       serverID,
       childKey,
       childEpoch,
       ancestorEpoch,
-    )
-      .then((result) => {
-        if (result.status === 'verified') {
-          this.evidenceByKey.set(childKey, { ancestor: ancestorID, childEpoch, ancestorEpoch });
-          this.serverByKey.set(childKey, serverID);
-        }
-        return result;
-      })
-      .finally(() => {
-        this.lookups.delete(lookupKey);
-      });
-    this.lookups.set(lookupKey, work);
-    return work;
+    ).then((result): DescendantCheck => {
+      // A retired or replaced walk may not publish evidence or clear newer state (#332).
+      if (this.lookups.get(lookupKey)?.token !== token) {
+        return { status: 'unresolved', error: 'the ownership check was retired' };
+      }
+      if (result.status === 'verified') {
+        this.evidenceByKey.set(childKey, { ancestor: ancestorID, childEpoch, ancestorEpoch });
+        this.serverByKey.set(childKey, serverID);
+      }
+      return result;
+    });
+    // The deadline is part of the deduplicated flight: when it wins, the lookup is
+    // retired at once so a recovered backend can be retried instead of reusing a
+    // promise that can never settle (#332).
+    const promise = this.deps.withTimeout(walk, this.deps.timeoutMs).finally(() => {
+      this.retireLookup(lookupKey, token);
+    });
+    this.lookups.set(lookupKey, { token, childKey, ancestorKey, serverID, promise });
+    return promise;
   }
 
   private async walkAncestry(
@@ -196,12 +234,12 @@ export class AncestryVerifier {
           error ??= 'ownership verification ran out of time';
           continue;
         }
-        const result = await this.deps
-          .withTimeout(this.verifyDescendant(childID, ancestorID, serverID), this.deps.timeoutMs)
-          .catch((cause: unknown): DescendantCheck => ({
+        const result = await this.verifyDescendant(childID, ancestorID, serverID).catch(
+          (cause: unknown): DescendantCheck => ({
             status: 'unresolved',
             error: errorText(cause),
-          }));
+          }),
+        );
         if (result.status === 'verified') verified.add(childID);
         else if (result.status === 'unrelated') unrelated.add(childID);
         else {

@@ -2,7 +2,11 @@ import { describe, expect, test } from 'bun:test';
 
 import { FakeBackend } from '../../test/fake-backend.ts';
 import type { SessionSummary } from '../domain/session.ts';
-import { AncestryVerifier, type AncestryVerifierDeps } from './ancestry-verifier.ts';
+import {
+  AncestryVerifier,
+  type AncestryVerifierDeps,
+  type DescendantCheck,
+} from './ancestry-verifier.ts';
 
 const backend = new FakeBackend();
 
@@ -182,6 +186,81 @@ describe('ancestry verifier (#310)', () => {
     f.verifier.forgetServer('other');
     expect(f.verifier.evidence().size).toBe(1);
     f.verifier.forgetServer('srv');
+    expect(f.verifier.evidence().size).toBe(0);
+  });
+
+  test('a timed-out walk is retired so a recovered backend can be retried (#332)', async () => {
+    const timeouts: Array<() => void> = [];
+    let releaseFirst!: (value: SessionSummary) => void;
+    let calls = 0;
+    const f = fixture({
+      withTimeout: (check) =>
+        new Promise<DescendantCheck>((resolve) => {
+          timeouts.push(() => {
+            resolve({ status: 'unresolved', error: 'timed out' });
+          });
+          void check.then(resolve);
+        }),
+      getSession: async (_backend, sessionID) => {
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<SessionSummary>((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return summary(sessionID, 'ancestor');
+      },
+    });
+    const firstTimeout = () => {
+      const fire = timeouts[0];
+      if (fire === undefined) throw new Error('expected a timeout for the first walk');
+      fire();
+    };
+
+    const firstRun = f.verifier.verifyUnknownDescendants(['child'], 'ancestor', 'srv');
+    firstTimeout();
+    const first = await firstRun;
+    expect(first.pending).toEqual(new Set(['child']));
+    expect(first.error).toContain('timed out');
+
+    const retryRun = f.verifier.verifyUnknownDescendants(['child'], 'ancestor', 'srv');
+    // A late firing of the retired deadline cannot retire the replacement walk.
+    firstTimeout();
+    const retry = await retryRun;
+    expect(retry.verified).toEqual(new Set(['child']));
+    expect(calls).toBe(2);
+
+    // The originally stalled RPC settling later cannot overwrite newer evidence.
+    releaseFirst(summary('child'));
+    await Promise.resolve();
+    expect(f.verifier.evidence().get('srv|child')).toEqual({
+      ancestor: 'ancestor',
+      childEpoch: 1,
+      ancestorEpoch: 1,
+    });
+  });
+
+  test('lifecycle teardown retires pending walks and ignores their late results (#332)', async () => {
+    const release: Array<(value: SessionSummary) => void> = [];
+    const f = fixture({
+      getSession: async () =>
+        new Promise<SessionSummary>((resolve) => {
+          release.push(resolve);
+        }),
+    });
+    const first = f.verifier.verifyDescendant('child', 'ancestor', 'srv');
+    expect(release).toHaveLength(1);
+    f.verifier.forgetSession('srv|child');
+    const second = f.verifier.verifyDescendant('child', 'ancestor', 'srv');
+    expect(release).toHaveLength(2);
+    f.verifier.forgetServer('srv');
+    const third = f.verifier.verifyDescendant('child', 'ancestor', 'srv');
+    expect(release).toHaveLength(3);
+    f.verifier.dispose();
+
+    for (const settleWalk of release) settleWalk(summary('child', 'ancestor'));
+    const results = await Promise.all([first, second, third]);
+    expect(results.every((result) => result.status === 'unresolved')).toBe(true);
     expect(f.verifier.evidence().size).toBe(0);
   });
 });

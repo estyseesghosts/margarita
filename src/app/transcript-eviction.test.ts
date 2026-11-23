@@ -73,4 +73,50 @@ describe('transcript eviction planning (#309)', () => {
     expect(plan.order).toContain('huge');
     expect(plan.evicted).toContain('old');
   });
+
+  test('the count cap protects the active entry even below the cutoff (#331)', () => {
+    const plan = planTranscriptEviction(
+      input({
+        order: ['new', 'b', 'c', 'active'],
+        touched: 'new',
+        activeKey: 'active',
+        countLimit: 2,
+      }),
+    );
+    expect(plan.order).toEqual(['new', 'active']);
+    expect(plan.evicted).toEqual(['b', 'c']);
+  });
+
+  test('the count cap protects a read that is still allowed to commit (#331)', () => {
+    const plan = planTranscriptEviction(
+      input({
+        order: ['new', 'b', 'c', 'inflight'],
+        touched: 'new',
+        inFlight: new Set(['inflight']),
+        countLimit: 2,
+      }),
+    );
+    expect(plan.order).toEqual(['new', 'inflight']);
+    expect(plan.evicted).toEqual(['b', 'c']);
+  });
+
+  test('protected entries alone may exceed the cap instead of dropping a live page (#331)', () => {
+    const plan = planTranscriptEviction(
+      input({
+        order: ['inflight', 'active'],
+        touched: 'new',
+        activeKey: 'active',
+        inFlight: new Set(['inflight']),
+        countLimit: 1,
+      }),
+    );
+    expect(plan.order).toEqual(['new', 'inflight', 'active']);
+    expect(plan.evicted).toEqual([]);
+  });
+
+  test('repeated order entries are planned once', () => {
+    const plan = planTranscriptEviction(input({ order: ['a', 'b', 'b'], touched: 'a' }));
+    expect(plan.order).toEqual(['a', 'b']);
+    expect(plan.evicted).toEqual([]);
+  });
 });

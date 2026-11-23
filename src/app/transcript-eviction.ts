@@ -28,29 +28,34 @@ export interface TranscriptEviction {
 }
 
 /**
- * Plans eviction after `touched` is accessed. Count eviction runs first; byte
- * eviction then walks least-recent entries from the end. The most-recent entry
- * is kept even when it alone exceeds the budget — dropping it would force the
- * next refresh to refetch the same bytes with no memory win.
+ * Plans eviction after `touched` is accessed. Protected entries (the touched
+ * entry, the active route and live reads) are separated from cacheable entries
+ * *before* either cap is applied, so a count slice cannot evict an entry the
+ * contract promises to retain (#331). When protected entries alone exceed a
+ * limit the cache temporarily stays over budget; dropping an active page or a
+ * read that can still commit would force an immediate refetch with no win.
  */
 export function planTranscriptEviction(input: TranscriptEvictionInput): TranscriptEviction {
-  const order = [input.touched, ...input.order.filter((entry) => entry !== input.touched)];
-  const evicted = new Set(order.slice(input.countLimit));
-  const kept = order.slice(0, input.countLimit);
+  const order = [...new Set([input.touched, ...input.order])];
+  const isProtected = (entry: string): boolean =>
+    entry === input.touched || entry === input.activeKey || input.inFlight.has(entry);
+  const evicted = new Set<string>();
+  const cacheable = order.filter((entry) => !isProtected(entry));
+  const countAllowance = Math.max(0, input.countLimit - (order.length - cacheable.length));
+  for (const entry of cacheable.slice(countAllowance)) evicted.add(entry);
 
+  const kept = order.filter((entry) => !evicted.has(entry));
   const sizes = new Map<string, number>();
   let total = 0;
   for (const entry of kept) {
-    if (evicted.has(entry)) continue;
     const size = input.sizes(entry);
     sizes.set(entry, size);
     total += size;
   }
 
-  for (let index = kept.length - 1; index >= 0 && total > input.byteBudget; index -= 1) {
+  for (let index = kept.length - 1; index > 0 && total > input.byteBudget; index -= 1) {
     const entry = kept[index];
-    if (entry === undefined || entry === input.activeKey || input.inFlight.has(entry)) continue;
-    if (index === 0) continue;
+    if (entry === undefined || isProtected(entry)) continue;
     total -= sizes.get(entry) ?? 0;
     evicted.add(entry);
   }

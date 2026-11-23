@@ -6467,6 +6467,49 @@ describe('failed transcript refresh retains and drains queued work (#295)', () =
   });
 });
 
+describe('transcript flight identity across session recreation (#333)', () => {
+  test('a read that outlives its session cannot erase the replacement session transcript', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [userMessage('m1', 'first')] };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+
+    const real = backend.listMessages.bind(backend);
+    const gate = deferred<void>();
+    let reads = 0;
+    let gated = false;
+    backend.listMessages = async (sessionID, limit, cursor) => {
+      reads += 1;
+      if (!gated) {
+        gated = true;
+        await gate.promise;
+        return { messages: [] };
+      }
+      return real(sessionID, limit, cursor);
+    };
+    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    await flush();
+    expect(reads).toBe(1);
+
+    // The old read is still blocked; delete and recreate the same server/session ID.
+    controller.onEvents('local', [{ kind: 'session-deleted', sessionID: 'ses_a' }], false);
+    backend.sessions = [fakeSession('ses_a')];
+    await controller.loadSessions();
+    controller.openSession('ses_a');
+    await flush();
+    expect(reads).toBe(2);
+
+    gate.resolve();
+    await flush();
+    const messages = controller.state.transcripts['ses_a']?.messages ?? [];
+    expect(messages.some((message) => message.id === 'm1')).toBe(true);
+    // The retired read cannot drain the new flight's hints into another fetch.
+    expect(reads).toBe(2);
+    controller.dispose();
+  });
+});
+
 describe('job state lifecycle on disconnect and removal (#136)', () => {
   const remoteJob: WorkerJob = {
     id: 'job_r',
