@@ -95,7 +95,6 @@ import {
   type TaskState,
 } from '../domain/goal-plan.ts';
 import { greetingPeriod } from '../domain/greeting-time.ts';
-import { selectGreeting } from '../domain/greetings.ts';
 import {
   type InspectorIndex,
   inspectorIndex,
@@ -211,6 +210,7 @@ import {
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { descendantScope } from './descendant-scope.ts';
 import { DraftRegistry } from './draft-registry.ts';
+import { GreetingSelector } from './greeting-selector.ts';
 import { applyPin, modelScope } from './model-pins.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
@@ -553,9 +553,8 @@ export class AppController {
   private readonly inputRequestRevisions = new Map<string, number>();
   /** Last killed composer text for Ctrl+Y; each kill replaces it (documented policy). */
   private killBuffer = '';
-  /** Greetings chosen once per route; process-lifetime only, never sent to a server. */
-  private readonly greetingCache = new Map<string, string>();
-  private readonly recentGreetings: string[] = [];
+  /** Sole owner of stable greeting selection (#318); process-lifetime only. */
+  private readonly greetings = new GreetingSelector();
   /** Bounded, route-scoped undo/redo of user edits; never shared across drafts. */
   private readonly undoStacks = new Map<string, UndoSnapshot[]>();
   private readonly redoStacks = new Map<string, UndoSnapshot[]>();
@@ -1079,13 +1078,7 @@ export class AppController {
    * for it yet, so it is intentionally not persisted across restarts).
    */
   greetingFor(key: string): string {
-    const cached = this.greetingCache.get(key);
-    if (cached !== undefined) return cached;
-    const greeting = selectGreeting(greetingPeriod(new Date(this.now())), this.recentGreetings);
-    this.greetingCache.set(key, greeting);
-    this.recentGreetings.push(greeting);
-    if (this.recentGreetings.length > 8) this.recentGreetings.shift();
-    return greeting;
+    return this.greetings.for(key, greetingPeriod(new Date(this.now())));
   }
 
   get version(): string {

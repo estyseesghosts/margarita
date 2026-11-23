@@ -12,13 +12,13 @@ Captured at `4d9c6af` plus the #305/#307/#306 documentation and tooling work:
 
 | Command | Result |
 | --- | --- |
-| `bun run verify` | 1319 pass, 40 skip, 0 fail (1359 tests across 104 files); includes format, Oxlint, strict typecheck, `check:architecture`, and tests |
+| `bun run verify` | 1322 pass, 40 skip, 0 fail (1362 tests across 105 files); includes format, Oxlint, strict typecheck, `check:architecture`, and tests |
 | `bun run bench -- --smoke` | opt-in synthetic projection/network benchmark; not a native FPS measurement |
 | `bun run bench:render` | opt-in renderable-reuse benchmark |
 | `sh scripts/test-pty-smoke.sh`, `sh scripts/test-tmux.sh` | Linux executable smoke, run in CI, needs a compiled binary |
 | `MARGARITA_LIVE=1 bun test` | opt-in compatibility against a disposable v2 service; never a user's real service |
 
-The test suite declares roughly 1,323 explicit test cases; most are grouped in
+The test suite declares roughly 1,326 explicit test cases; most are grouped in
 `src/app/controller.test.ts` (about 270) and `src/ui/app.test.tsx` (about 115).
 Those two files are the coupling the extraction must unravel: behavior is
 protected, but the fixtures are tied to one concrete class.
