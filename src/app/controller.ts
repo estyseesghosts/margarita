@@ -220,6 +220,7 @@ import { RefreshGenerations } from './refresh-generations.ts';
 import { inputRequestRefreshTargets } from './request-targets.ts';
 import { SessionFetcher } from './session-fetch.ts';
 import { mergeCommittedSessions, sessionFlags, sessionPage } from './session-snapshot.ts';
+import { planTranscriptEviction } from './transcript-eviction.ts';
 import { UsageAnalyticsSelector } from './usage-selector.ts';
 
 /** A point an edit can be undone/redone back to. Attachments are kept, never duplicated. */
@@ -3098,39 +3099,24 @@ export class AppController {
    * reopening an evicted session refetches the latest page normally.
    */
   private touchTranscript(key: string): void {
-    this.transcriptOrder = [key, ...this.transcriptOrder.filter((entry) => entry !== key)];
-    const evicted = new Set(this.transcriptOrder.slice(transcriptCacheLimit));
-    this.transcriptOrder = this.transcriptOrder.slice(0, transcriptCacheLimit);
-
-    const budget = this.deps.transcriptCacheBytes ?? transcriptCacheByteLimit;
-    const activeKey =
-      this.state.route.kind === 'conversation'
-        ? this.keyFor(this.state.route.serverID, this.state.route.sessionID)
-        : undefined;
-    const sizes = new Map<string, number>();
-    let total = 0;
-    for (const entry of this.transcriptOrder) {
-      if (evicted.has(entry)) continue;
-      const messages = this.state.transcripts[entry]?.messages ?? [];
-      const retained = approximateTranscriptBytes(messages).total;
-      sizes.set(entry, retained);
-      total += retained;
-    }
-    const inFlight = this.inFlightTranscriptKeys();
-    for (let index = this.transcriptOrder.length - 1; index >= 0 && total > budget; index -= 1) {
-      const entry = this.transcriptOrder[index];
-      if (entry === undefined || entry === activeKey || inFlight.has(entry)) continue;
-      // Keep the most recently used entry even when it alone exceeds the budget: evicting
-      // it would make the next refresh refetch the same bytes with no memory win.
-      if (index === 0) continue;
-      total -= sizes.get(entry) ?? 0;
-      evicted.add(entry);
-    }
-    if (evicted.size === 0) return;
-    this.transcriptOrder = this.transcriptOrder.filter((entry) => !evicted.has(entry));
+    const plan = planTranscriptEviction({
+      order: this.transcriptOrder,
+      touched: key,
+      sizes: (entry) =>
+        approximateTranscriptBytes(this.state.transcripts[entry]?.messages ?? []).total,
+      activeKey:
+        this.state.route.kind === 'conversation'
+          ? this.keyFor(this.state.route.serverID, this.state.route.sessionID)
+          : undefined,
+      inFlight: this.inFlightTranscriptKeys(),
+      countLimit: transcriptCacheLimit,
+      byteBudget: this.deps.transcriptCacheBytes ?? transcriptCacheByteLimit,
+    });
+    this.transcriptOrder = plan.order;
+    if (plan.evicted.length === 0) return;
     this.setState(
       produce((state) => {
-        for (const entry of evicted) delete state.transcripts[entry];
+        for (const entry of plan.evicted) delete state.transcripts[entry];
       }),
     );
   }

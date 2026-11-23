@@ -148,7 +148,9 @@ These are concrete source observations, not hypotheses:
 - **Mutable state:** `transcriptInFlight` (498), `transcriptDirty` (499),
   `transcriptRetryTimers` (501), `transcriptRetryAttempts` (502),
   `transcriptReadSeq` / `transcriptCommitted` (509-510), `transcriptOrder` (522),
-  plus `AppState.transcripts`, `transcriptWindow` and LRU/byte-budget state.
+  plus `AppState.transcripts` and `transcriptWindow`. The LRU/byte-budget eviction
+  decision is now a pure planner in `src/app/transcript-eviction.ts` (first #309
+  slice, five tests); the controller still owns the order and the store write.
 - **Async/teardown:** single-flight reads, bounded retries, failure backoff,
   active/in-flight sessions exempt from eviction; timers cleared in `dispose()`
   at 712.
