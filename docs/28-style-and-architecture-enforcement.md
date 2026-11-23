@@ -36,10 +36,16 @@ table is enforced on both supported development platforms.
 | Tests | `bun test` | Behavioural assertions pass, including the architecture-gate tests. |
 | Boundaries | `bun run check:architecture` | Production import edges and import cycles follow the rules below. |
 
-`check:architecture` is intentionally cheap and dependency-free: it is a local
-Bun script (`scripts/check-architecture.ts`) that reads `src/**/*.ts(x)` and
-reports every offending import with a file and line. It does not parse types.
-Anything that needs semantic understanding stays a review responsibility.
+`check:architecture` is a local Bun script (`scripts/check-architecture.ts`)
+that reads `src/**/*.ts(x)` and reports every offending import with a file and
+line. Module edges come from the pinned `@babel/parser` syntax parser, so
+comments, string literals and multiline imports are never mistaken for edges,
+and `import`/`import type`/re-exports/side-effect imports/literal `import()`/
+`require()`/`import = require` are all covered (#325). The declarative policy
+is exported as `ARCHITECTURE_POLICY` from the script; this table is its human
+readable mirror. A computed (nonliteral) dynamic specifier fails closed in
+production code because no static gate can prove what it imports. Semantic
+ownership and changeability remain review responsibilities.
 
 ## Import-boundary rules
 
@@ -51,9 +57,9 @@ roots and may depend on every layer.
 
 | From | Must not import | Why |
 | --- | --- | --- |
-| `src/domain/` | `app/`, `ui/`, `adapter/`, `config/`, `cli/`, `perf/`, `solid-js`, `@opentui/*`, `@opencode/*`, or Node I/O (`node:fs*`, `node:net`, `node:http*`, `node:https`, `bun:sqlite`) | Domain logic is pure and reusable; owning wire, storage or render state here is the coupling the audit asks to remove. |
+| `src/domain/` | `app/`, `ui/`, `adapter/`, `config/`, `cli/`, `perf/`, `solid-js`, `@opentui/*`, `@opencode/*`, or Node I/O (`fs*`, `net`, `http*`, `https`, `tls`, `dgram`, `dns` — bare or `node:` — plus `bun:sqlite`) | Domain logic is pure and reusable; owning wire, storage or render state here is the coupling the audit asks to remove. |
 | `src/adapter/` | `app/`, `ui/`, `solid-js`, `@opentui/*` | The adapter owns wire conversion and transport. Calling upward into application or view state hides ownership in the transport layer. `@opencode/client` is expected here. |
-| `src/ui/` | `@opencode/*`, and Node network modules (`node:net`, `node:http*`, `node:https`, direct `fetch(...)`) | Views must not speak the wire protocol or issue transport RPCs; they call application actions. Solid and OpenTUI imports are expected in this layer. |
+| `src/ui/` | `@opencode/*`, and Node network modules (`net`, `http*`, `https`, `tls`, `dgram`, `dns` — bare or `node:` — plus direct `fetch(...)`) | Views must not speak the wire protocol or issue transport RPCs; they call application actions. Solid and OpenTUI imports are expected in this layer. |
 
 These are the machine-checkable categories from issue #307. They are a ratchet,
 not a claim that architecture is already clean: the existing UI-to-`AppController`

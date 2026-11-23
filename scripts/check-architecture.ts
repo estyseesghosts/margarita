@@ -12,6 +12,9 @@
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, posix, relative, resolve, sep } from 'node:path';
 
+import { parse as parseBabel } from '@babel/parser';
+import * as babel from '@babel/types';
+
 /** A source file in the shape the pure checks consume. */
 export interface SourceFile {
   /** Repository-relative path with forward slashes, e.g. `src/domain/form.ts`. */
@@ -66,11 +69,45 @@ function externalMatches(specifier: string, prefixes: readonly string[]): boolea
   return prefixes.some((prefix) => specifier === prefix || specifier.startsWith(`${prefix}/`));
 }
 
+/**
+ * The single declarative import policy, mirrored in
+ * `docs/28-style-and-architecture-enforcement.md`. Package entries match the
+ * package itself and any subpath; Node modules match bare and `node:` forms
+ * (so `fs/promises` and `node:fs/promises` are the same edge) (#325).
+ */
+export const ARCHITECTURE_POLICY = {
+  domain: {
+    forbiddenLayers: ['app', 'ui', 'adapter', 'config', 'cli', 'perf'],
+    forbiddenPackages: ['solid-js', '@opentui', '@opencode'],
+    forbiddenNodeModules: ['fs', 'net', 'http', 'https', 'tls', 'dgram', 'dns'],
+    forbiddenBareSpecifiers: ['bun:sqlite'],
+  },
+  adapter: {
+    forbiddenLayers: ['app', 'ui'],
+    forbiddenPackages: ['solid-js', '@opentui'],
+    forbiddenNodeModules: [],
+    forbiddenBareSpecifiers: [],
+  },
+  ui: {
+    forbiddenLayers: [],
+    forbiddenPackages: ['@opencode'],
+    forbiddenNodeModules: ['net', 'http', 'https', 'tls', 'dgram', 'dns'],
+    forbiddenBareSpecifiers: [],
+  },
+} as const;
+
+function nodeModuleMatches(specifier: string, modules: readonly string[]): boolean {
+  const withoutScheme = specifier.startsWith('node:') ? specifier.slice(5) : specifier;
+  const name = withoutScheme.split('/')[0] ?? withoutScheme;
+  return modules.includes(name);
+}
+
 const domainRule: BoundaryRule = {
   applies: (path) => layerOf(path) === 'domain' && !isTest(path),
   forbids: (specifier, target) => {
     const problems: ForbiddenSite[] = [];
-    if (targetsLayer(target, ['app', 'ui', 'adapter', 'config', 'cli', 'perf'])) {
+    const policy = ARCHITECTURE_POLICY.domain;
+    if (targetsLayer(target, policy.forbiddenLayers)) {
       problems.push({
         line: 0,
         target: specifier,
@@ -78,19 +115,14 @@ const domainRule: BoundaryRule = {
       });
     }
     const external =
-      externalMatches(specifier, [
-        'solid-js',
-        '@opentui/core',
-        '@opentui/solid',
-        '@opencode/client',
-      ]) ||
-      /^node:(fs|net|http|https|tls|dgram|dns)/.test(specifier) ||
-      specifier === 'bun:sqlite';
+      externalMatches(specifier, policy.forbiddenPackages) ||
+      nodeModuleMatches(specifier, policy.forbiddenNodeModules) ||
+      policy.forbiddenBareSpecifiers.some((value) => value === specifier);
     if (external) {
       problems.push({
         line: 0,
         target: specifier,
-        rule: 'domain must not import Solid, OpenTUI, @opencode/client or Node I/O',
+        rule: 'domain must not import Solid, OpenTUI, @opencode clients or Node I/O',
       });
     }
     return problems;
@@ -101,14 +133,15 @@ const adapterRule: BoundaryRule = {
   applies: (path) => layerOf(path) === 'adapter' && !isTest(path),
   forbids: (specifier, target) => {
     const problems: ForbiddenSite[] = [];
-    if (targetsLayer(target, ['app', 'ui'])) {
+    const policy = ARCHITECTURE_POLICY.adapter;
+    if (targetsLayer(target, policy.forbiddenLayers)) {
       problems.push({
         line: 0,
         target: specifier,
         rule: 'adapter must not depend on app or ui',
       });
     }
-    if (externalMatches(specifier, ['solid-js', '@opentui/core', '@opentui/solid'])) {
+    if (externalMatches(specifier, policy.forbiddenPackages)) {
       problems.push({
         line: 0,
         target: specifier,
@@ -123,14 +156,15 @@ const uiRule: BoundaryRule = {
   applies: (path) => layerOf(path) === 'ui' && !isTest(path),
   forbids: (specifier) => {
     const problems: ForbiddenSite[] = [];
-    if (externalMatches(specifier, ['@opencode/client'])) {
+    const policy = ARCHITECTURE_POLICY.ui;
+    if (externalMatches(specifier, policy.forbiddenPackages)) {
       problems.push({
         line: 0,
         target: specifier,
-        rule: 'ui must not import @opencode/client wire internals',
+        rule: 'ui must not import @opencode/client or other wire clients',
       });
     }
-    if (/^node:(net|http|https|tls|dgram|dns)/.test(specifier)) {
+    if (nodeModuleMatches(specifier, policy.forbiddenNodeModules)) {
       problems.push({
         line: 0,
         target: specifier,
@@ -146,52 +180,115 @@ function findFetchViolations(file: SourceFile): readonly ImportViolation[] {
   if (layerOf(file.path) !== 'ui' || isTest(file.path)) {
     return [];
   }
-  const found: ImportViolation[] = [];
-  for (const [index, line] of withoutComments(file.text).split('\n').entries()) {
-    if (/\bfetch\s*\(/.test(line)) {
-      found.push({
-        file: file.path,
-        line: index + 1,
-        target: 'fetch(...)',
-        rule: 'ui must not perform transport RPCs directly',
-      });
-    }
-  }
-  return found;
+  return fetchCallLines(file.text).map((line) => ({
+    file: file.path,
+    line,
+    target: 'fetch(...)',
+    rule: 'ui must not perform transport RPCs directly',
+  }));
 }
 
 const boundaryRules: readonly BoundaryRule[] = [domainRule, adapterRule, uiRule];
 
-/** Strip line and block comments so commented-out imports and URLs are ignored. */
-function withoutComments(text: string): string {
-  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+/** Marker for a computed module specifier the parser cannot resolve statically. */
+export const DYNAMIC_SPECIFIER = '(dynamic)';
+
+/**
+ * Parses TypeScript/TSX with a real syntax parser. Comments and string
+ * literals are not module edges; a parser-based gate never mistakes either for
+ * one (#325). TypeScript 7's native package no longer exposes the classic
+ * `createSourceFile` API, so this uses the pinned Babel parser instead.
+ */
+function parse(text: string): babel.File {
+  return parseBabel(text, {
+    sourceType: 'module',
+    plugins: ['typescript', 'jsx'],
+    errorRecovery: true,
+  });
 }
 
-/** Extract static, type-only, side-effect and dynamic imports with line numbers. */
-export function extractImports(text: string): readonly ImportSite[] {
-  const clean = withoutComments(text);
-  const patterns = [
-    /(?:^|\n)\s*(?:import|export)\b[^;]*?\bfrom\s*['"]([^'"]+)['"]/g,
-    /(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g,
-    /\bimport\(\s*['"]([^'"]+)['"]\s*\)/g,
-  ];
-  const seen = new Set<string>();
-  const sites: ImportSite[] = [];
-  for (const pattern of patterns) {
-    for (const match of clean.matchAll(pattern)) {
-      const specifier = match[1];
-      if (specifier === undefined) {
-        continue;
-      }
-      const line = clean.slice(0, match.index + 1).split('\n').length;
-      const key = `${line}:${specifier}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        sites.push({ specifier, line });
-      }
+function isNode(value: unknown): value is babel.Node {
+  return (
+    typeof value === 'object' && value !== null && 'type' in value && typeof value.type === 'string'
+  );
+}
+
+/** Walks an AST without casts; every child is validated before it is visited. */
+function walkAst(value: unknown, accept: (node: babel.Node) => void): void {
+  if (!isNode(value)) return;
+  accept(value);
+  for (const child of Object.values(value)) {
+    if (Array.isArray(child)) {
+      for (const entry of child) walkAst(entry, accept);
+    } else {
+      walkAst(child, accept);
     }
   }
+}
+
+function lineOf(node: babel.Node): number {
+  return node.loc?.start.line ?? 1;
+}
+
+function dynamicSpecifier(node: babel.CallExpression): string {
+  const argument = node.arguments[0];
+  if (argument !== undefined && babel.isStringLiteral(argument)) return argument.value;
+  return DYNAMIC_SPECIFIER;
+}
+
+/**
+ * Extracts every module edge with a line number: static/type-only/side-effect
+ * imports, re-exports, `import = require`, literal dynamic `import()` and
+ * `require()`. A nonliteral dynamic specifier is reported with
+ * {@link DYNAMIC_SPECIFIER} so the gate can fail closed instead of assuming the
+ * edge does not exist (#325).
+ */
+export function extractImports(text: string): readonly ImportSite[] {
+  const source = parse(text);
+  const sites: ImportSite[] = [];
+  const seen = new Set<string>();
+  const add = (node: babel.Node, specifier: string): void => {
+    const line = lineOf(node);
+    const key = `${line}:${specifier}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    sites.push({ specifier, line });
+  };
+  walkAst(source, (node) => {
+    if (babel.isImportDeclaration(node) && babel.isStringLiteral(node.source)) {
+      add(node, node.source.value);
+    } else if (
+      (babel.isExportNamedDeclaration(node) || babel.isExportAllDeclaration(node)) &&
+      node.source !== null &&
+      node.source !== undefined &&
+      babel.isStringLiteral(node.source)
+    ) {
+      add(node, node.source.value);
+    } else if (
+      babel.isTSImportEqualsDeclaration(node) &&
+      babel.isTSExternalModuleReference(node.moduleReference) &&
+      babel.isStringLiteral(node.moduleReference.expression)
+    ) {
+      add(node, node.moduleReference.expression.value);
+    } else if (
+      babel.isCallExpression(node) &&
+      (babel.isImport(node.callee) || babel.isIdentifier(node.callee, { name: 'require' }))
+    ) {
+      add(node, dynamicSpecifier(node));
+    }
+  });
   return sites.toSorted((left, right) => left.line - right.line);
+}
+
+/** Lines containing a direct `fetch(...)` call, never a string or a comment. */
+export function fetchCallLines(text: string): readonly number[] {
+  const lines: number[] = [];
+  walkAst(parse(text), (node) => {
+    if (babel.isCallExpression(node) && babel.isIdentifier(node.callee, { name: 'fetch' })) {
+      lines.push(lineOf(node));
+    }
+  });
+  return lines;
 }
 
 /**
@@ -220,14 +317,26 @@ export function findImportViolations(files: readonly SourceFile[]): readonly Imp
   const violations: ImportViolation[] = [];
   for (const file of files) {
     const rules = boundaryRules.filter((rule) => rule.applies(file.path));
+    const sites = extractImports(file.text);
+    if (!isTest(file.path)) {
+      for (const site of sites) {
+        if (site.specifier === DYNAMIC_SPECIFIER) {
+          violations.push({
+            file: file.path,
+            line: site.line,
+            target: DYNAMIC_SPECIFIER,
+            rule: 'dynamic module specifiers must be literal so the gate can check them',
+          });
+        }
+      }
+    }
     if (rules.length === 0) {
       continue;
     }
-    const text = withoutComments(file.text);
-    for (const site of extractImports(file.text)) {
+    for (const site of sites) {
       const target = resolveTarget(file.path, site.specifier, known);
       for (const rule of rules) {
-        for (const problem of rule.forbids(site.specifier, target, text)) {
+        for (const problem of rule.forbids(site.specifier, target, file.text)) {
           violations.push({
             file: file.path,
             line: problem.line > 0 ? problem.line : site.line,

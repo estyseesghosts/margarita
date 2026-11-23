@@ -52,9 +52,12 @@ passing tests.
 3. **Dependency direction is `ui → app/use-cases → domain`**, with `adapter/`
    as the only wire translator and `config/` as the only persistence transport
    for ordinary local JSON. Domain stays free of `app/`, `ui/`, Solid, OpenTUI,
-   `@opencode/client` and Node I/O. This is enforced by the gate added in #307
+   `@opencode/*` and Node I/O. This is enforced by the gate added in #307
    (`scripts/check-architecture.ts`) and documented in
-   `docs/28-style-and-architecture-enforcement.md`.
+   `docs/28-style-and-architecture-enforcement.md`. Edge extraction now uses a
+   real syntax parser over all import/re-export/`require`/dynamic forms, with
+   the single declarative policy exported as `ARCHITECTURE_POLICY` and computed
+   dynamic specifiers rejected rather than ignored (#325).
 4. **Server-qualified identity everywhere.** A bare session ID is never a key
    for state shared across hosts; generations/epochs accompany every read whose
    reply can arrive after teardown, unpair or replacement.

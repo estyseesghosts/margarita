@@ -95,4 +95,6 @@ assertions with its owner.
 - Assert exact calls on the **owning** backend and explicitly assert forbidden
   calls on the other hosts (`assertNoCalls`).
 - Track moved/added/removed tests in the PR description; `bun run verify` plus
-  the architecture gate must stay green.
+  the architecture gate must stay green. Gate fixtures cover every module-edge
+  syntax and a CLI negative case; the declarative policy is `ARCHITECTURE_POLICY`
+  in `scripts/check-architecture.ts` (#325).
