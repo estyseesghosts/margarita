@@ -76,6 +76,11 @@ export interface CharacterizationHarness {
   readonly sessionID: string;
   /** Drains microtasks and due zero-delay timers without sleeping. */
   settle(rounds?: number): Promise<void>;
+  /**
+   * Awaitable checkpoint: drains microtasks and due timers until `predicate` holds, instead of
+   * guessing a fixed number of settle rounds. Bounded so a stuck RPC fails visibly (#326).
+   */
+  waitUntil(predicate: () => boolean, description?: string): Promise<void>;
   backend(serverID: string): FakeBackend;
   /** Adds or removes a host registration without touching the other hosts. */
   setRegistered(serverID: string, registered: boolean): void;
@@ -183,6 +188,16 @@ export async function createHarness(
         await Promise.resolve();
         scheduler.runDue();
       }
+    },
+    async waitUntil(predicate: () => boolean, description = 'condition'): Promise<void> {
+      // Bounded by a generous checkpoint budget; each turn is a real microtask drain under
+      // virtual time, so a stuck RPC fails the test instead of silently passing (#326).
+      for (let turn = 0; turn < 100; turn += 1) {
+        if (predicate()) return;
+        await Promise.resolve();
+        scheduler.runDue();
+      }
+      throw new Error(`waitUntil: ${description} did not settle within 100 virtual turns`);
     },
     backend(serverID: string): FakeBackend {
       const backend = backends.get(serverID);

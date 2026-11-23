@@ -90,7 +90,11 @@ coordinator and the event-pump manager tests. Those tests assert behavior at a
 real runtime boundary and are kept separate from the deterministic race
 fixtures — they are not claimed to be scheduler-driven. Race-sensitive tests
 use the virtual-time harness or explicit `deferred()` gates for RPC completion
-and effect publication instead of guessing a settle count.
+and effect publication instead of guessing a settle count. The harness exposes
+`waitUntil(predicate)` as a bounded, predicate-driven checkpoint so a test can
+await a specific state publication rather than a fixed number of settle rounds;
+it is demonstrated by a held session-listing RPC and by committing two hosts'
+indices under both RPC resolution orders with identical results (#326).
 
 ## Regression traps: coverage status
 

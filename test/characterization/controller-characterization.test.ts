@@ -266,6 +266,63 @@ describe('time-driven behavior under an injected scheduler (#326)', () => {
     harness.dispose();
   });
 
+  test('an explicit checkpoint awaits a held RPC and its effect publication (#326)', async () => {
+    const harness = await createHarness();
+    const backend = harness.backend('local');
+    const gate = deferred<Awaited<ReturnType<typeof backend.listSessions>>>();
+    backend.listSessions = async () => gate.promise;
+    const newKey = sessionKey({ serverID: 'local', sessionID: 'ses_checkpoint' });
+    const published = () => harness.controller.state.sessions[newKey] !== undefined;
+
+    const load = harness.controller.loadSessions();
+    let checkpointPassed = false;
+    const checkpoint = harness.waitUntil(published, 'session listing publication').then(() => {
+      checkpointPassed = true;
+    });
+    await harness.settle(2);
+    // The RPC is still held, so no amount of settling may satisfy the checkpoint.
+    expect(checkpointPassed).toBe(false);
+    expect(published()).toBe(false);
+
+    gate.resolve({ sessions: [collidingSession('local', 'ses_checkpoint', 'checkpoint')] });
+    await checkpoint;
+    await load;
+    expect(published()).toBe(true);
+    expect(checkpointPassed).toBe(true);
+    harness.dispose();
+  });
+
+  test('opposite RPC resolution orders commit the same session index (#326)', async () => {
+    for (const first of ['local', 'remote'] as const) {
+      const harness = await createHarness();
+      const releases: Record<string, (sessions: SessionSummary[]) => void> = {};
+      for (const serverID of ['local', 'remote']) {
+        const gate = deferred<{ sessions: SessionSummary[] }>();
+        releases[serverID] = (sessions) => gate.resolve({ sessions });
+        harness.backend(serverID).listSessions = async () => gate.promise;
+      }
+      const load = harness.controller.loadSessions();
+      await harness.settle(2);
+      const order = first === 'local' ? ['local', 'remote'] : ['remote', 'local'];
+      for (const serverID of order) {
+        releases[serverID]?.([collidingSession(serverID, `ses_${serverID}`, `${serverID} page`)]);
+      }
+      await load;
+      await harness.settle();
+
+      expect(
+        harness.controller.state.sessions[sessionKey({ serverID: 'local', sessionID: 'ses_local' })]
+          ?.title,
+      ).toBe('local page');
+      expect(
+        harness.controller.state.sessions[
+          sessionKey({ serverID: 'remote', sessionID: 'ses_remote' })
+        ]?.title,
+      ).toBe('remote page');
+      harness.dispose();
+    }
+  });
+
   test('dispose cancels every timer the controller still owns', async () => {
     const harness = await createHarness();
     harness.controller.showNotice('still on screen', 'dim');
