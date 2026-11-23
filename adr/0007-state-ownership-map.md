@@ -132,6 +132,9 @@ These are concrete source observations, not hypotheses:
   588-589, `transcriptJobsDirty` at 591), plus the generations above.
 - **Async/teardown:** one stream per host, generations and per-key epochs; event
   batches must be admitted atomically and drained independently of failed reads.
+  The duplicated route-host and attached-session rules in `resync`/`applyEvent`
+  are now pure in `src/app/route-server.ts` (first event-admission #308 slice,
+  two tests).
 - **Intended owner:** `EventAdmission` inside the host/session service; public
   contract is typed events in, named invalidations/commands out.
 - **Tests:** `src/adapter/event-pump.test.ts`, multi-server event suites,

@@ -220,6 +220,7 @@ import { PersistenceCoordinator } from './persistence-coordinator.ts';
 import { RefreshGenerations } from './refresh-generations.ts';
 import { inputRequestRefreshTargets } from './request-targets.ts';
 import { RevisionCache } from './revision-cache.ts';
+import { attachedSessionFor, routeServerFor } from './route-server.ts';
 import { SessionFetcher } from './session-fetch.ts';
 import { mergeCommittedSessions, sessionFlags, sessionPage } from './session-snapshot.ts';
 import { planTranscriptEviction } from './transcript-eviction.ts';
@@ -1970,19 +1971,14 @@ export class AppController {
       if (parseSessionKey(key).serverID !== serverID) continue;
       committedBefore.set(key, this.transcriptGenerations.committedGeneration(key));
     }
-    const attachedSession = (): string | undefined => {
-      const route = this.state.route;
-      return route.kind === 'conversation' && route.serverID === serverID
-        ? route.sessionID
-        : undefined;
-    };
+    const attachedSession = (): string | undefined =>
+      attachedSessionFor(this.state.route, serverID);
     await this.loadSessions(serverID);
     if (!currentResync()) return;
     // The catalog and conversation are read from the route *now*, never from a route
     // captured before an await; a switch during resync must keep the new route fresh (#275).
     const route = this.state.route;
-    const routeServer =
-      route.kind === 'overview' ? this.state.overview.project.serverID : route.serverID;
+    const routeServer = routeServerFor(route, this.state.overview.project.serverID);
     if (routeServer === serverID)
       void this.track('catalog', this.loadCatalog(this.currentDirectory(), serverID));
     const attached = attachedSession();
@@ -2019,17 +2015,13 @@ export class AppController {
   }
 
   private applyEvent(serverID: string, event: BackendEvent): void {
-    const attached =
-      this.state.route.kind === 'conversation' && this.state.route.serverID === serverID
-        ? this.state.route.sessionID
-        : undefined;
+    const attached = attachedSessionFor(this.state.route, serverID);
     switch (event.kind) {
       case 'connected':
         return;
       case 'catalog-changed': {
         const route = this.state.route;
-        const routeServer =
-          route.kind === 'overview' ? this.state.overview.project.serverID : route.serverID;
+        const routeServer = routeServerFor(route, this.state.overview.project.serverID);
         if (routeServer !== serverID) return; // another host's catalog is not ours to reload
         void this.track('catalog', this.loadCatalog(this.currentDirectory(), serverID));
         return;
