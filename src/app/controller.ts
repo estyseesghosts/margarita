@@ -214,6 +214,7 @@ import { errorText, refreshOutcome } from './error-text.ts';
 import { admitEvent, type EventCommand } from './event-admission.ts';
 import { GoalRevisionGuard } from './goal-revision-guard.ts';
 import { GreetingSelector } from './greeting-selector.ts';
+import { healthCommands, HostSessionIndex, type HostStreamCommand } from './host-session-index.ts';
 import { InspectorDocumentCache } from './inspector-document.ts';
 import { applyPin, modelScope } from './model-pins.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
@@ -532,9 +533,8 @@ export class AppController {
   private readonly sessionFetcher: SessionFetcher;
   private readonly summaryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private transcriptOrder: string[] = [];
-  /** Per-host stream status: the viewed conversation's footer must reflect its own host,
-   *  not the launch server's badge (issue #109). */
-  private readonly streamByServer = new Map<string, StreamStatus>();
+  /** Sole owner of per-host stream status and index health reporting (#308). */
+  private readonly hostStreams = new HostSessionIndex();
   private readonly modelSwitches = new Map<string, Promise<boolean>>();
   private readonly failedModelSwitches = new Set<string>();
   private readonly modelSwitchRevisions = new Map<string, number>();
@@ -800,7 +800,7 @@ export class AppController {
 
   /** The viewed host's stream status, falling back to the launch server's badge. */
   streamStatusOf(serverID: string): StreamStatus {
-    return this.streamByServer.get(serverID) ?? this.state.stream;
+    return this.hostStreams.statusOf(serverID, this.state.stream);
   }
 
   executionOf(sessionID: string, serverID: string = this.activeServerID()): Execution {
@@ -1430,16 +1430,10 @@ export class AppController {
     // Only the freshest refresh for a still-registered host may be applied; anything older
     // or whose server was removed mid-flight is dropped so it cannot resurrect rows.
     const registered = new Set(this.serverIDs());
-    const applied = results.filter(
-      (result) =>
-        registered.has(result.serverID) && this.isRefreshCurrent(result.serverID, result.epoch),
+    const { applied, health } = healthCommands(results, registered, (hostID, epoch) =>
+      this.isRefreshCurrent(hostID, epoch),
     );
-    for (const result of applied) {
-      this.deps.setServerHealth?.(
-        result.serverID,
-        result.ok ? { ok: true } : { ok: false, error: result.cause },
-      );
-    }
+    for (const report of health) this.deps.setServerHealth?.(report.serverID, report.result);
     const healthy = new Set(applied.filter((result) => result.ok).map((result) => result.serverID));
 
     // Reconcile and commit per host, rechecking registration and freshness after every
@@ -1697,16 +1691,10 @@ export class AppController {
       }),
     );
     const registered = new Set(this.serverIDs());
-    const applied = results.filter(
-      (result) =>
-        registered.has(result.serverID) && this.isRefreshCurrent(result.serverID, result.epoch),
+    const { applied, health } = healthCommands(results, registered, (hostID, epoch) =>
+      this.isRefreshCurrent(hostID, epoch),
     );
-    for (const result of applied) {
-      this.deps.setServerHealth?.(
-        result.serverID,
-        result.ok ? { ok: true } : { ok: false, error: result.cause },
-      );
-    }
+    for (const report of health) this.deps.setServerHealth?.(report.serverID, report.result);
     batch(() => {
       let anyError: string | undefined;
       for (const result of applied) {
@@ -1878,28 +1866,47 @@ export class AppController {
 
   onStreamStatus(serverID: string, status: StreamStatus): void {
     this.debugLog.write('stream-status', { serverID, status });
+    const effects = this.hostStreams.transition({
+      serverID,
+      status,
+      launchServerID: this.serverID,
+      launchBadge: this.state.stream,
+    });
     batch(() => {
-      // Track every host's stream so the viewed conversation's footer reflects its own host,
-      // not the launch server's badge (issue #109).
-      this.streamByServer.set(serverID, status);
-      // Any host's liveness changes status dots and tab counts. A remote transition writes
-      // no other store field, so bump the reactive overview clock explicitly (#293).
-      this.overviewRevision[1]((value) => value + 1);
-      // Every host, not just the launch one: a remote disconnect must drop that host's live-
-      // looking job rows and transient background confirmations (#136). Only this host's keys
-      // are touched, so other servers keep their server-confirmed state.
-      if (status === 'reconnecting') this.clearRuntimeStateForServer(serverID);
+      for (const command of effects.batched) this.executeHostStreamCommand(command);
     });
     // The single stream badge belongs to the launch server; per-server health lives on the
     // manager. A remote reconnect resyncs that host through onEvents and never touches the
     // badge here.
-    if (serverID !== this.serverID) return;
-    const reconnected = status === 'live' && this.state.stream === 'reconnecting';
-    this.setState('stream', status);
-    if (status === 'reconnecting') {
-      this.showNotice('Connection lost · retrying', 'warn', false);
+    for (const command of effects.after) this.executeHostStreamCommand(command);
+  }
+
+  /** Executes one host-stream effect against the controller's reactive store and capabilities. */
+  private executeHostStreamCommand(command: HostStreamCommand): void {
+    switch (command.kind) {
+      case 'bump-overview':
+        // Any host's liveness changes status dots and tab counts. A remote transition writes
+        // no other store field, so bump the reactive overview clock explicitly (#293).
+        this.overviewRevision[1]((value) => value + 1);
+        return;
+      case 'clear-runtime':
+        // Every host, not just the launch one: a remote disconnect must drop that host's
+        // live-looking job rows and transient background confirmations (#136). Only this
+        // host's keys are touched, so other servers keep their server-confirmed state.
+        this.clearRuntimeStateForServer(command.serverID);
+        return;
+      case 'set-badge':
+        this.setState('stream', command.status);
+        return;
+      case 'show-lost-notice':
+        this.showNotice('Connection lost · retrying', 'warn', false);
+        return;
+      case 'resync':
+        void this.track('resync', this.resync(command.serverID));
+        return;
+      default:
+        return;
     }
-    if (reconnected) void this.track('resync', this.resync(serverID));
   }
 
   onEvents(serverID: string, events: readonly BackendEvent[], resync: boolean): void {

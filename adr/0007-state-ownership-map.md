@@ -128,9 +128,11 @@ These are concrete source observations, not hypotheses:
 - **Authoritative source:** the owning server's event stream and its snapshot;
   a disconnect is not a confirmed empty result.
 - **Readers / writers:** the transcript/job hint consumers and overview read events; the event pump writes them through onEvents and onStreamStatus.
-- **Mutable state:** `streamByServer`, transcript dirty hints
-  (`transcriptDirty` at 499), job hints (`jobRefreshes` / `jobRefreshDirty` at
-  588-589, `transcriptJobsDirty` at 591), plus the generations above.
+- **Mutable state:** per-host stream status is now owned by `HostSessionIndex`
+  in `src/app/host-session-index.ts` (fifth #308 slice, eight tests); transcript
+  dirty hints (`transcriptDirty` at 499), job hints (`jobRefreshes` /
+  `jobRefreshDirty` at 588-589, `transcriptJobsDirty` at 591) and the generations
+  above remain in the controller.
 - **Async/teardown:** one stream per host, generations and per-key epochs; event
   batches must be admitted atomically and drained independently of failed reads.
   The duplicated route-host and attached-session rules in `resync`/`applyEvent`
@@ -141,10 +143,18 @@ These are concrete source observations, not hypotheses:
   `EventCommand[]`. The facade's `applyEvent` now only builds the context and
   runs `executeEventCommand` per effect — no routing decisions remain in the
   controller.
-- **Owner:** `admitEvent` in `src/app/event-admission.ts`; typed event in,
-  ordered named commands out. Still to extract: stream status and reconnect
-  handling (`onStreamStatus`, `resync`) and the `HostSessionIndex` itself.
-- **Tests:** `src/app/event-admission.test.ts` (8), `src/adapter/event-pump.test.ts`,
+  Stream status transitions are decided by `HostSessionIndex.transition()`: a
+  host's status is keyed independently with the launch badge as fallback (#109),
+  and the returned effects are split at the reactive batch boundary so remote
+  hosts never touch the badge. The two duplicated per-host health emissions in
+  the full and paged index reads now share `healthCommands()`, which drops
+  unregistered and stale results before reporting.
+- **Owner:** `admitEvent` in `src/app/event-admission.ts` and `HostSessionIndex`
+  in `src/app/host-session-index.ts`; typed inputs in, ordered named commands
+  out. Still to extract: `resync`/reconnect orchestration, per-host page state
+  and the rest of `HostSessionIndex` (the index currently owns stream status only).
+- **Tests:** `src/app/event-admission.test.ts` (8),
+  `src/app/host-session-index.test.ts` (8), `src/adapter/event-pump.test.ts`,
   multi-server event suites, `src/app/async-audit-regressions.test.ts`.
 
 ### 3. Transcript refresh, pagination and cache lifetime (#309)
