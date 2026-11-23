@@ -470,6 +470,81 @@ describe('partial session index failures (#341)', () => {
     harness.dispose();
   });
 
+  test('a list failure with activity succeeding preserves cached sessions and the error', async () => {
+    const harness = await createHarness();
+    const sessionKeyLocal = sessionKey({ serverID: 'local', sessionID: harness.sessionID });
+    harness.emit(
+      'local',
+      [{ kind: 'execution', sessionID: harness.sessionID, state: 'started' }],
+      false,
+    );
+    await harness.settle();
+    expect(harness.controller.state.sessions[sessionKeyLocal]).toBeDefined();
+
+    harness.backend('local').listSessions = async () => {
+      throw new BackendError('transport', 'session.list', 'list offline');
+    };
+    await harness.controller.loadSessions();
+    await harness.settle();
+
+    // No fabricated rows, the previously confirmed session survives, and the listing error
+    // remains visible while running evidence is left alone (#341 trap 2).
+    expect(harness.controller.state.sessions[sessionKeyLocal]).toBeDefined();
+    expect(harness.controller.state.serverPages['local']?.error).toContain('list offline');
+    expect(harness.controller.state.running[sessionKeyLocal]).toBe(true);
+    harness.dispose();
+  });
+
+  test('a failed second page is a host failure, not a partial list published as complete', async () => {
+    const harness = await createHarness();
+    harness.backend('local').listSessions = async (query) => {
+      if (query?.cursor === undefined)
+        return {
+          sessions: [collidingSession('local', 'ses_page1', 'page one')],
+          nextCursor: 'page-2',
+        };
+      throw new BackendError('transport', 'session.list', 'page 2 offline');
+    };
+
+    await harness.controller.loadSessions();
+    await harness.settle();
+
+    // The incomplete listing is not committed; the prior host failure/empty page stays visible.
+    expect(
+      harness.controller.state.sessions[sessionKey({ serverID: 'local', sessionID: 'ses_page1' })],
+    ).toBeUndefined();
+    expect(harness.controller.state.serverPages['local']?.error).toContain('page 2 offline');
+    harness.dispose();
+  });
+
+  test('an SSE execution newer than a slow activity snapshot wins over its empty set', async () => {
+    const harness = await createHarness();
+    const backend = harness.backend('local');
+    const gate = deferred<Set<string>>();
+    backend.activeSessionIDs = () => gate.promise;
+
+    const load = harness.controller.loadSessions();
+    await harness.settle();
+    // Stamp a running turn after the snapshot boundary but before activity resolves.
+    harness.emit(
+      'local',
+      [{ kind: 'execution', sessionID: harness.sessionID, state: 'started' }],
+      false,
+    );
+    await harness.settle();
+    gate.resolve(new Set());
+    await load;
+    await harness.settle();
+
+    // reconcileRunning refuses to clear a flag newer than its snapshot (#341 trap 3).
+    expect(
+      harness.controller.state.running[
+        sessionKey({ serverID: 'local', sessionID: harness.sessionID })
+      ],
+    ).toBe(true);
+    harness.dispose();
+  });
+
   test('dispose cancels a pending activity retry so no stale running flags are published', async () => {
     const harness = await createHarness();
     harness.backend('local').activeSessionIDs = async () => {
