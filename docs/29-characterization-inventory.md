@@ -12,13 +12,13 @@ Captured at `4d9c6af` plus the #305/#307/#306 documentation and tooling work:
 
 | Command | Result |
 | --- | --- |
-| `bun run verify` | 1312 pass, 40 skip, 0 fail (1352 tests across 102 files); includes format, Oxlint, strict typecheck, `check:architecture`, and tests |
+| `bun run verify` | 1316 pass, 40 skip, 0 fail (1356 tests across 103 files); includes format, Oxlint, strict typecheck, `check:architecture`, and tests |
 | `bun run bench -- --smoke` | opt-in synthetic projection/network benchmark; not a native FPS measurement |
 | `bun run bench:render` | opt-in renderable-reuse benchmark |
 | `sh scripts/test-pty-smoke.sh`, `sh scripts/test-tmux.sh` | Linux executable smoke, run in CI, needs a compiled binary |
 | `MARGARITA_LIVE=1 bun test` | opt-in compatibility against a disposable v2 service; never a user's real service |
 
-The test suite declares roughly 1,316 explicit test cases; most are grouped in
+The test suite declares roughly 1,320 explicit test cases; most are grouped in
 `src/app/controller.test.ts` (about 270) and `src/ui/app.test.tsx` (about 115).
 Those two files are the coupling the extraction must unravel: behavior is
 protected, but the fixtures are tied to one concrete class.
@@ -34,7 +34,7 @@ protected, but the fixtures are tied to one concrete class.
 | Permissions and forms, descendant verification | `form-routing.test.ts` (28), `domain/form.test.ts` (24), `multi-server-events.test.ts`, `test/manual-pairing.test.ts`, `src/app/descendant-scope.test.ts` (3) | `RequestInbox` → `request-inbox.test.ts`; request scope now pure in `src/app/descendant-scope.ts` (#310) | Unknown-child/sibling-isolation cases need the shared collision fixture; ancestry timeouts still use real waits in some tests |
 | Composer, drafts, paste, editor, completion, history | `domain/composer.test.ts` (30), `clipboard.test.ts`, `external-editor.test.ts`, `project-files.test.ts`, `ui/app.test.tsx`, `src/app/draft-registry.test.ts` (3) | `RouteScopedComposer` → `composer-service.test.ts`; route identity/revisions already in `src/app/draft-registry.ts` (#311) | Draft revision/external-editor cases split across UI and controller suites; no single route-switch fixture |
 | Submission admission and session creation | `async-audit-regressions.test.ts` (14), `cli/print.test.ts`, `test/writable/prompt-flow.test.ts`, `test/writable/session-control.test.ts` | `SubmissionCoordinator` → `submission.test.ts` | Unknown-write and duplicate-submit cases need a reusable gated `prompt` fixture |
-| Models and agents | `model-selection.test.ts` (21), `domain/model-resolution.test.ts`, `domain/model-sort.test.ts`, `agent-catalog.test.ts` | `ModelSelectionCoordinator` → `model-selection-service.test.ts` | Confirmation-before-billable-send assertions mixed into controller tests |
+| Models and agents | `model-selection.test.ts` (21), `domain/model-resolution.test.ts`, `domain/model-sort.test.ts`, `agent-catalog.test.ts`, `src/app/model-pins.test.ts` (4) | `ModelSelectionCoordinator` → `model-selection-service.test.ts`; model scopes and pin intent already in `src/app/model-pins.ts` (#313) | Confirmation-before-billable-send assertions mixed into controller tests |
 | Goals, plans, tasks | `domain/goal-plan.test.ts` (17), `domain/native-goal.test.ts`, `controller.test.ts` | `GoalPlanCoordinator` → `goal-coordinator.test.ts` | No shared fixture for overlapping reads/saves or cross-host goal collisions |
 | Inspection, diff, rewind, revert | `domain/inspector.test.ts`, `diff.test.ts`, `rewind.test.ts`, `edit-diff.test.ts`, `async-audit-regressions.test.ts` | `InspectionService` + `RevertCommand` → `inspection.test.ts` | Negative "no backend mutation on preview" assertions are localized, not systematic |
 | Persistence | `config/*` suites, `test/linux/persistence.test.ts` (12), `scripts/test-low-disk.sh`, `src/app/persistence-coordinator.test.ts` (4) | **`Extracted (#317)`** `src/app/persistence-coordinator.ts`; controller delegates `flushLocalState()` and patches | Save-chain conflict cases still partly in controller/production-assembly tests |

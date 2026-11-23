@@ -211,6 +211,7 @@ import {
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { descendantScope } from './descendant-scope.ts';
 import { DraftRegistry } from './draft-registry.ts';
+import { applyPin, modelScope } from './model-pins.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
 import { RefreshGenerations } from './refresh-generations.ts';
@@ -6159,7 +6160,7 @@ export class AppController {
 
   /** Stable per-host, per-project scope for remembered and pinned models (#189). */
   private modelScope(serverID: string, directory: string): string {
-    return `${serverID}|${directoryKey(directory, this.platformFor(serverID))}`;
+    return modelScope(serverID, directory, this.platformFor(serverID));
   }
 
   /**
@@ -6302,14 +6303,13 @@ export class AppController {
    * operation (including a clear) is what lets another process merge unrelated scopes (#273).
    */
   private mutatePin(key: string, model: ModelSelection | null): void {
-    const revision = (this.pinOperations[key]?.revision ?? 0) + 1;
-    const operations: Record<string, PinnedModelOperation> = {
-      ...this.pinOperations,
-      [key]: { revision, model, updatedAt: this.isoNow() },
-    };
-    const pins: Record<string, ModelSelection> = { ...this.state.pinnedModels };
-    if (model === null) delete pins[key];
-    else pins[key] = model;
+    const { operations, pins } = applyPin(
+      this.pinOperations,
+      this.state.pinnedModels,
+      key,
+      model,
+      this.isoNow(),
+    );
     this.pinOperations = operations;
     this.setState('pinnedModels', reconcile(pins));
     this.persistence.patch({ pinnedModels: pins, pinnedModelOps: operations });

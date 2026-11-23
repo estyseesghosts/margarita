@@ -249,7 +249,9 @@ These are concrete source observations, not hypotheses:
 - **Readers / writers:** pickers, footer and the submission gate read it; catalog loads, confirmed switches, transcript evidence and pin edits write it.
 - **Mutable state:** `modelSwitches`/`failedModelSwitches`/`modelSwitchRevisions`
   (526-528), `agentSwitches`/`failedAgentSwitches`/`confirmedAgents` (530-539),
-  `pinOperations` (634), `AppState.models/agents/pinnedModels/lastModels`.
+  `pinOperations` (634), `AppState.models/agents/pinnedModels/lastModels`. Model
+  scopes and per-scope pin intent are now pure in `src/app/model-pins.ts`
+  (first #313 slice); switch confirmations still live here.
 - **Async/teardown:** one pending switch per server-qualified session; late
   catalog or acknowledgement results obey explicit precedence; no implicit
   fallback to another model or provider.
