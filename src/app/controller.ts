@@ -217,6 +217,7 @@ import { applyPin, modelScope } from './model-pins.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
 import { RefreshGenerations } from './refresh-generations.ts';
+import { inputRequestRefreshTargets } from './request-targets.ts';
 import { SessionFetcher } from './session-fetch.ts';
 import { mergeCommittedSessions, sessionFlags, sessionPage } from './session-snapshot.ts';
 import { UsageAnalyticsSelector } from './usage-selector.ts';
@@ -2511,18 +2512,17 @@ export class AppController {
    * refreshed too — the location merge still filters out sibling forms.
    */
   private inputRequestRefreshTargets(eventSessionID: string, serverID: string): string[] {
-    const targets = new Set<string>();
-    const known = this.state.sessions[this.keyFor(serverID, eventSessionID)] !== undefined;
-    if (eventSessionID !== 'global' && known) targets.add(eventSessionID);
     const route = this.state.route;
-    if (route.kind !== 'conversation' || route.serverID !== serverID) return [...targets];
-    const attached = route.sessionID;
-    if (eventSessionID === 'global' || !known) {
-      targets.add(attached);
-    } else if (this.requestSessionScope(attached, serverID).has(eventSessionID)) {
-      targets.add(attached);
-    }
-    return [...targets];
+    return inputRequestRefreshTargets({
+      eventSessionID,
+      serverID,
+      isKnown: (id) => this.state.sessions[this.keyFor(serverID, id)] !== undefined,
+      attached:
+        route.kind === 'conversation'
+          ? { serverID: route.serverID, sessionID: route.sessionID }
+          : undefined,
+      scope: (sessionID, host) => this.requestSessionScope(sessionID, host),
+    });
   }
 
   /** The attached session plus its descendants on the same server. */

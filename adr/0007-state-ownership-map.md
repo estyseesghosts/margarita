@@ -190,8 +190,9 @@ These are concrete source observations, not hypotheses:
   requestErrors`.
 - **Async/teardown:** bounded ancestry verification, independent endpoint
   freshness, per-key revision cancellation on session removal or unpair. The
-  attached-session/sibling scope rule is now a pure function in
-  `src/app/descendant-scope.ts` (first #310 slice).
+  attached-session/sibling scope rule and input-request event routing are now
+  pure functions in `src/app/descendant-scope.ts` and `src/app/request-targets.ts`
+  (#310 slices, eight focused tests).
 - **Intended owner:** `RequestInbox` with immutable origin envelopes
   (server, owning session, actual form session, form ID, token) and
   `answer`/`cancel` results; overlay focus stays in UI state.
