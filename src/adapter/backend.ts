@@ -135,7 +135,16 @@ export type PromptDraft = Readonly<{
   delivery?: Delivery;
 }>;
 
-/** The narrow set of server operations the frontend needs; see docs/08-server-adapter.md. */
+/**
+ * The narrow set of server operations the frontend needs; see docs/08-server-adapter.md.
+ *
+ * An instance is bound to one server connection; calls taking a `directory` are scoped to
+ * that project on that host. Wire DTOs are converted here, not in views or domain modules.
+ * Failures are normalized through `BackendError`, whose kind distinguishes not-found,
+ * conflict, unauthorized, invalid, transport and unknown outcomes. A failed read is never
+ * reported as a confirmed-empty result, and a failed write must be treated as an uncertain
+ * outcome rather than blindly retried (#312).
+ */
 export interface Backend {
   readonly baseUrl: string;
   listSessions(query: {

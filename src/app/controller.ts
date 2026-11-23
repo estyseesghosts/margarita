@@ -330,6 +330,15 @@ export type ServerAdmin = Readonly<{
   unpair(serverID: string): Promise<UnpairOutcome | void>;
 }>;
 
+/**
+ * Everything the composition root injects into `AppController`: backend access, config
+ * and storage, platform facts, and the few side effects (clipboard, files, URLs) the
+ * frontend cannot perform itself. Injecting them keeps clocks, storage and transport
+ * replaceable in tests; the controller never constructs those services itself.
+ *
+ * Optional fields have conservative defaults for tests (in-memory goal store, silent
+ * debug log, explicit copy fallback file). Production assembly supplies real implementations.
+ */
 export type ControllerDeps = Readonly<{
   backend: Backend;
   /** Resolves a backend by server identity; absent means single-server mode. */
@@ -457,14 +466,21 @@ type DescendantCheck =
   | Readonly<{ status: 'unrelated' }>
   | Readonly<{ status: 'unresolved'; error: string }>;
 
-/**
- * Owns all frontend state and every server interaction. Views read `state` and call
- * methods; they never talk to the backend. Leaving a session is a pure view change:
- * nothing here calls interrupt/background/delete on navigation.
- */
 /** Pause reason the goal plugin records when the user interrupts a running goal. */
 const stoppedByUserReason = 'Stopped by the user';
 
+/**
+ * The application facade: owns interactive state and the server interactions that feed
+ * it. Views read `state` and call methods instead of talking to the backend. Leaving a
+ * session is a pure view change: nothing here calls interrupt/background/delete on
+ * navigation.
+ *
+ * During the ownership migration (#305) this class also forwards to capability services.
+ * Callers should use the operations and read-only views it exposes, not its internal maps,
+ * generations or timers; those owners move as capabilities are extracted. Construct one
+ * instance per client, call `dispose()` to release owned timers, and `flushLocalState()`
+ * before exit so queued saves are not lost.
+ */
 export class AppController {
   readonly state: AppState;
   private readonly setState: SetStoreFunction<AppState>;

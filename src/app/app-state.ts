@@ -157,6 +157,16 @@ export type Completion = Readonly<{
   start: number;
 }>;
 
+/**
+ * The reactive snapshot views read. Server-authoritative facts, persisted frontend state
+ * and ephemeral UI state share this store, so every record is keyed by a server-qualified
+ * identity wherever two hosts can collide: a bare session ID is not an identity.
+ *
+ * Writes are owned by `AppController` and the capability services it delegates to (#305);
+ * views must treat this snapshot as read-only. Derived views (overview groups, transcripts,
+ * usage) are cached elsewhere with explicit revisions (#288, #293); changing a field here
+ * without its invalidation path is a bug, not a cosmetic detail.
+ */
 export type AppState = {
   stream: StreamStatus;
   /**
@@ -241,7 +251,6 @@ export type AppState = {
   models: CatalogModel[];
   defaultModel?: ModelSelection;
   serverCommands: ServerCommand[];
-  /** Names of the MCP servers the owning host exposes; empty when it offers none. */
   /** Confirmed MCP names indexed by host and canonical project directory. */
   mcpCatalogs: Record<string, Record<string, string[]>>;
   /**
