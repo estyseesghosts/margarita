@@ -219,12 +219,15 @@ These are concrete source observations, not hypotheses:
 - **Authoritative source:** per-location `permission.list` and `form.list` plus
   verified parent links; a failed endpoint is never confirmed-empty.
 - **Readers / writers:** permission/form cards and overlays read it; refreshInputRequests, answerPermission and finishForm write it.
-- **Mutable state:** `formToken` (543), `answeringForms` (544),
-  `inputRequestRevision` / `inputRequestRevisions` (545-546) and
-  `AppState.permissions/forms/requestErrors` stay in the controller. Verified
-  child→ancestor evidence and in-flight ancestry walks are now owned by
-  `AncestryVerifier` in `src/app/ancestry-verifier.ts` (second impure #310 slice,
-  nine tests), which exposes a read-only evidence view to the pure scope rule.
+- **Mutable state:** `formToken` (543) and `answeringForms` (544) stay in the
+  controller (they belong to the reply/overlay slice). The monotonic refresh
+  revision and per-key revision map are now owned by `RequestInboxCoordinator`
+  in `src/app/request-inbox-coordinator.ts` (third impure #310 slice, nine
+  tests), with `AppState.permissions/forms/requestErrors` written only through
+  its commands. Verified child→ancestor evidence and in-flight ancestry walks
+  are owned by `AncestryVerifier` in `src/app/ancestry-verifier.ts` (second
+  impure #310 slice, nine tests), which exposes a read-only evidence view to the
+  pure scope rule.
 - **Async/teardown:** bounded ancestry verification, independent endpoint
   freshness, per-key revision cancellation on session removal or unpair. The
   attached-session/sibling scope rule and input-request event routing are pure
@@ -240,13 +243,19 @@ These are concrete source observations, not hypotheses:
   deduplication, cycle and depth caps, stale-result rejection, a global deadline
   and per-child timeouts — all through explicit injected ports (backend lookup,
   local index, session epochs, clock, timeout), so stalls and cycles are testable
-  without real waits.
-- **Intended owner:** `RequestInbox` — the pure visibility rules, the
-  `AncestryVerifier` and an impure coordinator emitting commands the facade
-  executes; immutable origin envelopes (server, owning session, actual form
-  session, form ID, token) and `answer`/`cancel` results remain to extract.
-  Overlay focus stays in UI state.
-- **Tests:** `src/app/ancestry-verifier.test.ts` (9),
+  without real waits. `RequestInboxCoordinator` owns the refresh revisions and
+  both publication phases: it groups the three independent endpoint reads,
+  rejects stale/late responses, assembles partial errors, and yields an
+  authoritative command batch before the ancestry await and a second batch
+  afterward. The facade drains the generator and executes each batch in its own
+  Solid transaction (#294); no read, merge or freshness decision remains in the
+  controller.
+- **Intended owner:** `RequestInbox` — now the pure visibility rules,
+  `AncestryVerifier` and `RequestInboxCoordinator`. Immutable origin envelopes
+  (server, owning session, actual form session, form ID, token) and
+  `answer`/`cancel` results remain to extract. Overlay focus stays in UI state.
+- **Tests:** `src/app/request-inbox-coordinator.test.ts` (9),
+  `src/app/ancestry-verifier.test.ts` (9),
   `src/app/request-inbox.test.ts` (8),
   `src/app/descendant-scope.test.ts` (3), `src/app/request-targets.test.ts` (5),
   `src/app/form-routing.test.ts`, `src/app/multi-server-events.test.ts`,

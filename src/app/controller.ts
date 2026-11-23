@@ -221,11 +221,7 @@ import { applyPin, modelScope } from './model-pins.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
 import { RefreshGenerations } from './refresh-generations.ts';
-import {
-  mergeLocationForms as mergeInboxForms,
-  shouldResetPermissionFocus,
-  unknownLocationChildren as unknownInboxChildren,
-} from './request-inbox.ts';
+import { type RequestInboxCommand, RequestInboxCoordinator } from './request-inbox-coordinator.ts';
 import { inputRequestRefreshTargets } from './request-targets.ts';
 import { RevisionCache } from './revision-cache.ts';
 import { attachedSessionFor, routeServerFor } from './route-server.ts';
@@ -559,8 +555,8 @@ export class AppController {
   /** Each open form has a unique token, and replies are guarded per server/session/form. */
   private formToken = 0;
   private readonly answeringForms = new Set<string>();
-  private inputRequestRevision = 0;
-  private readonly inputRequestRevisions = new Map<string, number>();
+  /** Sole owner of request refresh revisions and both publication batches (#310). */
+  private readonly inbox: RequestInboxCoordinator;
   /** Last killed composer text for Ctrl+Y; each kill replaces it (documented policy). */
   private killBuffer = '';
   /** Sole owner of stable greeting selection (#318); process-lifetime only. */
@@ -703,6 +699,36 @@ export class AppController {
       concurrency: ancestryVerifyConcurrency,
       timeoutMs: deps.ancestryVerifyTimeoutMs ?? ancestryVerifyTimeoutMs,
       budgetMs: ancestryVerifyBudgetMs,
+    });
+    this.inbox = new RequestInboxCoordinator({
+      readRequests: async (sessionID, directory, backend) => {
+        const [permissions, forms, locationForms] = await Promise.allSettled([
+          backend.listPermissions(sessionID),
+          backend.listForms(sessionID),
+          directory !== undefined && backend.listLocationForms !== undefined
+            ? backend.listLocationForms(directory)
+            : Promise.resolve<FormRequest[]>([]),
+        ]);
+        return { permissions, forms, locationForms };
+      },
+      backendFor: (serverID) => this.backendFor(serverID),
+      keyFor: (serverID, sessionID) => this.keyFor(serverID, sessionID),
+      sessionEpoch: (key) => this.sessionEpoch(key),
+      isSessionCurrent: (key, epoch) => this.isSessionCurrent(key, epoch),
+      isRegisteredBackend: (serverID, backend) => this.isRegisteredBackend(serverID, backend),
+      directoryOf: (key) => this.state.sessions[key]?.directory,
+      previousPermissionIDOf: (key) => this.state.permissions[key]?.[0]?.id,
+      cachedFormsOf: (key) => this.state.forms[key] ?? [],
+      attachedRoute: () => {
+        const route = this.state.route;
+        return route.kind === 'conversation'
+          ? { serverID: route.serverID, sessionID: route.sessionID }
+          : undefined;
+      },
+      scope: (sessionID, serverID) => this.requestSessionScope(sessionID, serverID),
+      describeError: errorText,
+      verify: (children, ancestorID, serverID) =>
+        this.verifyUnknownDescendants(children, ancestorID, serverID),
     });
     this.pinOperations = deps.localState.pinnedModelOps ?? {};
     this.persistence = new PersistenceCoordinator({
@@ -1614,7 +1640,7 @@ export class AppController {
     this.goalVersions.delete(key);
     this.generations.forgetEvents(key);
     this.invalidateJobRefresh(key);
-    this.inputRequestRevisions.delete(key);
+    this.inbox.forgetSession(key);
     // A recreated ID must start a new read order; the process-wide counters stay monotonic,
     // so an older in-flight response can never look current again (#262, #263).
     this.summaryAdmitted.delete(key);
@@ -2231,184 +2257,44 @@ export class AppController {
     sessionID: string,
     serverID: string = this.activeServerID(),
   ): Promise<void> {
-    const backend = this.backendFor(serverID);
-    const key = this.keyFor(serverID, sessionID);
-    const epoch = this.sessionEpoch(key);
-    const revision = ++this.inputRequestRevision;
-    this.inputRequestRevisions.set(key, revision);
-    const directory = this.state.sessions[key]?.directory;
-    const previousPermissionID = this.state.permissions[key]?.[0]?.id;
-    // Permissions and forms reconcile independently: one failed endpoint must never
-    // hide a valid request from the other (#214).
-    const [permissionsResult, formsResult, locationFormsResult] = await Promise.allSettled([
-      backend.listPermissions(sessionID),
-      backend.listForms(sessionID),
-      directory !== undefined && backend.listLocationForms !== undefined
-        ? backend.listLocationForms(directory)
-        : Promise.resolve<FormRequest[]>([]),
-    ]);
-    if (this.inputRequestRevisions.get(key) !== revision) return;
-    if (!this.isSessionCurrent(key, epoch)) return;
-    if (!this.isRegisteredBackend(serverID, backend)) return;
-
-    const errors: { permissions?: string; forms?: string } = {};
-    if (permissionsResult.status === 'rejected') {
-      errors.permissions = errorText(permissionsResult.reason);
+    // The coordinator yields one batch with the authoritative results, then a second batch
+    // after bounded verification. Each batch stays a separate Solid transaction (#294).
+    for await (const commands of this.inbox.refresh(sessionID, serverID)) {
+      batch(() => {
+        for (const command of commands) this.executeRequestInboxCommand(command);
+      });
     }
-    const sessionForms = formsResult.status === 'fulfilled' ? formsResult.value : undefined;
-    if (formsResult.status === 'rejected') errors.forms = errorText(formsResult.reason);
-    const locationForms =
-      locationFormsResult.status === 'fulfilled' ? locationFormsResult.value : undefined;
-    const locationFormsError =
-      locationFormsResult.status === 'rejected' ? locationFormsResult.reason : undefined;
-    const cachedForms = this.state.forms[key] ?? [];
-    const allowed = this.requestSessionScope(sessionID, serverID);
-    const authoritative = sessionForms !== undefined;
-    // A location snapshot may contain a question from an actively running child that the
-    // session index has not caught up with yet. Those IDs are resolved *after* the
-    // independently authoritative permissions, session forms and global questions are
-    // published, so one stalled child cannot delay an actionable prompt (#294).
-    const unknownChildren = this.unknownLocationChildren(locationForms, sessionID, allowed);
-    let forms = sessionForms ?? cachedForms.filter((form) => form.sessionID === sessionID);
-    if (locationForms === undefined) {
-      // The location route failed. Keep the location-owned forms that were previously
-      // confirmed instead of discarding them with the failed snapshot: a transport error
-      // does not prove the global or child request was settled (#264). The stale marker
-      // in `requestErrors` keeps the partial data visible rather than authoritative.
-      errors.forms ??= errorText(locationFormsError);
-    }
-    // Only the global sentinel, the attached session and already verified descendants may
-    // appear. Previously shown rows for a child still under verification are preserved so
-    // a retry cannot make an established question blink out (#294); new unknown children
-    // stay hidden until verified, so a sibling question can never leak (#209, #274).
-    forms = this.mergeLocationForms(
-      forms,
-      locationForms,
-      sessionID,
-      authoritative,
-      allowed,
-      new Set(unknownChildren),
-      cachedForms,
-    );
+  }
 
-    // Publish every independently authoritative result before any ancestry walk runs.
-    batch(() => {
-      if (permissionsResult.status === 'fulfilled') {
-        this.setState('permissions', key, permissionsResult.value);
-      }
-      this.setState('forms', key, forms);
-      // Replace the per-session record: a successful retry must remove an old error, and a
-      // later failure in one category must not leave the other category's stale text.
-      this.setState(
-        'requestErrors',
-        produce((all) => {
-          if (Object.keys(errors).length === 0) delete all[key];
-          else all[key] = errors;
-        }),
-      );
-      const route = this.state.route;
-      const nextPermissionID =
-        permissionsResult.status === 'fulfilled' ? permissionsResult.value[0]?.id : undefined;
-      if (
-        shouldResetPermissionFocus({
-          attached:
-            route.kind === 'conversation' &&
-            route.serverID === serverID &&
-            route.sessionID === sessionID,
-          permissionsFulfilled: permissionsResult.status === 'fulfilled',
-          nextPermissionID,
-          previousPermissionID,
-        })
-      ) {
-        // A different request needs a fresh deliberate focus; the same request keeps the
-        // user's selection across routine refreshes (#237).
+  /** Executes one request-inbox store effect inside its publication batch. */
+  private executeRequestInboxCommand(command: RequestInboxCommand): void {
+    switch (command.kind) {
+      case 'set-permissions':
+        this.setState('permissions', command.key, command.value);
+        return;
+      case 'set-forms':
+        this.setState('forms', command.key, command.value);
+        return;
+      case 'set-request-errors':
+        // Replace the whole per-key record: a successful retry clears an old error without
+        // leaving the other category's stale text behind.
+        this.setState(
+          'requestErrors',
+          produce((all) => {
+            if (command.value === undefined) delete all[command.key];
+            else all[command.key] = command.value;
+          }),
+        );
+        return;
+      case 'reset-permission-focus':
+        // A different request needs fresh deliberate focus; the same one keeps the user's
+        // selection across routine refreshes (#237).
         this.setState('permissionChoice', 0);
         this.setState('permissionFocused', false);
-      }
-    });
-
-    if (unknownChildren.length === 0) return;
-    // Resolve unknown-child ownership in a separately bounded phase. Results that arrive
-    // after a newer refresh, deletion, unpair or backend replacement are discarded.
-    const checked = await this.verifyUnknownDescendants(unknownChildren, sessionID, serverID);
-    if (!this.inputRefreshCurrent(key, epoch, serverID, backend, revision)) return;
-    for (const childID of checked.verified) allowed.add(childID);
-    for (const childID of checked.unrelated) allowed.delete(childID);
-    // Unrelated rows disappear; verified rows appear from the live location snapshot;
-    // unresolved rows keep their last confirmed form and an explicit retryable error.
-    const merged = this.mergeLocationForms(
-      forms.filter((form) => !checked.unrelated.has(form.sessionID)),
-      locationForms,
-      sessionID,
-      authoritative,
-      allowed,
-      new Set(checked.pending),
-      cachedForms,
-    );
-    const finalErrors = { ...errors };
-    if (checked.error !== undefined) {
-      finalErrors.forms ??= `Could not verify a child question's owner: ${checked.error}`;
+        return;
+      default:
+        return;
     }
-    batch(() => {
-      this.setState('forms', key, merged);
-      this.setState(
-        'requestErrors',
-        produce((all) => {
-          if (Object.keys(finalErrors).length === 0) delete all[key];
-          else all[key] = finalErrors;
-        }),
-      );
-    });
-  }
-
-  /** True when this refresh still owns the session, backend and revision it started with. */
-  private inputRefreshCurrent(
-    key: string,
-    epoch: number,
-    serverID: string,
-    backend: Backend,
-    revision: number,
-  ): boolean {
-    return (
-      this.inputRequestRevisions.get(key) === revision &&
-      this.isSessionCurrent(key, epoch) &&
-      this.isRegisteredBackend(serverID, backend)
-    );
-  }
-
-  /** Distinct location-form owners outside the attached session and its verified scope. */
-  private unknownLocationChildren(
-    locationForms: readonly FormRequest[] | undefined,
-    sessionID: string,
-    allowed: ReadonlySet<string>,
-  ): string[] {
-    return unknownInboxChildren(locationForms, sessionID, allowed);
-  }
-
-  /**
-   * The location forms this conversation may display. The per-session listing is
-   * authoritative for the attached session's own rows; the global sentinel and verified
-   * descendants may be merged from the location snapshot. `keepUnknown` retains a child's
-   * previously confirmed row while a new ownership check is in flight, never a new one.
-   */
-  private mergeLocationForms(
-    base: readonly FormRequest[],
-    locationForms: readonly FormRequest[] | undefined,
-    sessionID: string,
-    sessionFormsAuthoritative: boolean,
-    allowed: ReadonlySet<string>,
-    keepUnknown: ReadonlySet<string>,
-    cachedForms: readonly FormRequest[],
-  ): FormRequest[] {
-    return mergeInboxForms({
-      base,
-      locationForms,
-      sessionID,
-      sessionFormsAuthoritative,
-      allowed,
-      keepUnknown,
-      cachedForms,
-    });
   }
 
   /**
@@ -5275,9 +5161,7 @@ export class AppController {
   private forgetServer(serverID: string): void {
     const route = this.state.route;
     if (route.kind !== 'overview' && route.serverID === serverID) this.openOverview();
-    for (const key of this.inputRequestRevisions.keys()) {
-      if (parseSessionKey(key).serverID === serverID) this.inputRequestRevisions.delete(key);
-    }
+    this.inbox.forgetServer(serverID);
     for (const key of this.generations.jobKeys()) {
       if (parseSessionKey(key).serverID === serverID) this.invalidateJobRefresh(key);
     }
