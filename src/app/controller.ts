@@ -811,6 +811,7 @@ export class AppController {
     });
     this.goalStore = deps.goalStore ?? memoryGoalStore();
     setState('recentModels', [...deps.localState.recentModels]);
+    setState('showScrollbar', deps.localState.showScrollbar ?? true);
     setState('pinnedModels', { ...deps.localState.pinnedModels });
     setState('lastModels', { ...deps.localState.lastModels });
     this.loadHistoryFor(deps.cwd);
@@ -882,6 +883,18 @@ export class AppController {
    */
   async flushLocalState(): Promise<void> {
     await this.persistence.flush();
+  }
+
+  /**
+   * Toggles the single app-level preference for Margarita's own scrollbars (#330). The scroll
+   * model is untouched; this only publishes the visibility flag for views to honor and stages
+   * one persistent patch so the choice survives restart.
+   */
+  toggleScrollbar(): boolean {
+    const next = !this.state.showScrollbar;
+    this.setState('showScrollbar', next);
+    this.persistence.patch({ showScrollbar: next });
+    return next;
   }
 
   // ---------------------------------------------------------------- identity

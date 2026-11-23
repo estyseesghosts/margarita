@@ -28,6 +28,8 @@ export type LocalState = Readonly<{
   /** Prompt history keyed by canonical project directory key. */
   history: Readonly<Record<string, readonly string[]>>;
   recentModels: readonly ModelSelection[];
+  /** App-level Margarita scrollbar visibility; absent means the current default (shown) (#330). */
+  showScrollbar?: boolean;
   /**
    * Models the user explicitly pinned as the new-session default (#190). Keys are `user` or
    * `project:<scopeKey>`; absent when nothing is pinned. Older builds ignore this field.

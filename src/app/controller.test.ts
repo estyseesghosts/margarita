@@ -6524,6 +6524,41 @@ describe('permission reply admission is scoped per request (#340)', () => {
   });
 });
 
+describe('app-level scrollbar preference (#330)', () => {
+  test('defaults to visible, toggles one persisted flag, and restores on restart', async () => {
+    let saved: LocalState | undefined;
+    const controller = makeController(
+      () => Promise.resolve([]),
+      new FakeBackend(),
+      () => 10_000,
+      {
+        saveLocalState: async (state) => {
+          saved = state;
+        },
+      },
+    );
+    expect(controller.state.showScrollbar).toBe(true);
+
+    expect(controller.toggleScrollbar()).toBe(false);
+    expect(controller.state.showScrollbar).toBe(false);
+    expect(controller.toggleScrollbar()).toBe(true);
+    await controller.flushLocalState();
+    expect(saved?.showScrollbar).toBe(true);
+    controller.dispose();
+
+    const restored = makeController(
+      () => Promise.resolve([]),
+      new FakeBackend(),
+      () => 10_000,
+      {
+        localState: { ...emptyState, showScrollbar: false },
+      },
+    );
+    expect(restored.state.showScrollbar).toBe(false);
+    restored.dispose();
+  });
+});
+
 describe('copy picker (#105)', () => {
   test('copies exact tool output bytes and reports the truncation boundary', async () => {
     const backend = new FakeBackend();
