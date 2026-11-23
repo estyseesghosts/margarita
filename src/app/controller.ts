@@ -220,6 +220,11 @@ import { applyPin, modelScope } from './model-pins.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
 import { RefreshGenerations } from './refresh-generations.ts';
+import {
+  mergeLocationForms as mergeInboxForms,
+  shouldResetPermissionFocus,
+  unknownLocationChildren as unknownInboxChildren,
+} from './request-inbox.ts';
 import { inputRequestRefreshTargets } from './request-targets.ts';
 import { RevisionCache } from './revision-cache.ts';
 import { attachedSessionFor, routeServerFor } from './route-server.ts';
@@ -2299,12 +2304,15 @@ export class AppController {
       const nextPermissionID =
         permissionsResult.status === 'fulfilled' ? permissionsResult.value[0]?.id : undefined;
       if (
-        route.kind === 'conversation' &&
-        route.serverID === serverID &&
-        route.sessionID === sessionID &&
-        (permissionsResult.status !== 'fulfilled' ||
-          nextPermissionID === undefined ||
-          nextPermissionID !== previousPermissionID)
+        shouldResetPermissionFocus({
+          attached:
+            route.kind === 'conversation' &&
+            route.serverID === serverID &&
+            route.sessionID === sessionID,
+          permissionsFulfilled: permissionsResult.status === 'fulfilled',
+          nextPermissionID,
+          previousPermissionID,
+        })
       ) {
         // A different request needs a fresh deliberate focus; the same request keeps the
         // user's selection across routine refreshes (#237).
@@ -2368,14 +2376,7 @@ export class AppController {
     sessionID: string,
     allowed: ReadonlySet<string>,
   ): string[] {
-    if (locationForms === undefined) return [];
-    const unknown = new Set<string>();
-    for (const form of locationForms) {
-      const childID = form.sessionID;
-      if (childID === 'global' || childID === sessionID || allowed.has(childID)) continue;
-      unknown.add(childID);
-    }
-    return [...unknown];
+    return unknownInboxChildren(locationForms, sessionID, allowed);
   }
 
   /**
@@ -2393,37 +2394,15 @@ export class AppController {
     keepUnknown: ReadonlySet<string>,
     cachedForms: readonly FormRequest[],
   ): FormRequest[] {
-    const merged = new Map(base.map((form) => [form.id, form]));
-    for (const form of cachedForms) {
-      if (keepUnknown.has(form.sessionID) && !merged.has(form.id)) merged.set(form.id, form);
-    }
-    if (locationForms === undefined) {
-      for (const form of cachedForms) {
-        const locationOwned =
-          form.sessionID === 'global' ||
-          (form.sessionID !== sessionID && allowed.has(form.sessionID));
-        if (locationOwned && !merged.has(form.id)) merged.set(form.id, form);
-      }
-      return [...merged.values()];
-    }
-    for (const form of locationForms) {
-      // With a successful per-session listing, that route is authoritative for the attached
-      // session; merging the same forms again could revive one it just removed. When the
-      // session route failed, the location snapshot is the only available source (#258).
-      if (form.sessionID === sessionID && sessionFormsAuthoritative) continue;
-      if (
-        form.sessionID !== 'global' &&
-        form.sessionID !== sessionID &&
-        !allowed.has(form.sessionID)
-      ) {
-        continue;
-      }
-      // With an authoritative session listing, a duplicate location entry must not
-      // overwrite it. Without one, the location snapshot is the only live source.
-      if (sessionFormsAuthoritative && merged.has(form.id)) continue;
-      merged.set(form.id, form);
-    }
-    return [...merged.values()];
+    return mergeInboxForms({
+      base,
+      locationForms,
+      sessionID,
+      sessionFormsAuthoritative,
+      allowed,
+      keepUnknown,
+      cachedForms,
+    });
   }
 
   /**

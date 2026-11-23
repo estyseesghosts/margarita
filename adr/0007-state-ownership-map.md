@@ -217,13 +217,22 @@ These are concrete source observations, not hypotheses:
   requestErrors`.
 - **Async/teardown:** bounded ancestry verification, independent endpoint
   freshness, per-key revision cancellation on session removal or unpair. The
-  attached-session/sibling scope rule and input-request event routing are now
-  pure functions in `src/app/descendant-scope.ts` and `src/app/request-targets.ts`
-  (#310 slices, eight focused tests).
-- **Intended owner:** `RequestInbox` with immutable origin envelopes
-  (server, owning session, actual form session, form ID, token) and
-  `answer`/`cancel` results; overlay focus stays in UI state.
-- **Tests:** `src/app/form-routing.test.ts`, `src/app/multi-server-events.test.ts`,
+  attached-session/sibling scope rule and input-request event routing are pure
+  in `src/app/descendant-scope.ts` and `src/app/request-targets.ts`. The first
+  `RequestInbox` slice is now `src/app/request-inbox.ts` (eight tests):
+  `unknownLocationChildren` selects child owners needing ancestry checks,
+  `mergeLocationForms` decides which forms survive into the displayed bucket
+  (global sentinel, attached session, verified descendants, no new sibling,
+  confirmed-row retention during in-flight verification), and
+  `shouldResetPermissionFocus` preserves deliberate focus only for an unchanged,
+  successfully listed request on the same route.
+- **Intended owner:** `RequestInbox` — the pure visibility rules above plus an
+  impure coordinator emitting commands the facade executes; immutable origin
+  envelopes (server, owning session, actual form session, form ID, token) and
+  `answer`/`cancel` results remain to extract. Overlay focus stays in UI state.
+- **Tests:** `src/app/request-inbox.test.ts` (8),
+  `src/app/descendant-scope.test.ts` (3), `src/app/request-targets.test.ts` (5),
+  `src/app/form-routing.test.ts`, `src/app/multi-server-events.test.ts`,
   `src/domain/form.test.ts`, `src/ui/app.test.tsx`.
 
 ### 6. Composer, drafts, paste, editor, completion and history (#311)
