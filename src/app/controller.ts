@@ -221,6 +221,7 @@ import { inputRequestRefreshTargets } from './request-targets.ts';
 import { SessionFetcher } from './session-fetch.ts';
 import { mergeCommittedSessions, sessionFlags, sessionPage } from './session-snapshot.ts';
 import { planTranscriptEviction } from './transcript-eviction.ts';
+import { TranscriptGenerations } from './transcript-generations.ts';
 import {
   retryDelay,
   transcriptFailureRetryable,
@@ -522,8 +523,8 @@ export class AppController {
    * a newer committed page. The counter is monotonic for the process lifetime; the map keeps
    * the newest committed generation per session.
    */
-  private transcriptReadSeq = 0;
-  private readonly transcriptCommitted = new Map<string, number>();
+  /** Sole owner of transcript read generations and commit watermarks (#309). */
+  private readonly transcriptGenerations = new TranscriptGenerations();
   /**
    * Admission order for `session.get` summary reads (#263). The newest admitted read wins:
    * an older response that resolves later is dropped instead of overwriting a fresher
@@ -1627,7 +1628,7 @@ export class AppController {
     // A recreated ID must start a new read order; the process-wide counters stay monotonic,
     // so an older in-flight response can never look current again (#262, #263).
     this.summaryAdmitted.delete(key);
-    this.transcriptCommitted.delete(key);
+    this.transcriptGenerations.forget(key);
     // Selection caches belong to the session lifetime: a deleted or recreated ID must never
     // inherit an earlier switch, failure marker or revision (#253).
     this.confirmedAgents.delete(key);
@@ -1992,7 +1993,7 @@ export class AppController {
     const committedBefore = new Map<string, number>();
     for (const key of Object.keys(this.state.transcripts)) {
       if (parseSessionKey(key).serverID !== serverID) continue;
-      committedBefore.set(key, this.transcriptCommitted.get(key) ?? 0);
+      committedBefore.set(key, this.transcriptGenerations.committedGeneration(key));
     }
     const attachedSession = (): string | undefined => {
       const route = this.state.route;
@@ -2033,7 +2034,8 @@ export class AppController {
       const ref = parseSessionKey(key);
       if (ref.serverID !== serverID) continue;
       const isAttached = attachedAtCommit === ref.sessionID;
-      const refreshed = (this.transcriptCommitted.get(key) ?? 0) > (committedBefore.get(key) ?? 0);
+      const refreshed =
+        this.transcriptGenerations.committedGeneration(key) > (committedBefore.get(key) ?? 0);
       if (!isAttached || !refreshed) this.setState('transcripts', key, 'stale', true);
       else this.setState('transcripts', key, 'stale', false);
     }
@@ -2902,7 +2904,7 @@ export class AppController {
     // Admission order across *all* callers (SSE refresh and direct attach), not only the
     // serialized schedule path. Two ordinary reads of one live session may overlap; the
     // one admitted later wins even when an older response arrives last (#262).
-    const generation = ++this.transcriptReadSeq;
+    const generation = this.transcriptGenerations.nextRead();
     let page: MessagePage;
     try {
       page = await backend.listMessages(sessionID, transcriptPageSize);
@@ -2925,7 +2927,7 @@ export class AppController {
       return;
     }
     // A newer accepted page is a watermark: this older snapshot must not replace it.
-    if (generation <= (this.transcriptCommitted.get(key) ?? 0)) return;
+    if (!this.transcriptGenerations.shouldCommit(key, generation)) return;
     const existing = this.state.transcripts[key];
     const merged = mergeLatest(existing?.messages ?? [], page.messages);
     // Cached messages older than this page keep their own cursor/retry state; otherwise the
@@ -2951,7 +2953,7 @@ export class AppController {
       }),
     );
     this.touchTranscript(key);
-    this.transcriptCommitted.set(key, generation);
+    this.transcriptGenerations.commit(key, generation);
     // The latest page is canonical for the session's current agent. Adopt a genuinely
     // newer switch (possibly made in another client) without letting an older cached
     // transcript message displace a fresh local acknowledgement (#253).

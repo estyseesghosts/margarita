@@ -12,13 +12,13 @@ Captured at `4d9c6af` plus the #305/#307/#306 documentation and tooling work:
 
 | Command | Result |
 | --- | --- |
-| `bun run verify` | 1356 pass, 40 skip, 0 fail (1396 tests across 113 files); includes format, Oxlint, strict typecheck, `check:architecture`, and tests |
+| `bun run verify` | 1359 pass, 40 skip, 0 fail (1399 tests across 114 files); includes format, Oxlint, strict typecheck, `check:architecture`, and tests |
 | `bun run bench -- --smoke` | opt-in synthetic projection/network benchmark; not a native FPS measurement |
 | `bun run bench:render` | opt-in renderable-reuse benchmark |
 | `sh scripts/test-pty-smoke.sh`, `sh scripts/test-tmux.sh` | Linux executable smoke, run in CI, needs a compiled binary |
 | `MARGARITA_LIVE=1 bun test` | opt-in compatibility against a disposable v2 service; never a user's real service |
 
-The test suite declares roughly 1,360 explicit test cases; most are grouped in
+The test suite declares roughly 1,363 explicit test cases; most are grouped in
 `src/app/controller.test.ts` (about 270) and `src/ui/app.test.tsx` (about 115).
 Those two files are the coupling the extraction must unravel: behavior is
 protected, but the fixtures are tied to one concrete class.
@@ -29,7 +29,7 @@ protected, but the fixtures are tied to one concrete class.
 | --- | --- | --- | --- |
 | Bootstrap, catalogs, session index, pagination | `controller.test.ts`, `production-assembly.test.ts`, `production-composition.test.ts`, `cli/*`, `src/app/refresh-generations.test.ts` (5), `src/app/session-fetch.test.ts` (4), `src/app/session-snapshot.test.ts` (8) | `HostSessionIndex` → `session-index.test.ts`; generations, paged reads/reconciliation and pure snapshot commit now in `src/app/{refresh-generations,session-fetch,session-snapshot}.ts` (#308) | No independent suite for event admission; paged/failing `listSessions` hooks exist in `FakeBackend` but are used ad hoc |
 | Events, resync, reconnect, multi-host collisions | `multi-server-events.test.ts` (25), `multi-server-aggregation.test.ts`, `adapter/event-pump.test.ts`, `async-route-ownership.test.ts`, `test/multi-server.test.ts` | `EventAdmission` → `event-admission.test.ts` | Event batches are built inline; no shared fixture for reorder/duplicate/missing events |
-| Transcripts, retry, pagination, cache | `merge-latest.test.ts`, `transcript-projector.test.ts`, `domain/transcript.test.ts` (81), `perf/memory.test.ts`, `tool-classification.test.ts` (6), `src/app/transcript-eviction.test.ts` (5), `src/app/transcript-retry.test.ts` (4) | `TranscriptRepository` → `transcript-repository.test.ts`; tool identity in `src/domain/tool-classification.ts` (#319), eviction planning in `src/app/transcript-eviction.ts` and retry policy/attempts in `src/app/transcript-retry.ts` (#309) | Failure-plus-queued-hint cases live in `controller.test.ts`; benchmark conditions must be recorded before moving them |
+| Transcripts, retry, pagination, cache | `merge-latest.test.ts`, `transcript-projector.test.ts`, `domain/transcript.test.ts` (81), `perf/memory.test.ts`, `tool-classification.test.ts` (6), `src/app/transcript-eviction.test.ts` (5), `src/app/transcript-retry.test.ts` (4), `src/app/transcript-generations.test.ts` (3) | `TranscriptRepository` → `transcript-repository.test.ts`; tool identity in `src/domain/tool-classification.ts` (#319), eviction, retry policy and generations in `src/app/transcript-{eviction,retry,generations}.ts` (#309) | Failure-plus-queued-hint cases live in `controller.test.ts`; benchmark conditions must be recorded before moving them |
 | Summaries, worker/shell job status | `execution-segment.test.ts`, `worker.test.ts`, `shell-job.test.ts`, `controller.test.ts`, `src/app/refresh-generations.test.ts` (5) | `JobStatusCoordinator`; worker/shell job epochs now in `RefreshGenerations` (#316/#308) | Stale-after-failure assertions are scattered; no single capability fixture |
 | Permissions and forms, descendant verification | `form-routing.test.ts` (28), `domain/form.test.ts` (24), `multi-server-events.test.ts`, `test/manual-pairing.test.ts`, `src/app/descendant-scope.test.ts` (3), `src/app/request-targets.test.ts` (5) | `RequestInbox` → `request-inbox.test.ts`; request scope and event routing now pure in `src/app/{descendant-scope,request-targets}.ts` (#310) | Unknown-child/sibling-isolation cases need the shared collision fixture; ancestry timeouts still use real waits in some tests |
 | Composer, drafts, paste, editor, completion, history | `domain/composer.test.ts` (30), `clipboard.test.ts`, `external-editor.test.ts`, `project-files.test.ts`, `ui/app.test.tsx`, `src/app/draft-registry.test.ts` (3) | `RouteScopedComposer` → `composer-service.test.ts`; route identity/revisions already in `src/app/draft-registry.ts` (#311) | Draft revision/external-editor cases split across UI and controller suites; no single route-switch fixture |
