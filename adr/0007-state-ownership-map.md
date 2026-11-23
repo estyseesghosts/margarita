@@ -272,8 +272,9 @@ These are concrete source observations, not hypotheses:
 - **Authoritative source:** server `opencode.goal` state for native goals;
   `config/goal-store.ts` for the frontend-managed plan document.
 - **Readers / writers:** tasks overlay, goal UI and footer read it; native-goal refresh, local plan edits and interrupt/steer intent write it.
-- **Mutable state:** `goalStore` (641), `goalRevisions` (646),
-  `goalEditChains` (648), `AppState.goals/nativeGoals/awaitingSteer`.
+- **Mutable state:** `goalStore` (641), `goalEditChains` (648),
+  `AppState.goals/nativeGoals/awaitingSteer`. The monotone UI revision guard is
+  now owned by `src/app/goal-revision-guard.ts` (first #314 slice, three tests).
 - **Async/teardown:** serialized per-session edits, revision watermarks,
   explicit accepted/rejected/conflict/unavailable outcomes; steer intent is
   scoped to the originating session and never resumes after route invalidation.

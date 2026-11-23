@@ -212,6 +212,7 @@ import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { descendantScope } from './descendant-scope.ts';
 import { DraftRegistry } from './draft-registry.ts';
 import { errorText, refreshOutcome } from './error-text.ts';
+import { GoalRevisionGuard } from './goal-revision-guard.ts';
 import { GreetingSelector } from './greeting-selector.ts';
 import { applyPin, modelScope } from './model-pins.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
@@ -635,7 +636,7 @@ export class AppController {
    * Highest goal revision whose UI state was confirmed for a server-qualified session. A late
    * read or an out-of-order save can never make the displayed plan regress (#161).
    */
-  private readonly goalRevisions = new Map<string, number>();
+  private readonly goalRevisions = new GoalRevisionGuard();
   /** Local goal edits, serialized per session so overlapping changes rebase deterministically. */
   private readonly goalEditChains = new Map<string, Promise<void>>();
   /**
@@ -1587,7 +1588,7 @@ export class AppController {
         delete state.permissions[key];
         delete state.forms[key];
         delete state.goals[key];
-        this.goalRevisions.delete(key);
+        this.goalRevisions.forget(key);
         this.goalEditChains.delete(key);
         delete state.nativeGoals[key];
         delete state.awaitingSteer[key];
@@ -5502,7 +5503,7 @@ export class AppController {
           }
         }
         for (const key of this.goalRevisions.keys()) {
-          if (parseSessionKey(key).serverID === serverID) this.goalRevisions.delete(key);
+          if (parseSessionKey(key).serverID === serverID) this.goalRevisions.forget(key);
         }
         // Qualified expansion entries are `<server-qualified session key> <node key>`; match
         // them by the session-key prefix of this host only.
@@ -8211,9 +8212,7 @@ export class AppController {
    * this session. A late read or an out-of-order save can never make the view regress (#161).
    */
   private commitGoalUI(key: string, doc: GoalPlanV1): boolean {
-    const seen = this.goalRevisions.get(key);
-    if (seen !== undefined && doc.revision < seen) return false;
-    this.goalRevisions.set(key, doc.revision);
+    if (!this.goalRevisions.commit(key, doc.revision)) return false;
     this.setState('goals', key, doc);
     return true;
   }
@@ -8228,7 +8227,7 @@ export class AppController {
     // supersedes this snapshot even when its revision number happens to match (#278).
     const epoch = this.sessionEpoch(key);
     const existed = this.state.sessions[key] !== undefined;
-    const revisionAtStart = this.goalRevisions.get(key);
+    const revisionAtStart = this.goalRevisions.revision(key);
     try {
       const doc = await this.goalStore.load({ serverID, sessionID });
       if (doc === undefined || this.disposed) return;
@@ -8236,7 +8235,7 @@ export class AppController {
       // A new-session read is allowed while the session is still unindexed; it is rejected
       // once the lifetime changed or a local/newer goal state was committed meanwhile.
       if (existed && this.state.sessions[key] === undefined) return;
-      if (this.goalRevisions.get(key) !== revisionAtStart) return;
+      if (this.goalRevisions.revision(key) !== revisionAtStart) return;
       this.commitGoalUI(key, doc);
     } catch (error) {
       if (!this.isSessionCurrent(key, epoch)) return;
