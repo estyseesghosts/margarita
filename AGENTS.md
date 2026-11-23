@@ -1,6 +1,17 @@
 ## CODE QUALITY STANDARDS
 
-Always read and follow ~/workdir/style-guide/README.md + the appropriate document for the language you are working on. Always read the style guides before writing or revising code.
+Before writing or revising code, read **all** of the general review standard and the
+language-specific guide:
+
+- Windows: `~\workdir\style-guides\README.md` and
+  `~\workdir\style-guides\typescript-javascript-style-guide.md`
+- Unix-like: `~/workdir/style-guides/README.md` and
+  `~/workdir/style-guides/typescript-javascript-style-guide.md`
+
+If that checkout is absent, read the mirror at
+<https://github.com/estyseesghosts/style-guides> instead. Do not assume a singular
+`style-guide` directory exists. `docs/28-style-and-architecture-enforcement.md`
+records which conventions are machine-checked and which remain review responsibilities.
 
 ## Truth and Citations
 
