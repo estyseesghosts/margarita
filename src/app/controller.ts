@@ -568,6 +568,9 @@ export class AppController {
    * (#337), and an old flight's cleanup must not release its replacement.
    */
   private readonly creations = new AdmissionGate();
+
+  /** Identity ledger so a repeated recall cannot duplicate a recovered queued message (#335). */
+  private readonly recoveredInbox = new Set<string>();
   /** Each open form has a unique token, and replies are guarded per server/session/form. */
   private formToken = 0;
   private readonly answeringForms = new Set<string>();
@@ -765,6 +768,7 @@ export class AppController {
     this.transcriptFlights.dispose();
     this.ancestry.dispose();
     this.creations.clear();
+    this.recoveredInbox.clear();
   }
 
   /** Short scheduler-driven pause between a settled read and a coalesced rerun. */
@@ -2241,6 +2245,34 @@ export class AppController {
       this.isRegisteredBackend(serverID, backend)
     ) {
       this.setState('inbox', key, items);
+    }
+  }
+
+  /**
+   * Best-effort follow-up read after an accepted write. A failed inbox refresh means stale
+   * queue state, never a failed write; it is reported separately and never throws back into
+   * an admitted send or a confirmed cancellation (#334/#335).
+   */
+  private async refreshInboxAfterWrite(
+    sessionID: string,
+    serverID: string,
+    backend: Backend,
+  ): Promise<void> {
+    try {
+      await this.refreshInbox(sessionID, serverID, backend);
+    } catch (error) {
+      this.debugLog.write('backend-error', {
+        operation: 'inbox',
+        kind: error instanceof BackendError ? error.kind : 'unknown',
+      });
+      if (!this.disposed) {
+        // A broken notice surface must not escape after a write that was already accepted.
+        try {
+          this.showNotice(`Queue is out of date; refresh failed: ${errorText(error)}`, 'warn');
+        } catch {
+          // Ignore a failing notice surface; the authoritative outcome is unchanged.
+        }
+      }
     }
   }
 
@@ -4175,7 +4207,10 @@ export class AppController {
               ...(agents.length === 0 ? {} : { agents }),
               ...(delivery === undefined ? {} : { delivery }),
             });
-            await this.refreshInbox(origin.sessionID, origin.serverID);
+            // The write is accepted here. The follow-up inbox read is best-effort: it must
+            // never turn a delivered prompt into a delivery-unknown result or invite a resend
+            // (#334). Report stale queue state separately.
+            await this.refreshInboxAfterWrite(origin.sessionID, origin.serverID, backend);
             return true;
           }
           default:
@@ -6501,10 +6536,31 @@ export class AppController {
     // index from another host's queue can never cancel here.
     const item = (this.state.inbox[key] ?? []).find((entry) => entry.id === inboxID);
     if (item === undefined) return;
+    // Snapshot the envelope before the RPC: the inbox is a reactive store proxy and may change
+    // while the cancel is in flight. Identity is server-qualified and stable (#335).
+    const envelope = {
+      serverID,
+      sessionID,
+      inboxID,
+      text: item.text,
+      attachments: item.attachments === undefined ? [] : [...item.attachments],
+    };
+    const recoveryKey = `${serverID}\u0000${sessionID}\u0000${inboxID}`;
+    if (
+      this.recoveredInbox.has(recoveryKey) ||
+      this.state.recovered.some(
+        (entry) =>
+          entry.serverID === serverID && entry.sessionID === sessionID && entry.inboxID === inboxID,
+      )
+    ) {
+      return;
+    }
+    const backend = this.backendFor(serverID);
     try {
-      await this.backendFor(serverID).cancelQueued(sessionID, inboxID);
+      await backend.cancelQueued(sessionID, inboxID);
     } catch (error) {
-      // The most likely race: the server delivered the item between our listing and the cancel.
+      // A conflict/not-found means the server delivered the item: never restore it as if the
+      // cancel had definitely succeeded, and never retry the mutation on an unknown outcome.
       if (
         error instanceof BackendError &&
         (error.kind === 'not-found' || error.kind === 'conflict')
@@ -6513,11 +6569,25 @@ export class AppController {
       } else {
         this.showNotice(errorText(error), 'error');
       }
-      await this.refreshInbox(sessionID, serverID);
+      await this.refreshInboxAfterWrite(sessionID, serverID, backend);
       return;
     }
-    await this.refreshInbox(sessionID, serverID);
-    // Restore the full text into the composer, never into a different session's composer.
+    // Cancellation is confirmed: recovery is authoritative and happens regardless of the
+    // optional inbox refresh that follows (#335).
+    this.recoveredInbox.add(recoveryKey);
+    this.restoreRecalled(envelope);
+    await this.refreshInboxAfterWrite(sessionID, serverID, backend);
+  }
+
+  /** Places a confirmed cancelled message into its origin composer, stash or recovery list. */
+  private restoreRecalled(envelope: {
+    serverID: string;
+    sessionID: string;
+    inboxID: string;
+    text: string;
+    attachments: readonly Attachment[];
+  }): void {
+    const { serverID, sessionID, inboxID, text, attachments } = envelope;
     const sameSession =
       this.state.route.kind === 'conversation' &&
       this.state.route.serverID === serverID &&
@@ -6528,29 +6598,37 @@ export class AppController {
       this.state.attachments.length === 0 &&
       this.state.completion === undefined
     ) {
-      this.writeComposer(composerFrom(item.text));
-      this.setState('attachments', [...(item.attachments ?? [])]);
+      this.writeComposer(composerFrom(text));
+      this.setState('attachments', [...attachments]);
       return;
     }
     // Never clobber a draft the user typed during the cancel; park the recalled text instead.
     const stashKey = this.keyFor(serverID, sessionID);
     if (this.state.stashes[stashKey] === undefined) {
       this.setState('stashes', stashKey, {
-        composer: composerFrom(item.text),
-        attachments: [...(item.attachments ?? [])],
+        composer: composerFrom(text),
+        attachments: [...attachments],
       });
       this.showNotice('Queued message parked · Ctrl+S to restore', 'dim');
       return;
     }
-    // Both slots are busy: keep the text in its own recovery entry, never lost.
+    // Both slots are busy: keep the text in its own uniquely keyed recovery entry.
+    if (
+      this.state.recovered.some(
+        (entry) =>
+          entry.serverID === serverID && entry.sessionID === sessionID && entry.inboxID === inboxID,
+      )
+    ) {
+      return;
+    }
     this.setState('recovered', (list) => [
       ...list,
       {
         serverID,
         sessionID,
         inboxID,
-        text: item.text,
-        ...(item.attachments === undefined ? {} : { attachments: [...item.attachments] }),
+        text,
+        ...(attachments.length === 0 ? {} : { attachments: [...attachments] }),
       },
     ]);
     this.showNotice(

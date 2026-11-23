@@ -3414,6 +3414,25 @@ describe('late prompt admission cannot retarget visible history (#160)', () => {
 });
 
 describe('post-acknowledgment local failures (#334)', () => {
+  test('an accepted prompt with a failing inbox refresh is not reported as delivery unknown', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom('delivered prompt'));
+    backend.listInbox = async () => {
+      throw new Error('inbox offline');
+    };
+
+    await controller.submit();
+
+    expect(backend.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    expect(controller.state.notice?.text).toContain('refresh failed');
+    expect(controller.state.notice?.text).not.toContain('may or may not have been delivered');
+    expect(controller.state.composer.text).toBe('');
+    controller.dispose();
+  });
+
   test('a failing diagnostic sink never resends or reports the accepted prompt as failed', async () => {
     const backend = new FakeBackend();
     backend.sessions = [fakeSession('ses_a')];
@@ -4282,6 +4301,53 @@ function queueController(inbox: FakeBackend['inbox']) {
   const controller = makeController(() => Promise.resolve([]), backend);
   return { backend, controller };
 }
+
+describe('confirmed queue cancellation recovery (#335)', () => {
+  test('a confirmed cancel restores the message even when the inbox refresh fails, exactly once', async () => {
+    const backend = queuedBackend();
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    backend.listInbox = async () => {
+      throw new Error('read failed');
+    };
+
+    await controller.recallQueuedUp();
+
+    expect(controller.state.composer.text).toBe('second follow-up');
+    expect(controller.state.notice?.text).toContain('refresh failed');
+    expect(backend.calls.filter((call) => call.name === 'cancelQueued')).toHaveLength(1);
+
+    // A stale UI can issue the same cancel again: identity-based recovery must not duplicate.
+    await controller.cancelQueued('in_2');
+    expect(controller.state.composer.text).toBe('second follow-up');
+    expect(controller.state.recovered).toHaveLength(0);
+    expect(backend.calls.filter((call) => call.name === 'cancelQueued')).toHaveLength(1);
+    controller.dispose();
+  });
+
+  test('a busy composer and occupied stash keep one uniquely keyed recovery entry', async () => {
+    const backend = queuedBackend();
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom('parked draft'));
+    controller.toggleStash();
+    controller.setComposer(composerFrom('new draft'));
+    backend.listInbox = async () => {
+      throw new Error('read failed');
+    };
+
+    await controller.cancelQueued('in_1');
+    await controller.cancelQueued('in_1');
+
+    expect(controller.state.composer.text).toBe('new draft');
+    expect(controller.state.recovered).toEqual([
+      { serverID: 'local', sessionID: 'ses_a', inboxID: 'in_1', text: 'first follow-up' },
+    ]);
+    expect(backend.calls.filter((call) => call.name === 'cancelQueued')).toHaveLength(1);
+    expect(controller.state.notice?.text).toContain('refresh failed');
+    controller.dispose();
+  });
+});
 
 describe('send-now targets the hinted queued item (issue #40)', () => {
   test('a pending steer item ahead of a queued one is skipped', async () => {
