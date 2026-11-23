@@ -230,8 +230,9 @@ These are concrete source observations, not hypotheses:
 - **Authoritative source:** a successful `session.prompt` acknowledgement;
   model/agent checks from the scoped catalog; local commands are not server RPCs.
 - **Readers / writers:** admission UI and CLI read it; submit, steer, createSessionWithPrompt and local command handlers write it.
-- **Mutable state:** `admittingSessions` (541), `pendingCompactions` (490),
-  draft revision and attachment set at admission time.
+- **Mutable state:** `pendingCompactions` (490), draft revision and attachment set
+  at admission time. The single-flight per-session admission lock is now owned by
+  `src/app/admission-gate.ts` (first #312 slice, three tests).
 - **Async/teardown:** one server-qualified per-session admission lock; unknown
   write outcome means no automatic retry; route changes during await preserve a
   newer draft; created session ID is retained even when the prompt fails.

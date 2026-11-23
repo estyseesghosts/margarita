@@ -198,6 +198,7 @@ import {
 import type { UsageAnalytics } from '../domain/usage-analytics.ts';
 import { type WorkerNode, workerNodes } from '../domain/worker.ts';
 import { approximateTranscriptBytes } from '../perf/memory.ts';
+import { AdmissionGate } from './admission-gate.ts';
 import {
   type AppState,
   type BackgroundEvent,
@@ -546,8 +547,8 @@ export class AppController {
    * never be rejected merely because the summary omitted `agent`.
    */
   private readonly confirmedAgents = new Map<string, AgentEvidence>();
-  /** In-flight prompt admissions keyed by server-qualified session (#163). */
-  private readonly admittingSessions = new Set<string>();
+  /** Sole owner of in-flight prompt admissions per server-qualified session (#312). */
+  private readonly admissions = new AdmissionGate();
   /** Each open form has a unique token, and replies are guarded per server/session/form. */
   private formToken = 0;
   private readonly answeringForms = new Set<string>();
@@ -4347,7 +4348,7 @@ export class AppController {
     const routeAtSubmit = this.state.route;
     if (
       routeAtSubmit.kind === 'conversation' &&
-      this.admittingSessions.has(this.keyFor(routeAtSubmit.serverID, routeAtSubmit.sessionID))
+      this.admissions.isAdmitting(this.keyFor(routeAtSubmit.serverID, routeAtSubmit.sessionID))
     ) {
       // A send to the SAME session is still in flight; never silently discard the new one
       // (#163). Other sessions and hosts stay independent.
@@ -4511,12 +4512,12 @@ export class AppController {
   ): Promise<boolean> {
     const admitKey = this.keyFor(origin.serverID, origin.sessionID);
     if (
-      this.admittingSessions.has(admitKey) ||
+      this.admissions.isAdmitting(admitKey) ||
       this.modelDispatchBlocked(origin.serverID, origin.sessionID) ||
       this.agentDispatchBlocked(origin.serverID, origin.sessionID)
     )
       return false;
-    this.admittingSessions.add(admitKey);
+    this.admissions.begin(admitKey);
     // Captured before the async send: navigation can load another project's history while
     // the server responds, and that newer load must not be repainted by this admission (#160).
     const historyGeneration = this.state.historyGeneration;
@@ -4558,7 +4559,7 @@ export class AppController {
       }
       return false;
     } finally {
-      this.admittingSessions.delete(admitKey);
+      this.admissions.end(admitKey);
     }
   }
 
