@@ -84,9 +84,11 @@ export interface SessionFlags {
 }
 
 /**
- * A full refresh judges completeness from its own results; a single-host resync
- * judges it from every host's page state. Only a refresh that committed a host
- * clears the loading flag, so a newer in-flight refresh keeps it set.
+ * Global completeness is derived from the current, registered per-host page state after
+ * commits, never from a refresh's own result list: stale or discarded results, an empty
+ * `every([])`, and a failed/unattempted host must never be promoted to complete (#327).
+ * A full refresh still carries the aggregate cursor, but only a refresh that committed a
+ * host publishes aggregate flags, so a newer in-flight refresh keeps its loading/error state.
  */
 export function sessionFlags(
   applied: readonly SnapshotResult[],
@@ -95,10 +97,7 @@ export function sessionFlags(
   serverID: string | undefined,
 ): SessionFlags {
   return {
-    complete:
-      serverID === undefined
-        ? applied.every((result) => result.ok && result.cursor === undefined)
-        : allServersComplete(),
+    complete: committedCount > 0 && allServersComplete(),
     cursor:
       serverID === undefined
         ? applied.find((result) => result.cursor !== undefined)?.cursor

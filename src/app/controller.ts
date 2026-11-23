@@ -1503,20 +1503,25 @@ export class AppController {
       if (result.ok) activeByServer.set(result.serverID, result.active);
     }
 
-    const flags = sessionFlags(
-      applied,
-      committed.length,
-      () => this.serverIDs().every((id) => this.state.serverPages[id]?.complete === true),
-      serverID,
-    );
-    batch(() => {
-      this.setStateTouchingOverview('sessionsComplete', flags.complete);
-      if (serverID === undefined) this.setState('sessionsCursor', flags.cursor);
-      // Only a refresh that actually applied a host may clear the loading flag; a newer
-      // or unrelated refresh keeps it set until that operation completes.
-      if (flags.loading) this.setState('sessionsLoading', false);
-      this.setState('sessionsError', flags.error);
-    });
+    // A refresh that committed nothing must not publish aggregate state at all: doing so
+    // could confirm completion from discarded/stale results or clear a newer spinner/error
+    // (#327). The host page snapshot remains the single source of completeness.
+    if (committed.length > 0) {
+      const flags = sessionFlags(
+        applied,
+        committed.length,
+        () => this.serverIDs().every((id) => this.state.serverPages[id]?.complete === true),
+        serverID,
+      );
+      batch(() => {
+        this.setStateTouchingOverview('sessionsComplete', flags.complete);
+        if (serverID === undefined) this.setState('sessionsCursor', flags.cursor);
+        // Only a refresh that actually applied a host may clear the loading flag; a newer
+        // or unrelated refresh keeps it set until that operation completes.
+        if (flags.loading) this.setState('sessionsLoading', false);
+        this.setState('sessionsError', flags.error);
+      });
+    }
 
     // Running sessions are the ones that can be blocked on input right now. The attached
     // conversation is refreshed even when idle: a child that just appeared in this listing

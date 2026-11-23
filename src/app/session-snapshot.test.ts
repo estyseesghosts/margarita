@@ -141,18 +141,27 @@ describe('session page and flag derivation (#308)', () => {
     expect(flags.error).toBe('down');
     expect(flags.cursor).toBeUndefined();
 
-    const clean = sessionFlags([result({ ok: true })], 1, () => false, undefined);
+    const clean = sessionFlags([result({ ok: true })], 1, () => true, undefined);
     expect(clean.complete).toBe(true);
     expect(clean.cursor).toBeUndefined();
-    const paged = sessionFlags([result({ cursor: 'next' })], 1, () => false, undefined);
+    const paged = sessionFlags([result({ cursor: 'next' })], 1, () => true, undefined);
     expect(paged.cursor).toBe('next');
   });
 
   test('a single-host resync defers completeness to every host and clears no cursor', () => {
-    const flags = sessionFlags([], 0, () => true, 'local');
+    const flags = sessionFlags([result({ ok: true })], 1, () => true, 'local');
     expect(flags.complete).toBe(true);
     expect(flags.cursor).toBeUndefined();
-    expect(flags.loading).toBe(false);
+    expect(flags.loading).toBe(true);
     expect(flags.error).toBeUndefined();
+  });
+
+  test('a refresh that commits no host cannot confirm completeness (#327)', () => {
+    // `every([])` and stale full-refresh results must not become global completion.
+    const stale = sessionFlags([result({ ok: true })], 0, () => true, undefined);
+    expect(stale.complete).toBe(false);
+    expect(stale.loading).toBe(false);
+    const discarded = sessionFlags([], 0, () => true, 'local');
+    expect(discarded.complete).toBe(false);
   });
 });

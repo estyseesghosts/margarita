@@ -3297,6 +3297,67 @@ describe('openOverview preserves the originating project (issue #106)', () => {
   });
 });
 
+describe('global session completeness under overlapping refreshes (#327)', () => {
+  test('an older full refresh cannot confirm completion after a newer targeted refresh', async () => {
+    const { controller, local, remote } = multiServerController();
+    try {
+      await controller.bootstrap();
+      expect(controller.state.sessionsComplete).toBe(true);
+
+      // Hold both hosts of a full refresh, then supersede the remote host with a newer
+      // targeted read that still has a page cursor.
+      const oldLocal = deferred<Awaited<ReturnType<typeof local.listSessions>>>();
+      const oldRemote = deferred<Awaited<ReturnType<typeof remote.listSessions>>>();
+      local.listSessions = () => oldLocal.promise;
+      remote.listSessions = () => oldRemote.promise;
+      const full = controller.loadSessions();
+
+      remote.listSessions = async () => ({ sessions: remote.sessions, nextCursor: 'next' });
+      await controller.loadSessions('srv_1');
+      expect(controller.state.sessionsComplete).toBe(false);
+
+      oldLocal.resolve({ sessions: local.sessions });
+      oldRemote.resolve({ sessions: remote.sessions });
+      await full;
+      // The older full refresh may commit the local host, but the remote host's newer paged
+      // state must keep global completion false.
+      expect(controller.state.sessionsComplete).toBe(false);
+      expect(controller.state.serverPages['srv_1']?.cursor).toBe('next');
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('a refresh whose results are all superseded publishes no aggregate completion', async () => {
+    const { controller, local, remote } = multiServerController();
+    try {
+      await controller.bootstrap();
+      expect(controller.state.sessionsComplete).toBe(true);
+
+      const oldLocal = deferred<Awaited<ReturnType<typeof local.listSessions>>>();
+      const oldRemote = deferred<Awaited<ReturnType<typeof remote.listSessions>>>();
+      local.listSessions = () => oldLocal.promise;
+      remote.listSessions = () => oldRemote.promise;
+      const full = controller.loadSessions();
+
+      // Newer targeted reads for every host supersede all results of the full refresh.
+      local.listSessions = async () => ({ sessions: local.sessions, nextCursor: 'local-next' });
+      remote.listSessions = async () => ({ sessions: remote.sessions, nextCursor: 'remote-next' });
+      await controller.loadSessions('local');
+      await controller.loadSessions('srv_1');
+      expect(controller.state.sessionsComplete).toBe(false);
+
+      oldLocal.resolve({ sessions: local.sessions });
+      oldRemote.resolve({ sessions: remote.sessions });
+      await full;
+      expect(controller.state.sessionsComplete).toBe(false);
+      expect(controller.state.sessionsCursor).toBeUndefined();
+    } finally {
+      controller.dispose();
+    }
+  });
+});
+
 describe('overview selection reloads project-scoped history (issue #107)', () => {
   test("switching the overview selection reloads the selected project's history", async () => {
     const backend = new FakeBackend();
