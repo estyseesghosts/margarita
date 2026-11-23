@@ -1181,8 +1181,6 @@ export class AppController {
   private pickerOpenToken = 0;
   private pendingPickerOpen:
     { token: number; action: FooterAction | 'effort'; routeKey: string } | undefined;
-  /** Per-session, per-job-kind refresh epochs: a late RPC response cannot restore removed state (#136). */
-  private readonly jobRefreshEpoch = new Map<string, { worker: number; shell: number }>();
   /** Deduplicates "agent unavailable" prompts across repeated catalog refreshes (#123). */
   private unavailableAgentNotice: string | undefined;
 
@@ -2004,7 +2002,7 @@ export class AppController {
   private clearRuntimeStateForServer(serverID: string): void {
     // Invalidate *every* in-flight refresh for this host, including first fetches that have
     // not written any row yet. Their response must not survive a reconnect (#140).
-    for (const key of this.jobRefreshEpoch.keys()) {
+    for (const key of this.generations.jobKeys()) {
       if (parseSessionKey(key).serverID === serverID) this.invalidateJobRefresh(key);
     }
     for (const key of this.jobStartProbes.keys()) {
@@ -2715,14 +2713,11 @@ export class AppController {
 
   /** Starts a new job refresh epoch for one kind; the other kind refreshes independently. */
   private nextJobRefreshEpoch(key: string, kind: 'worker' | 'shell'): number {
-    const current = this.jobRefreshEpoch.get(key) ?? { worker: 0, shell: 0 };
-    const epoch = current[kind] + 1;
-    this.jobRefreshEpoch.set(key, { ...current, [kind]: epoch });
-    return epoch;
+    return this.generations.nextJobRefresh(key, kind);
   }
 
   private isJobRefreshCurrent(key: string, kind: 'worker' | 'shell', epoch: number): boolean {
-    return (this.jobRefreshEpoch.get(key)?.[kind] ?? 0) === epoch;
+    return this.generations.isJobRefreshCurrent(key, kind, epoch);
   }
 
   /**
@@ -2731,11 +2726,7 @@ export class AppController {
    * so an old response could pass the freshness check again (#140).
    */
   private invalidateJobRefresh(key: string): void {
-    const current = this.jobRefreshEpoch.get(key) ?? { worker: 0, shell: 0 };
-    this.jobRefreshEpoch.set(key, {
-      worker: current.worker + 1,
-      shell: current.shell + 1,
-    });
+    this.generations.invalidateJobRefresh(key);
   }
 
   /**
@@ -5514,7 +5505,7 @@ export class AppController {
     for (const key of this.inputRequestRevisions.keys()) {
       if (parseSessionKey(key).serverID === serverID) this.inputRequestRevisions.delete(key);
     }
-    for (const key of this.jobRefreshEpoch.keys()) {
+    for (const key of this.generations.jobKeys()) {
       if (parseSessionKey(key).serverID === serverID) this.invalidateJobRefresh(key);
     }
     for (const key of this.jobStartProbes.keys()) {

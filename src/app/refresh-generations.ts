@@ -6,10 +6,20 @@
  * when it landed? Keeping them together gives each generation one writer and one
  * named invalidation operation.
  */
+/** One worker/shell refresh pair, each kind advancing independently. */
+export interface JobEpochs {
+  readonly worker: number;
+  readonly shell: number;
+}
+
+/** Kind of job list a refresh reads. */
+export type JobKind = 'worker' | 'shell';
+
 export class RefreshGenerations {
   private readonly refreshEpoch = new Map<string, number>();
   private readonly sessionEpochs = new Map<string, number>();
   private readonly resyncEpochs = new Map<string, number>();
+  private readonly jobEpochs = new Map<string, JobEpochs>();
   private readonly runningEventSeq = new Map<string, number>();
   private readonly usageByKey = new Map<string, number>();
   private runningEventSequence = 0;
@@ -57,6 +67,28 @@ export class RefreshGenerations {
   /** True while a resync is still the newest one for its host. */
   isResyncCurrent(serverID: string, epoch: number): boolean {
     return this.resyncEpochs.get(serverID) === epoch;
+  }
+
+  /** Starts a new refresh for one job kind; the other kind is untouched. */
+  nextJobRefresh(key: string, kind: JobKind): number {
+    const current = this.jobEpochs.get(key) ?? { worker: 0, shell: 0 };
+    const epoch = current[kind] + 1;
+    this.jobEpochs.set(key, { ...current, [kind]: epoch });
+    return epoch;
+  }
+
+  isJobRefreshCurrent(key: string, kind: JobKind, epoch: number): boolean {
+    return (this.jobEpochs.get(key)?.[kind] ?? 0) === epoch;
+  }
+
+  /** Bumps both kinds rather than deleting them, so old replies cannot pass again. */
+  invalidateJobRefresh(key: string): void {
+    const current = this.jobEpochs.get(key) ?? { worker: 0, shell: 0 };
+    this.jobEpochs.set(key, { worker: current.worker + 1, shell: current.shell + 1 });
+  }
+
+  jobKeys(): readonly string[] {
+    return [...this.jobEpochs.keys()];
   }
 
   /** Current global execution-event clock, captured before a snapshot read. */

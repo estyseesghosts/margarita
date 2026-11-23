@@ -41,6 +41,23 @@ describe('refresh generations (#308)', () => {
     expect(generations.isResyncCurrent('local', resync)).toBe(false);
   });
 
+  test('worker and shell refresh epochs advance independently', () => {
+    const generations = new RefreshGenerations();
+    const key = 'local:ses_a';
+    const worker = generations.nextJobRefresh(key, 'worker');
+    const shell = generations.nextJobRefresh(key, 'shell');
+    expect(worker).toBe(1);
+    expect(shell).toBe(1);
+    expect(generations.isJobRefreshCurrent(key, 'worker', worker)).toBe(true);
+    expect(generations.isJobRefreshCurrent(key, 'shell', shell)).toBe(true);
+    expect(generations.nextJobRefresh(key, 'worker')).toBe(2);
+    expect(generations.isJobRefreshCurrent(key, 'shell', shell)).toBe(true);
+    generations.invalidateJobRefresh(key);
+    expect(generations.jobKeys()).toContain(key);
+    expect(generations.isJobRefreshCurrent(key, 'shell', shell)).toBe(false);
+    expect(generations.nextJobRefresh(key, 'shell')).toBe(3);
+  });
+
   test('event and usage stamps stay monotonic when one session is forgotten', () => {
     const generations = new RefreshGenerations();
     const before = generations.eventClock();
