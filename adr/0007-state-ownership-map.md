@@ -334,9 +334,11 @@ These are concrete source observations, not hypotheses:
 
 ### 12. Reactive coordination and view boundaries (#316/#318/#319)
 
-- **Current owner:** the store setter wrapper at 680-685, `overviewRevision`
-  signal and overview/usage caches at 560-586, main UI at `src/ui/app.tsx`,
-  `transcript-view.tsx` and `overlays.tsx`.
+- **Current owner:** the store setter wrapper at 680-685, the `overviewRevision`
+  signal, and the main UI at `src/ui/app.tsx`, `transcript-view.tsx` and
+  `overlays.tsx`. The three overview projection caches now use the shared
+  `src/app/revision-cache.ts` primitive (four tests); usage and greeting memo
+  owners are in `src/app/usage-selector.ts` and `src/app/greeting-selector.ts`.
 - **Authoritative source:** the owning capability's state; derived views must
   subscribe only to fields that can change them.
 - **Readers / writers:** all mounted Solid views read it; AppController store updates, revision signals and UI-local view state write it.

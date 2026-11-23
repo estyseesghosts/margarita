@@ -219,6 +219,7 @@ import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-ur
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
 import { RefreshGenerations } from './refresh-generations.ts';
 import { inputRequestRefreshTargets } from './request-targets.ts';
+import { RevisionCache } from './revision-cache.ts';
 import { SessionFetcher } from './session-fetch.ts';
 import { mergeCommittedSessions, sessionFlags, sessionPage } from './session-snapshot.ts';
 import { planTranscriptEviction } from './transcript-eviction.ts';
@@ -559,12 +560,9 @@ export class AppController {
    * the store update.
    */
   private readonly overviewRevision = createSignal(0);
-  private overviewGroupsCache:
-    { revision: number; serverKey: string; groups: ProjectGroup[] } | undefined;
-  private overviewRowsCache:
-    { revision: number; serverKey: string; complete: boolean; rows: OverviewRow[] } | undefined;
-  private overviewTabCountsCache:
-    { revision: number; serverKey: string; counts: Record<OverviewTab, number> } | undefined;
+  private readonly overviewGroupsCache = new RevisionCache<ProjectGroup[]>();
+  private readonly overviewRowsCache = new RevisionCache<OverviewRow[]>();
+  private readonly overviewTabCountsCache = new RevisionCache<Record<OverviewTab, number>>();
   /** Sole owner of the analytics projection cache (#316/#318). */
   private readonly usageAnalyticsSelector = new UsageAnalyticsSelector();
   /** Single-flight coalescing for worker/shell refreshes (#284). */
@@ -972,16 +970,15 @@ export class AppController {
 
   /** Counts for the tab bar, based on the same classifier as the dot. */
   tabCounts(): Record<OverviewTab, number> {
-    const revision = this.overviewRevision[0]();
-    const serverKey = this.overviewServerKey();
-    const cached = this.overviewTabCountsCache;
-    if (cached?.revision === revision && cached.serverKey === serverKey) return cached.counts;
-    const counts = tabCounts(Object.values(this.state.sessions), {
-      statusOf: (session) => this.statusOf(session),
-      online: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
-    });
-    this.overviewTabCountsCache = { revision, serverKey, counts };
-    return counts;
+    return this.overviewTabCountsCache.get(
+      this.overviewRevision[0](),
+      this.overviewServerKey(),
+      () =>
+        tabCounts(Object.values(this.state.sessions), {
+          statusOf: (session) => this.statusOf(session),
+          online: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
+        }),
+    );
   }
 
   overviewTab(): OverviewTab {
@@ -1003,24 +1000,28 @@ export class AppController {
   }
 
   groups(): ProjectGroup[] {
-    const revision = this.overviewRevision[0]();
-    const serverKey = this.overviewServerKey();
-    const cached = this.overviewGroupsCache;
-    if (cached?.revision === revision && cached.serverKey === serverKey) return cached.groups;
-    const filtered = filterSessions(Object.values(this.state.sessions), this.state.overview.tab, {
-      statusOf: (session) => this.statusOf(session),
-      online: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
-    });
-    const groups = groupSessions(filtered, {
-      platformFor: (serverID) => this.platformFor(serverID),
-      showArchived: this.deps.config.sessions.showArchived,
-      showChildren: this.deps.config.sessions.showChildren,
-      activityOf: (session) => this.lastUsed(session),
-      serverLabelOf: (serverID) => this.deps.serverInfo?.(serverID)?.label,
-      serverOnline: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
-    });
-    this.overviewGroupsCache = { revision, serverKey, groups };
-    return groups;
+    return this.overviewGroupsCache.get(
+      this.overviewRevision[0](),
+      this.overviewServerKey(),
+      () => {
+        const filtered = filterSessions(
+          Object.values(this.state.sessions),
+          this.state.overview.tab,
+          {
+            statusOf: (session) => this.statusOf(session),
+            online: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
+          },
+        );
+        return groupSessions(filtered, {
+          platformFor: (serverID) => this.platformFor(serverID),
+          showArchived: this.deps.config.sessions.showArchived,
+          showChildren: this.deps.config.sessions.showChildren,
+          activityOf: (session) => this.lastUsed(session),
+          serverLabelOf: (serverID) => this.deps.serverInfo?.(serverID)?.label,
+          serverOnline: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
+        });
+      },
+    );
   }
 
   /** Most recent use: server activity or this frontend opening the session. */
@@ -1033,24 +1034,20 @@ export class AppController {
 
   /** Flattened selectable overview rows in display order, for keyboard navigation. */
   overviewRows(): OverviewRow[] {
-    const revision = this.overviewRevision[0]();
-    const serverKey = this.overviewServerKey();
     const complete = this.state.sessionsComplete;
-    const cached = this.overviewRowsCache;
-    if (
-      cached?.revision === revision &&
-      cached.serverKey === serverKey &&
-      cached.complete === complete
-    ) {
-      return cached.rows;
-    }
-    const rows = this.groups().flatMap((group) =>
-      groupRows(group, this.state.overview.expanded[group.key] === true),
+    return this.overviewRowsCache.get(
+      this.overviewRevision[0](),
+      this.overviewServerKey(),
+      () => {
+        const rows = this.groups().flatMap((group) =>
+          groupRows(group, this.state.overview.expanded[group.key] === true),
+        );
+        // Offer pagination once the server says the first pages are not everything.
+        if (!complete) rows.push({ kind: 'loadmore', key: loadMoreRowKey });
+        return rows;
+      },
+      complete ? 'complete' : 'paged',
     );
-    // Offer pagination once the server says the first pages are not everything.
-    if (!complete) rows.push({ kind: 'loadmore', key: loadMoreRowKey });
-    this.overviewRowsCache = { revision, serverKey, complete, rows };
-    return rows;
   }
 
   /** Injected clock, so ages and recency are testable. */

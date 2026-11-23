@@ -12,13 +12,13 @@ Captured at `4d9c6af` plus the #305/#307/#306 documentation and tooling work:
 
 | Command | Result |
 | --- | --- |
-| `bun run verify` | 1368 pass, 40 skip, 0 fail (1408 tests across 116 files); includes format, Oxlint, strict typecheck, `check:architecture`, and tests |
+| `bun run verify` | 1372 pass, 40 skip, 0 fail (1412 tests across 117 files); includes format, Oxlint, strict typecheck, `check:architecture`, and tests |
 | `bun run bench -- --smoke` | opt-in synthetic projection/network benchmark; not a native FPS measurement |
 | `bun run bench:render` | opt-in renderable-reuse benchmark |
 | `sh scripts/test-pty-smoke.sh`, `sh scripts/test-tmux.sh` | Linux executable smoke, run in CI, needs a compiled binary |
 | `MARGARITA_LIVE=1 bun test` | opt-in compatibility against a disposable v2 service; never a user's real service |
 
-The test suite declares roughly 1,372 explicit test cases; most are grouped in
+The test suite declares roughly 1,376 explicit test cases; most are grouped in
 `src/app/controller.test.ts` (about 270) and `src/ui/app.test.tsx` (about 115).
 Those two files are the coupling the extraction must unravel: behavior is
 protected, but the fixtures are tied to one concrete class.
@@ -38,7 +38,7 @@ protected, but the fixtures are tied to one concrete class.
 | Goals, plans, tasks | `domain/goal-plan.test.ts` (17), `domain/native-goal.test.ts`, `controller.test.ts`, `src/app/goal-revision-guard.test.ts` (3) | `GoalPlanCoordinator` → `goal-coordinator.test.ts`; monotone UI revision guard already in `src/app/goal-revision-guard.ts` (#314) | No shared fixture for overlapping reads/saves or cross-host goal collisions |
 | Inspection, diff, rewind, revert | `domain/inspector.test.ts`, `diff.test.ts`, `rewind.test.ts`, `edit-diff.test.ts`, `async-audit-regressions.test.ts`, `src/app/inspector-document.test.ts` (3) | `InspectionService` + `RevertCommand` → `inspection.test.ts`; memoized document already in `src/app/inspector-document.ts` (#315) | Negative "no backend mutation on preview" assertions are localized, not systematic |
 | Persistence | `config/*` suites, `test/linux/persistence.test.ts` (12), `scripts/test-low-disk.sh`, `src/app/persistence-coordinator.test.ts` (4) | **`Extracted (#317)`** `src/app/persistence-coordinator.ts`; controller delegates `flushLocalState()` and patches | Save-chain conflict cases still partly in controller/production-assembly tests |
-| Reactive coordination / UI | `ui/app.test.tsx` (115), `production-assembly.test.ts`, `test/perf.test.tsx`, `src/app/usage-selector.test.ts` (3) | explicit selectors + view-models (#316/#318); usage analytics memo already in `src/app/usage-selector.ts` | Mounted-renderer tests are the main coverage; no dependency-free selector suite yet |
+| Reactive coordination / UI | `ui/app.test.tsx` (115), `production-assembly.test.ts`, `test/perf.test.tsx`, `src/app/usage-selector.test.ts` (3), `src/app/revision-cache.test.ts` (4) | explicit selectors + view-models (#316/#318); usage memo in `src/app/usage-selector.ts` and the shared overview memo primitive in `src/app/revision-cache.ts` | Mounted-renderer tests are the main coverage; no dependency-free selector suite yet |
 
 ## Reusable fixture layer
 
