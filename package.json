@@ -15,10 +15,11 @@
     "format": "bun fmt --no-script",
     "format:check": "bun fmt --no-script --check",
     "typecheck": "bun check",
+    "check:architecture": "bun run scripts/check-architecture.ts",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
     "test:writable": "bun run scripts/test-writable.ts",
-    "verify": "bun run format:check && bun run lint && bun run typecheck && bun run test",
+    "verify": "bun run format:check && bun run lint && bun run typecheck && bun run check:architecture && bun run test",
     "lint": "oxlint --type-aware --deny-warnings"
   },
   "dependencies": {

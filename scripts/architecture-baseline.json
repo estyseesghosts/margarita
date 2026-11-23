@@ -1,0 +1,3 @@
+{
+  "cycles": ["src/domain/execution-segment.ts -> src/domain/transcript.ts -> src/domain/worker.ts"]
+}
