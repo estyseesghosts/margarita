@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import { isRecord } from '../domain/backend-event.ts';
@@ -45,6 +45,51 @@ export type LocalState = Readonly<{
 
 export const emptyState: LocalState = { schemaVersion: 1, history: {}, recentModels: [] };
 
+/**
+ * The filesystem surface state I/O needs. Production uses the Node defaults; tests inject
+ * failing reads and renames so destructive-save paths are exercised deterministically (#336).
+ */
+export interface LocalStateIO {
+  readFile(path: string): Promise<string>;
+  rename(from: string, to: string): Promise<void>;
+  /** Confirms a path still exists after a backup rename, so no unverified path is reported. */
+  verify(path: string): Promise<void>;
+}
+
+const defaultIO: LocalStateIO = {
+  readFile: (path) => readFile(path, 'utf8'),
+  rename: async (from, to) => {
+    await rename(from, to);
+  },
+  verify: async (path) => {
+    await access(path);
+  },
+};
+
+function errorText(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
+/** A save was refused because the original file could not be read or safely preserved (#336). */
+export class LocalStateSafetyError extends Error {
+  constructor(
+    readonly path: string,
+    readonly reason: 'unreadable' | 'backup-failed',
+    cause: unknown,
+  ) {
+    const detail = errorText(cause);
+    super(
+      reason === 'unreadable'
+        ? `Refusing to overwrite ${path}: reading it failed (${detail}). ` +
+            'The original file was left unchanged; restore access and retry.'
+        : `Refusing to overwrite ${path}: it holds invalid JSON and could not be moved aside ` +
+            `(${detail}). The original file was left unchanged; restore access and retry.`,
+      cause instanceof Error ? { cause } : undefined,
+    );
+    this.name = 'LocalStateSafetyError';
+  }
+}
+
 export type LoadStateResult = Readonly<{
   state: LocalState;
   warning?: string;
@@ -52,17 +97,24 @@ export type LoadStateResult = Readonly<{
   incompatible?: { path: string; version: unknown };
 }>;
 
-/** Moves an unreadable file aside instead of resetting it in place. */
-async function preserveUnreadable(path: string): Promise<string> {
+/**
+ * Moves an unreadable file aside instead of resetting it in place. The backup path is returned
+ * only after the rename and the backup's existence are confirmed (#336).
+ */
+async function preserveUnreadable(path: string, io: LocalStateIO): Promise<string> {
   const backup = `${path}.corrupt-${Date.now()}-${process.pid}-${randomUUID().slice(0, 8)}`;
-  await rename(path, backup).catch(() => {});
+  await io.rename(path, backup);
+  await io.verify(backup);
   return backup;
 }
 
-export async function loadState(path: string): Promise<LoadStateResult> {
+export async function loadState(
+  path: string,
+  io: LocalStateIO = defaultIO,
+): Promise<LoadStateResult> {
   let text: string;
   try {
-    text = await readFile(path, 'utf8');
+    text = await io.readFile(path);
   } catch (cause) {
     if (isRecord(cause) && cause['code'] === 'ENOENT') return { state: emptyState };
     return { state: emptyState, warning: `Could not read local state: ${String(cause)}` };
@@ -71,11 +123,22 @@ export async function loadState(path: string): Promise<LoadStateResult> {
   try {
     raw = JSON.parse(text);
   } catch (cause) {
-    const backup = await preserveUnreadable(path);
-    return {
-      state: emptyState,
-      warning: `Local state was unreadable; the original was preserved at ${backup}. ${String(cause)}`,
-    };
+    try {
+      const backup = await preserveUnreadable(path, io);
+      return {
+        state: emptyState,
+        warning: `Local state was unreadable; the original was preserved at ${backup}. ${String(cause)}`,
+      };
+    } catch (preserveError) {
+      // A startup read is non-destructive, so report honestly instead of claiming a backup.
+      // Any later save is still refused by readForMerge until the file is preserved.
+      return {
+        state: emptyState,
+        warning:
+          `Local state was unreadable and could not be preserved (${errorText(preserveError)}). ` +
+          `The original was left at ${path}; writes are refused until it is safe. ${String(cause)}`,
+      };
+    }
   }
   if (isIncompatibleVersion(raw)) {
     const error = new IncompatibleSchemaError({
@@ -90,11 +153,20 @@ export async function loadState(path: string): Promise<LoadStateResult> {
     };
   }
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    const backup = await preserveUnreadable(path);
-    return {
-      state: emptyState,
-      warning: `Local state was unreadable; the original was preserved at ${backup}.`,
-    };
+    try {
+      const backup = await preserveUnreadable(path, io);
+      return {
+        state: emptyState,
+        warning: `Local state was unreadable; the original was preserved at ${backup}.`,
+      };
+    } catch (preserveError) {
+      return {
+        state: emptyState,
+        warning:
+          `Local state was unreadable and could not be preserved (${errorText(preserveError)}). ` +
+          `The original was left at ${path}; writes are refused until it is safe.`,
+      };
+    }
   }
   return { state: parseState(raw) };
 }
@@ -291,20 +363,30 @@ export type SaveResult = Readonly<{
 const lockRetryMs = 25;
 const lockTimeoutMs = 5_000;
 
-async function readForMerge(path: string): Promise<{ state: LocalState; warning?: string }> {
+async function readForMerge(
+  path: string,
+  io: LocalStateIO,
+): Promise<{ state: LocalState; warning?: string }> {
   let text: string;
   try {
-    text = await readFile(path, 'utf8');
+    text = await io.readFile(path);
   } catch (cause) {
+    // Only a missing file means "nothing to merge". Any other read failure must abort the
+    // save: writing an empty merge over an unreadable file destroys another process's data.
     if (isRecord(cause) && cause['code'] === 'ENOENT') return { state: emptyState };
-    return { state: emptyState, warning: `Could not read local state for merge: ${String(cause)}` };
+    throw new LocalStateSafetyError(path, 'unreadable', cause);
   }
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch (cause) {
-    // Never silently destroy what another process may have written: keep a backup.
-    const backup = await preserveUnreadable(path);
+    // Never replace corrupt state unless the original was actually moved aside and verified.
+    let backup: string;
+    try {
+      backup = await preserveUnreadable(path, io);
+    } catch (preserveError) {
+      throw new LocalStateSafetyError(path, 'backup-failed', preserveError);
+    }
     return {
       state: emptyState,
       warning: `Local state was unreadable; the original was preserved at ${backup}: ${String(cause)}`,
@@ -330,6 +412,7 @@ export async function saveState(
   path: string,
   state: LocalState,
   limits: MergeLimits = defaultMergeLimits,
+  io: LocalStateIO = defaultIO,
 ): Promise<SaveResult> {
   const previous = saveChains.get(path) ?? Promise.resolve();
   let release: () => void = noop;
@@ -349,7 +432,7 @@ export async function saveState(
       retryMs: lockRetryMs,
     });
     try {
-      const disk = await readForMerge(path);
+      const disk = await readForMerge(path, io);
       const merged = mergeState(state, disk.state, limits);
       tempCounter += 1;
       const temp = `${path}.${process.pid}.${lock.token}.${Date.now()}.${tempCounter}.tmp`;

@@ -1,12 +1,19 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { pickTheme } from '../ui/theme.ts';
 import { defaultConfig, loadConfig, parseConfig, stripJsonComments } from './config.ts';
-import { emptyState, loadState, mergeState, parseState, saveState } from './local-state.ts';
-import type { PinnedModelOperation } from './local-state.ts';
+import {
+  emptyState,
+  loadState,
+  LocalStateSafetyError,
+  mergeState,
+  parseState,
+  saveState,
+} from './local-state.ts';
+import type { LocalStateIO, PinnedModelOperation } from './local-state.ts';
 import { appPaths } from './paths.ts';
 import { IncompatibleSchemaError } from './schema-guard.ts';
 
@@ -225,6 +232,136 @@ describe('local state', () => {
     // No temp files should be left behind.
     const leftovers = (await readdir(dir)).filter((name) => name.includes('.tmp'));
     expect(leftovers).toEqual([]);
+  });
+});
+
+/** Real I/O with individual operations replaced by deterministic faults (#336). */
+function ioWith(overrides: Partial<LocalStateIO>): LocalStateIO {
+  return {
+    readFile: (path) => readFile(path, 'utf8'),
+    rename: async (from, to) => {
+      await rename(from, to);
+    },
+    verify: async (path) => {
+      await access(path);
+    },
+    ...overrides,
+  };
+}
+
+function readError(code: string): Error & { code: string } {
+  return Object.assign(new Error(`${code} while reading state`), { code });
+}
+
+describe('non-destructive local-state saves (#336)', () => {
+  const pending = { schemaVersion: 1 as const, history: { '/p': ['new'] }, recentModels: [] };
+
+  test('a non-ENOENT read failure refuses the save and leaves the original bytes intact', async () => {
+    const path = join(await tempDir(), 'state.json');
+    const original = '{"schemaVersion":1,"history":{"/p":["keep"]},"recentModels":[]}\n';
+    await Bun.write(path, original);
+    for (const code of ['EACCES', 'EIO', 'EPERM']) {
+      let failure: unknown;
+      try {
+        await saveState(
+          path,
+          pending,
+          undefined,
+          ioWith({
+            readFile: async () => {
+              throw readError(code);
+            },
+          }),
+        );
+      } catch (cause) {
+        failure = cause;
+      }
+      if (!(failure instanceof LocalStateSafetyError)) {
+        throw new Error(`expected a LocalStateSafetyError, got ${String(failure)}`);
+      }
+      expect(failure.reason).toBe('unreadable');
+      expect(failure.message).toContain('left unchanged');
+      expect(await readFile(path, 'utf8')).toBe(original);
+    }
+  });
+
+  test('ENOENT still creates a new file with the merged snapshot', async () => {
+    const path = join(await tempDir(), 'missing', 'state.json');
+    const result = await saveState(path, pending);
+    expect(result.state.history['/p']).toEqual(['new']);
+    expect((await loadState(path)).state).toEqual(pending);
+  });
+
+  test('corrupt JSON with a verified backup is reported at its exact path', async () => {
+    const dir = await tempDir();
+    const path = join(dir, 'state.json');
+    const corrupt = '{not json';
+    await Bun.write(path, corrupt);
+    const result = await saveState(path, pending);
+    const backupName = (await readdir(dir)).find((name) => name.startsWith('state.json.corrupt-'));
+    expect(backupName).toBeDefined();
+    expect(result.warning).toContain(backupName ?? '');
+    expect(await readFile(join(dir, backupName ?? ''), 'utf8')).toBe(corrupt);
+    expect((await loadState(path)).state).toEqual(pending);
+  });
+
+  test('a failed backup rename leaves the corrupt original untouched and claims no backup', async () => {
+    const dir = await tempDir();
+    const path = join(dir, 'state.json');
+    const corrupt = '{not json';
+    await Bun.write(path, corrupt);
+    let failure: unknown;
+    try {
+      await saveState(
+        path,
+        pending,
+        undefined,
+        ioWith({
+          rename: async () => {
+            throw readError('EACCES');
+          },
+        }),
+      );
+    } catch (cause) {
+      failure = cause;
+    }
+    if (!(failure instanceof LocalStateSafetyError)) {
+      throw new Error(`expected a LocalStateSafetyError, got ${String(failure)}`);
+    }
+    expect(failure.reason).toBe('backup-failed');
+    expect(await readFile(path, 'utf8')).toBe(corrupt);
+    expect((await readdir(dir)).some((name) => name.includes('.corrupt-'))).toBe(false);
+  });
+
+  test('pending edits survive an I/O failure and the next legitimate save succeeds', async () => {
+    const path = join(await tempDir(), 'state.json');
+    const original = '{"schemaVersion":1,"history":{"/p":["keep"]},"recentModels":[]}\n';
+    await Bun.write(path, original);
+    let allowRead = false;
+    const io = ioWith({
+      readFile: (target) => {
+        if (!allowRead) throw readError('EIO');
+        return readFile(target, 'utf8');
+      },
+    });
+    let failure: unknown;
+    try {
+      await saveState(path, pending, undefined, io);
+    } catch (cause) {
+      failure = cause;
+    }
+    if (!(failure instanceof LocalStateSafetyError)) {
+      throw new Error(`expected a LocalStateSafetyError, got ${String(failure)}`);
+    }
+    expect(failure.reason).toBe('unreadable');
+    expect(await readFile(path, 'utf8')).toBe(original);
+    allowRead = true;
+    await saveState(path, pending, undefined, io);
+    expect((await loadState(path)).state).toEqual({
+      schemaVersion: 1,
+      history: { '/p': ['keep', 'new'] },
+      recentModels: [],
+    });
   });
 });
 
