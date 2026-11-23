@@ -6263,6 +6263,7 @@ describe('escape key handling (issue #90)', () => {
 function twoHostPermissionController() {
   const local = new FakeBackend();
   const remote = new FakeBackend();
+  const registered = new Set(['srv_1']);
   remote.serverID = 'srv_1';
   const sessionID = 'ses_same';
   local.sessions = [fakeSession(sessionID)];
@@ -6278,10 +6279,10 @@ function twoHostPermissionController() {
     saveLocalState: async () => {},
     listFiles: () => Promise.resolve([]),
     requestExit: () => {},
-    serverIDs: () => ['srv_1'],
+    serverIDs: () => [...registered],
     backendFor: (serverID: string) => (serverID === 'srv_1' ? remote : local),
   });
-  return { controller, local, remote, sessionID };
+  return { controller, local, remote, sessionID, registered };
 }
 
 describe('permission reply admission is scoped per request (#340)', () => {
@@ -6327,6 +6328,115 @@ describe('permission reply admission is scoped per request (#340)', () => {
 
       gate.resolve();
       await answerA;
+      expect(controller.state.answering).toBe(false);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('two fast answers to the same permission produce one backend reply (#340)', async () => {
+    const { controller, local, sessionID } = twoHostPermissionController();
+    try {
+      await controller.bootstrap();
+      controller.openSession(sessionID, 'local');
+      await flush();
+      local.permissions = [
+        { id: 'p_dup', sessionID, action: 'run shell', resources: [], save: [] },
+      ];
+      controller.onEvents('local', [{ kind: 'input-requests-changed', sessionID }], false);
+      await flush();
+      const gate = deferred<void>();
+      let calls = 0;
+      const original = local.replyPermission.bind(local);
+      local.replyPermission = async (...args) => {
+        calls += 1;
+        await gate.promise;
+        return original(...args);
+      };
+      const first = controller.answerPermission('once');
+      const second = controller.answerPermission('once');
+      expect(calls).toBe(1);
+      expect(controller.isPermissionAnswering('local', sessionID, 'p_dup')).toBe(true);
+      gate.resolve();
+      await Promise.all([first, second]);
+      expect(local.calls.filter((call) => call.name === 'replyPermission')).toHaveLength(1);
+      expect(controller.isPermissionAnswering('local', sessionID, 'p_dup')).toBe(false);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('two permissions in one session are tracked independently (#340)', async () => {
+    const { controller, local, sessionID } = twoHostPermissionController();
+    try {
+      await controller.bootstrap();
+      controller.openSession(sessionID, 'local');
+      await flush();
+      local.permissions = [
+        { id: 'p1', sessionID, action: 'run shell', resources: [], save: [] },
+        { id: 'p2', sessionID, action: 'read files', resources: [], save: [] },
+      ];
+      controller.onEvents('local', [{ kind: 'input-requests-changed', sessionID }], false);
+      await flush();
+      const gate = deferred<void>();
+      const original = local.replyPermission.bind(local);
+      local.replyPermission = async (...args) => {
+        if (args[1] === 'p1') await gate.promise;
+        return original(...args);
+      };
+      const originalPending = controller.pendingPermission.bind(controller);
+      let useSecond = false;
+      controller.pendingPermission = () =>
+        useSecond
+          ? { id: 'p2', sessionID, action: 'read files', resources: [], save: [] }
+          : originalPending();
+
+      const first = controller.answerPermission('once');
+      expect(controller.isPermissionAnswering('local', sessionID, 'p1')).toBe(true);
+      useSecond = true;
+      const second = controller.answerPermission('once');
+      useSecond = false;
+      expect(controller.isPermissionAnswering('local', sessionID, 'p2')).toBe(true);
+      expect(controller.isPermissionAnswering('local', sessionID, 'p1')).toBe(true);
+
+      gate.resolve();
+      await Promise.all([first, second]);
+      // p2 is unheld so its reply is recorded first; p1 records only after the gate opens.
+      expect(
+        local.calls.filter((call) => call.name === 'replyPermission').map((call) => call.args[1]),
+      ).toEqual(['p2', 'p1']);
+      expect(controller.isPermissionAnswering('local', sessionID, 'p1')).toBe(false);
+      expect(controller.isPermissionAnswering('local', sessionID, 'p2')).toBe(false);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('mid-flight unpair retires a held permission reply lock (#340)', async () => {
+    const { controller, remote, sessionID, registered } = twoHostPermissionController();
+    try {
+      await controller.bootstrap();
+      controller.openSession(sessionID, 'srv_1');
+      await flush();
+      remote.permissions = [{ id: 'p_a', sessionID, action: 'run shell', resources: [], save: [] }];
+      controller.onEvents('srv_1', [{ kind: 'input-requests-changed', sessionID }], false);
+      await flush();
+      const gate = deferred<void>();
+      const original = remote.replyPermission.bind(remote);
+      remote.replyPermission = async (...args) => {
+        await gate.promise;
+        return original(...args);
+      };
+      const answer = controller.answerPermission('once');
+      await flush();
+      expect(controller.isPermissionAnswering('srv_1', sessionID, 'p_a')).toBe(true);
+
+      // Unpair the owning host while the reply is held; its lock must be retired.
+      registered.delete('srv_1');
+      gate.resolve();
+      await answer;
+      await flush();
+      expect(controller.isPermissionAnswering('srv_1', sessionID, 'p_a')).toBe(false);
       expect(controller.state.answering).toBe(false);
     } finally {
       controller.dispose();

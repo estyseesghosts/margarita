@@ -602,6 +602,15 @@ export class AppController {
   private readonly answeringPermissions = new Map<string, number>();
   private permissionReplySeq = 0;
 
+  /**
+   * Whether the exact permission request is being answered. The visible card derives its busy
+   * state from this request-specific key rather than the aggregate `state.answering` flag, so an
+   * unrelated host's held reply never shows as busy here (#340).
+   */
+  isPermissionAnswering(serverID: string, sessionID: string, permissionID: string): boolean {
+    return this.answeringPermissions.has(JSON.stringify([serverID, sessionID, permissionID]));
+  }
+
   /** Retires host-owned permission reply locks without touching other hosts (#340). */
   private retirePermissionReplies(matches: (serverID: string, sessionID: string) => boolean): void {
     for (const key of this.answeringPermissions.keys()) {
