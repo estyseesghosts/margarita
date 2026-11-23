@@ -26,6 +26,19 @@ export type SendOutcome =
 /** Terminal outcome of one admission transaction. */
 export type AdmissionOutcome = 'blocked' | 'declined' | 'admitted' | 'unknown' | 'failed';
 
+/**
+ * Immutable identity of the draft a prompt came from, captured before any await
+ * (#324). The revision distinguishes the acknowledged payload from newer edits.
+ */
+export interface SubmissionOrigin {
+  readonly serverID: string;
+  readonly sessionID: string;
+  readonly draftKey: string;
+  readonly draftRevision: number;
+  readonly text: string;
+  readonly sentAttachmentIDs: readonly string[];
+}
+
 /** One observable effect of an admission, in order. */
 export type AdmissionCommand =
   | { kind: 'log-accepted' }
@@ -38,6 +51,13 @@ export type AdmissionCommand =
       historyGeneration: number;
     }
   | { kind: 'clear-composer'; text: string; sentAttachments: readonly Attachment[] }
+  | {
+      kind: 'clear-parked-draft';
+      key: string;
+      revision: number;
+      text: string;
+      sentAttachmentIDs: readonly string[];
+    }
   | { kind: 'show-notice'; message: string }
   | { kind: 'schedule-transcript'; sessionID: string }
   | { kind: 'refresh-inbox'; sessionID: string; serverID: string };
@@ -61,6 +81,8 @@ export interface AdmissionContext {
   /** Message for an ambiguous transport write; never an invitation to retry. */
   readonly transportNotice: string;
   readonly sentAttachments: readonly Attachment[];
+  /** Captured before validation and the RPC; never derived from the current route. */
+  readonly origin: SubmissionOrigin;
 }
 
 /** First blocking reason, in the same precedence the facade checks today. */
@@ -119,6 +141,16 @@ export function resolveAdmission(
           text: context.text,
           sentAttachments: context.sentAttachments,
         });
+      } else {
+        // The user navigated away: reconcile the parked origin draft, never the
+        // composer of the route currently on screen (#324).
+        commands.push({
+          kind: 'clear-parked-draft',
+          key: context.origin.draftKey,
+          revision: context.origin.draftRevision,
+          text: context.origin.text,
+          sentAttachmentIDs: context.origin.sentAttachmentIDs,
+        });
       }
       return { outcome: 'admitted', commands };
     }
@@ -157,4 +189,54 @@ export function composerClearance(
   sentAttachmentIDs: readonly string[],
 ): { clearText: boolean; sentIDs: ReadonlySet<string> } {
   return { clearText: currentText === submittedText, sentIDs: new Set(sentAttachmentIDs) };
+}
+
+/**
+ * Clearance for a parked origin draft (#324). Text is removed only when the
+ * captured revision still matches: a matching string alone cannot distinguish
+ * the acknowledged payload from a newer edit that happens to reuse it. Sent
+ * attachment IDs are removed regardless, because those bytes were acknowledged.
+ */
+export function parkedDraftClearance(
+  currentText: string,
+  currentRevision: number,
+  origin: Pick<SubmissionOrigin, 'draftRevision' | 'text' | 'sentAttachmentIDs'>,
+): { clearText: boolean; sentIDs: ReadonlySet<string> } {
+  return {
+    clearText: currentRevision === origin.draftRevision && currentText === origin.text,
+    sentIDs: new Set(origin.sentAttachmentIDs),
+  };
+}
+
+/**
+ * Content-free label for a local effect (#334). Diagnostics must be able to say
+ * which optional post-write step failed without ever echoing the prompt or an
+ * attachment body.
+ */
+export function localEffectLabel(command: AdmissionCommand): string {
+  switch (command.kind) {
+    case 'remember-prompt':
+      return 'history';
+    case 'clear-composer':
+    case 'clear-parked-draft':
+      return 'draft';
+    case 'show-notice':
+      return 'notice';
+    case 'schedule-transcript':
+      return 'transcript refresh';
+    case 'refresh-inbox':
+      return 'inbox refresh';
+    case 'log-accepted':
+    case 'log-failed':
+      return 'diagnostics';
+    default: {
+      const exhaustive: never = command;
+      return exhaustive;
+    }
+  }
+}
+
+/** Reports a post-acknowledgment failure as a local sync failure, never a send failure. */
+export function localFailureNotice(effect: string, error: unknown): string {
+  return `The prompt was sent, but the local ${effect} update failed: ${errorText(error)}`;
 }

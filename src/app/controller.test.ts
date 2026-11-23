@@ -3311,6 +3311,38 @@ describe('late prompt admission cannot retarget visible history (#160)', () => {
   });
 });
 
+describe('post-acknowledgment local failures (#334)', () => {
+  test('a failing diagnostic sink never resends or reports the accepted prompt as failed', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    const controller = makeController(
+      async () => [],
+      backend,
+      () => 10_000,
+      {
+        debugLog: {
+          enabled: true,
+          write(kind) {
+            if (kind === 'action') throw new Error('logger is down');
+          },
+          close() {},
+        },
+      },
+    );
+    await attach(controller, 'ses_a');
+    controller.setComposer(composerFrom('a prompt never sent twice'));
+
+    await controller.submit();
+    await flush();
+
+    expect(backend.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.notice?.text).toContain('prompt was sent');
+    expect(controller.state.notice?.text).not.toContain('a prompt never sent twice');
+    controller.dispose();
+  });
+});
+
 describe('createSession scopes agent/model to the target project (issue #108)', () => {
   test("switching hosts resets defaults and never carries another host's agent/model into createSession", async () => {
     const { controller, backendA, backendB, agentA, modelA, modelB } = catalogController();

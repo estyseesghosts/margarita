@@ -233,8 +233,12 @@ import {
   classifySendError,
   composerClearance,
   isOriginRoute,
+  localEffectLabel,
+  localFailureNotice,
+  parkedDraftClearance,
   resolveAdmission,
   type SendOutcome,
+  type SubmissionOrigin,
 } from './submission-admission.ts';
 import { planTranscriptEviction } from './transcript-eviction.ts';
 import { TranscriptFlightTracker } from './transcript-flight.ts';
@@ -4197,6 +4201,22 @@ export class AppController {
     // Captured before the async send: navigation can load another project's history while
     // the server responds, and that newer load must not be repainted by this admission (#160).
     const historyGeneration = this.state.historyGeneration;
+    // The origin draft is server-qualified and immutable from here on (#324). Deriving it
+    // from the originating session rather than the live route keeps a late acknowledgement
+    // away from whichever composer the user is looking at now.
+    const draftKey = this.drafts.keyFor({
+      kind: 'conversation',
+      serverID: origin.serverID,
+      sessionID: origin.sessionID,
+    });
+    const submissionOrigin: SubmissionOrigin = {
+      serverID: origin.serverID,
+      sessionID: origin.sessionID,
+      draftKey,
+      draftRevision: this.draftRevision(draftKey),
+      text,
+      sentAttachmentIDs: sentAttachments.map((attachment) => attachment.id),
+    };
     try {
       let outcome: SendOutcome;
       try {
@@ -4214,10 +4234,32 @@ export class AppController {
           routeIsOrigin: isOriginRoute(this.state.route, origin.serverID, origin.sessionID),
           transportNotice,
           sentAttachments,
+          origin: submissionOrigin,
         },
         outcome,
       );
-      for (const command of resolution.commands) this.executeAdmissionCommand(command);
+      // The transport result is already durable here. Each local effect has its own
+      // failure boundary: a broken logger, history write or draft cleanup can never
+      // retroactively turn an accepted prompt into a send failure or trigger a resend
+      // (#334). Remaining effects still run, and the admission lock is released below.
+      for (const command of resolution.commands) {
+        try {
+          this.executeAdmissionCommand(command);
+        } catch (error) {
+          const effect = localEffectLabel(command);
+          try {
+            // Only the effect label is logged: never prompt text or attachments.
+            this.debugLog.write('admission-local-failure', { effect });
+          } catch {
+            // A failing diagnostic sink must not escape after an accepted write.
+          }
+          try {
+            this.showNotice(localFailureNotice(effect, error), 'warn');
+          } catch {
+            // A failing notice surface must not escape after an accepted write.
+          }
+        }
+      }
       return resolution.outcome === 'admitted';
     } finally {
       this.admissions.end(admitKey);
@@ -4248,6 +4290,28 @@ export class AppController {
       case 'clear-composer':
         this.clearComposer(command.text, command.sentAttachments);
         return;
+      case 'clear-parked-draft': {
+        const draft = this.state.drafts[command.key] ?? emptyComposer;
+        const clearance = parkedDraftClearance(draft.text, this.draftRevision(command.key), {
+          draftRevision: command.revision,
+          text: command.text,
+          sentAttachmentIDs: command.sentAttachmentIDs,
+        });
+        batch(() => {
+          if (clearance.clearText) this.setState('drafts', command.key, { ...emptyComposer });
+          // Only the acknowledged bytes are removed; unsent edits and files survive.
+          if (clearance.sentIDs.size > 0) {
+            this.setState(
+              'draftAttachments',
+              command.key,
+              (this.state.draftAttachments[command.key] ?? []).filter(
+                (attachment) => !clearance.sentIDs.has(attachment.id),
+              ),
+            );
+          }
+        });
+        return;
+      }
       case 'show-notice':
         this.showNotice(command.message, 'error');
         return;

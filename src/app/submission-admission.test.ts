@@ -11,8 +11,12 @@ import {
   classifySendError,
   composerClearance,
   isOriginRoute,
+  localEffectLabel,
+  localFailureNotice,
+  parkedDraftClearance,
   resolveAdmission,
   type SendOutcome,
+  type SubmissionOrigin,
 } from './submission-admission.ts';
 
 const originRoute: Route = { kind: 'conversation', serverID: 'srv', sessionID: 'ses' };
@@ -31,6 +35,14 @@ function context(overrides: Partial<AdmissionContext> = {}): AdmissionContext {
     routeIsOrigin: true,
     transportNotice: 'Delivery unknown. Check the transcript before resending.',
     sentAttachments: [],
+    origin: {
+      serverID: 'srv',
+      sessionID: 'ses',
+      draftKey: 'server:srv/session:ses',
+      draftRevision: 3,
+      text: 'please fix this',
+      sentAttachmentIDs: [],
+    } satisfies SubmissionOrigin,
     ...overrides,
   };
 }
@@ -124,10 +136,34 @@ describe('submission admission state machine (#312)', () => {
     ]);
   });
 
-  test('a route change during the send preserves the originating draft', () => {
-    const result = resolve({ kind: 'accepted' }, { routeIsOrigin: false });
+  test('a route change during the send reconciles the parked origin draft only (#324)', () => {
+    const sent = [attachment('a1')];
+    const origin: SubmissionOrigin = {
+      serverID: 'srv',
+      sessionID: 'ses',
+      draftKey: 'server:srv/session:ses',
+      draftRevision: 3,
+      text: 'please fix this',
+      sentAttachmentIDs: ['a1'],
+    };
+    const result = resolve(
+      { kind: 'accepted' },
+      { routeIsOrigin: false, origin, sentAttachments: sent },
+    );
     expect(result.outcome).toBe('admitted');
-    expect(result.kinds).not.toContain('clear-composer');
+    expect(result.kinds).toEqual(['log-accepted', 'remember-prompt', 'clear-parked-draft']);
+    expect(result.commands[2]).toEqual({
+      kind: 'clear-parked-draft',
+      key: 'server:srv/session:ses',
+      revision: 3,
+      text: 'please fix this',
+      sentAttachmentIDs: ['a1'],
+    });
+    const unknown = resolve(
+      { kind: 'transport-unknown' },
+      { routeIsOrigin: false, origin, sentAttachments: sent },
+    );
+    expect(unknown.kinds).not.toContain('clear-parked-draft');
   });
 
   test('an unknown write preserves the draft and refreshes only the originating session', () => {
@@ -174,5 +210,42 @@ describe('submission admission state machine (#312)', () => {
       sentIDs: new Set(['a1', 'a2']),
     });
     expect(composerClearance('submitted', 'submitted', []).sentIDs.size).toBe(0);
+  });
+
+  test('parked draft clearance requires the captured revision, not just matching text (#324)', () => {
+    const origin = {
+      draftRevision: 3,
+      text: 'please fix this',
+      sentAttachmentIDs: ['a1'],
+    };
+    expect(parkedDraftClearance('please fix this', 3, origin)).toEqual({
+      clearText: true,
+      sentIDs: new Set(['a1']),
+    });
+    expect(parkedDraftClearance('please fix this', 4, origin)).toEqual({
+      clearText: false,
+      sentIDs: new Set(['a1']),
+    });
+    expect(parkedDraftClearance('newer edit', 3, origin).clearText).toBe(false);
+  });
+
+  test('local effect failures are reported without prompt content (#334)', () => {
+    expect(
+      localEffectLabel({
+        kind: 'remember-prompt',
+        text: 'SECRET',
+        directory: '/work',
+        serverID: 'srv',
+        historyGeneration: 1,
+      }),
+    ).toBe('history');
+    expect(localEffectLabel({ kind: 'clear-composer', text: 'SECRET', sentAttachments: [] })).toBe(
+      'draft',
+    );
+    expect(localEffectLabel({ kind: 'show-notice', message: 'SECRET' })).toBe('notice');
+    const notice = localFailureNotice('history', new Error('disk full'));
+    expect(notice).toContain('prompt was sent');
+    expect(notice).toContain('disk full');
+    expect(notice).not.toContain('SECRET');
   });
 });

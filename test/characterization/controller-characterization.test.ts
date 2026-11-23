@@ -86,7 +86,7 @@ describe('production behavior through the characterization harness (#306)', () =
     harness.dispose();
   });
 
-  test('navigating away during a prompt leaves the originating draft intact', async () => {
+  test('a successful prompt clears only its origin draft after a route change (#324)', async () => {
     const harness = await createHarness();
     harness.controller.openSession(harness.sessionID, 'local');
     await settle();
@@ -111,7 +111,44 @@ describe('production behavior through the characterization harness (#306)', () =
 
     harness.controller.openSession(harness.sessionID, 'local');
     await settle();
-    expect(harness.controller.state.composer.text).toBe('origin text');
+    expect(harness.controller.state.composer.text).toBe('');
+    // The unrelated remote draft is not the acknowledgement's business.
+    harness.controller.openSession(harness.sessionID, 'remote');
+    await settle();
+    expect(harness.controller.state.composer.text).toBe('newer remote text');
+    harness.dispose();
+  });
+
+  test('a newer edit to the parked origin draft survives the acknowledgement (#324)', async () => {
+    const harness = await createHarness();
+    harness.controller.openSession(harness.sessionID, 'local');
+    await settle();
+    const gate = deferred();
+    const backend = harness.backend('local');
+    const original = backend.prompt.bind(backend);
+    backend.prompt = async (sessionID, draft) => {
+      const result = await original(sessionID, draft);
+      await gate.promise;
+      return result;
+    };
+    harness.controller.setComposer(composerFrom('origin text'));
+    const sent = harness.controller.submit();
+    await settle(2);
+
+    harness.controller.openSession(harness.sessionID, 'remote');
+    await settle();
+    harness.controller.openSession(harness.sessionID, 'local');
+    await settle();
+    harness.controller.setComposer(composerFrom('newer local edit'));
+    harness.controller.openSession(harness.sessionID, 'remote');
+    await settle();
+    gate.resolve();
+    await sent;
+    await settle();
+
+    harness.controller.openSession(harness.sessionID, 'local');
+    await settle();
+    expect(harness.controller.state.composer.text).toBe('newer local edit');
     harness.dispose();
   });
 });

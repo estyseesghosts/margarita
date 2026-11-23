@@ -312,17 +312,25 @@ These are concrete source observations, not hypotheses:
   `admissionBlock` reports the first gate refusal, `classifySendError` separates
   an unknown transport write from a confirmed failure, `resolveAdmission`
   returns the ordered effects, and `composerClearance` preserves newer text
-  while removing only sent attachments.
+  while removing only sent attachments. The twelve tests now also cover an
+  immutable `SubmissionOrigin` (key + revision captured before the send),
+  `parkedDraftClearance` for a draft left on another route, and content-free
+  labels for post-acknowledgment local effects (#324/#334).
 - **Async/teardown:** one server-qualified per-session admission lock; unknown
-  write outcome means no automatic retry; route changes during await preserve a
-  newer draft; created session ID is retained even when the prompt fails.
+  write outcome means no automatic retry; an acknowledged prompt reconciles its
+  own parked draft at the captured revision and leaves other routes alone;
+  created session ID is retained even when the prompt fails. Each post-ack
+  local effect has its own failure boundary: a broken logger, history write or
+  draft cleanup yields a local-sync diagnostic without reclassifying the
+  acknowledged send or resending it.
 - **Owner:** `resolveAdmission` in `src/app/submission-admission.ts`; the facade
   only observes gate/route state and executes the returned commands. Still to
   extract: new-session creation recovery (`createSessionWithPrompt`) and the
   transport adapter itself; no second lock in the composer service and no direct
   backend calls in views.
-- **Tests:** `src/app/submission-admission.test.ts` (10),
+- **Tests:** `src/app/submission-admission.test.ts` (12),
   `src/app/admission-gate.test.ts` (3), `src/app/controller.test.ts`,
+  `test/characterization/controller-characterization.test.ts` (#324/#334),
   `src/app/async-audit-regressions.test.ts`, `test/prompt-flow.test.ts`,
   `test/session-control.test.ts`.
 
