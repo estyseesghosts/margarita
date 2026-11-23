@@ -3121,6 +3121,47 @@ describe('createSession does not steal focus or mutate another draft (issue #113
       controller.dispose();
     }
   });
+
+  test('a failed first prompt parked by navigation is not duplicated (#339)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    // Control the created session ID and hold the prompt RPC so navigation happens while
+    // admission is still pending — the exact window that previously duplicated the draft.
+    const created = deferred<SessionSummary>();
+    backend.createSessionHook = () => created.promise;
+    const gate = deferred<void>();
+    backend.prompt = async () => {
+      await gate.promise;
+      throw new Error('server unreachable');
+    };
+    const controller = makeController(() => Promise.resolve([]), backend);
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      controller.attachImage(pngBytes, 'image/png', 'shot.png');
+
+      const promise = controller.createSessionWithPrompt(
+        { serverID: 'local', directory: '/work/kohjoh' },
+        'hello',
+      );
+      created.resolve({ ...fakeSession('ses_b'), directory: '/work/kohjoh' });
+      await flush();
+      // Navigating away parks the exact envelope (text + attachments) in ses_b's draft.
+      controller.openSession('ses_a');
+      await flush();
+
+      gate.resolve();
+      await promise;
+
+      // Failure parking must be a reconcile, never a second append (#339).
+      expect((controller.state.drafts['ses_b'] ?? {}).text).toBe('hello');
+      expect(
+        (controller.state.draftAttachments['ses_b'] ?? []).map((attachment) => attachment.name),
+      ).toEqual(['shot.png']);
+    } finally {
+      controller.dispose();
+    }
+  });
 });
 
 describe('new-session creation is single-flight and registration-fenced (#337, #338)', () => {

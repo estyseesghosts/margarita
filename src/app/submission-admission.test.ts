@@ -10,6 +10,7 @@ import {
   type AdmissionOutcome,
   classifySendError,
   composerClearance,
+  failedPromptRecovery,
   isOriginRoute,
   localEffectLabel,
   localFailureNotice,
@@ -243,6 +244,33 @@ describe('submission admission state machine (#312)', () => {
       sentIDs: new Set(['a1']),
     });
     expect(parkedDraftClearance('newer edit', 3, origin).clearText).toBe(false);
+  });
+
+  test('failed first-prompt parking reconciles instead of duplicating text or files (#339)', () => {
+    // Navigation parks the exact envelope; recovery must be a no-op for already-present data.
+    expect(failedPromptRecovery('hello', 'hello', ['a1'], ['a1'])).toEqual({
+      text: undefined,
+      missingAttachmentIDs: [],
+    });
+    // A newer edit containing the original is preserved without a second copy.
+    expect(failedPromptRecovery('hello world', 'hello', ['a1'], ['a1'])).toEqual({
+      text: undefined,
+      missingAttachmentIDs: [],
+    });
+    // An empty parked draft receives the text once and only genuinely new attachment IDs.
+    expect(failedPromptRecovery('', 'hello', ['a1'], ['a1', 'a2'])).toEqual({
+      text: 'hello',
+      missingAttachmentIDs: ['a2'],
+    });
+    // Attachment IDs with a shared basename are deduplicated by stable ID, never by name.
+    expect(failedPromptRecovery('hello', 'hello', ['a1'], ['a1', 'a2'])).toEqual({
+      text: undefined,
+      missingAttachmentIDs: ['a2'],
+    });
+    expect(failedPromptRecovery('', '', [], [])).toEqual({
+      text: undefined,
+      missingAttachmentIDs: [],
+    });
   });
 
   test('local effect failures are reported without prompt content (#334)', () => {

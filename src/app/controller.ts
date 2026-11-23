@@ -232,6 +232,7 @@ import {
   type AdmissionCommand,
   classifySendError,
   composerClearance,
+  failedPromptRecovery,
   isOriginRoute,
   localEffectLabel,
   localFailureNotice,
@@ -4903,12 +4904,26 @@ export class AppController {
   ): void {
     const key = this.keyFor(serverID, sessionID);
     const draft = this.state.drafts[key] ?? emptyComposer;
+    const existing = this.state.draftAttachments[key] ?? [];
+    // Reconcile rather than append: navigating away while the first prompt was pending
+    // already parked this exact envelope, so a blind append duplicated the text and files
+    // (#339). Keep only attachment IDs that are not yet present, matched by stable ID.
+    const recovery = failedPromptRecovery(
+      draft.text,
+      text,
+      existing.map((attachment) => attachment.id),
+      attachments.map((attachment) => attachment.id),
+    );
+    const byId = new Map(attachments.map((attachment) => [attachment.id, attachment]));
     batch(() => {
-      this.setState('drafts', key, insertText(draft, text));
-      this.setState('draftAttachments', key, [
-        ...(this.state.draftAttachments[key] ?? []),
-        ...attachments,
-      ]);
+      if (recovery.text !== undefined)
+        this.setState('drafts', key, insertText(draft, recovery.text));
+      if (recovery.missingAttachmentIDs.length > 0) {
+        const missing = recovery.missingAttachmentIDs
+          .map((id) => byId.get(id))
+          .filter((attachment): attachment is Attachment => attachment !== undefined);
+        this.setState('draftAttachments', key, [...existing, ...missing]);
+      }
     });
   }
 

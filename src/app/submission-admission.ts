@@ -220,6 +220,28 @@ export function parkedDraftClearance(
 }
 
 /**
+ * Reconcile a failed first prompt back into its parked draft (#339). Navigating away from
+ * a newly created session while its first prompt is pending parks the exact envelope via
+ * saveDraft(); appending it again on failure produced duplicated text (`hellohello`) and
+ * repeated attachment IDs. Text is added only when the draft does not already contain it,
+ * and attachments are deduplicated by stable ID rather than by file name.
+ */
+export function failedPromptRecovery(
+  currentText: string,
+  submittedText: string,
+  currentAttachmentIDs: readonly string[],
+  submittedAttachmentIDs: readonly string[],
+): { text: string | undefined; missingAttachmentIDs: readonly string[] } {
+  const present = new Set(currentAttachmentIDs);
+  return {
+    // When the draft already holds the envelope (parked by navigation) or a newer edit that
+    // contains it, do not insert a second copy; a genuinely empty draft gets the text once.
+    text: currentText.includes(submittedText) || submittedText === '' ? undefined : submittedText,
+    missingAttachmentIDs: submittedAttachmentIDs.filter((id) => !present.has(id)),
+  };
+}
+
+/**
  * Content-free label for a local effect (#334). Diagnostics must be able to say
  * which optional post-write step failed without ever echoing the prompt or an
  * attachment body.
