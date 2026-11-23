@@ -1,9 +1,11 @@
 # Style and architecture enforcement
 
-This document closes the enforcement gap recorded in `docs/marg-audit.md` (the
-AGENTS/CI findings) and issue #307. It makes the style-guide instructions
+This document closes the AGENTS/CI enforcement gap recorded in issue #307 and
+tracked in ADR 0007 / issue #305. It makes the style-guide instructions
 reproducible on a clean checkout and states plainly what a green build does and
-does not prove. It does **not** create new style rules.
+does not prove. It does **not** create new style rules. The original review
+notes are an intentionally untracked local document; nothing here depends on
+them being present.
 
 ## Source of the rules
 
@@ -63,8 +65,8 @@ roots and may depend on every layer.
 
 These are the machine-checkable categories from issue #307. They are a ratchet,
 not a claim that architecture is already clean: the existing UI-to-`AppController`
-type dependency described in `docs/marg-audit.md` and issue #318 is deliberately
-out of scope for this gate and is owned by that extraction.
+type dependency tracked by issue #318 is deliberately out of scope for this gate
+and is owned by that extraction.
 
 ## New cycles
 

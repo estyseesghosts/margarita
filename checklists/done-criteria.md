@@ -28,3 +28,17 @@
 - [ ] Transcript virtualization handles stress fixtures; keystrokes stay responsive.
 - [ ] Windows Terminal, Ghostty, tmux manual smoke pass.
 - [ ] All source claims linked to pinned v2.3.0 docs/source; `--help` current.
+
+## Extraction PR (ADR 0007 / #305)
+
+- [ ] A capability that gained or moved mutable state updates its ADR 0007 owner
+      row **and** the matching row in `docs/29-characterization-inventory.md`,
+      including the new owner, authoritative source, writer, teardown, public
+      operations and remaining controller call sites.
+- [ ] A reviewer confirms the service actually owns the state (single writer,
+      explicit invalidation), not merely that code moved into a new file.
+- [ ] Behavior is preserved by focused tests and at least one production-assembly
+      path; `bun run verify` is green and no assertion was weakened to get there.
+- [ ] Historical `src/app/controller.ts` line numbers in docs are not presented
+      as current; symbol names or baseline-SHA-anchored links are used instead.
+

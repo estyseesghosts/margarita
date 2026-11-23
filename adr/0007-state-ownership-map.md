@@ -2,10 +2,16 @@
 
 - **Status:** Proposed (migration contract, not a code change)
 - **Date:** 2026-11-22
-- **Audit baseline:** `4d9c6af`; line references below use the current checkout,
-  which contains only documentation and tooling changes since that revision.
-- **Drivers:** issue #305 (this map), #306 (characterization harness), #307
-  (enforcement), and the architecture findings in `docs/marg-audit.md`.
+- **Audit baseline:** `4d9c6af5baae04964598f09d477a45c3b63ad8fc` (full SHA).
+  Bare line numbers in this document are historical observations of that
+  revision, not a claim about the current tree; they are kept only where a
+  symbol name alone would be ambiguous. Current owners and test locations are
+  listed per capability below, so a clean checkout needs no local audit file.
+- **Drivers:** issues #305 (this map), #306 (characterization harness), #307
+  (enforcement) and #325/#326 (gate and scheduler enforcement). The original
+  source review is an intentionally **untracked local working document**
+  (`docs/marg-audit.md`); it is not part of the repository, and this ADR plus
+  #305 are the committed source of truth.
 - **Guides:** all of `style-guides/README.md` and
   `style-guides/typescript-javascript-style-guide.md` (local paths and mirror are
   recorded in `AGENTS.md`).
