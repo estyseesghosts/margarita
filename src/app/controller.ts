@@ -970,7 +970,6 @@ export class AppController {
     this.pendingPickerOpen = undefined;
   }
 
-  /** Health/label inputs outside the store; cheap per host, never per session. */
   /**
    * Health/label inputs outside the store; cheap per host, never per session. Stream status is
    * included because a remote host's liveness changes its execution classification (#288).
