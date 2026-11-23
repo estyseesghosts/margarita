@@ -213,6 +213,7 @@ import { DraftRegistry } from './draft-registry.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
 import { RefreshGenerations } from './refresh-generations.ts';
+import { SessionFetcher } from './session-fetch.ts';
 
 /** A point an edit can be undone/redone back to. Attachments are kept, never duplicated. */
 type UndoSnapshot = Readonly<{ composer: Composer }>;
@@ -519,6 +520,8 @@ export class AppController {
   private readonly summaryAdmitted = new Map<string, number>();
   /** Sole owner of refresh/session/event generations (#308). */
   private readonly generations = new RefreshGenerations();
+  /** Sole owner of paged index reads and definite-not-found reconciliation (#308). */
+  private readonly sessionFetcher: SessionFetcher;
   private readonly summaryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private transcriptOrder: string[] = [];
   /** Per-host stream status: the viewed conversation's footer must reflect its own host,
@@ -697,6 +700,12 @@ export class AppController {
     };
     this.drafts = new DraftRegistry({
       projectKey: (directory, serverID) => this.projectKeyOf(directory, serverID),
+    });
+    this.sessionFetcher = new SessionFetcher({
+      backendFor: (serverID) => this.backendFor(serverID),
+      keyFor: (serverID, sessionID) => this.keyFor(serverID, sessionID),
+      pageLimit: sessionPageLimit,
+      concurrency: reconcileConcurrency,
     });
     this.pinOperations = deps.localState.pinnedModelOps ?? {};
     this.persistence = new PersistenceCoordinator({
@@ -1611,52 +1620,14 @@ export class AppController {
     cursor?: string;
   }> {
     const effectiveEpoch = epoch ?? this.nextRefreshEpoch(serverID);
-    const backend = this.backendFor(serverID);
-    const loaded: SessionSummary[] = [];
-    let cursor: string | undefined;
-    let pages = 0;
-    do {
-      const page = await backend.listSessions(cursor === undefined ? {} : { cursor });
-      // Trust the backend's server stamp when present; otherwise this server owns the row.
-      loaded.push(...page.sessions.map((session) => ({ ...session, serverID })));
-      cursor = page.nextCursor;
-      pages += 1;
-    } while (cursor !== undefined && pages < sessionPageLimit);
-    const active = await backend.activeSessionIDs();
-    return {
-      serverID,
-      fresh: Object.fromEntries(
-        loaded.map((session) => [this.keyFor(serverID, session.id), session]),
-      ),
-      active,
-      epoch: effectiveEpoch,
-      ...(cursor === undefined ? {} : { cursor }),
-    };
+    return this.sessionFetcher.loadServer(serverID, effectiveEpoch);
   }
 
   /** Looks up cached sessions the listing did not return; only a definite not-found deletes. */
   private async reconcileKnownSessions(
     refs: readonly SessionRef[],
   ): Promise<{ found: Record<string, SessionSummary>; deleted: SessionRef[] }> {
-    const found: Record<string, SessionSummary> = {};
-    const deleted: SessionRef[] = [];
-    for (let start = 0; start < refs.length; start += reconcileConcurrency) {
-      await Promise.all(
-        refs.slice(start, start + reconcileConcurrency).map(async (ref) => {
-          try {
-            found[sessionKey(ref)] = {
-              ...(await this.backendFor(ref.serverID).getSession(ref.sessionID)),
-              serverID: ref.serverID,
-            };
-          } catch (error) {
-            if (error instanceof BackendError && error.kind === 'not-found') deleted.push(ref);
-            // Any other failure proves nothing: keep the row. A host removed mid-
-            // reconciliation is not reconcilable here and is skipped entirely.
-          }
-        }),
-      );
-    }
-    return { found, deleted };
+    return this.sessionFetcher.reconcile(refs);
   }
 
   /** Drops every cached trace of a session the server no longer has. */

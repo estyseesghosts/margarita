@@ -106,9 +106,11 @@ These are concrete source observations, not hypotheses:
   (516-517), `summaryTimers` (521), `transcriptOrder` (522), `serverPages` in
   `AppState`. Host/session/resync epochs and event/usage stamps are now owned by
   `src/app/refresh-generations.ts` (first #308 slice).
-- **Async/teardown:** per-host refresh epochs, host-qualified keys, timers in
-  `summaryTimers`; `forgetServer()` at 5580 and `clearRuntimeStateForServer()`
-  at 2043 are the current teardown points.
+- **Async/teardown:** per-host refresh epochs (`RefreshGenerations`), host-qualified
+  keys, timers in `summaryTimers`; `forgetServer()` and
+  `clearRuntimeStateForServer()` are the current teardown points. Paged reads and
+  definite-not-found reconciliation now live in `src/app/session-fetch.ts`
+  (second #308 slice); snapshot commit and event admission remain in the facade.
 - **Intended owner:** `HostSessionIndex` with contract
   `initialize(hosts)`, `refresh(host)`, `loadMore(host)`, `applyEvent(host, event)`,
   `resync(host)`, `status(host)`, `forget(host)`, `dispose()`; it updates an

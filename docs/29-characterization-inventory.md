@@ -12,13 +12,13 @@ Captured at `4d9c6af` plus the #305/#307/#306 documentation and tooling work:
 
 | Command | Result |
 | --- | --- |
-| `bun run verify` | 1304 pass, 40 skip, 0 fail (1344 tests across 100 files); includes format, Oxlint, strict typecheck, `check:architecture`, and tests |
+| `bun run verify` | 1308 pass, 40 skip, 0 fail (1348 tests across 101 files); includes format, Oxlint, strict typecheck, `check:architecture`, and tests |
 | `bun run bench -- --smoke` | opt-in synthetic projection/network benchmark; not a native FPS measurement |
 | `bun run bench:render` | opt-in renderable-reuse benchmark |
 | `sh scripts/test-pty-smoke.sh`, `sh scripts/test-tmux.sh` | Linux executable smoke, run in CI, needs a compiled binary |
 | `MARGARITA_LIVE=1 bun test` | opt-in compatibility against a disposable v2 service; never a user's real service |
 
-The test suite declares roughly 1,308 explicit test cases; most are grouped in
+The test suite declares roughly 1,312 explicit test cases; most are grouped in
 `src/app/controller.test.ts` (about 270) and `src/ui/app.test.tsx` (about 115).
 Those two files are the coupling the extraction must unravel: behavior is
 protected, but the fixtures are tied to one concrete class.
@@ -27,7 +27,7 @@ protected, but the fixtures are tied to one concrete class.
 
 | Behavior | Current protection | Future owner / suite (from ADR 0007) | Gap before extraction |
 | --- | --- | --- | --- |
-| Bootstrap, catalogs, session index, pagination | `controller.test.ts`, `production-assembly.test.ts`, `production-composition.test.ts`, `cli/*`, `src/app/refresh-generations.test.ts` (4) | `HostSessionIndex` → `session-index.test.ts`; epochs/generations already in `src/app/refresh-generations.ts` (#308) | No independent suite for the full index; paged/failing `listSessions` hooks exist in `FakeBackend` but are used ad hoc |
+| Bootstrap, catalogs, session index, pagination | `controller.test.ts`, `production-assembly.test.ts`, `production-composition.test.ts`, `cli/*`, `src/app/refresh-generations.test.ts` (4), `src/app/session-fetch.test.ts` (4) | `HostSessionIndex` → `session-index.test.ts`; generations in `src/app/refresh-generations.ts` and paged reads/reconciliation in `src/app/session-fetch.ts` (#308) | No independent suite for snapshot commit/event admission; paged/failing `listSessions` hooks exist in `FakeBackend` but are used ad hoc |
 | Events, resync, reconnect, multi-host collisions | `multi-server-events.test.ts` (25), `multi-server-aggregation.test.ts`, `adapter/event-pump.test.ts`, `async-route-ownership.test.ts`, `test/multi-server.test.ts` | `EventAdmission` → `event-admission.test.ts` | Event batches are built inline; no shared fixture for reorder/duplicate/missing events |
 | Transcripts, retry, pagination, cache | `merge-latest.test.ts`, `transcript-projector.test.ts`, `domain/transcript.test.ts` (81), `perf/memory.test.ts`, `tool-classification.test.ts` (6) | `TranscriptRepository` → `transcript-repository.test.ts`; pure tool identity already extracted to `src/domain/tool-classification.ts` (#319) | Failure-plus-queued-hint cases live in `controller.test.ts`; benchmark conditions must be recorded before moving them |
 | Summaries, worker/shell job status | `execution-segment.test.ts`, `worker.test.ts`, `shell-job.test.ts`, `controller.test.ts` | `JobStatusCoordinator` | Stale-after-failure assertions are scattered; no single capability fixture |
