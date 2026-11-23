@@ -19,7 +19,6 @@ import { nextQueuedUser } from '../adapter/wire-mapping.ts';
 import type { AppConfig } from '../config/config.ts';
 import { GoalConflictError, type GoalStore, memoryGoalStore } from '../config/goal-store.ts';
 import type { LocalState, PinnedModelOperation, SaveResult } from '../config/local-state.ts';
-import { mergeState } from '../config/local-state.ts';
 import {
   type AgentDescriptor,
   defaultAgent,
@@ -211,6 +210,7 @@ import {
 } from './app-state.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
+import { PersistenceCoordinator } from './persistence-coordinator.ts';
 
 /** A point an edit can be undone/redone back to. Attachments are kept, never duplicated. */
 type UndoSnapshot = Readonly<{ composer: Composer }>;
@@ -622,7 +622,8 @@ export class AppController {
    * in-flight file scan can be rejected even when its directory string and mention did not. */
   private completionGeneration = 0;
   private disposed = false;
-  private persisted: LocalState;
+  /** Sole owner of staged local-state snapshots and serialized writes (#317). */
+  private readonly persistence: PersistenceCoordinator;
   /**
    * Per-route draft edit generations. A route keeps its revision while it is parked, so editing
    * a different route cannot invalidate an untouched draft. Restoring a draft does not bump it;
@@ -632,9 +633,6 @@ export class AppController {
   private editorRecoverySeq = 0;
   /** Canonical per-scope pin operations, kept in sync with the latest merged disk state. */
   private pinOperations: Readonly<Record<string, PinnedModelOperation>>;
-  /** In-flight saves, serialized per controller. */
-  private saveChain: Promise<void> = Promise.resolve();
-  private saveError: string | undefined;
   /** In-flight pastes, serialized in arrival order so a route switch mid-paste cannot
    * interleave two paste transactions. */
   private pasteChain: Promise<void> = Promise.resolve();
@@ -700,8 +698,23 @@ export class AppController {
         this.overviewRevision[1]((value) => value + 1);
       });
     };
-    this.persisted = deps.localState;
     this.pinOperations = deps.localState.pinnedModelOps ?? {};
+    this.persistence = new PersistenceCoordinator({
+      initial: deps.localState,
+      save: deps.saveLocalState,
+      onMerge: (adopted) => {
+        this.pinOperations = adopted.pinnedModelOps ?? {};
+        this.setState('pinnedModels', reconcile({ ...adopted.pinnedModels }));
+      },
+      onWarning: (warning) => {
+        this.showNotice(`Local state warning: ${warning}`, 'warn');
+      },
+      onError: (message) => {
+        this.debugLog.write('backend-error', { operation: 'save', kind: 'unknown' });
+        this.showNotice(`Could not persist local state: ${message}`, 'error');
+      },
+      describeError: errorText,
+    });
     this.goalStore = deps.goalStore ?? memoryGoalStore();
     setState('recentModels', [...deps.localState.recentModels]);
     setState('pinnedModels', { ...deps.localState.pinnedModels });
@@ -726,12 +739,7 @@ export class AppController {
    * history/model updates are not lost. Rejects if any save failed, so the caller can warn.
    */
   async flushLocalState(): Promise<void> {
-    await this.saveChain;
-    if (this.saveError !== undefined) {
-      const message = this.saveError;
-      this.saveError = undefined;
-      throw new Error(message);
-    }
+    await this.persistence.flush();
   }
 
   // ---------------------------------------------------------------- identity
@@ -4407,7 +4415,7 @@ export class AppController {
    */
   private historyEntriesFor(directory: string, serverID: string, key: string): string[] {
     const limit = this.deps.config.history.limit;
-    const current = [...(this.persisted.history[key] ?? [])];
+    const current = [...(this.persistence.state.history[key] ?? [])];
     const entries = [...current];
     const seen = new Set(entries);
     for (const candidate of legacyProjectKeys(
@@ -4416,7 +4424,7 @@ export class AppController {
     )) {
       if (candidate.platform === 'win32' && this.win32FoldClaims(candidate.key, serverID) !== 1)
         continue;
-      for (const entry of this.persisted.history[candidate.key] ?? []) {
+      for (const entry of this.persistence.state.history[candidate.key] ?? []) {
         if (seen.has(entry)) continue;
         seen.add(entry);
         entries.push(entry);
@@ -4474,7 +4482,9 @@ export class AppController {
     );
     // Persist to the owning project unconditionally, but only repaint the visible history
     // when its scope still matches and no newer load has happened in the meantime (#160).
-    this.persist({ history: { ...this.persisted.history, [key]: history.entries } });
+    this.persistence.patch({
+      history: { ...this.persistence.state.history, [key]: history.entries },
+    });
     const scope = this.state.historyScope;
     if (
       scope !== undefined &&
@@ -6301,7 +6311,7 @@ export class AppController {
       [this.modelScope(serverID, directory)]: model,
     };
     this.setState('lastModels', reconcile(lastModels));
-    this.persist({ lastModels });
+    this.persistence.patch({ lastModels });
   }
 
   private async modelDefaultCommand(args: string): Promise<void> {
@@ -6390,7 +6400,7 @@ export class AppController {
     else pins[key] = model;
     this.pinOperations = operations;
     this.setState('pinnedModels', reconcile(pins));
-    this.persist({ pinnedModels: pins, pinnedModelOps: operations });
+    this.persistence.patch({ pinnedModels: pins, pinnedModelOps: operations });
   }
 
   private modelDispatchBlocked(serverID: string, sessionID: string): boolean {
@@ -6497,7 +6507,7 @@ export class AppController {
       ...this.state.recentModels.filter((entry) => !sameModel(entry, model)),
     ].slice(0, this.deps.config.models.recentLimit);
     this.setState('recentModels', recent);
-    this.persist({ recentModels: recent });
+    this.persistence.patch({ recentModels: recent });
   }
 
   // ---------------------------------------------------------------- execution control
@@ -8332,40 +8342,6 @@ export class AppController {
     return model === undefined ? 'server default' : formatModelRef(model);
   }
 
-  // ---------------------------------------------------------------- persistence & supervision
-
-  private persist(patch: Partial<Omit<LocalState, 'schemaVersion'>>): void {
-    this.persisted = { ...this.persisted, ...patch };
-    const snapshot = this.persisted;
-    this.saveChain = this.saveChain.then(async () => {
-      try {
-        const result = await this.deps.saveLocalState(snapshot);
-        const merged = result?.state;
-        if (merged !== undefined) {
-          // Adopt the post-merge snapshot so later patches build on what is actually on
-          // disk. If this process applied a newer patch while the save was in flight,
-          // re-merge that patch over the disk state instead of dropping either.
-          const latest = this.persisted;
-          const adopted = latest === snapshot ? merged : mergeState(latest, merged);
-          this.persisted = adopted;
-          this.pinOperations = adopted.pinnedModelOps ?? {};
-          // The footer/`/model default show` must reflect unrelated pins that another
-          // process wrote, not the stale snapshot this save started from.
-          this.setState('pinnedModels', reconcile({ ...adopted.pinnedModels }));
-        }
-        if (result?.warning !== undefined) {
-          this.showNotice(`Local state warning: ${result.warning}`, 'warn');
-        }
-      } catch (error) {
-        const message = errorText(error);
-        this.debugLog.write('backend-error', { operation: 'save', kind: 'unknown' });
-        this.saveError = message;
-        this.showNotice(`Could not persist local state: ${message}`, 'error');
-      }
-    });
-  }
-
-  /** Every background promise ends here: failures become visible notices, never silence. */
   // ---------------------------------------------------------------- goals & plans
 
   private isoNow(): string {

@@ -294,8 +294,10 @@ These are concrete source observations, not hypotheses:
 
 ### 11. Persistence (#317)
 
-- **Current owner:** `persist()` at 8337, `flushLocalState()` at 728,
-  `AppController` constructor state at 687-693.
+- **Current owner (extracted in #317):** `src/app/persistence-coordinator.ts`
+  owns the snapshot, save chain and last error. `AppController.flushLocalState()`
+  delegates to it and feature owners call `persistence.patch(...)` through the
+  facade; constructor wiring remains at 703-718.
 - **Authoritative source:** `config/local-state.ts` with atomic writes,
   cross-process merge and schema versioning; credentials stay in the separate
   OS keyring path and must never enter local JSON.
@@ -304,8 +306,9 @@ These are concrete source observations, not hypotheses:
   `pinOperations` (634).
 - **Async/teardown:** serialized writes, explicit failure reporting while the
   app is open, and a defined flush/cancellation outcome on exit.
-- **Intended owner:** `PersistenceCoordinator` (`read`, `patch`, `flush`,
-  `dispose`); feature owners supply typed patches, only this service writes.
+- **Owner:** `PersistenceCoordinator` (`state`, `patch`, `flush`); feature owners
+  supply typed patches, only this service writes. `dispose` is not needed: the
+  coordinator owns no timers or subscriptions.
 - **Tests:** `test/linux/persistence.test.ts`, `scripts/test-low-disk.sh`,
   `test/production-assembly.test.ts`, config suites.
 
