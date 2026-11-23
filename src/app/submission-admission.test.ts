@@ -112,7 +112,20 @@ describe('submission admission state machine (#312)', () => {
 
   test('an accepted send logs, records history and clears the acknowledged draft in order', () => {
     const sent = [attachment('a1')];
-    const result = resolve({ kind: 'accepted' }, { sentAttachments: sent });
+    const result = resolve(
+      { kind: 'accepted' },
+      {
+        sentAttachments: sent,
+        origin: {
+          serverID: 'srv',
+          sessionID: 'ses',
+          draftKey: 'server:srv/session:ses',
+          draftRevision: 3,
+          text: 'please fix this',
+          sentAttachmentIDs: ['a1'],
+        },
+      },
+    );
     expect(result.outcome).toBe('admitted');
     expect(result.kinds).toEqual(['log-accepted', 'remember-prompt', 'clear-composer']);
     expect(result.commands[1]).toEqual({
@@ -122,10 +135,13 @@ describe('submission admission state machine (#312)', () => {
       serverID: 'srv',
       historyGeneration: 7,
     });
+    // Active-origin clearance carries the immutable identity, exactly like the parked path.
     expect(result.commands[2]).toEqual({
       kind: 'clear-composer',
+      key: 'server:srv/session:ses',
+      revision: 3,
       text: 'please fix this',
-      sentAttachments: sent,
+      sentAttachmentIDs: ['a1'],
     });
   });
 
@@ -239,9 +255,15 @@ describe('submission admission state machine (#312)', () => {
         historyGeneration: 1,
       }),
     ).toBe('history');
-    expect(localEffectLabel({ kind: 'clear-composer', text: 'SECRET', sentAttachments: [] })).toBe(
-      'draft',
-    );
+    expect(
+      localEffectLabel({
+        kind: 'clear-composer',
+        key: 'server:srv/session:ses',
+        revision: 3,
+        text: 'SECRET',
+        sentAttachmentIDs: [],
+      }),
+    ).toBe('draft');
     expect(localEffectLabel({ kind: 'show-notice', message: 'SECRET' })).toBe('notice');
     const notice = localFailureNotice('history', new Error('disk full'));
     expect(notice).toContain('prompt was sent');

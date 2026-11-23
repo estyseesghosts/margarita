@@ -155,6 +155,50 @@ describe('production behavior through the characterization harness (#306)', () =
     expect(harness.controller.state.composer.text).toBe('newer local edit');
     harness.dispose();
   });
+
+  test('a same-route edit restored to the submitted text keeps its newer revision (#324)', async () => {
+    const harness = await createHarness();
+    harness.controller.openSession(harness.sessionID, 'local');
+    await harness.settle();
+    const gate = deferred();
+    const backend = harness.backend('local');
+    const original = backend.prompt.bind(backend);
+    backend.prompt = async (sessionID, draft) => {
+      const result = await original(sessionID, draft);
+      await gate.promise;
+      return result;
+    };
+    harness.controller.setComposer(composerFrom('submitted text'));
+    const sent = harness.controller.submit();
+    await harness.settle(2);
+
+    // Edit away and back to the exact submitted string. Each write bumps the draft revision,
+    // so a later acknowledgement must not treat this as the unchanged submitted draft.
+    harness.controller.setComposer(composerFrom('newer text'));
+    harness.controller.setComposer(composerFrom('submitted text'));
+    gate.resolve();
+    await sent;
+    await harness.settle();
+
+    // Text survives because the revision no longer matches the acknowledged origin.
+    expect(harness.controller.state.composer.text).toBe('submitted text');
+    // The newer edit history also survives: undo reaches the intermediate text.
+    harness.controller.undo();
+    expect(harness.controller.state.composer.text).toBe('newer text');
+    harness.dispose();
+  });
+
+  test('an unchanged active-origin draft clears exactly once on acknowledgement (#324)', async () => {
+    const harness = await createHarness();
+    harness.controller.openSession(harness.sessionID, 'local');
+    await harness.settle();
+    harness.controller.setComposer(composerFrom('submitted text'));
+    const sent = harness.controller.submit();
+    await sent;
+    await harness.settle();
+    expect(harness.controller.state.composer.text).toBe('');
+    harness.dispose();
+  });
 });
 
 describe('time-driven behavior under an injected scheduler (#326)', () => {

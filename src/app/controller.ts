@@ -4419,9 +4419,35 @@ export class AppController {
           command.historyGeneration,
         );
         return;
-      case 'clear-composer':
-        this.clearComposer(command.text, command.sentAttachments);
+      case 'clear-composer': {
+        // Active origin: require the captured revision AND text before clearing. A newer edit
+        // that happens to reuse the submitted string (edit then undo back to it) must keep its
+        // draft and undo history; only the acknowledged attachment IDs may be removed (#324).
+        const clearance = parkedDraftClearance(
+          this.state.composer.text,
+          this.draftRevision(command.key),
+          {
+            draftRevision: command.revision,
+            text: command.text,
+            sentAttachmentIDs: command.sentAttachmentIDs,
+          },
+        );
+        batch(() => {
+          if (clearance.clearText) {
+            this.writeComposer(emptyComposer);
+            this.clearEdits();
+            this.setState('completion', undefined);
+            this.setState('focusedGroup', undefined);
+          }
+          if (clearance.sentIDs.size > 0) {
+            this.setState(
+              'attachments',
+              this.state.attachments.filter((a) => !clearance.sentIDs.has(a.id)),
+            );
+          }
+        });
         return;
+      }
       case 'clear-parked-draft': {
         const draft = this.state.drafts[command.key] ?? emptyComposer;
         const clearance = parkedDraftClearance(draft.text, this.draftRevision(command.key), {

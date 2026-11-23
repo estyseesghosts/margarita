@@ -50,7 +50,13 @@ export type AdmissionCommand =
       serverID: string;
       historyGeneration: number;
     }
-  | { kind: 'clear-composer'; text: string; sentAttachments: readonly Attachment[] }
+  | {
+      kind: 'clear-composer';
+      key: string;
+      revision: number;
+      text: string;
+      sentAttachmentIDs: readonly string[];
+    }
   | {
       kind: 'clear-parked-draft';
       key: string;
@@ -136,10 +142,15 @@ export function resolveAdmission(
         });
       }
       if (context.routeIsOrigin) {
+        // Active origin: carry the same immutable identity as the parked path so the
+        // controller can distinguish an unchanged draft from a newer edit that happens to
+        // reuse the submitted string (#324).
         commands.push({
           kind: 'clear-composer',
-          text: context.text,
-          sentAttachments: context.sentAttachments,
+          key: context.origin.draftKey,
+          revision: context.origin.draftRevision,
+          text: context.origin.text,
+          sentAttachmentIDs: context.origin.sentAttachmentIDs,
         });
       } else {
         // The user navigated away: reconcile the parked origin draft, never the
