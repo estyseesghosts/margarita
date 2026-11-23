@@ -150,7 +150,9 @@ These are concrete source observations, not hypotheses:
   `transcriptReadSeq` / `transcriptCommitted` (509-510), `transcriptOrder` (522),
   plus `AppState.transcripts` and `transcriptWindow`. The LRU/byte-budget eviction
   decision is now a pure planner in `src/app/transcript-eviction.ts` (first #309
-  slice, five tests); the controller still owns the order and the store write.
+  slice, five tests). The retryability rule, exponential backoff and per-session
+  attempt counters now live in `src/app/transcript-retry.ts` (second #309 slice,
+  four tests); timer scheduling and notices stay in the controller.
 - **Async/teardown:** single-flight reads, bounded retries, failure backoff,
   active/in-flight sessions exempt from eviction; timers cleared in `dispose()`
   at 712.

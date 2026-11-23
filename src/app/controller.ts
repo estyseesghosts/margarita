@@ -221,6 +221,12 @@ import { inputRequestRefreshTargets } from './request-targets.ts';
 import { SessionFetcher } from './session-fetch.ts';
 import { mergeCommittedSessions, sessionFlags, sessionPage } from './session-snapshot.ts';
 import { planTranscriptEviction } from './transcript-eviction.ts';
+import {
+  retryDelay,
+  transcriptFailureRetryable,
+  transcriptRetryBaseDelayMs,
+  TranscriptRetryTracker,
+} from './transcript-retry.ts';
 import { UsageAnalyticsSelector } from './usage-selector.ts';
 
 /** A point an edit can be undone/redone back to. Attachments are kept, never duplicated. */
@@ -424,8 +430,6 @@ export type ControllerDeps = Readonly<{
 const transcriptPageSize = 120;
 const transcriptCacheLimit = 8;
 /** A failed canonical refetch retries a bounded number of times with exponential delay (#295). */
-const transcriptRetryLimit = 3;
-const transcriptRetryBaseDelayMs = 250;
 /** Default retained-history budget; summaries and drafts live outside this cache. */
 const transcriptCacheByteLimit = 32 * 1024 * 1024;
 const sessionPageLimit = 5;
@@ -510,7 +514,8 @@ export class AppController {
   private readonly transcriptDirty = new Set<string>();
   /** Bounded retry state for a failed canonical refetch (#295). */
   private readonly transcriptRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly transcriptRetryAttempts = new Map<string, number>();
+  /** Sole owner of bounded transcript retry attempts (#309). */
+  private readonly transcriptRetries = new TranscriptRetryTracker();
   /**
    * Admission/commit order for canonical transcript reads (#262). Concurrent reads for one
    * server-qualified session are legitimate, but a slower older response must never replace
@@ -1576,7 +1581,7 @@ export class AppController {
       clearTimeout(retryTimer);
       this.transcriptRetryTimers.delete(retryKey);
     }
-    this.transcriptRetryAttempts.delete(retryKey);
+    this.transcriptRetries.reset(retryKey);
     this.clearJobStartProbe(key);
     const expansionPrefix = `${key} `;
     this.setState(
@@ -2828,7 +2833,7 @@ export class AppController {
         );
         return;
       }
-      this.transcriptRetryAttempts.delete(key);
+      this.transcriptRetries.reset(key);
       if (refreshJobs) this.scheduleJobRefresh(sessionID, serverID);
       await delay(80);
       if (dirty && !this.disposed) this.scheduleTranscript(sessionID, serverID, dirtyJobs);
@@ -2856,7 +2861,7 @@ export class AppController {
       this.state.sessions[qualifiedKey] !== undefined &&
       this.serverIDs().includes(serverID);
     if (!current) {
-      this.transcriptRetryAttempts.delete(key);
+      this.transcriptRetries.reset(key);
       return;
     }
     if (this.state.transcripts[qualifiedKey] !== undefined) {
@@ -2868,22 +2873,18 @@ export class AppController {
     // subsequent transcript retry on a slow job RPC (#284, #295).
     if (refreshJobs || dirtyJobs) this.scheduleJobRefresh(sessionID, serverID);
     if (!transcriptFailureRetryable(failure)) {
-      this.transcriptRetryAttempts.delete(key);
+      this.transcriptRetries.reset(key);
       return;
     }
-    const attempt = (this.transcriptRetryAttempts.get(key) ?? 0) + 1;
-    if (attempt > transcriptRetryLimit) {
-      this.transcriptRetryAttempts.delete(key);
-      return;
-    }
-    this.transcriptRetryAttempts.set(key, attempt);
+    const attempt = this.transcriptRetries.next(key);
+    if (attempt === undefined) return;
     const timer = setTimeout(
       () => {
         this.transcriptRetryTimers.delete(key);
         if (this.disposed) return;
         this.scheduleTranscript(sessionID, serverID, dirtyJobs);
       },
-      (this.deps.transcriptRetryBaseDelayMs ?? transcriptRetryBaseDelayMs) * 2 ** (attempt - 1),
+      retryDelay(attempt, this.deps.transcriptRetryBaseDelayMs ?? transcriptRetryBaseDelayMs),
     );
     this.transcriptRetryTimers.set(key, timer);
   }
@@ -8850,10 +8851,4 @@ function goalFailureReason(kind: BackendError['kind']): GoalQueryFailure {
 
 function delay(ms: number): Promise<void> {
   return new Promise((done) => setTimeout(done, ms));
-}
-
-/** Transient read failures are worth a bounded retry; a gone session or auth failure is not. */
-function transcriptFailureRetryable(error: unknown): boolean {
-  if (!(error instanceof BackendError)) return true;
-  return error.kind === 'transport' || error.kind === 'unknown';
 }
