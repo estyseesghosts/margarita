@@ -132,6 +132,44 @@ describe('request inbox coordinator (#310)', () => {
     expect((await generator.next()).done).toBe(true);
   });
 
+  test('a failed forms endpoint does not discard a successful permission snapshot', async () => {
+    const { coordinator, setReads } = fixture();
+    setReads(reads({ forms: { status: 'rejected', reason: 'forms offline' } }));
+    const [first] = await collect(coordinator.refresh('ses', 'srv'));
+    expect(first).toContainEqual({
+      kind: 'set-permissions',
+      key: 'srv:ses',
+      value: [permission()],
+    });
+    expect(first).toContainEqual({
+      kind: 'set-request-errors',
+      key: 'srv:ses',
+      value: { forms: 'forms offline' },
+    });
+    expect(first).not.toContainEqual({ kind: 'set-permissions', key: 'srv:ses', value: [] });
+    expect(first).not.toContainEqual({ kind: 'reset-permission-focus' });
+  });
+
+  test('a failed forms endpoint keeps the previously confirmed form visibly stale', async () => {
+    const cached = form('cached');
+    const { coordinator, setReads } = fixture({ cachedFormsOf: () => [cached] });
+    setReads(
+      reads({
+        permissions: { status: 'rejected', reason: 'permissions offline' },
+        forms: { status: 'rejected', reason: 'forms offline' },
+      }),
+    );
+    const [first] = await collect(coordinator.refresh('ses', 'srv'));
+    expect(first).toContainEqual({ kind: 'set-forms', key: 'srv:ses', value: [cached] });
+    expect(first).toContainEqual({
+      kind: 'set-request-errors',
+      key: 'srv:ses',
+      value: { permissions: 'permissions offline', forms: 'forms offline' },
+    });
+    // A failed permission read publishes no value, so a stale card cannot be confirmed-empty.
+    expect(first?.some((command) => command.kind === 'set-permissions')).toBe(false);
+  });
+
   test('a verification error is appended to the second batch without clearing the first', async () => {
     const f = fixture({
       readRequests: async () =>
