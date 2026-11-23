@@ -78,11 +78,19 @@ dirty-follow-up cannot refresh a recreated lifetime (#333). `scheduler.test.ts`
 covers the fake itself.
 
 **Remaining boundary:** timers owned outside `ControllerDeps.scheduler` (the UI
-renderer, the event pump and opt-in live/PTY harnesses) still use real time; so
-do the explicit `Bun.sleep` waits in older, non-characterization controller
-suites. Those tests assert behavior at a real runtime boundary and are kept
-separate from the deterministic race fixtures — they are not claimed to be
-scheduler-driven.
+renderer, the event pump and opt-in live/PTY harnesses) still use real time.
+The older harnesses now drain microtasks deterministically with bounded
+`Promise.resolve()` turns; `src/app/controller.test.ts` names the sole
+remaining wall-clock escape hatch `flushMacrotask()` and uses it only in seven
+tests that drive runtime-owned `setTimeout` paths (startup readiness, resync,
+pagination, grouped tools, goal retry and worker reconciliation). The same
+documented boundary remains in the ancestry/form verification harness
+(`form-routing.test.ts`), the async-audit resync fixture, the persistence
+coordinator and the event-pump manager tests. Those tests assert behavior at a
+real runtime boundary and are kept separate from the deterministic race
+fixtures — they are not claimed to be scheduler-driven. Race-sensitive tests
+use the virtual-time harness or explicit `deferred()` gates for RPC completion
+and effect publication instead of guessing a settle count.
 
 ## Regression traps: coverage status
 

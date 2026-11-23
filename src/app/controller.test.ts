@@ -53,7 +53,22 @@ function makeController(
   });
 }
 
+/**
+ * Deterministic microtask idle barrier (#326). A bounded number of `Promise.resolve()` turns
+ * settles awaited RPC/effect chains without touching the real event loop. Tests that need a
+ * runtime-owned timer to progress use the explicitly named `flushMacrotask` boundary instead,
+ * and race-sensitive tests use the virtual-time harness or an explicit deferred gate.
+ */
 async function flush(): Promise<void> {
+  for (let round = 0; round < 5; round += 1) await Promise.resolve();
+}
+
+/**
+ * Documented non-deterministic boundary (#326): a macrotask yield lets runtime-owned timers
+ * progress. Reserved for tests that drive real `setTimeout` paths through the older harness;
+ * it is deliberately not used by race-sensitive characterization tests.
+ */
+async function flushMacrotask(): Promise<void> {
   for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
 }
 
@@ -419,7 +434,7 @@ describe('startup shell before indexing (#287)', () => {
     // `bootstrap` sets the phase synchronously, before its first await, so the first frame
     // can show a genuine loading state rather than a false empty overview.
     expect(controller.state.startup.phase).toBe('loading');
-    await flush();
+    await flushMacrotask();
     expect(controller.state.startup.phase).toBe('ready');
     expect(controller.state.startup.readyAt).toBeDefined();
     expect(controller.state.sessions['ses_local']).toBeDefined();
@@ -1964,7 +1979,7 @@ describe('reconnect reconciliation (issue #36)', () => {
 
     backend.sessions = backend.sessions.filter((session) => session.id !== 'ses_b');
     controller.onEvents('local', [], true);
-    await flush();
+    await flushMacrotask();
     expect(Object.keys(controller.state.sessions).toSorted()).toEqual(['ses_a', 'ses_c']);
     controller.dispose();
   });
@@ -1989,14 +2004,14 @@ describe('reconnect reconciliation (issue #36)', () => {
     await controller.bootstrap();
     narrow();
     controller.openSession('ses_b');
-    await flush();
+    await flushMacrotask();
     backend.sessions = backend.sessions
       .filter((session) => session.id !== 'ses_b')
       .map((session) =>
         session.id === 'ses_c' ? { ...session, archived: true, directory: '/moved' } : session,
       );
     controller.onEvents('local', [], true);
-    await flush();
+    await flushMacrotask();
     expect(controller.state.sessions['ses_c']).toMatchObject({
       archived: true,
       directory: '/moved',
@@ -2069,7 +2084,7 @@ describe('session pagination', () => {
       { name: 'return', ctrl: false, alt: false, shift: false },
       services,
     );
-    await flush();
+    await flushMacrotask();
     expect(Object.keys(controller.state.sessions)).toContain('s5');
     expect(controller.state.sessionsComplete).toBe(false);
     expect(controller.state.overview.selectedRow).toBe('loadmore'); // still selectable
@@ -2080,7 +2095,7 @@ describe('session pagination', () => {
       { name: 'return', ctrl: false, alt: false, shift: false },
       services,
     );
-    await flush();
+    await flushMacrotask();
     expect(Object.keys(controller.state.sessions)).toContain('s6');
     expect(controller.state.sessionsComplete).toBe(true);
     expect(controller.overviewRows().some((row) => row.kind === 'loadmore')).toBe(false);
@@ -2994,7 +3009,7 @@ describe('tool-group focus', () => {
     // The stream folds another tool into the same group: first-tool key stays stable.
     backend.messages['ses_a'] = [groupedTranscript([...groupFixture, fakeTool('t6', 'read')])];
     controller.onEvents('local', [], true); // same resync path events take in production
-    await flush();
+    await flushMacrotask();
     expect(controller.state.focusedGroup).toBe('group:t1');
 
     controller.toggleFocusedGroup();
@@ -4470,14 +4485,14 @@ describe('native opencode goal (issue #21)', () => {
 
     mode = 'ok';
     controller.onEvents('local', [], true);
-    await flush();
-    await flush();
+    await flushMacrotask();
+    await flushMacrotask();
     expect(controller.nativeGoalStateOf('ses_a')?.status).toBe('verified');
 
     // A read in flight during reconnect answers after a newer push: the push wins.
     mode = 'hold';
     controller.onEvents('local', [], true);
-    await flush();
+    await flushMacrotask();
     controller.onEvents(
       'local',
       [
@@ -6967,7 +6982,7 @@ describe('background worker lifecycle (#101)', () => {
     // The server finished one worker while we were detached; only the finished one returns.
     backend.jobs = { ses_a: [{ ...jobs[0]!, status: 'completed' as const }] };
     controller.onStreamStatus('local', 'live');
-    await flush();
+    await flushMacrotask();
 
     const rows = controller.workerNodes('ses_a', 'local');
     expect(rows).toHaveLength(1);

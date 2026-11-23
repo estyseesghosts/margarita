@@ -90,7 +90,7 @@ describe('multi-server harness', () => {
     });
     controller.state.sessions['server:srv_1/session:ses_same'] = remote.sessions[0]!;
     controller.openSession('ses_same', 'srv_1');
-    for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
+    for (let round = 0; round < 5; round += 1) await Promise.resolve();
     const all = Object.values(controller.state.permissions).flat();
     expect(all.some((permission) => permission.action === 'remote')).toBe(true);
     expect(all.some((permission) => permission.action === 'local')).toBe(false);

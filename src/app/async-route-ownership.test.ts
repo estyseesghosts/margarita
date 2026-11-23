@@ -29,7 +29,7 @@ function diff(file: string): FileDiff[] {
 }
 
 async function flush(): Promise<void> {
-  for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
+  for (let round = 0; round < 5; round += 1) await Promise.resolve();
 }
 
 async function harness(goalStore?: GoalStore) {

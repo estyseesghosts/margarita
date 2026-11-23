@@ -286,7 +286,7 @@ describe('per-server @file completion', () => {
     await routed.loadSessions();
     routed.openSession('ses_r', 'srv_1');
     routed.setComposer(composerFrom('@remote'));
-    for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
+    for (let round = 0; round < 5; round += 1) await Promise.resolve();
 
     expect(routed.state.completion?.kind).toBe('file');
     expect(routed.state.completion?.items.map((item) => item.insert)).toEqual([
@@ -299,7 +299,7 @@ describe('per-server @file completion', () => {
     // The overview opens on the selected remote project and stays remote (issue #79).
     routed.openOverview();
     routed.setComposer(composerFrom('@remote'));
-    for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
+    for (let round = 0; round < 5; round += 1) await Promise.resolve();
     expect(routed.state.overview.project.serverID).toBe('srv_1');
     expect(routed.state.completion?.items.map((item) => item.insert)).toEqual([
       '@remote-file.ts ',
@@ -310,7 +310,7 @@ describe('per-server @file completion', () => {
     // Opening the selected remote session's overview keeps the remote project (issue #79).
     routed.openOverview();
     routed.setComposer(composerFrom('@remote'));
-    for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
+    for (let round = 0; round < 5; round += 1) await Promise.resolve();
     expect(routed.state.overview.project.serverID).toBe('srv_1');
     expect(routed.state.completion?.items.map((item) => item.insert)).toEqual([
       '@remote-file.ts ',
@@ -322,7 +322,7 @@ describe('per-server @file completion', () => {
     routed.openSession('ses_a', 'local');
     routed.openOverview();
     routed.setComposer(composerFrom('@local'));
-    for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
+    for (let round = 0; round < 5; round += 1) await Promise.resolve();
     expect(routed.state.overview.project.serverID).toBe('local');
     expect(routed.state.completion?.items.map((item) => item.insert)).toEqual(['@local-file.ts ']);
     expect(localScans).toBeGreaterThan(0);
@@ -374,7 +374,7 @@ describe('overview identity (issue #62)', () => {
     expect(controller.state.overview.selectedRow).toBe(remoteRow.key);
 
     routeKeyNew(controller, 'return');
-    for (let round = 0; round < 10; round += 1) await Bun.sleep(0);
+    for (let round = 0; round < 10; round += 1) await Promise.resolve();
 
     expect(controller.state.route).toEqual({
       kind: 'conversation',

@@ -33,7 +33,7 @@ function session(id: string, serverID = 'local'): SessionSummary {
 }
 
 async function flush(): Promise<void> {
-  for (let round = 0; round < 8; round += 1) await Bun.sleep(0);
+  for (let round = 0; round < 8; round += 1) await Promise.resolve();
 }
 
 type Fixture = Awaited<ReturnType<typeof boot>>;

@@ -149,7 +149,7 @@ async function compositionFixture() {
 }
 
 async function flush(): Promise<void> {
-  for (let round = 0; round < 10; round += 1) await Bun.sleep(0);
+  for (let round = 0; round < 10; round += 1) await Promise.resolve();
 }
 
 describe('production composition collisions (issue #72)', () => {

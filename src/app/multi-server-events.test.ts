@@ -114,7 +114,7 @@ function harness() {
 }
 
 async function flush(): Promise<void> {
-  for (let round = 0; round < 10; round += 1) await Bun.sleep(0);
+  for (let round = 0; round < 10; round += 1) await Promise.resolve();
 }
 
 const remoteKey = `server:${remoteID}/session:${sessionID}`;

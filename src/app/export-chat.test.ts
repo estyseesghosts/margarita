@@ -51,7 +51,7 @@ async function setup(platform: NodeJS.Platform = 'linux', clientCwd = '/local/cl
   });
   await controller.bootstrap();
   controller.openSession('ses_shared', 'a');
-  for (let round = 0; round < 5; round += 1) await Bun.sleep(0);
+  for (let round = 0; round < 5; round += 1) await Promise.resolve();
   return { a, b, controller, writes };
 }
 

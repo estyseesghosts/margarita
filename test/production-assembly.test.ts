@@ -99,7 +99,7 @@ describe('production assembly (main-path wiring)', () => {
     ]);
 
     controller.openSession('ses_same', 'srv_1');
-    for (let round = 0; round < 10; round += 1) await Bun.sleep(0);
+    for (let round = 0; round < 10; round += 1) await Promise.resolve();
 
     const sent = await controller.sendToSession('ses_same', 'ship it');
     expect(sent).toBe(true);
@@ -175,7 +175,7 @@ describe('production assembly (main-path wiring)', () => {
     const { controller, servers } = assembly;
     await controller.bootstrap();
     controller.openSession('ses_same', 'srv_1');
-    for (let round = 0; round < 10; round += 1) await Bun.sleep(0);
+    for (let round = 0; round < 10; round += 1) await Promise.resolve();
     expect(await controller.sendToSession('ses_same', 'first')).toBe(true);
     expect(remote.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
 
@@ -209,7 +209,7 @@ describe('production assembly (main-path wiring)', () => {
     remote.inboxSession = { in_same: 'ses_same', in_extra: 'ses_same' };
 
     controller.openSession('ses_same', 'srv_1');
-    for (let round = 0; round < 10; round += 1) await Bun.sleep(0);
+    for (let round = 0; round < 10; round += 1) await Promise.resolve();
 
     // The remote view shows only the remote host's queue for the colliding ID.
     const remoteView = controller.currentView();
@@ -240,7 +240,7 @@ describe('production assembly (main-path wiring)', () => {
     const { controller } = assembly;
     await controller.bootstrap();
     controller.openSession('ses_same', 'srv_1');
-    for (let round = 0; round < 10; round += 1) await Bun.sleep(0);
+    for (let round = 0; round < 10; round += 1) await Promise.resolve();
 
     const remoteKey = 'server:srv_1/session:ses_same';
 
@@ -375,7 +375,7 @@ function restoreInput(
 }
 
 async function flush(): Promise<void> {
-  for (let round = 0; round < 10; round += 1) await Bun.sleep(0);
+  for (let round = 0; round < 10; round += 1) await Promise.resolve();
 }
 
 describe('startup restore of paired servers', () => {
