@@ -175,14 +175,22 @@ These are concrete source observations, not hypotheses:
   four tests), and read generations/commit watermarks in
   `src/app/transcript-generations.ts` (third #309 slice, three tests), and the
   single-flight/dirty-hint coalescer in `src/app/transcript-flight.ts` (fourth
-  #309 slice, four tests); timer scheduling and notices stay in the controller.
+  #309 slice, four tests). The resync stale/fresh rule and the failure
+  classification rule are now pure in `src/app/transcript-freshness.ts` (fifth
+  #309 slice, nine tests): `planResyncStaleFlags` keeps only an attached session
+  that committed a newer page fresh, and `classifyTranscriptFailure` orders
+  stale marking, independent job hints, retry reset and bounded retry scheduling.
+  Timers, notices and store writes still stay in the controller.
 - **Async/teardown:** single-flight reads, bounded retries, failure backoff,
   active/in-flight sessions exempt from eviction; timers cleared in `dispose()`
   at 712.
 - **Intended owner:** `TranscriptRepository/Coordinator` with
   `open`, `refresh`, `applyHint`, `loadOlder`, `invalidate`, `forgetHost`,
   `dispose`, returning immutable read-only views.
-- **Tests:** `src/app/controller.test.ts`, `src/app/merge-latest.test.ts`,
+- **Tests:** `src/app/transcript-freshness.test.ts` (9),
+  `src/app/transcript-eviction.test.ts` (5), `src/app/transcript-retry.test.ts` (4),
+  `src/app/transcript-generations.test.ts` (3), `src/app/transcript-flight.test.ts` (4),
+  `src/app/controller.test.ts`, `src/app/merge-latest.test.ts`,
   `src/domain/transcript-projector.test.ts`, `scripts/bench.ts` scenarios
   `projectorTailUpdate`, `livePageReconcile`.
 

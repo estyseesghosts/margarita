@@ -242,6 +242,11 @@ import {
 } from './submission-admission.ts';
 import { planTranscriptEviction } from './transcript-eviction.ts';
 import { TranscriptFlightTracker } from './transcript-flight.ts';
+import {
+  classifyTranscriptFailure,
+  planResyncStaleFlags,
+  type TranscriptFailureCommand,
+} from './transcript-freshness.ts';
 import { TranscriptGenerations } from './transcript-generations.ts';
 import {
   retryDelay,
@@ -2022,15 +2027,16 @@ export class AppController {
     // Mark only sessions this resync did not refresh; the attached conversation must have
     // committed a newer page to stay fresh. A detached session is stale even if an old
     // read happened to land, because its live events were not the focus of this resync.
-    const attachedAtCommit = attachedSession();
-    for (const key of Object.keys(this.state.transcripts)) {
-      const ref = parseSessionKey(key);
-      if (ref.serverID !== serverID) continue;
-      const isAttached = attachedAtCommit === ref.sessionID;
-      const refreshed =
-        this.transcriptGenerations.committedGeneration(key) > (committedBefore.get(key) ?? 0);
-      if (!isAttached || !refreshed) this.setState('transcripts', key, 'stale', true);
-      else this.setState('transcripts', key, 'stale', false);
+    for (const command of planResyncStaleFlags({
+      serverID,
+      keys: Object.keys(this.state.transcripts),
+      attachedSessionID: attachedSession(),
+      committedBefore,
+      committedNow: (key) => this.transcriptGenerations.committedGeneration(key),
+      sessionServerOf: (key) => parseSessionKey(key).serverID,
+      sessionIDOf: (key) => parseSessionKey(key).sessionID,
+    })) {
+      this.setState('transcripts', command.key, 'stale', command.stale);
     }
     if (serverID === this.serverID && this.state.notice?.text === 'Connection lost · retrying')
       this.clearNotice();
@@ -2687,37 +2693,57 @@ export class AppController {
   ): Promise<void> {
     const key = `${serverID} ${sessionID}`;
     const qualifiedKey = this.keyFor(serverID, sessionID);
-    const current =
-      !this.disposed &&
-      this.state.sessions[qualifiedKey] !== undefined &&
-      this.serverIDs().includes(serverID);
-    if (!current) {
-      this.transcriptRetries.reset(key);
-      return;
+    const commands = classifyTranscriptFailure({
+      key,
+      qualifiedKey,
+      sessionID,
+      serverID,
+      current:
+        !this.disposed &&
+        this.state.sessions[qualifiedKey] !== undefined &&
+        this.serverIDs().includes(serverID),
+      hasTranscript: this.state.transcripts[qualifiedKey] !== undefined,
+      refreshJobs,
+      dirtyJobs,
+      retryable: transcriptFailureRetryable(failure),
+      nextAttempt: () => this.transcriptRetries.next(key),
+    });
+    for (const command of commands) this.executeTranscriptFailureCommand(command);
+  }
+
+  /** Executes one classified transcript-failure effect against the controller's capabilities. */
+  private executeTranscriptFailureCommand(command: TranscriptFailureCommand): void {
+    switch (command.kind) {
+      case 'reset-retries':
+        this.transcriptRetries.reset(command.key);
+        return;
+      case 'mark-stale':
+        // The failed response is not authoritative: keep the last confirmed messages.
+        this.setState('transcripts', command.qualifiedKey, 'stale', true);
+        return;
+      case 'refresh-jobs':
+        // Job hints are independent of transcript success; do not delay them behind a slow
+        // or backoff-scheduled transcript retry (#284, #295).
+        this.scheduleJobRefresh(command.sessionID, command.serverID);
+        return;
+      case 'schedule-retry': {
+        const timer = setTimeout(
+          () => {
+            this.transcriptRetryTimers.delete(command.key);
+            if (this.disposed) return;
+            this.scheduleTranscript(command.sessionID, command.serverID, command.dirtyJobs);
+          },
+          retryDelay(
+            command.attempt,
+            this.deps.transcriptRetryBaseDelayMs ?? transcriptRetryBaseDelayMs,
+          ),
+        );
+        this.transcriptRetryTimers.set(command.key, timer);
+        return;
+      }
+      default:
+        return;
     }
-    if (this.state.transcripts[qualifiedKey] !== undefined) {
-      // The failed response is not authoritative: keep the last confirmed messages and say
-      // so, rather than clearing the transcript or pretending it refreshed.
-      this.setState('transcripts', qualifiedKey, 'stale', true);
-    }
-    // Job hints are independent of transcript success; honor them without delaying a
-    // subsequent transcript retry on a slow job RPC (#284, #295).
-    if (refreshJobs || dirtyJobs) this.scheduleJobRefresh(sessionID, serverID);
-    if (!transcriptFailureRetryable(failure)) {
-      this.transcriptRetries.reset(key);
-      return;
-    }
-    const attempt = this.transcriptRetries.next(key);
-    if (attempt === undefined) return;
-    const timer = setTimeout(
-      () => {
-        this.transcriptRetryTimers.delete(key);
-        if (this.disposed) return;
-        this.scheduleTranscript(sessionID, serverID, dirtyJobs);
-      },
-      retryDelay(attempt, this.deps.transcriptRetryBaseDelayMs ?? transcriptRetryBaseDelayMs),
-    );
-    this.transcriptRetryTimers.set(key, timer);
   }
 
   private async fetchLatest(
