@@ -1,7 +1,7 @@
 import { isAbsolute, join, posix, resolve, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { batch, createSignal } from 'solid-js';
+import { batch } from 'solid-js';
 import { createStore, produce, reconcile, type SetStoreFunction, unwrap } from 'solid-js/store';
 
 import {
@@ -219,11 +219,11 @@ import { healthCommands, HostSessionIndex, type HostStreamCommand } from './host
 import { InspectorDocumentCache } from './inspector-document.ts';
 import { applyPin, modelScope } from './model-pins.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
+import { OverviewProjection } from './overview-projection.ts';
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
 import { RefreshGenerations } from './refresh-generations.ts';
 import { type RequestInboxCommand, RequestInboxCoordinator } from './request-inbox-coordinator.ts';
 import { inputRequestRefreshTargets } from './request-targets.ts';
-import { RevisionCache } from './revision-cache.ts';
 import { attachedSessionFor, routeServerFor } from './route-server.ts';
 import { SessionFetcher } from './session-fetch.ts';
 import { mergeCommittedSessions, sessionFlags, sessionPage } from './session-snapshot.ts';
@@ -571,10 +571,7 @@ export class AppController {
    * to the session fields touched during a cache miss. Writes bump it in the same batch as
    * the store update.
    */
-  private readonly overviewRevision = createSignal(0);
-  private readonly overviewGroupsCache = new RevisionCache<ProjectGroup[]>();
-  private readonly overviewRowsCache = new RevisionCache<OverviewRow[]>();
-  private readonly overviewTabCountsCache = new RevisionCache<Record<OverviewTab, number>>();
+  private readonly overview: OverviewProjection;
   /** Sole owner of the analytics projection cache (#316/#318). */
   private readonly usageAnalyticsSelector = new UsageAnalyticsSelector();
   /** Single-flight coalescing for worker/shell refreshes (#284). */
@@ -645,6 +642,7 @@ export class AppController {
     this.debugLog = deps.debugLog ?? noDebugLog;
     const [state, setState] = createStore<AppState>(initialState(deps.cwd, this.serverID));
     this.state = state;
+    this.overview = new OverviewProjection(() => this.overviewServerKey());
     // Track only inputs that can change grouped rows or tab counts. Selection, focus,
     // composer and notice updates must not invalidate the overview projection (#288).
     const overviewInputs = new Set([
@@ -674,7 +672,7 @@ export class AppController {
       // still names the previous projection's cache entry (#293).
       batch(() => {
         Reflect.apply(setState, undefined, args);
-        this.overviewRevision[1]((value) => value + 1);
+        this.overview.invalidate();
       });
     };
     this.drafts = new DraftRegistry({
@@ -1017,14 +1015,11 @@ export class AppController {
 
   /** Counts for the tab bar, based on the same classifier as the dot. */
   tabCounts(): Record<OverviewTab, number> {
-    return this.overviewTabCountsCache.get(
-      this.overviewRevision[0](),
-      this.overviewServerKey(),
-      () =>
-        tabCounts(Object.values(this.state.sessions), {
-          statusOf: (session) => this.statusOf(session),
-          online: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
-        }),
+    return this.overview.tabCounts(() =>
+      tabCounts(Object.values(this.state.sessions), {
+        statusOf: (session) => this.statusOf(session),
+        online: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
+      }),
     );
   }
 
@@ -1047,28 +1042,20 @@ export class AppController {
   }
 
   groups(): ProjectGroup[] {
-    return this.overviewGroupsCache.get(
-      this.overviewRevision[0](),
-      this.overviewServerKey(),
-      () => {
-        const filtered = filterSessions(
-          Object.values(this.state.sessions),
-          this.state.overview.tab,
-          {
-            statusOf: (session) => this.statusOf(session),
-            online: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
-          },
-        );
-        return groupSessions(filtered, {
-          platformFor: (serverID) => this.platformFor(serverID),
-          showArchived: this.deps.config.sessions.showArchived,
-          showChildren: this.deps.config.sessions.showChildren,
-          activityOf: (session) => this.lastUsed(session),
-          serverLabelOf: (serverID) => this.deps.serverInfo?.(serverID)?.label,
-          serverOnline: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
-        });
-      },
-    );
+    return this.overview.groups(() => {
+      const filtered = filterSessions(Object.values(this.state.sessions), this.state.overview.tab, {
+        statusOf: (session) => this.statusOf(session),
+        online: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
+      });
+      return groupSessions(filtered, {
+        platformFor: (serverID) => this.platformFor(serverID),
+        showArchived: this.deps.config.sessions.showArchived,
+        showChildren: this.deps.config.sessions.showChildren,
+        activityOf: (session) => this.lastUsed(session),
+        serverLabelOf: (serverID) => this.deps.serverInfo?.(serverID)?.label,
+        serverOnline: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
+      });
+    });
   }
 
   /** Most recent use: server activity or this frontend opening the session. */
@@ -1082,19 +1069,14 @@ export class AppController {
   /** Flattened selectable overview rows in display order, for keyboard navigation. */
   overviewRows(): OverviewRow[] {
     const complete = this.state.sessionsComplete;
-    return this.overviewRowsCache.get(
-      this.overviewRevision[0](),
-      this.overviewServerKey(),
-      () => {
-        const rows = this.groups().flatMap((group) =>
-          groupRows(group, this.state.overview.expanded[group.key] === true),
-        );
-        // Offer pagination once the server says the first pages are not everything.
-        if (!complete) rows.push({ kind: 'loadmore', key: loadMoreRowKey });
-        return rows;
-      },
-      complete ? 'complete' : 'paged',
-    );
+    return this.overview.overviewRows(complete, () => {
+      const rows = this.groups().flatMap((group) =>
+        groupRows(group, this.state.overview.expanded[group.key] === true),
+      );
+      // Offer pagination once the server says the first pages are not everything.
+      if (!complete) rows.push({ kind: 'loadmore', key: loadMoreRowKey });
+      return rows;
+    });
   }
 
   /** Injected clock, so ages and recency are testable. */
@@ -1923,7 +1905,7 @@ export class AppController {
       case 'bump-overview':
         // Any host's liveness changes status dots and tab counts. A remote transition writes
         // no other store field, so bump the reactive overview clock explicitly (#293).
-        this.overviewRevision[1]((value) => value + 1);
+        this.overview.invalidate();
         return;
       case 'clear-runtime':
         // Every host, not just the launch one: a remote disconnect must drop that host's

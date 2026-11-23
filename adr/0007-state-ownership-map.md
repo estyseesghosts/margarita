@@ -407,20 +407,27 @@ These are concrete source observations, not hypotheses:
 - **Authoritative source:** the owning capability's state; derived views must
   subscribe only to fields that can change them.
 - **Readers / writers:** all mounted Solid views read it; AppController store updates, revision signals and UI-local view state write it.
-- **Mutable state:** `overviewGroupsCache`, `overviewRowsCache`,
-  `overviewTabCountsCache`, `inspectorCache`, disclosure/window state in
-  `src/ui/transcript-view.tsx`. The usage-analytics memo and stable greeting
-  selection are now owned by `src/app/usage-selector.ts` and
-  `src/app/greeting-selector.ts` (first #316/#318 slices); the controller only
-  supplies evidence and the time period.
+- **Mutable state:** `inspectorCache` and disclosure/window state in
+  `src/ui/transcript-view.tsx`. The overview revision clock and the three
+  projection caches are now owned by `OverviewProjection` in
+  `src/app/overview-projection.ts` (second #316 slice, five tests): it exposes
+  `invalidate()` plus `tabCounts()/groups()/overviewRows()` selectors keyed by
+  an explicit host-health scope function; the controller still computes the
+  projections and batches the invalidation with its store writes. The
+  usage-analytics memo and stable greeting selection are owned by
+  `src/app/usage-selector.ts` and `src/app/greeting-selector.ts` (first #316/#318
+  slices); the controller only supplies evidence and the time period.
+  Still to remove: the overloaded setter wrapper's argument sniffing, now the
+  only place that implicitly decides which writes invalidate the overview.
 - **Async/teardown:** store changes and revision bumps are batched atomically
   (#293); composer keystrokes must not regroup sessions or reformat hidden rows.
 - **Intended owner:** named capability write operations plus derived selectors;
   UI receives narrow view-models/action ports, not the whole controller and state.
   Pure folding/preview policy moves to domain modules without losing
   incremental projector reuse (#319).
-- **Tests:** `src/ui/app.test.tsx`, `test/perf.test.tsx`, `scripts/bench-render.ts`,
-  PTY smoke scripts.
+- **Tests:** `src/app/overview-projection.test.ts` (5),
+  `src/app/revision-cache.test.ts` (4), `src/ui/app.test.tsx`,
+  `test/perf.test.tsx`, `scripts/bench-render.ts`, PTY smoke scripts.
 
 ## Allowed dependency graph
 
