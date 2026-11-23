@@ -197,6 +197,7 @@ import type { UsageAnalytics } from '../domain/usage-analytics.ts';
 import { type WorkerNode, workerNodes } from '../domain/worker.ts';
 import { approximateTranscriptBytes } from '../perf/memory.ts';
 import { AdmissionGate } from './admission-gate.ts';
+import { AncestryVerifier, type DescendantCheck } from './ancestry-verifier.ts';
 import {
   type AppState,
   type BackgroundEvent,
@@ -476,12 +477,6 @@ type AgentEvidence = Readonly<{
   observedAt: number;
 }>;
 
-/** Outcome of walking authoritative parent links for one uncached child question (#274). */
-type DescendantCheck =
-  | Readonly<{ status: 'verified' }>
-  | Readonly<{ status: 'unrelated' }>
-  | Readonly<{ status: 'unresolved'; error: string }>;
-
 /** Pause reason the goal plugin records when the user interrupts a running goal. */
 const stoppedByUserReason = 'Stopped by the user';
 
@@ -636,17 +631,8 @@ export class AppController {
   private readonly goalRevisions = new GoalRevisionGuard();
   /** Local goal edits, serialized per session so overlapping changes rebase deterministically. */
   private readonly goalEditChains = new Map<string, Promise<void>>();
-  /**
-   * Server-verified child→viewing-ancestor relationships, keyed by the child's
-   * server-qualified session key (#274). Both session lifetimes are stored so deletion,
-   * recreation or unpair/re-pair invalidates the association instead of leaking a form.
-   */
-  private readonly verifiedDescendants = new Map<
-    string,
-    Readonly<{ ancestor: string; childEpoch: number; ancestorEpoch: number }>
-  >();
-  /** In-flight ancestry walks, deduplicated across concurrent form refreshes. */
-  private readonly ancestryLookups = new Map<string, Promise<DescendantCheck>>();
+  /** Sole owner of verified child→ancestor evidence and in-flight ancestry walks (#310). */
+  private readonly ancestry: AncestryVerifier;
   /** Identity of the server this controller talks to; part of every session key. */
   readonly serverID: string;
 
@@ -698,6 +684,20 @@ export class AppController {
       keyFor: (serverID, sessionID) => this.keyFor(serverID, sessionID),
       pageLimit: sessionPageLimit,
       concurrency: reconcileConcurrency,
+    });
+    this.ancestry = new AncestryVerifier({
+      backendFor: (serverID) => this.backendFor(serverID),
+      isRegistered: (serverID, backend) => this.isRegisteredBackend(serverID, backend),
+      getSession: (backend, sessionID) => backend.getSession(sessionID),
+      keyFor: (serverID, sessionID) => this.keyFor(serverID, sessionID),
+      sessionEpoch: (key) => this.sessionEpoch(key),
+      localSummary: (key) => this.state.sessions[key],
+      isSessionCurrent: (key, epoch) => this.isSessionCurrent(key, epoch),
+      now: () => Date.now(),
+      withTimeout: (check) => this.withDescendantTimeout(check),
+      concurrency: ancestryVerifyConcurrency,
+      timeoutMs: deps.ancestryVerifyTimeoutMs ?? ancestryVerifyTimeoutMs,
+      budgetMs: ancestryVerifyBudgetMs,
     });
     this.pinOperations = deps.localState.pinnedModelOps ?? {};
     this.persistence = new PersistenceCoordinator({
@@ -1622,7 +1622,7 @@ export class AppController {
     this.modelSwitches.delete(key);
     this.failedModelSwitches.delete(key);
     this.modelSwitchRevisions.delete(key);
-    this.verifiedDescendants.delete(key);
+    this.ancestry.forgetSession(key);
     // A recreated ID starts without usage evidence, so a new summary can establish usage.
     this.generations.forgetUsage(key);
     const route = this.state.route;
@@ -2420,39 +2420,7 @@ export class AppController {
     pending: Set<string>;
     error?: string;
   }> {
-    const verified = new Set<string>();
-    const unrelated = new Set<string>();
-    const pending = new Set<string>();
-    let error: string | undefined;
-    const deadline = Date.now() + ancestryVerifyBudgetMs;
-    let next = 0;
-    const worker = async (): Promise<void> => {
-      while (next < childIDs.length) {
-        const childID = childIDs[next];
-        next += 1;
-        if (childID === undefined) continue;
-        if (Date.now() >= deadline) {
-          pending.add(childID);
-          error ??= 'ownership verification ran out of time';
-          continue;
-        }
-        const result = await this.withDescendantTimeout(
-          this.verifyDescendant(childID, ancestorID, serverID),
-        ).catch((cause: unknown): DescendantCheck => ({
-          status: 'unresolved',
-          error: errorText(cause),
-        }));
-        if (result.status === 'verified') verified.add(childID);
-        else if (result.status === 'unrelated') unrelated.add(childID);
-        else {
-          pending.add(childID);
-          error ??= result.error;
-        }
-      }
-    };
-    const workers = Math.min(ancestryVerifyConcurrency, childIDs.length);
-    await Promise.all(Array.from({ length: workers }, worker));
-    return { verified, unrelated, pending, ...(error === undefined ? {} : { error }) };
+    return this.ancestry.verifyUnknownDescendants(childIDs, ancestorID, serverID);
   }
 
   private async withDescendantTimeout(check: Promise<DescendantCheck>): Promise<DescendantCheck> {
@@ -2496,102 +2464,10 @@ export class AppController {
       serverID,
       sessionID,
       sessions: this.state.sessions,
-      verified: this.verifiedDescendants,
+      verified: this.ancestry.evidence(),
       sessionEpoch: (key) => this.sessionEpoch(key),
       keyFor: (host, session) => this.keyFor(host, session),
     });
-  }
-
-  /**
-   * Walks authoritative `parentID` links to decide whether `childID` is a descendant of
-   * `ancestorID` on one host. Successful walks are cached with both lifetimes; unrelated
-   * chains are not cached so a later re-parent or delayed index can resolve. A transport
-   * failure is reported as unresolved so the UI can retry instead of settling the form.
-   */
-  private verifyDescendant(
-    childID: string,
-    ancestorID: string,
-    serverID: string,
-  ): Promise<DescendantCheck> {
-    const childKey = this.keyFor(serverID, childID);
-    const ancestorKey = this.keyFor(serverID, ancestorID);
-    const childEpoch = this.sessionEpoch(childKey);
-    const ancestorEpoch = this.sessionEpoch(ancestorKey);
-    const cached = this.verifiedDescendants.get(childKey);
-    if (
-      cached !== undefined &&
-      cached.ancestor === ancestorID &&
-      cached.childEpoch === childEpoch &&
-      cached.ancestorEpoch === ancestorEpoch
-    ) {
-      return Promise.resolve({ status: 'verified' });
-    }
-    const lookupKey = `${childKey}|${ancestorKey}|${childEpoch}|${ancestorEpoch}`;
-    const existing = this.ancestryLookups.get(lookupKey);
-    if (existing !== undefined) return existing;
-    const work = this.walkAncestry(
-      childID,
-      ancestorID,
-      serverID,
-      childKey,
-      childEpoch,
-      ancestorEpoch,
-    )
-      .then((result) => {
-        if (result.status === 'verified') {
-          this.verifiedDescendants.set(childKey, {
-            ancestor: ancestorID,
-            childEpoch,
-            ancestorEpoch,
-          });
-        }
-        return result;
-      })
-      .finally(() => {
-        this.ancestryLookups.delete(lookupKey);
-      });
-    this.ancestryLookups.set(lookupKey, work);
-    return work;
-  }
-
-  private async walkAncestry(
-    childID: string,
-    ancestorID: string,
-    serverID: string,
-    childKey: string,
-    childEpoch: number,
-    ancestorEpoch: number,
-  ): Promise<DescendantCheck> {
-    const backend = this.backendFor(serverID);
-    const ancestorKey = this.keyFor(serverID, ancestorID);
-    const stillCurrent = (): boolean =>
-      this.isRegisteredBackend(serverID, backend) &&
-      this.isSessionCurrent(childKey, childEpoch) &&
-      this.isSessionCurrent(ancestorKey, ancestorEpoch);
-    const seen = new Set<string>();
-    let current = childID;
-    for (let depth = 0; depth < 32; depth += 1) {
-      if (seen.has(current)) {
-        return { status: 'unresolved', error: 'the session ancestry contains a cycle' };
-      }
-      seen.add(current);
-      let parentID: string | undefined;
-      try {
-        const currentKey = this.keyFor(serverID, current);
-        // The child itself may still be absent from the index; parents are usually cached.
-        const summary = this.state.sessions[currentKey] ?? (await backend.getSession(current));
-        if (!stillCurrent()) {
-          return { status: 'unresolved', error: 'the session lifetime changed during lookup' };
-        }
-        parentID = summary.parentID;
-      } catch (error) {
-        return { status: 'unresolved', error: errorText(error) };
-      }
-      if (parentID === undefined) return { status: 'unrelated' };
-      if (parentID === ancestorID) return { status: 'verified' };
-      current = parentID;
-    }
-    return { status: 'unresolved', error: 'the session ancestry is too deep' };
   }
 
   /** Retries input requests for the attached conversation after a partial failure. */
@@ -5387,9 +5263,7 @@ export class AppController {
     for (const key of this.generations.sessionKeys()) {
       if (parseSessionKey(key).serverID === serverID) this.invalidateSession(key);
     }
-    for (const key of this.verifiedDescendants.keys()) {
-      if (parseSessionKey(key).serverID === serverID) this.verifiedDescendants.delete(key);
-    }
+    this.ancestry.forgetServer(serverID);
     for (const key of this.generations.usageKeys()) {
       if (parseSessionKey(key).serverID === serverID) this.generations.forgetUsage(key);
     }
