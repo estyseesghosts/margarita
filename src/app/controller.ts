@@ -173,7 +173,7 @@ import {
   serverPathShape,
 } from '../domain/server-path.ts';
 import { classifySessionStatus, type SessionStatus } from '../domain/session-status.ts';
-import type { Execution, SessionSummary, TokenUsage } from '../domain/session.ts';
+import type { Execution, SessionSummary } from '../domain/session.ts';
 import {
   type ShellBackgroundState,
   shellBackgroundState as projectShellBackgroundState,
@@ -196,7 +196,7 @@ import {
   type TranscriptNode,
   transcriptWindowStep,
 } from '../domain/transcript.ts';
-import { projectUsage, type UsageAnalytics } from '../domain/usage-analytics.ts';
+import type { UsageAnalytics } from '../domain/usage-analytics.ts';
 import { type WorkerNode, workerNodes } from '../domain/worker.ts';
 import { approximateTranscriptBytes } from '../perf/memory.ts';
 import {
@@ -216,6 +216,7 @@ import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-ur
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
 import { RefreshGenerations } from './refresh-generations.ts';
 import { SessionFetcher } from './session-fetch.ts';
+import { UsageAnalyticsSelector } from './usage-selector.ts';
 
 /** A point an edit can be undone/redone back to. Attachments are kept, never duplicated. */
 type UndoSnapshot = Readonly<{ composer: Composer }>;
@@ -576,20 +577,8 @@ export class AppController {
     { revision: number; serverKey: string; complete: boolean; rows: OverviewRow[] } | undefined;
   private overviewTabCountsCache:
     { revision: number; serverKey: string; counts: Record<OverviewTab, number> } | undefined;
-  /** Reuses one analytics projection until transcript/usage/catalog evidence changes (#285). */
-  private usageAnalyticsCache:
-    | {
-        serverID: string;
-        sessionID: string;
-        messages: readonly TranscriptMessage[];
-        tokens: TokenUsage | undefined;
-        cost: number | undefined;
-        catalog: readonly CatalogModel[];
-        mcpServers: readonly string[];
-        stale: boolean;
-        result: UsageAnalytics;
-      }
-    | undefined;
+  /** Sole owner of the analytics projection cache (#316/#318). */
+  private readonly usageAnalyticsSelector = new UsageAnalyticsSelector();
   /** Single-flight coalescing for worker/shell refreshes (#284). */
   private readonly jobRefreshes = new Map<string, Promise<void>>();
   private readonly jobRefreshDirty = new Set<string>();
@@ -886,21 +875,7 @@ export class AppController {
     const catalog = this.scopedModelsFor(serverID, session?.directory ?? this.deps.cwd);
     const mcpServers = this.mcpServersFor(serverID, session?.directory ?? '');
     const stale = view?.stream !== 'live';
-    const cached = this.usageAnalyticsCache;
-    if (
-      cached !== undefined &&
-      cached.serverID === serverID &&
-      cached.sessionID === sessionID &&
-      cached.messages === messages &&
-      cached.tokens === session?.tokens &&
-      cached.cost === session?.cost &&
-      cached.catalog === catalog &&
-      cached.mcpServers === mcpServers &&
-      cached.stale === stale
-    ) {
-      return cached.result;
-    }
-    const result = projectUsage({
+    return this.usageAnalyticsSelector.select({
       serverID,
       sessionID,
       messages,
@@ -910,18 +885,6 @@ export class AppController {
       mcpServers,
       stale,
     });
-    this.usageAnalyticsCache = {
-      serverID,
-      sessionID,
-      messages,
-      tokens: session?.tokens,
-      cost: session?.cost,
-      catalog,
-      mcpServers,
-      stale,
-      result,
-    };
-    return result;
   }
 
   openUsage(): void {

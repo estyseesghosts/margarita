@@ -328,8 +328,9 @@ These are concrete source observations, not hypotheses:
   subscribe only to fields that can change them.
 - **Readers / writers:** all mounted Solid views read it; AppController store updates, revision signals and UI-local view state write it.
 - **Mutable state:** `overviewGroupsCache`, `overviewRowsCache`,
-  `overviewTabCountsCache`, `usageAnalyticsCache`, `inspectorCache`,
-  disclosure/window state in `src/ui/transcript-view.tsx`.
+  `overviewTabCountsCache`, `inspectorCache`, disclosure/window state in
+  `src/ui/transcript-view.tsx`. The usage-analytics memo is now owned by
+  `src/app/usage-selector.ts` (first #316/#318 slice); the controller only supplies evidence.
 - **Async/teardown:** store changes and revision bumps are batched atomically
   (#293); composer keystrokes must not regroup sessions or reformat hidden rows.
 - **Intended owner:** named capability write operations plus derived selectors;
