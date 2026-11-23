@@ -187,7 +187,9 @@ These are concrete source observations, not hypotheses:
   `verifiedDescendants` (654), `answeringForms`, `AppState.permissions/forms/
   requestErrors`.
 - **Async/teardown:** bounded ancestry verification, independent endpoint
-  freshness, per-key revision cancellation on session removal or unpair.
+  freshness, per-key revision cancellation on session removal or unpair. The
+  attached-session/sibling scope rule is now a pure function in
+  `src/app/descendant-scope.ts` (first #310 slice).
 - **Intended owner:** `RequestInbox` with immutable origin envelopes
   (server, owning session, actual form session, form ID, token) and
   `answer`/`cancel` results; overlay focus stays in UI state.

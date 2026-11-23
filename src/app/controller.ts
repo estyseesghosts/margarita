@@ -209,6 +209,7 @@ import {
   type Route,
 } from './app-state.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
+import { descendantScope } from './descendant-scope.ts';
 import { DraftRegistry } from './draft-registry.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
@@ -2594,35 +2595,14 @@ export class AppController {
 
   /** The attached session plus its descendants on the same server. */
   private requestSessionScope(sessionID: string, serverID: string): Set<string> {
-    const scope = new Set([sessionID]);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const session of Object.values(this.state.sessions)) {
-        if (
-          session.serverID === serverID &&
-          session.parentID !== undefined &&
-          scope.has(session.parentID) &&
-          !scope.has(session.id)
-        ) {
-          scope.add(session.id);
-          changed = true;
-        }
-      }
-    }
-    // Include children verified from server ancestry even when the local index has not
-    // listed them yet. Lifetime epochs keep the association from surviving deletion or
-    // ID reuse (#274).
-    const ancestorKey = this.keyFor(serverID, sessionID);
-    const ancestorEpoch = this.sessionEpoch(ancestorKey);
-    for (const [childKey, verified] of this.verifiedDescendants) {
-      if (verified.ancestor !== sessionID || verified.ancestorEpoch !== ancestorEpoch) continue;
-      const child = parseSessionKey(childKey);
-      if (child.serverID !== serverID) continue;
-      if (this.sessionEpoch(childKey) !== verified.childEpoch) continue;
-      scope.add(child.sessionID);
-    }
-    return scope;
+    return descendantScope({
+      serverID,
+      sessionID,
+      sessions: this.state.sessions,
+      verified: this.verifiedDescendants,
+      sessionEpoch: (key) => this.sessionEpoch(key),
+      keyFor: (host, session) => this.keyFor(host, session),
+    });
   }
 
   /**
