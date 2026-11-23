@@ -1292,6 +1292,84 @@ describe('continue/resume attach (issues #10 #11)', () => {
     controller.dispose();
   });
 
+  test('a newer candidate on a later page wins without relying on newest-first ordering', async () => {
+    const backend = new FakeBackend();
+    backend.listSessionsHook = async (query) => ({
+      sessions:
+        query.cursor === undefined
+          ? [{ ...fakeSession('older'), updatedAt: 10 }]
+          : [{ ...fakeSession('newer'), updatedAt: 20 }],
+      ...(query.cursor === undefined ? { nextCursor: 'page-2' } : {}),
+    });
+    const controller = makeController(() => Promise.resolve([]), backend);
+    expect((await controller.findLatestSessionIn('/work/kohjoh'))?.id).toBe('newer');
+    controller.dispose();
+  });
+
+  test('a page failure after a candidate is found surfaces as incomplete, not a best guess (#343)', async () => {
+    const backend = new FakeBackend();
+    backend.listSessionsHook = async (query) => {
+      if (query.cursor === undefined)
+        return {
+          sessions: [{ ...fakeSession('candidate'), updatedAt: 10 }],
+          nextCursor: 'page-2',
+        };
+      throw new BackendError('transport', 'session.list', 'page 2 offline');
+    };
+    const controller = makeController(() => Promise.resolve([]), backend);
+    let message: string | undefined;
+    try {
+      await controller.findLatestSessionIn('/work/kohjoh');
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain('page 2 offline');
+    controller.dispose();
+  });
+
+  test('a page cap with results outstanding rejects instead of accepting the candidate (#343)', async () => {
+    const backend = new FakeBackend();
+    let page = 0;
+    backend.listSessionsHook = async () => {
+      page += 1;
+      return {
+        sessions: [{ ...fakeSession('candidate'), updatedAt: 10 }],
+        nextCursor: `more-${page}`,
+      };
+    };
+    const controller = makeController(() => Promise.resolve([]), backend);
+    let message: string | undefined;
+    try {
+      await controller.findLatestSessionIn('/work/kohjoh');
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain('exceeded the page limit');
+    controller.dispose();
+  });
+
+  test('a repeated pagination cursor is rejected without spinning through the cap (#343)', async () => {
+    const backend = new FakeBackend();
+    let calls = 0;
+    backend.listSessionsHook = async () => {
+      calls += 1;
+      return {
+        sessions: [{ ...fakeSession('candidate'), updatedAt: 10 }],
+        nextCursor: 'same',
+      };
+    };
+    const controller = makeController(() => Promise.resolve([]), backend);
+    let message: string | undefined;
+    try {
+      await controller.findLatestSessionIn('/work/kohjoh');
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain('repeated a pagination cursor');
+    expect(calls).toBeLessThan(10);
+    controller.dispose();
+  });
+
   test('ensureSession stores a fetched summary before attach/prompt', async () => {
     const backend = new FakeBackend();
     const session = {

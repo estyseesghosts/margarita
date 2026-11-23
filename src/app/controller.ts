@@ -5099,9 +5099,13 @@ export class AppController {
     let cursor: string | undefined;
     let pages = 0;
     let best: SessionSummary | undefined;
+    const seenCursors = new Set<string>();
+    // One owner for the whole search: a replacement registration mid-scan must not have its
+    // rows attributed to this lookup, and a repeated cursor must not spin through the cap (#343).
+    const backend = this.backendFor(serverID);
     try {
       do {
-        const page = await this.backendFor(serverID).listSessions(
+        const page = await backend.listSessions(
           cursor === undefined ? directoryQuery : { directory, cursor },
         );
         for (const session of page.sessions) {
@@ -5112,7 +5116,18 @@ export class AppController {
             directoryKey(session.directory, this.platformFor(session.serverID ?? serverID)) !== key
           )
             continue;
+          // Selection is exhaustive max-updatedAt, never an unverified newest-first early exit.
           if (best === undefined || session.updatedAt > best.updatedAt) best = session;
+        }
+        if (page.nextCursor !== undefined) {
+          if (seenCursors.has(page.nextCursor)) {
+            throw new BackendError(
+              'unknown',
+              'session.list',
+              'Directory search repeated a pagination cursor; the latest session is unverified',
+            );
+          }
+          seenCursors.add(page.nextCursor);
         }
         cursor = page.nextCursor;
         pages += 1;
@@ -5134,6 +5149,32 @@ export class AppController {
         this.debugLog.write('find-latest-fallback', { serverID, error: errorText(error) });
         return this.latestSessionInState(directory, serverID);
       }
+      // A failure after a candidate was found leaves the search incomplete. The candidate is
+      // not proven to be the latest, so it must never be returned or cached (#343).
+      this.debugLog.write('find-latest-incomplete', { serverID, error: errorText(error) });
+      throw error;
+    }
+    if (cursor !== undefined) {
+      // The 50-page cap was reached with results still outstanding: an exhaustive verdict is
+      // impossible, so do not silently accept the best candidate (#343).
+      const incomplete = new BackendError(
+        'unknown',
+        'session.list',
+        'Directory search exceeded the page limit; the latest session is unverified',
+      );
+      this.debugLog.write('find-latest-incomplete', { serverID, reason: 'page-limit' });
+      throw incomplete;
+    }
+    // Registration may have changed while pages were in flight; a stale owner's verdict is
+    // not authoritative for the current server (#343).
+    if (!this.serverIDs().includes(serverID) || !this.isRegisteredBackend(serverID, backend)) {
+      const replaced = new BackendError(
+        'unknown',
+        'session.list',
+        'Server registration changed during directory search',
+      );
+      this.debugLog.write('find-latest-incomplete', { serverID, reason: 'replaced' });
+      throw replaced;
     }
     if (best !== undefined) this.storeSessionSummary(best);
     return best;
