@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
+import { BackendError } from '../../src/adapter/backend.ts';
 import { composerFrom } from '../../src/domain/composer.ts';
+import type { FormRequest } from '../../src/domain/form.ts';
+import type { SessionSummary } from '../../src/domain/session.ts';
 import { assertNoCalls, createHarness, deferred, settle } from './harness.ts';
+import { FakeScheduler } from './scheduler.ts';
 
 describe('characterization harness (#306)', () => {
   test('a deferred settles only when the test releases it', async () => {
@@ -150,5 +154,78 @@ describe('production behavior through the characterization harness (#306)', () =
     await settle();
     expect(harness.controller.state.composer.text).toBe('newer local edit');
     harness.dispose();
+  });
+});
+
+describe('time-driven behavior under an injected scheduler (#326)', () => {
+  test('a transcript backoff retry fires only when virtual time is advanced', async () => {
+    const harness = await createHarness();
+    harness.controller.openSession(harness.sessionID, 'local');
+    await harness.settle();
+    const backend = harness.backend('local');
+    const real = backend.listMessages.bind(backend);
+    let attempts = 0;
+    backend.listMessages = async (...args) => {
+      attempts += 1;
+      if (attempts === 1) throw new BackendError('transport', 'message.list', 'offline');
+      return real(...args);
+    };
+
+    harness.emit('local', [{ kind: 'transcript-changed', sessionID: harness.sessionID }], false);
+    await harness.settle();
+    const key = harness.sessionID;
+    expect(attempts).toBe(1);
+    expect(harness.controller.state.transcripts[key]?.stale).toBe(true);
+    expect(harness.scheduler.pendingCount()).toBeGreaterThan(0);
+
+    harness.scheduler.advanceBy(1);
+    await harness.settle();
+    expect(attempts).toBe(2);
+    expect(harness.controller.state.transcripts[key]?.stale).toBe(false);
+    harness.dispose();
+  });
+
+  test('an ancestry deadline expires only when virtual time reaches it', async () => {
+    const scheduler = new FakeScheduler();
+    const harness = await createHarness({ scheduler });
+    const backend = harness.backend('local');
+    const childForm: FormRequest = {
+      id: 'form_child',
+      sessionID: 'ses_child',
+      title: 'child question',
+      fields: [
+        { kind: 'text', key: 'answer', title: 'Answer', required: false, hidden: false, when: [] },
+      ],
+    };
+    backend.forms = [childForm];
+    const realGet = backend.getSession.bind(backend);
+    backend.getSession = async (sessionID) => {
+      if (sessionID === 'ses_child') return new Promise<SessionSummary>(() => {});
+      return realGet(sessionID);
+    };
+
+    harness.controller.openSession(harness.sessionID, 'local');
+    await harness.settle();
+    expect(harness.controller.state.forms[harness.sessionID] ?? []).toHaveLength(0);
+
+    const start = scheduler.now();
+    scheduler.advanceBy(49);
+    await harness.settle();
+    expect(harness.controller.currentRequestError()?.forms).toBeUndefined();
+    scheduler.advanceBy(1);
+    // The timeout resolves the verifier; its second publication batch needs a longer
+    // microtask drain before the observable store write lands.
+    await harness.settle(20);
+    expect(harness.controller.currentRequestError()?.forms).toContain('timed out');
+    expect(scheduler.now()).toBe(start + 50);
+    harness.dispose();
+  });
+
+  test('dispose cancels every timer the controller still owns', async () => {
+    const harness = await createHarness();
+    harness.controller.showNotice('still on screen', 'dim');
+    expect(harness.scheduler.pendingCount()).toBeGreaterThan(0);
+    harness.dispose();
+    expect(harness.scheduler.pendingCount()).toBe(0);
   });
 });

@@ -489,7 +489,9 @@ ui  ──► app (use cases / facade / view models) ──► domain
 ## Staged order, stop/go and acceptance
 
 1. **Protect behavior first:** #306 characterization/race fixtures and #307
-   enforcement (paths + architecture gate) proceed together.
+   enforcement (paths + architecture gate) proceed together. #326 adds an
+   injected `TimerScheduler` port so retries, deadlines, probes and notices are
+   driven by virtual time; production keeps runtime timers.
 2. **Extract independent owners:** #308 host/session index and events, then
    #309 transcripts, #310 requests, #311 composer, #312 submission, #313
    models/agents, #314 goals, #315 inspection/revert, #317 persistence.

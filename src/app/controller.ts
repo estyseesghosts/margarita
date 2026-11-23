@@ -240,6 +240,7 @@ import {
   type SendOutcome,
   type SubmissionOrigin,
 } from './submission-admission.ts';
+import { runtimeTimerScheduler, type TimerHandle, type TimerScheduler } from './timer-scheduler.ts';
 import { planTranscriptEviction } from './transcript-eviction.ts';
 import { TranscriptFlightTracker } from './transcript-flight.ts';
 import {
@@ -377,6 +378,8 @@ export type ControllerDeps = Readonly<{
   clientCwd?: string;
   version: string;
   now: () => number;
+  /** Injectable timers for retries/deadlines/probes; defaults to runtime timers (#326). */
+  scheduler?: TimerScheduler;
   saveLocalState: (state: LocalState) => Promise<SaveResult | void>;
   /**
    * Local project listing. A plain string array is treated as a complete authoritative scan;
@@ -509,14 +512,14 @@ export class AppController {
   /** Changes whenever navigation or a modal interaction can supersede a pending fork. */
   private interactionGeneration = 0;
   private noticeCounter = 0;
-  private noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  private noticeTimer: TimerHandle | undefined;
   /** Timestamp (ms, from `deps.now`) of the most recent idle Escape tap, for double-tap detection. */
   private escapeAt: number | undefined;
-  private escapeTimer: ReturnType<typeof setTimeout> | undefined;
+  private escapeTimer: TimerHandle | undefined;
   /** Sole owner of single-flight reads and coalesced dirty hints (#309). */
   private readonly transcriptFlights = new TranscriptFlightTracker();
   /** Bounded retry state for a failed canonical refetch (#295). */
-  private readonly transcriptRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly transcriptRetryTimers = new Map<string, TimerHandle>();
   /** Sole owner of bounded transcript retry attempts (#309). */
   private readonly transcriptRetries = new TranscriptRetryTracker();
   /**
@@ -538,7 +541,7 @@ export class AppController {
   private readonly generations = new RefreshGenerations();
   /** Sole owner of paged index reads and definite-not-found reconciliation (#308). */
   private readonly sessionFetcher: SessionFetcher;
-  private readonly summaryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly summaryTimers = new Map<string, TimerHandle>();
   private transcriptOrder: string[] = [];
   /** Sole owner of per-host stream status and index health reporting (#308). */
   private readonly hostStreams = new HostSessionIndex();
@@ -583,8 +586,10 @@ export class AppController {
   /** Single-flight coalescing for worker/shell refreshes (#284). */
   private readonly jobRefreshes = new Map<string, Promise<void>>();
   private readonly jobRefreshDirty = new Set<string>();
-  private readonly jobStartProbes = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly jobStartProbes = new Map<string, TimerHandle>();
   private readonly debugLog: DebugLog;
+  /** Sole owner of timed work; a fake scheduler drives it deterministically in tests. */
+  private readonly scheduler: TimerScheduler;
 
   /**
    * Opt-in `--debug-log` diagnostics for key routing: which key the TUI saw and with
@@ -646,6 +651,7 @@ export class AppController {
   constructor(private readonly deps: ControllerDeps) {
     this.serverID = deps.serverID ?? localServerID;
     this.debugLog = deps.debugLog ?? noDebugLog;
+    this.scheduler = deps.scheduler ?? runtimeTimerScheduler;
     const [state, setState] = createStore<AppState>(initialState(deps.cwd, this.serverID));
     this.state = state;
     this.overview = new OverviewProjection(() => this.overviewServerKey());
@@ -679,7 +685,7 @@ export class AppController {
       sessionEpoch: (key) => this.sessionEpoch(key),
       localSummary: (key) => this.state.sessions[key],
       isSessionCurrent: (key, epoch) => this.isSessionCurrent(key, epoch),
-      now: () => Date.now(),
+      now: () => deps.now(),
       withTimeout: (check) => this.withDescendantTimeout(check),
       concurrency: ancestryVerifyConcurrency,
       timeoutMs: deps.ancestryVerifyTimeoutMs ?? ancestryVerifyTimeoutMs,
@@ -741,16 +747,23 @@ export class AppController {
 
   dispose(): void {
     this.disposed = true;
-    if (this.noticeTimer !== undefined) clearTimeout(this.noticeTimer);
+    if (this.noticeTimer !== undefined) this.scheduler.clearTimeout(this.noticeTimer);
     this.resetEscapeTimer();
-    for (const timer of this.summaryTimers.values()) clearTimeout(timer);
+    for (const timer of this.summaryTimers.values()) this.scheduler.clearTimeout(timer);
     this.summaryTimers.clear();
-    for (const timer of this.transcriptRetryTimers.values()) clearTimeout(timer);
+    for (const timer of this.transcriptRetryTimers.values()) this.scheduler.clearTimeout(timer);
     this.transcriptRetryTimers.clear();
-    for (const timer of this.jobStartProbes.values()) clearTimeout(timer);
+    for (const timer of this.jobStartProbes.values()) this.scheduler.clearTimeout(timer);
     this.jobStartProbes.clear();
     this.transcriptFlights.dispose();
     this.ancestry.dispose();
+  }
+
+  /** Short scheduler-driven pause between a settled read and a coalesced rerun. */
+  private delay(ms: number): Promise<void> {
+    return new Promise((done) => {
+      this.scheduler.setTimeout(done, ms);
+    });
   }
 
   /**
@@ -1569,7 +1582,7 @@ export class AppController {
     this.transcriptFlights.retire(retryKey);
     const retryTimer = this.transcriptRetryTimers.get(retryKey);
     if (retryTimer !== undefined) {
-      clearTimeout(retryTimer);
+      this.scheduler.clearTimeout(retryTimer);
       this.transcriptRetryTimers.delete(retryKey);
     }
     this.transcriptRetries.reset(retryKey);
@@ -2138,7 +2151,7 @@ export class AppController {
     if (this.summaryTimers.has(key)) return;
     this.summaryTimers.set(
       key,
-      setTimeout(() => {
+      this.scheduler.setTimeout(() => {
         this.summaryTimers.delete(key);
         void this.track('session', this.refreshSummary(sessionID, serverID));
       }, 150),
@@ -2290,9 +2303,9 @@ export class AppController {
   }
 
   private async withDescendantTimeout(check: Promise<DescendantCheck>): Promise<DescendantCheck> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timer: TimerHandle | undefined;
     const timeout = new Promise<DescendantCheck>((settle) => {
-      timer = setTimeout(
+      timer = this.scheduler.setTimeout(
         () => settle({ status: 'unresolved', error: 'the ownership check timed out' }),
         this.deps.ancestryVerifyTimeoutMs ?? ancestryVerifyTimeoutMs,
       );
@@ -2300,7 +2313,7 @@ export class AppController {
     try {
       return await Promise.race([check, timeout]);
     } finally {
-      if (timer !== undefined) clearTimeout(timer);
+      if (timer !== undefined) this.scheduler.clearTimeout(timer);
     }
   }
 
@@ -2476,7 +2489,7 @@ export class AppController {
   private scheduleJobStartProbe(sessionID: string, serverID: string = this.activeServerID()): void {
     const key = this.keyFor(serverID, sessionID);
     if (this.jobStartProbes.has(key)) return;
-    const timer = setTimeout(() => {
+    const timer = this.scheduler.setTimeout(() => {
       this.jobStartProbes.delete(key);
       if (this.disposed) return;
       if (!this.serverIDs().includes(serverID)) return;
@@ -2489,7 +2502,7 @@ export class AppController {
   private clearJobStartProbe(key: string): void {
     const timer = this.jobStartProbes.get(key);
     if (timer === undefined) return;
-    clearTimeout(timer);
+    this.scheduler.clearTimeout(timer);
     this.jobStartProbes.delete(key);
   }
 
@@ -2505,7 +2518,7 @@ export class AppController {
     // A fresh signal supersedes a pending backoff retry; it must not wait behind it.
     const retryTimer = this.transcriptRetryTimers.get(key);
     if (retryTimer !== undefined) {
-      clearTimeout(retryTimer);
+      this.scheduler.clearTimeout(retryTimer);
       this.transcriptRetryTimers.delete(key);
     }
     if (this.transcriptFlights.coalesce(key, refreshJobs)) return;
@@ -2542,7 +2555,7 @@ export class AppController {
       }
       this.transcriptRetries.reset(key);
       if (refreshJobs) this.scheduleJobRefresh(sessionID, serverID);
-      await delay(80);
+      await this.delay(80);
       if (dirty && !this.disposed) this.scheduleTranscript(sessionID, serverID, dirtyJobs);
     })();
     void this.track('transcript', run);
@@ -2596,7 +2609,7 @@ export class AppController {
         this.scheduleJobRefresh(command.sessionID, command.serverID);
         return;
       case 'schedule-retry': {
-        const timer = setTimeout(
+        const timer = this.scheduler.setTimeout(
           () => {
             this.transcriptRetryTimers.delete(command.key);
             if (this.disposed) return;
@@ -7787,10 +7800,10 @@ export class AppController {
     this.noticeCounter += 1;
     const id = this.noticeCounter;
     this.setState('notice', { text, tone, id });
-    if (this.noticeTimer !== undefined) clearTimeout(this.noticeTimer);
+    if (this.noticeTimer !== undefined) this.scheduler.clearTimeout(this.noticeTimer);
     this.noticeTimer = undefined;
     if (autoClear) {
-      this.noticeTimer = setTimeout(
+      this.noticeTimer = this.scheduler.setTimeout(
         () => {
           if (this.state.notice?.id === id) this.setState('notice', undefined);
         },
@@ -7842,7 +7855,7 @@ export class AppController {
   private armEscapeDoubleTap(now: number): void {
     this.escapeAt = now;
     this.resetEscapeTimer();
-    this.escapeTimer = setTimeout(() => {
+    this.escapeTimer = this.scheduler.setTimeout(() => {
       this.escapeTimer = undefined;
       this.escapeAt = undefined;
     }, AppController.ESCAPE_DOUBLE_TAP_MS);
@@ -7855,7 +7868,7 @@ export class AppController {
 
   private resetEscapeTimer(): void {
     if (this.escapeTimer !== undefined) {
-      clearTimeout(this.escapeTimer);
+      this.scheduler.clearTimeout(this.escapeTimer);
       this.escapeTimer = undefined;
     }
   }
@@ -8640,8 +8653,4 @@ function goalFailureReason(kind: BackendError['kind']): GoalQueryFailure {
     default:
       return 'unknown';
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((done) => setTimeout(done, ms));
 }

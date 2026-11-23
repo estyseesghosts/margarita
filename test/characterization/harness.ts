@@ -12,6 +12,7 @@ import { emptyState } from '../../src/config/local-state.ts';
 import type { BackendEvent } from '../../src/domain/backend-event.ts';
 import type { SessionSummary } from '../../src/domain/session.ts';
 import { FakeBackend } from '../fake-backend.ts';
+import { FakeScheduler } from './scheduler.ts';
 
 /** A promise whose resolution the test controls. */
 export interface Deferred<T> {
@@ -26,9 +27,13 @@ export function deferred<T = void>(): Deferred<T> {
   return { promise: result.promise, resolve: result.resolve, reject: result.reject };
 }
 
-/** Lets queued microtasks and zero-delay callbacks run to a stable point. */
+/**
+ * Drains queued microtasks to a stable point without sleeping. Code that needs a
+ * timer to fire must use a injected scheduler and advance it explicitly; this
+ * barrier never advances wall-clock time (#326).
+ */
 export async function settle(rounds = 8): Promise<void> {
-  for (let round = 0; round < rounds; round += 1) await Bun.sleep(0);
+  for (let round = 0; round < rounds; round += 1) await Promise.resolve();
 }
 
 /** Injectable clock; controller code reads `now`, tests advance it explicitly. */
@@ -66,7 +71,11 @@ export interface CharacterizationHarness {
   readonly backends: ReadonlyMap<string, FakeBackend>;
   readonly registered: Set<string>;
   readonly clock: FakeClock;
+  /** Injectable timers owned by this controller; time moves only when advanced. */
+  readonly scheduler: FakeScheduler;
   readonly sessionID: string;
+  /** Drains microtasks and due zero-delay timers without sleeping. */
+  settle(rounds?: number): Promise<void>;
   backend(serverID: string): FakeBackend;
   /** Adds or removes a host registration without touching the other hosts. */
   setRegistered(serverID: string, registered: boolean): void;
@@ -81,7 +90,8 @@ export interface CharacterizationHarness {
 export interface HarnessOptions {
   readonly serverIDs?: readonly string[];
   readonly sessionID?: string;
-  readonly clock?: FakeClock;
+  /** Shared virtual-time source for the clock and all controller timers. */
+  readonly scheduler?: FakeScheduler;
   /** Seed data or hooks before the controller bootstraps. */
   readonly prepare?: (backends: ReadonlyMap<string, FakeBackend>) => void;
   /** Extra controller dependencies; cannot override the injected backends or clock. */
@@ -113,7 +123,11 @@ export async function createHarness(
 ): Promise<CharacterizationHarness> {
   const ids = options.serverIDs ?? ['local', 'remote'];
   const sessionID = options.sessionID ?? 'ses_same';
-  const clock = options.clock ?? fakeClock();
+  const scheduler = options.scheduler ?? new FakeScheduler();
+  const clock: FakeClock = {
+    now: () => scheduler.now(),
+    advance: (milliseconds) => scheduler.advanceBy(milliseconds),
+  };
   const backends = new Map<string, FakeBackend>();
   for (const serverID of ids) {
     const backend = new FakeBackend();
@@ -135,7 +149,8 @@ export async function createHarness(
     platform: 'linux',
     cwd: '/work',
     version: 'test',
-    now: () => clock.now(),
+    now: () => scheduler.now(),
+    scheduler,
     saveLocalState: async () => {},
     listFiles: async () => [],
     requestExit: () => {},
@@ -161,7 +176,14 @@ export async function createHarness(
     backends,
     registered,
     clock,
+    scheduler,
     sessionID,
+    async settle(rounds = 8): Promise<void> {
+      for (let round = 0; round < rounds; round += 1) {
+        await Promise.resolve();
+        scheduler.runDue();
+      }
+    },
     backend(serverID: string): FakeBackend {
       const backend = backends.get(serverID);
       if (backend === undefined) throw new Error(`harness: unknown server ${serverID}`);

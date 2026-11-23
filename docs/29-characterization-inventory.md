@@ -48,20 +48,36 @@ protected, but the fixtures are tied to one concrete class.
 
 - `deferred()` — a promise released explicitly by the test, so a slow response
   can resolve after a newer one; no real sleeps.
-- `settle(rounds)` — bounded zero-delay turns that drain queued microtasks.
-- `fakeClock()` — injectable `now()` plus explicit `advance()`; passed to the
-  controller as `deps.now`.
+- `settle(rounds)` — bounded microtask turns only; it never sleeps or advances
+  time. Longer async chains use an explicit larger round count.
+- `FakeScheduler` — virtual-time implementation of the controller's injected
+  timer port (`TimerScheduler`). `advanceBy(ms)` runs due timers in chronological
+  order, `runDue()` flushes zero-delay work, `pendingCount()` proves teardown,
+  and `dispose()` clears everything. `createHarness()` shares one instance with
+  both `deps.now` and every controller timer, so retry backoff, ancestry
+  deadlines, job probes and notice timeouts move only when a test advances them.
+- `fakeClock()` — standalone injectable `now()` for non-harness tests.
 - `createHarness()` — bootstraps an `AppController` with colliding sessions on
   several hosts, a fail-closed `backendFor` resolver, short retry delays, and a
-  `serverIDs()` list the test can mutate to simulate unpair.
+  `serverIDs()` list the test can mutate to simulate unpair. Its `settle()` and
+  `scheduler` are the deterministic async controls.
 - `marks()` / `callsSince()` / `assertNoCalls()` — per-host call-log slicing so
   a test can assert **which backend was called, which host owns the result, and
   what was not mutated**.
 - `emit()` — sends typed `BackendEvent` batches with an explicit `resync` flag.
 
 `test/characterization/controller-characterization.test.ts` proves the harness
-on five cases: deferred ordering, per-host call slicing, same-ID collision
-isolation, duplicate-Enter admission, and a route change during a gated prompt.
+on deferred ordering, per-host call slicing, same-ID collision isolation,
+duplicate-Enter admission, route changes during a gated prompt, and three
+scheduler-driven cases: transcript backoff, ancestry deadline expiry and timer
+teardown on `dispose()` (#326). `scheduler.test.ts` covers the fake itself.
+
+**Remaining boundary:** timers owned outside `ControllerDeps.scheduler` (the UI
+renderer, the event pump and opt-in live/PTY harnesses) still use real time; so
+do the explicit `Bun.sleep` waits in older, non-characterization controller
+suites. Those tests assert behavior at a real runtime boundary and are kept
+separate from the deterministic race fixtures — they are not claimed to be
+scheduler-driven.
 
 ## Regression traps: coverage status
 
