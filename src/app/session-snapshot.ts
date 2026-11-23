@@ -91,7 +91,7 @@ export interface SessionFlags {
  * host publishes aggregate flags, so a newer in-flight refresh keeps its loading/error state.
  */
 export function sessionFlags(
-  applied: readonly SnapshotResult[],
+  applied: readonly Pick<SnapshotResult, 'ok' | 'cursor' | 'error'>[],
   committedCount: number,
   allServersComplete: () => boolean,
   serverID: string | undefined,

@@ -3,8 +3,9 @@ import { describe, expect, test } from 'bun:test';
 import { BackendError } from '../../src/adapter/backend.ts';
 import { composerFrom } from '../../src/domain/composer.ts';
 import type { FormRequest } from '../../src/domain/form.ts';
+import { sessionKey } from '../../src/domain/server-identity.ts';
 import type { SessionSummary } from '../../src/domain/session.ts';
-import { assertNoCalls, createHarness, deferred, settle } from './harness.ts';
+import { assertNoCalls, collidingSession, createHarness, deferred, settle } from './harness.ts';
 import { FakeScheduler } from './scheduler.ts';
 
 describe('characterization harness (#306)', () => {
@@ -365,5 +366,120 @@ describe('time-driven behavior under an injected scheduler (#326)', () => {
     harness.scheduler.advanceBy(200);
     await harness.settle();
     expect(backend.calls.filter((call) => call.name === 'listMessages')).toHaveLength(1);
+  });
+});
+
+describe('partial session index failures (#341)', () => {
+  test('a failed activity read keeps discovered sessions and last-known running state', async () => {
+    const harness = await createHarness();
+    harness.emit(
+      'local',
+      [{ kind: 'execution', sessionID: harness.sessionID, state: 'started' }],
+      false,
+    );
+    await harness.settle();
+    const runningKey = sessionKey({ serverID: 'local', sessionID: harness.sessionID });
+    expect(harness.controller.state.running[runningKey]).toBe(true);
+
+    // Discover a new session, then fail only the activity capability.
+    harness.backend('local').sessions.push(collidingSession('local', 'ses_new', 'new session'));
+    harness.backend('local').activeSessionIDs = async () => {
+      throw new BackendError('transport', 'session.active', 'activity offline');
+    };
+
+    await harness.controller.loadSessions();
+    await harness.settle();
+
+    // The list and cursor survive; the activity failure is not a session-list failure.
+    expect(
+      harness.controller.state.sessions[sessionKey({ serverID: 'local', sessionID: 'ses_new' })]
+        ?.title,
+    ).toBe('new session');
+    expect(harness.controller.state.serverPages['local']?.error).toBeUndefined();
+    // Running evidence is stale/unknown, never "every session stopped" (#341).
+    expect(harness.controller.state.running[runningKey]).toBe(true);
+    harness.dispose();
+  });
+
+  test('one host’s failed activity read does not stale another host’s running evidence', async () => {
+    const harness = await createHarness();
+    harness.emit(
+      'local',
+      [{ kind: 'execution', sessionID: harness.sessionID, state: 'started' }],
+      false,
+    );
+    harness.emit(
+      'remote',
+      [{ kind: 'execution', sessionID: harness.sessionID, state: 'started' }],
+      false,
+    );
+    await harness.settle();
+    const localKey = sessionKey({ serverID: 'local', sessionID: harness.sessionID });
+    const remoteKey = sessionKey({ serverID: 'remote', sessionID: harness.sessionID });
+    expect(harness.controller.state.running[localKey]).toBe(true);
+    expect(harness.controller.state.running[remoteKey]).toBe(true);
+
+    // Identical raw session IDs: only the local host's activity endpoint fails.
+    harness.backend('local').activeSessionIDs = async () => {
+      throw new BackendError('transport', 'session.active', 'activity offline');
+    };
+    // Remote activity succeeds with an empty set, so its older turn becomes idle.
+    await harness.controller.loadSessions();
+    await harness.settle();
+
+    expect(harness.controller.state.running[localKey]).toBe(true);
+    expect(harness.controller.state.running[remoteKey]).toBeUndefined();
+    harness.dispose();
+  });
+
+  test('a bounded activity-only retry recovers without refetching the session list', async () => {
+    const harness = await createHarness();
+    harness.emit(
+      'local',
+      [{ kind: 'execution', sessionID: harness.sessionID, state: 'started' }],
+      false,
+    );
+    await harness.settle();
+    const runningKey = sessionKey({ serverID: 'local', sessionID: harness.sessionID });
+    const backend = harness.backend('local');
+    let listCalls = 0;
+    const originalList = backend.listSessions.bind(backend);
+    backend.listSessions = async (query) => {
+      listCalls += 1;
+      return originalList(query);
+    };
+    let activityCalls = 0;
+    backend.activeSessionIDs = async () => {
+      activityCalls += 1;
+      if (activityCalls === 1) throw new BackendError('transport', 'session.active', 'offline');
+      return new Set();
+    };
+
+    await harness.controller.loadSessions();
+    await harness.settle();
+    const afterLoad = listCalls;
+    expect(activityCalls).toBe(1);
+    expect(harness.controller.state.running[runningKey]).toBe(true);
+
+    // Advance past the 250 ms retry: only activity is re-read, never the whole list.
+    harness.scheduler.advanceBy(300);
+    await harness.settle();
+    expect(activityCalls).toBe(2);
+    expect(listCalls).toBe(afterLoad);
+    expect(harness.controller.state.running[runningKey]).toBeUndefined();
+    harness.dispose();
+  });
+
+  test('dispose cancels a pending activity retry so no stale running flags are published', async () => {
+    const harness = await createHarness();
+    harness.backend('local').activeSessionIDs = async () => {
+      throw new BackendError('transport', 'session.active', 'offline');
+    };
+    await harness.controller.loadSessions();
+    await harness.settle();
+    expect(harness.scheduler.pendingCount()).toBeGreaterThan(0);
+
+    harness.dispose();
+    expect(harness.scheduler.pendingCount()).toBe(0);
   });
 });

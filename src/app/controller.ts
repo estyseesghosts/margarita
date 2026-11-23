@@ -554,6 +554,13 @@ export class AppController {
   /** Sole owner of paged index reads and definite-not-found reconciliation (#308). */
   private readonly sessionFetcher: SessionFetcher;
   private readonly summaryTimers = new Map<string, TimerHandle>();
+  /**
+   * Bounded, scheduler-driven retries of just the activity read after a failed snapshot
+   * activity lookup. Never rebuilds the session list, and is keyed per host so one host's
+   * unavailable activity endpoint cannot mark another host's running state stale (#341).
+   */
+  private readonly activityRetryTimers = new Map<string, TimerHandle>();
+  private readonly activityRetryAttempts = new Map<string, number>();
   private transcriptOrder: string[] = [];
   /** Sole owner of per-host stream status and index health reporting (#308). */
   private readonly hostStreams = new HostSessionIndex();
@@ -801,6 +808,11 @@ export class AppController {
     this.transcriptRetryTimers.clear();
     for (const timer of this.jobStartProbes.values()) this.scheduler.clearTimeout(timer);
     this.jobStartProbes.clear();
+    // Activity retries are owned timers too; a disposed controller must not publish stale
+    // running flags from a callback (#341).
+    for (const timer of this.activityRetryTimers.values()) this.scheduler.clearTimeout(timer);
+    this.activityRetryTimers.clear();
+    this.activityRetryAttempts.clear();
     // Cancel every owned pause, including 80 ms dirty-follow-up delays, and settle their
     // continuations so awaiting work cannot hang after teardown (#333).
     for (const key of this.pendingDelays.keys()) this.retireDelay(key);
@@ -1464,6 +1476,65 @@ export class AppController {
     );
   }
 
+  /** Cancels a host's pending activity retry without resetting its bounded attempt budget. */
+  private cancelActivityRetryTimer(serverID: string): void {
+    const timer = this.activityRetryTimers.get(serverID);
+    if (timer === undefined) return;
+    this.scheduler.clearTimeout(timer);
+    this.activityRetryTimers.delete(serverID);
+  }
+
+  /** Clears a host's retry entirely: a successful activity read, unpair or disposal. */
+  private clearActivityRetry(serverID: string): void {
+    this.cancelActivityRetryTimer(serverID);
+    this.activityRetryAttempts.delete(serverID);
+  }
+
+  /** Schedules a bounded activity-only retry; the session list is never refetched (#341). */
+  private scheduleActivityRetry(serverID: string, epoch: number): void {
+    this.cancelActivityRetryTimer(serverID);
+    const attempt = this.activityRetryAttempts.get(serverID) ?? 0;
+    // Bounded: a permanently unavailable activity service retries a few times, then leaves the
+    // last-known running evidence stale until the next user-driven refresh. No infinite loop.
+    if (attempt >= 3) return;
+    this.activityRetryAttempts.set(serverID, attempt + 1);
+    const timer = this.scheduler.setTimeout(
+      () => {
+        this.activityRetryTimers.delete(serverID);
+        void this.retryActivityRead(serverID, epoch);
+      },
+      250 * 2 ** attempt,
+    );
+    this.activityRetryTimers.set(serverID, timer);
+  }
+
+  /** Re-reads only activity for the still-current host, then reconciles running state. */
+  private async retryActivityRead(serverID: string, epoch: number): Promise<void> {
+    if (
+      this.disposed ||
+      !this.serverIDs().includes(serverID) ||
+      !this.isRefreshCurrent(serverID, epoch)
+    )
+      return;
+    // Events stamped after this boundary are newer than the activity snapshot and must win.
+    const snapshotSeq = this.generations.eventClock();
+    let active: Set<string>;
+    try {
+      active = new Set(await this.backendFor(serverID).activeSessionIDs());
+    } catch {
+      this.scheduleActivityRetry(serverID, epoch);
+      return;
+    }
+    if (
+      this.disposed ||
+      !this.serverIDs().includes(serverID) ||
+      !this.isRefreshCurrent(serverID, epoch)
+    )
+      return;
+    this.clearActivityRetry(serverID);
+    batch(() => this.reconcileRunning(serverID, active, snapshotSeq));
+  }
+
   /** Set when the launch server failed to refresh; bootstrap re-throws it for the CLI. */
   private launchLoadError: unknown;
 
@@ -1479,7 +1550,9 @@ export class AppController {
       error: string | undefined;
       cause: unknown;
       fresh: Record<string, SessionSummary>;
-      active: Set<string>;
+      /** Present only when the activity read succeeded; absence means stale/unknown (#341). */
+      active?: Set<string>;
+      activeError?: string;
       cursor: string | undefined;
       snapshotSeq: number;
       usageSeq: number;
@@ -1500,7 +1573,8 @@ export class AppController {
             error: undefined as string | undefined,
             cause: undefined as unknown,
             fresh: loaded.fresh,
-            active: loaded.active,
+            ...(loaded.active === undefined ? {} : { active: new Set(loaded.active) }),
+            ...(loaded.activeError === undefined ? {} : { activeError: loaded.activeError }),
             cursor: loaded.cursor ?? undefined,
             snapshotSeq,
             usageSeq,
@@ -1518,7 +1592,6 @@ export class AppController {
             error: error instanceof Error ? error.message : 'Could not reach the server',
             cause: error,
             fresh: {},
-            active: new Set<string>(),
             cursor: undefined,
             snapshotSeq,
             usageSeq,
@@ -1564,10 +1637,24 @@ export class AppController {
         );
         for (const ref of reconciled.deleted) this.forgetSession(ref.sessionID, ref.serverID);
         this.setState('serverPages', result.serverID, sessionPage(result));
-        if (result.ok) this.reconcileRunning(result.serverID, result.active, result.snapshotSeq);
+        // Only a successful activity read may change running state. An unknown activity
+        // outcome leaves the last-known flags untouched — an empty set here would falsely
+        // declare every session stopped (#341).
+        if (result.active !== undefined)
+          this.reconcileRunning(result.serverID, result.active, result.snapshotSeq);
       });
       committed.push(result.serverID);
-      if (result.ok) activeByServer.set(result.serverID, result.active);
+      if (result.active !== undefined) activeByServer.set(result.serverID, result.active);
+      if (result.activeError !== undefined) {
+        this.debugLog.write('activity-lookup-failed', {
+          serverID: result.serverID,
+          error: result.activeError,
+        });
+        // Retry only the activity capability; the successful list/cursor already committed.
+        this.scheduleActivityRetry(result.serverID, result.epoch);
+      } else {
+        this.clearActivityRetry(result.serverID);
+      }
     }
 
     // A refresh that committed nothing must not publish aggregate state at all: doing so
@@ -1640,7 +1727,8 @@ export class AppController {
     serverID: string;
     epoch: number;
     fresh: Record<string, SessionSummary>;
-    active: Set<string>;
+    active?: ReadonlySet<string>;
+    activeError?: string;
     cursor?: string;
   }> {
     const effectiveEpoch = epoch ?? this.nextRefreshEpoch(serverID);
@@ -1792,12 +1880,11 @@ export class AppController {
           };
         }
         const cursor = this.state.serverPages[serverID]?.cursor;
+        // Identity/pagination and activity are independent capabilities: a failed activity read
+        // must not drop a successful page or its cursor (#341).
+        let page;
         try {
-          const [page, active] = await Promise.all([
-            backend.listSessions(cursor === undefined ? {} : { cursor }),
-            backend.activeSessionIDs(),
-          ]);
-          return { serverID, epoch, snapshotSeq, ok: true as const, page, active };
+          page = await backend.listSessions(cursor === undefined ? {} : { cursor });
         } catch (error) {
           return {
             serverID,
@@ -1806,6 +1893,28 @@ export class AppController {
             ok: false as const,
             error: error instanceof Error ? error.message : 'Unknown error loading sessions',
             cause: error,
+          };
+        }
+        try {
+          const active = await backend.activeSessionIDs();
+          return {
+            serverID,
+            epoch,
+            snapshotSeq,
+            ok: true as const,
+            page,
+            active: new Set(active),
+            activeError: undefined as string | undefined,
+          };
+        } catch (error) {
+          return {
+            serverID,
+            epoch,
+            snapshotSeq,
+            ok: true as const,
+            page,
+            active: undefined,
+            activeError: error instanceof Error ? error.message : 'Activity lookup failed',
           };
         }
       }),
@@ -1842,7 +1951,19 @@ export class AppController {
           complete: result.page.nextCursor === undefined,
           loading: false,
         });
-        this.reconcileRunning(result.serverID, result.active, result.snapshotSeq);
+        // Publish the page unconditionally; only a successful activity read may change
+        // running state. A failed read leaves last-known flags alone and schedules an
+        // activity-only retry instead of rebuilding the list (#341).
+        if (result.active !== undefined) {
+          this.reconcileRunning(result.serverID, result.active, result.snapshotSeq);
+          this.clearActivityRetry(result.serverID);
+        } else if (result.activeError !== undefined) {
+          this.debugLog.write('activity-lookup-failed', {
+            serverID: result.serverID,
+            error: result.activeError,
+          });
+          this.scheduleActivityRetry(result.serverID, result.epoch);
+        }
       }
       const all = this.serverIDs().map((serverID) => this.state.serverPages[serverID]);
       this.setStateTouchingOverview(
@@ -1866,7 +1987,7 @@ export class AppController {
     // and each failure is isolated so one host cannot abort or mask a healthy one (#196).
     const followUps = applied.flatMap((result) =>
       result.ok
-        ? [...result.active].map(async (sessionID) => {
+        ? [...(result.active ?? [])].map(async (sessionID) => {
             if (!this.serverIDs().includes(result.serverID)) return;
             try {
               await this.refreshInputRequests(sessionID, result.serverID);
@@ -5484,6 +5605,9 @@ export class AppController {
     // A held permission reply on this host must not keep a lock after unpair; a re-pair must
     // not inherit it, and other hosts keep their independent replies (#340).
     this.retirePermissionReplies((host) => host === serverID);
+    // An in-flight activity retry for this host must not revive running flags on a re-pair
+    // under the same ID; other hosts keep their independent retry budgets (#341).
+    this.clearActivityRetry(serverID);
     // Retire every host-owned timer so an unpair/re-pair cannot run a stale continuation
     // against a replacement registration (#333). Other hosts keep their pending work.
     this.retireDelaysWhere((key) => key.startsWith(hostPrefix));

@@ -25,7 +25,13 @@ export interface ServerSessionPage {
   readonly serverID: string;
   readonly epoch: number;
   readonly fresh: Record<string, SessionSummary>;
-  readonly active: Set<string>;
+  /**
+   * Last-known active session IDs, present only when the activity read succeeded. Absence
+   * means running evidence is stale/unknown — never "every session stopped" (#341).
+   */
+  readonly active?: ReadonlySet<string>;
+  /** Diagnostic when the activity read failed; identity and paging remain valid (#341). */
+  readonly activeError?: string;
   readonly cursor?: string;
 }
 
@@ -51,16 +57,26 @@ export class SessionFetcher {
       cursor = page.nextCursor;
       pages += 1;
     } while (cursor !== undefined && pages < this.deps.pageLimit);
-    const active = await backend.activeSessionIDs();
-    return {
+    const page: ServerSessionPage = {
       serverID,
       fresh: Object.fromEntries(
         loaded.map((session) => [this.deps.keyFor(serverID, session.id), session]),
       ),
-      active,
       epoch,
       ...(cursor === undefined ? {} : { cursor }),
     };
+    // Activity is a separate, less authoritative capability than session identity and
+    // pagination. A failed activity lookup must not throw away a successful listing: report
+    // the cause distinctly and leave running evidence unknown (#341). The caller's epoch and
+    // registration guards still reject the whole page if the host was replaced mid-read.
+    try {
+      return { ...page, active: await backend.activeSessionIDs() };
+    } catch (error) {
+      return {
+        ...page,
+        activeError: error instanceof Error ? error.message : 'Activity lookup failed',
+      };
+    }
   }
 
   async reconcile(refs: readonly SessionRef[]): Promise<ReconciledSessions> {

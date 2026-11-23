@@ -43,6 +43,34 @@ describe('session fetcher (#308)', () => {
     expect(page.fresh[sessionKey({ serverID: 'local', sessionID: 'a' })]?.serverID).toBe('local');
   });
 
+  test('a failed activity read keeps the successful page, cursor and rows (#341)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [summary('a'), summary('b')];
+    backend.activeSessionIDs = async () => {
+      throw new BackendError('transport', 'session.active', 'activity offline');
+    };
+    const fetcher = new SessionFetcher(deps(backend));
+    const page = await fetcher.loadServer('local', 7);
+    // Identity and paging survive; activity is reported as a distinct, unknown outcome.
+    expect(Object.keys(page.fresh)).toEqual([
+      sessionKey({ serverID: 'local', sessionID: 'a' }),
+      sessionKey({ serverID: 'local', sessionID: 'b' }),
+    ]);
+    expect(page.active).toBeUndefined();
+    expect(page.activeError).toContain('activity offline');
+    expect(page.epoch).toBe(7);
+  });
+
+  test('a successful activity read exposes the active set as evidence (#341)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [summary('a')];
+    backend.active = new Set(['a']);
+    const fetcher = new SessionFetcher(deps(backend));
+    const page = await fetcher.loadServer('local', 3);
+    expect([...(page.active ?? [])]).toEqual(['a']);
+    expect(page.activeError).toBeUndefined();
+  });
+
   test('honours the page limit and fails closed for an unknown host', async () => {
     const backend = new FakeBackend();
     let listed = 0;
