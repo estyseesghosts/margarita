@@ -32,4 +32,19 @@ describe('prompt admission gate (#312)', () => {
     expect(gate.isAdmitting('never-claimed')).toBe(false);
     expect(gate.begin('never-claimed')).toBe(true);
   });
+
+  test('owned claims cannot be released by an older flight (#337)', () => {
+    const gate = new AdmissionGate();
+    const first = gate.beginOwned('new:host|project');
+    expect(first).toBeDefined();
+    expect(gate.beginOwned('new:host|project')).toBeUndefined();
+    expect(gate.endOwned('new:host|project', Symbol('other'))).toBe(false);
+    expect(gate.endOwned('new:host|project', first ?? Symbol('none'))).toBe(true);
+    const second = gate.beginOwned('new:host|project');
+    expect(second).toBeDefined();
+    expect(gate.endOwned('new:host|project', first ?? Symbol('none'))).toBe(false);
+    expect(gate.isAdmitting('new:host|project')).toBe(true);
+    gate.clear();
+    expect(gate.isAdmitting('new:host|project')).toBe(false);
+  });
 });

@@ -3123,6 +3123,108 @@ describe('createSession does not steal focus or mutate another draft (issue #113
   });
 });
 
+describe('new-session creation is single-flight and registration-fenced (#337, #338)', () => {
+  test('two Enter presses while createSession is held create one session and send one prompt', async () => {
+    const backend = new FakeBackend();
+    const created = deferred<SessionSummary>();
+    backend.createSessionHook = () => created.promise;
+    const controller = makeController(async () => [], backend);
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      controller.setComposer(composerFrom('hello'));
+
+      // Two presses in the same tick: the gate is acquired before the first await, so the
+      // second call cannot start a competing creation or billable prompt.
+      const first = controller.submit();
+      const second = controller.submit();
+      expect(await second).toBeUndefined();
+      expect(controller.state.notice?.text).toContain('already being created');
+
+      created.resolve({ ...fakeSession('ses_b'), directory: '/work/kohjoh' });
+      await first;
+      expect(backend.calls.filter((call) => call.name === 'createSession')).toHaveLength(1);
+      expect(backend.calls.filter((call) => call.name === 'prompt')).toHaveLength(1);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('an older flight cannot release the gate of its replacement after teardown', async () => {
+    const backend = new FakeBackend();
+    const created = deferred<SessionSummary>();
+    backend.createSessionHook = () => created.promise;
+    const controller = makeController(async () => [], backend);
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      const oldFlight = controller.createSessionWithPrompt(
+        { serverID: 'local', directory: '/work/kohjoh' },
+        'first',
+      );
+      controller.dispose();
+      created.resolve({ ...fakeSession('ses_b'), directory: '/work/kohjoh' });
+      await oldFlight;
+
+      const replacement = makeController(async () => [], backend);
+      try {
+        await replacement.bootstrap();
+        replacement.openOverview();
+        const next = deferred<SessionSummary>();
+        backend.createSessionHook = () => next.promise;
+        const second = replacement.createSessionWithPrompt(
+          { serverID: 'local', directory: '/work/kohjoh' },
+          'second',
+        );
+        expect(replacement.state.notice?.text).toBeUndefined();
+        next.resolve({ ...fakeSession('ses_c'), directory: '/work/kohjoh' });
+        expect(await second).toBe('ses_c');
+      } finally {
+        replacement.dispose();
+      }
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('a server replaced mid-create receives no prompt or model switch (#338)', async () => {
+    const backendA = new FakeBackend();
+    backendA.serverID = 'srv_1';
+    const backendB = new FakeBackend();
+    backendB.serverID = 'srv_1';
+    let current = backendA;
+    const created = deferred<SessionSummary>();
+    backendA.createSessionHook = () => {
+      // Replace the registration only once the create RPC is actually on the wire.
+      current = backendB;
+      return created.promise;
+    };
+    const controller = makeController(async () => [], backendA, undefined, {
+      serverIDs: () => ['srv_1'],
+      backendFor: (serverID) => (serverID === 'srv_1' ? current : backendA),
+    });
+    try {
+      await controller.bootstrap();
+      controller.openOverview();
+      const flight = controller.createSessionWithPrompt(
+        { serverID: 'srv_1', directory: '/work/kohjoh' },
+        'hello',
+      );
+      // Unpair/re-pair happens inside createSessionHook; resolving the old create now must
+      // not commit the result against the replacement registration.
+      created.resolve({ ...fakeSession('ses_b'), serverID: 'srv_1' });
+      expect(await flight).toBe('ses_b');
+
+      expect(backendA.calls.filter((call) => call.name === 'prompt')).toHaveLength(0);
+      expect(backendB.calls.filter((call) => call.name === 'prompt')).toHaveLength(0);
+      expect(backendB.calls.filter((call) => call.name === 'switchModel')).toHaveLength(0);
+      expect(controller.state.notice?.text).toContain('no longer available');
+    } finally {
+      controller.dispose();
+    }
+  });
+});
+
 describe('openOverview preserves the originating project (issue #106)', () => {
   test('keeps the originating project when the active tab excludes its sessions', async () => {
     const { controller } = multiServerController();

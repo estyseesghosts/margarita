@@ -561,6 +561,13 @@ export class AppController {
   private readonly confirmedAgents = new Map<string, AgentEvidence>();
   /** Sole owner of in-flight prompt admissions per server-qualified session (#312). */
   private readonly admissions = new AdmissionGate();
+
+  /**
+   * Sole owner of in-flight new-session creation, keyed by immutable host/project/draft
+   * identity. A double Enter must never allocate two sessions or send a billable prompt twice
+   * (#337), and an old flight's cleanup must not release its replacement.
+   */
+  private readonly creations = new AdmissionGate();
   /** Each open form has a unique token, and replies are guarded per server/session/form. */
   private formToken = 0;
   private readonly answeringForms = new Set<string>();
@@ -757,6 +764,7 @@ export class AppController {
     this.jobStartProbes.clear();
     this.transcriptFlights.dispose();
     this.ancestry.dispose();
+    this.creations.clear();
   }
 
   /** Short scheduler-driven pause between a settled read and a coalesced rerun. */
@@ -4102,7 +4110,20 @@ export class AppController {
         this.showNotice('Start a session before running commands.', 'warn');
         return;
       }
-      await this.createSessionWithPrompt(this.currentProject(), text);
+      // The new-session branch has no session key for the normal admission gate. Check the
+      // project-scoped creation gate synchronously so a double Enter gets the same explicit
+      // notice before it reaches the public creation entry point (#337).
+      const project = this.currentProject();
+      const creationKey = `${this.drafts.keyFor({ kind: 'new', ...project })}|${this.routeKey(this.state.route)}`;
+      if (this.creations.isAdmitting(creationKey)) {
+        this.showNotice(
+          'A new session is already being created for this project. Wait for confirmation before sending again.',
+          'dim',
+          false,
+        );
+        return;
+      }
+      await this.createSessionWithPrompt(project, text);
       return;
     }
     // Capture the originating host/session before any await: a user may navigate to another
@@ -4539,9 +4560,9 @@ export class AppController {
     project: ProjectRef,
     text: string | undefined,
   ): Promise<string | undefined> {
+    const { serverID, directory } = project;
     const agent = this.state.overview.agent;
     const model = this.state.overview.model;
-    const { serverID, directory } = project;
     // Submission envelope, captured before any route or draft change: opening the new
     // session restores its own (empty) draft, so reading the composer back afterwards
     // silently dropped the user's prompt and attachments (issue #77).
@@ -4551,136 +4572,195 @@ export class AppController {
     // route they are viewing (issue #113).
     const originKey = this.routeKey(this.state.route);
     const originProject = this.currentProject();
-    this.setState('admitting', true);
-    // Scope agent/model to the target project's catalog before creating: a choice made on
-    // another host must not be carried into a session here (issue #108). Wait for the
-    // correct scoped catalog and reject stale results after navigation.
-    if (!(await this.ensureCatalog(directory, serverID))) {
-      this.setState('admitting', false);
-      return undefined;
-    }
-    const scopedAgent =
-      agent !== undefined && this.state.agents.some((a) => a.id === agent) ? agent : undefined;
-    // A catalog model describes its available variants, not a selected variant:
-    // comparing it with sameModel() falsely rejects every explicit #variant.
-    // Never replace an explicit choice with a default: that could bill a different provider.
-    const resolution = this.resolveModelFor(serverID, directory, model);
-    if (resolution.kind === 'blocked') {
-      this.setState('admitting', false);
+    // Acquire synchronously, before the catalog await: two Enter presses in the same tick
+    // must not allocate two billable sessions (#337). The key uses the immutable host,
+    // project and originating draft identity, never a display label or bare session ID.
+    const creationKey = `${this.drafts.keyFor({ kind: 'new', serverID, directory })}|${originKey}`;
+    const token = this.creations.beginOwned(creationKey);
+    if (token === undefined) {
       this.showNotice(
-        `Model ${formatModelRef(resolution.model)} is unavailable for ${directory} on ${serverID}. No prompt sent.`,
-        'error',
+        'A new session is already being created for this project. Wait for confirmation before sending again.',
+        'dim',
+        false,
       );
       return undefined;
     }
-    const scopedModel = resolution.kind === 'model' ? resolution.model : undefined;
-    // The server default is passed through as before; every other source is a deliberate
-    // choice and must be confirmed by the server before anything billable is admitted.
-    const confirmModel =
-      resolution.kind === 'model' && resolution.source !== 'server-default'
-        ? resolution.model
-        : undefined;
-    let session: SessionSummary;
+    this.setState('admitting', true);
     try {
-      session = await this.backendFor(serverID).createSession({
-        directory,
-        ...(scopedAgent === undefined ? {} : { agent: scopedAgent }),
-        ...(scopedModel === undefined ? {} : { model: scopedModel }),
-      });
-      this.debugLog.write('action', { action: 'create-session', ok: true });
-    } catch (error) {
-      this.debugLog.write('action', {
-        action: 'create-session',
-        ok: false,
-        errorKind: error instanceof BackendError ? error.kind : 'unknown',
-      });
-      this.setState('admitting', false);
-      this.showNotice(errorText(error), 'error');
-      return undefined;
-    }
-    if (confirmModel !== undefined) {
-      // V2 resolves a missing model at first prompt. Verify the server actually stored
-      // our explicit selection before admitting anything billable. Repair an ignored
-      // create-time selection once, and fail closed if it still does not match.
+      // Capture the registration and the exact backend object before the first await. Every
+      // later stage uses this one owner; re-resolving backendFor() after an await would
+      // retarget a replaced host and could send the prompt to unrelated state (#338).
       const backend = this.backendFor(serverID);
-      try {
-        let confirmed = await backend.getSession(session.id);
-        if (confirmed.model === undefined || !sameModel(confirmed.model, confirmModel)) {
-          await backend.switchModel(session.id, confirmModel);
-          confirmed = await backend.getSession(session.id);
-        }
-        if (confirmed.model === undefined || !sameModel(confirmed.model, confirmModel)) {
-          throw new Error(
-            `server reported ${confirmed.model === undefined ? 'no model' : formatModelRef(confirmed.model)}`,
-          );
-        }
-        session = confirmed;
-        this.recordConfirmedModel(serverID, directory, confirmModel);
-      } catch (error) {
-        this.setState('admitting', false);
+      const outdated = (): boolean => this.disposed || !this.isRegisteredBackend(serverID, backend);
+      const abandoned = (sessionID?: string): void => {
         this.showNotice(
-          `Session ${session.id} created, but model ${formatModelRef(confirmModel)} was not confirmed. Prompt not sent: ${errorText(error)}`,
+          sessionID === undefined
+            ? 'The original server is no longer available. No prompt was sent.'
+            : `Session ${sessionID} was created on the original server, but that server is no ` +
+                'longer available here. No prompt was sent.',
+          'warn',
+        );
+      };
+      // Scope agent/model to the target project's catalog before creating: a choice made on
+      // another host must not be carried into a session here (issue #108). Wait for the
+      // correct scoped catalog and reject stale results after navigation.
+      if (!(await this.ensureCatalog(directory, serverID))) return undefined;
+      if (outdated()) {
+        abandoned();
+        return undefined;
+      }
+      const scopedAgent =
+        agent !== undefined && this.state.agents.some((a) => a.id === agent) ? agent : undefined;
+      // A catalog model describes its available variants, not a selected variant:
+      // comparing it with sameModel() falsely rejects every explicit #variant.
+      // Never replace an explicit choice with a default: that could bill a different provider.
+      const resolution = this.resolveModelFor(serverID, directory, model);
+      if (resolution.kind === 'blocked') {
+        this.showNotice(
+          `Model ${formatModelRef(resolution.model)} is unavailable for ${directory} on ${serverID}. No prompt sent.`,
           'error',
         );
+        return undefined;
+      }
+      const scopedModel = resolution.kind === 'model' ? resolution.model : undefined;
+      // The server default is passed through as before; every other source is a deliberate
+      // choice and must be confirmed by the server before anything billable is admitted.
+      const confirmModel =
+        resolution.kind === 'model' && resolution.source !== 'server-default'
+          ? resolution.model
+          : undefined;
+      let session: SessionSummary;
+      try {
+        session = await backend.createSession({
+          directory,
+          ...(scopedAgent === undefined ? {} : { agent: scopedAgent }),
+          ...(scopedModel === undefined ? {} : { model: scopedModel }),
+        });
+        this.debugLog.write('action', { action: 'create-session', ok: true });
+      } catch (error) {
+        this.debugLog.write('action', {
+          action: 'create-session',
+          ok: false,
+          errorKind: error instanceof BackendError ? error.kind : 'unknown',
+        });
+        this.showNotice(errorText(error), 'error');
+        return undefined;
+      }
+      const capturedProjectKey = directoryKey(directory, this.platformFor(serverID));
+      const belongsToHost =
+        session.serverID === serverID &&
+        directoryKey(session.directory, this.platformFor(serverID)) === capturedProjectKey;
+      if (outdated() || !belongsToHost) {
+        abandoned(session.id);
         return session.id;
       }
-    }
-    this.setState('admitting', false);
-    const sessionServerID = session.serverID ?? serverID;
-    this.setStateTouchingOverview('sessions', this.keyFor(sessionServerID, session.id), {
-      ...session,
-      serverID: sessionServerID,
-    });
-    if (text === undefined) {
-      this.openSession(session.id, sessionServerID);
+      if (confirmModel !== undefined) {
+        // V2 resolves a missing model at first prompt. Verify the server actually stored
+        // our explicit selection before admitting anything billable. Repair an ignored
+        // create-time selection once, and fail closed if it still does not match.
+        try {
+          let confirmed = await backend.getSession(session.id);
+          if (outdated()) {
+            abandoned(session.id);
+            return session.id;
+          }
+          if (confirmed.model === undefined || !sameModel(confirmed.model, confirmModel)) {
+            await backend.switchModel(session.id, confirmModel);
+            if (outdated()) {
+              abandoned(session.id);
+              return session.id;
+            }
+            confirmed = await backend.getSession(session.id);
+          }
+          if (outdated()) {
+            abandoned(session.id);
+            return session.id;
+          }
+          if (confirmed.model === undefined || !sameModel(confirmed.model, confirmModel)) {
+            throw new Error(
+              `server reported ${confirmed.model === undefined ? 'no model' : formatModelRef(confirmed.model)}`,
+            );
+          }
+          session = confirmed;
+          this.recordConfirmedModel(serverID, directory, confirmModel);
+        } catch (error) {
+          this.showNotice(
+            `Session ${session.id} created, but model ${formatModelRef(confirmModel)} was not confirmed. Prompt not sent: ${errorText(error)}`,
+            'error',
+          );
+          return session.id;
+        }
+      }
+      const sessionServerID = session.serverID ?? serverID;
+      this.setStateTouchingOverview('sessions', this.keyFor(sessionServerID, session.id), {
+        ...session,
+        serverID: sessionServerID,
+      });
+      if (text === undefined) {
+        this.openSession(session.id, sessionServerID);
+        return session.id;
+      }
+      const stillOrigin =
+        this.routeKey(this.state.route) === originKey &&
+        originProject.serverID === project.serverID &&
+        originProject.directory === project.directory;
+      if (stillOrigin) {
+        // Empty the route we are leaving (its draft must not keep a copy of the sent prompt),
+        // then restore the envelope into the created session until the server acknowledges it.
+        this.clearComposer(text, attachments);
+        this.openSession(session.id, sessionServerID);
+        this.writeComposer(composerFrom(text));
+        this.setState('attachments', [...attachments]);
+      }
+      const sent = await this.admit(
+        { serverID: sessionServerID, sessionID: session.id },
+        text,
+        directory,
+        async () => {
+          if (outdated()) {
+            abandoned(session.id);
+            return false;
+          }
+          const { files, agents } = await this.promptFiles(
+            text,
+            directory,
+            attachments,
+            sessionServerID,
+          );
+          if (outdated()) {
+            abandoned(session.id);
+            return false;
+          }
+          if (
+            this.modelDispatchBlocked(sessionServerID, session.id) ||
+            this.agentDispatchBlocked(sessionServerID, session.id)
+          )
+            return false;
+          await backend.prompt(session.id, {
+            text,
+            files,
+            ...(agents.length === 0 ? {} : { agents }),
+          });
+          return true;
+        },
+        undefined,
+        attachments,
+      );
+      if (!sent) {
+        if (outdated()) return session.id;
+        // Prompt delivery failed or was ambiguous: park the unsent text and files in the
+        // created session's draft so they can be recovered, and report against the new
+        // session without touching the route the user is viewing.
+        this.stashPromptDraft(sessionServerID, session.id, text, attachments);
+        this.showNotice(`Session ${session.id} was created but the prompt was not sent.`, 'error');
+      }
       return session.id;
+    } finally {
+      // Only the owning flight may release the gate; an older flight settling after a
+      // replacement cannot unlock it (#337). Dispose clears the whole gate (#338).
+      this.creations.endOwned(creationKey, token);
+      if (!this.disposed) this.setState('admitting', false);
     }
-    const stillOrigin =
-      this.routeKey(this.state.route) === originKey &&
-      originProject.serverID === project.serverID &&
-      originProject.directory === project.directory;
-    if (stillOrigin) {
-      // Empty the route we are leaving (its draft must not keep a copy of the sent prompt),
-      // then restore the envelope into the created session until the server acknowledges it.
-      this.clearComposer(text, attachments);
-      this.openSession(session.id, sessionServerID);
-      this.writeComposer(composerFrom(text));
-      this.setState('attachments', [...attachments]);
-    }
-    const sent = await this.admit(
-      { serverID: sessionServerID, sessionID: session.id },
-      text,
-      directory,
-      async () => {
-        const { files, agents } = await this.promptFiles(
-          text,
-          directory,
-          attachments,
-          sessionServerID,
-        );
-        if (
-          this.modelDispatchBlocked(sessionServerID, session.id) ||
-          this.agentDispatchBlocked(sessionServerID, session.id)
-        )
-          return false;
-        await this.backendFor(sessionServerID).prompt(session.id, {
-          text,
-          files,
-          ...(agents.length === 0 ? {} : { agents }),
-        });
-        return true;
-      },
-      undefined,
-      attachments,
-    );
-    if (!sent) {
-      // Prompt delivery failed or was ambiguous: park the unsent text and files in the
-      // created session's draft so they can be recovered, and report against the new
-      // session without touching the route the user is viewing.
-      this.stashPromptDraft(sessionServerID, session.id, text, attachments);
-      this.showNotice(`Session ${session.id} was created but the prompt was not sent.`, 'error');
-    }
-    return session.id;
   }
 
   /** Parks unsent prompt text and attachments in the created session's draft for recovery. */
