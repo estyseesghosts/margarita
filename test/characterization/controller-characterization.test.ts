@@ -228,4 +228,61 @@ describe('time-driven behavior under an injected scheduler (#326)', () => {
     harness.dispose();
     expect(harness.scheduler.pendingCount()).toBe(0);
   });
+
+  test('a deleted lifetime cannot run its deferred dirty follow-up (#333)', async () => {
+    const harness = await createHarness();
+    harness.controller.openSession(harness.sessionID, 'local');
+    await harness.settle();
+    const backend = harness.backend('local');
+    const gate = deferred<Awaited<ReturnType<typeof backend.listMessages>>>();
+    // Count explicitly: a FakeBackend method override does not record calls, so callsSince()
+    // cannot observe a read held open by this override.
+    let heldCalls = 0;
+    backend.listMessages = () => {
+      heldCalls += 1;
+      return gate.promise;
+    };
+
+    // Two hints while the first read is held: the second coalesces into a dirty follow-up.
+    harness.emit('local', [{ kind: 'transcript-changed', sessionID: harness.sessionID }], false);
+    await harness.settle();
+    harness.emit('local', [{ kind: 'transcript-changed', sessionID: harness.sessionID }], false);
+    await harness.settle();
+    gate.resolve({ messages: [] });
+    await harness.settle();
+    const afterRead = heldCalls;
+    // The read settled but its 80ms follow-up is now owned by a tracked, cancellable timer.
+    expect(harness.scheduler.pendingCount()).toBeGreaterThan(0);
+
+    // Delete the session while the follow-up is held, then advance past its due time.
+    harness.emit('local', [{ kind: 'session-deleted', sessionID: harness.sessionID }], false);
+    await harness.settle();
+    harness.scheduler.advanceBy(200);
+    await harness.settle();
+    expect(heldCalls).toBe(afterRead);
+    harness.dispose();
+  });
+
+  test('dispose settles a pending dirty-follow-up so its awaiter does not hang (#333)', async () => {
+    const harness = await createHarness();
+    harness.controller.openSession(harness.sessionID, 'local');
+    await harness.settle();
+    const backend = harness.backend('local');
+    const gate = deferred<Awaited<ReturnType<typeof backend.listMessages>>>();
+    backend.listMessages = () => gate.promise;
+
+    harness.emit('local', [{ kind: 'transcript-changed', sessionID: harness.sessionID }], false);
+    await harness.settle();
+    harness.emit('local', [{ kind: 'transcript-changed', sessionID: harness.sessionID }], false);
+    await harness.settle();
+    gate.resolve({ messages: [] });
+    await harness.settle();
+    expect(harness.scheduler.pendingCount()).toBeGreaterThan(0);
+
+    harness.dispose();
+    expect(harness.scheduler.pendingCount()).toBe(0);
+    harness.scheduler.advanceBy(200);
+    await harness.settle();
+    expect(backend.calls.filter((call) => call.name === 'listMessages')).toHaveLength(1);
+  });
 });

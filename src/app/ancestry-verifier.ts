@@ -6,6 +6,13 @@
  * timeouts — is an explicit port supplied by the owning controller, so the whole ownership
  * decision (including stalls, cycles, depth caps and stale results) can be tested with
  * deterministic fakes. It never writes the reactive store or selects navigation.
+ *
+ * OpenCode v2 exposes an AbortSignal only for `events`, not for `getSession`. A stalled
+ * ancestry read therefore cannot be canceled on the wire (#332); instead a retired walk is
+ * checked before every hop and after every await so it issues no further RPCs, and the
+ * number of logically outstanding reads is capped so repeated retries cannot accumulate
+ * unbounded backend work. A retired read releases its logical slot immediately, so a
+ * recovered backend can issue a fresh request.
  */
 import type { Backend } from '../adapter/backend.ts';
 import type { SessionSummary } from '../domain/session.ts';
@@ -45,6 +52,8 @@ export interface AncestryVerifierDeps {
   readonly concurrency: number;
   readonly timeoutMs: number;
   readonly budgetMs: number;
+  /** Cap on logically outstanding noncancelable reads across all retry attempts (#332). */
+  readonly maxOutstandingReads?: number;
 }
 
 /** Classified results of one bounded verification phase. */
@@ -64,11 +73,27 @@ interface AncestryLookup {
   readonly promise: Promise<DescendantCheck>;
 }
 
+/** A read whose slot is reserved until it settles or its flight is retired. */
+interface TrackedRead {
+  readonly token: number;
+  released: boolean;
+}
+
+const defaultMaxOutstandingReads = 8;
+
+/** A retired walk is unresolved, never a definitive "unrelated" verdict (#332). */
+const retiredCheck: DescendantCheck = {
+  status: 'unresolved',
+  error: 'the ownership check was retired',
+};
+
 /** Owns ancestry evidence and the bounded verification of unknown child owners. */
 export class AncestryVerifier {
   private readonly evidenceByKey = new Map<string, VerifiedDescendant>();
   private readonly serverByKey = new Map<string, string>();
   private readonly lookups = new Map<string, AncestryLookup>();
+  private readonly activeReads = new Set<TrackedRead>();
+  private readonly readWaiters: Array<() => void> = [];
   private nextToken = 1;
 
   constructor(private readonly deps: AncestryVerifierDeps) {}
@@ -76,6 +101,11 @@ export class AncestryVerifier {
   /** Read-only evidence for the pure descendantScope rule. */
   evidence(): ReadonlyMap<string, VerifiedDescendant> {
     return this.evidenceByKey;
+  }
+
+  /** Logically outstanding reads, exposed for bounded-work assertions in tests (#332). */
+  outstandingReads(): number {
+    return this.activeReads.size;
   }
 
   /** Drops one session's evidence and pending walks after deletion or ID reuse. */
@@ -102,16 +132,70 @@ export class AncestryVerifier {
     }
   }
 
-  /** Clears all owned walks and evidence; late completions become inert (#332). */
+  /** Clears all owned walks, reads and evidence; late completions become inert (#332). */
   dispose(): void {
     this.lookups.clear();
     this.evidenceByKey.clear();
     this.serverByKey.clear();
+    for (const read of this.activeReads) this.releaseRead(read);
+    this.activeReads.clear();
+    this.readWaiters.length = 0;
   }
 
   /** Removes a lookup only while it is still the flight that created it. */
   private retireLookup(lookupKey: string, token: number): void {
-    if (this.lookups.get(lookupKey)?.token === token) this.lookups.delete(lookupKey);
+    if (this.lookups.get(lookupKey)?.token !== token) return;
+    this.lookups.delete(lookupKey);
+    // The wire request may still be pending, but its flight is over: free its logical slot
+    // so a recovered backend can retry instead of queuing behind an abandoned read (#332).
+    for (const read of this.activeReads) {
+      if (read.token === token) this.releaseRead(read);
+    }
+  }
+
+  private releaseRead(read: TrackedRead): void {
+    if (read.released) return;
+    read.released = true;
+    this.activeReads.delete(read);
+    this.readWaiters.shift()?.();
+  }
+
+  /** Bounded, retirement-aware read: retired flights release their slot immediately. */
+  private async boundedGetSession(
+    token: number,
+    backend: Backend,
+    sessionID: string,
+    isRetired: () => boolean,
+  ): Promise<SessionSummary> {
+    const cap = this.deps.maxOutstandingReads ?? defaultMaxOutstandingReads;
+    while (this.activeReads.size >= cap) {
+      await new Promise<void>((resolve) => this.readWaiters.push(resolve));
+      // A flight retired while queued for a slot must not start a late RPC (#332).
+      if (isRetired()) {
+        this.readWaiters.shift()?.();
+        throw new Error('the ownership check was retired');
+      }
+    }
+    if (isRetired()) throw new Error('the ownership check was retired');
+    const tracked: TrackedRead = { token, released: false };
+    this.activeReads.add(tracked);
+    let read: Promise<SessionSummary>;
+    try {
+      read = this.deps.getSession(backend, sessionID);
+    } catch (error) {
+      this.releaseRead(tracked);
+      throw error;
+    }
+    return read.then(
+      (value) => {
+        this.releaseRead(tracked);
+        return value;
+      },
+      (error: unknown) => {
+        this.releaseRead(tracked);
+        throw error;
+      },
+    );
   }
 
   /** Verifies one child, reusing lifetime-matched evidence and deduplicating concurrent walks. */
@@ -139,6 +223,10 @@ export class AncestryVerifier {
     if (existing !== undefined) return existing.promise;
     const token = this.nextToken;
     this.nextToken += 1;
+    // The walk starts synchronously, before the lookup is registered. Treat "not yet
+    // registered" as current so its first hop is not mistaken for a retired flight.
+    let registered = false;
+    const isRetired = (): boolean => registered && this.lookups.get(lookupKey)?.token !== token;
     const walk = this.walkAncestry(
       childID,
       ancestorID,
@@ -146,6 +234,8 @@ export class AncestryVerifier {
       childKey,
       childEpoch,
       ancestorEpoch,
+      token,
+      isRetired,
     ).then((result): DescendantCheck => {
       // A retired or replaced walk may not publish evidence or clear newer state (#332).
       if (this.lookups.get(lookupKey)?.token !== token) {
@@ -164,6 +254,7 @@ export class AncestryVerifier {
       this.retireLookup(lookupKey, token);
     });
     this.lookups.set(lookupKey, { token, childKey, ancestorKey, serverID, promise });
+    registered = true;
     return promise;
   }
 
@@ -174,18 +265,23 @@ export class AncestryVerifier {
     childKey: string,
     childEpoch: number,
     ancestorEpoch: number,
+    token: number,
+    isRetired: () => boolean,
   ): Promise<DescendantCheck> {
-    const { backendFor, isRegistered, getSession, keyFor, localSummary, isSessionCurrent } =
-      this.deps;
+    const { backendFor, isRegistered, keyFor, localSummary, isSessionCurrent } = this.deps;
     const backend = backendFor(serverID);
     const ancestorKey = keyFor(serverID, ancestorID);
     const stillCurrent = (): boolean =>
+      !isRetired() &&
       isRegistered(serverID, backend) &&
       isSessionCurrent(childKey, childEpoch) &&
       isSessionCurrent(ancestorKey, ancestorEpoch);
     const seen = new Set<string>();
     let current = childID;
     for (let depth = 0; depth < 32; depth += 1) {
+      // A retired walk must never begin another ancestor RPC, even when an earlier pending
+      // request resolves after the deadline or teardown (#332).
+      if (isRetired()) return retiredCheck;
       if (seen.has(current)) {
         return { status: 'unresolved', error: 'the session ancestry contains a cycle' };
       }
@@ -194,7 +290,10 @@ export class AncestryVerifier {
       try {
         const currentKey = keyFor(serverID, current);
         // The child itself may still be absent from the index; parents are usually cached.
-        const summary = localSummary(currentKey) ?? (await getSession(backend, current));
+        const summary =
+          localSummary(currentKey) ??
+          (await this.boundedGetSession(token, backend, current, isRetired));
+        if (isRetired()) return retiredCheck;
         if (!stillCurrent()) {
           return { status: 'unresolved', error: 'the session lifetime changed during lookup' };
         }

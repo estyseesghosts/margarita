@@ -240,6 +240,127 @@ describe('ancestry verifier (#310)', () => {
     });
   });
 
+  test('a retired multi-hop walk issues no further ancestor RPCs after recovery (#332)', async () => {
+    const timeouts: Array<() => void> = [];
+    const requested: string[] = [];
+    let releaseFirst!: (value: SessionSummary) => void;
+    let calls = 0;
+    const f = fixture({
+      withTimeout: (check) =>
+        new Promise<DescendantCheck>((resolve) => {
+          timeouts.push(() => resolve({ status: 'unresolved', error: 'timed out' }));
+          void check.then(resolve);
+        }),
+      getSession: async (_backend, sessionID) => {
+        requested.push(sessionID);
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<SessionSummary>((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return summary(sessionID, f.parents.get(sessionID));
+      },
+    });
+    f.parents.set('child', 'mid');
+    f.parents.set('mid', 'ancestor');
+
+    const first = f.verifier.verifyDescendant('child', 'ancestor', 'srv');
+    expect(requested).toEqual(['child']);
+    const fire = timeouts[0];
+    if (fire === undefined) throw new Error('expected a timeout for the first walk');
+    fire();
+    await first;
+
+    const retry = await f.verifier.verifyDescendant('child', 'ancestor', 'srv');
+    expect(retry).toEqual({ status: 'verified' });
+    expect(requested).toEqual(['child', 'child', 'mid']);
+
+    // The retired walk's deferred child response must not start the old mid-hop RPC.
+    releaseFirst(summary('child', 'mid'));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(requested).toEqual(['child', 'child', 'mid']);
+    expect(f.verifier.outstandingReads()).toBe(0);
+    expect(f.verifier.evidence().get('srv|child')).toEqual({
+      ancestor: 'ancestor',
+      childEpoch: 1,
+      ancestorEpoch: 1,
+    });
+  });
+
+  test('repeated retries against a stalled noncancelable backend stay bounded and recover (#332)', async () => {
+    const timeouts: Array<() => void> = [];
+    const releases: Array<() => void> = [];
+    let calls = 0;
+    let stalled = true;
+    const f = fixture({
+      maxOutstandingReads: 1,
+      withTimeout: (check) =>
+        new Promise<DescendantCheck>((resolve) => {
+          timeouts.push(() => resolve({ status: 'unresolved', error: 'timed out' }));
+          void check.then(resolve);
+        }),
+      getSession: async () => {
+        calls += 1;
+        if (stalled) {
+          return new Promise<SessionSummary>((resolve) => {
+            releases.push(() => resolve(summary('child', 'ancestor')));
+          });
+        }
+        return summary('child', 'ancestor');
+      },
+    });
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const run = f.verifier.verifyDescendant('child', 'ancestor', 'srv');
+      const fire = timeouts[attempt];
+      if (fire === undefined) throw new Error('expected a timeout for each attempt');
+      fire();
+      expect((await run).status).toBe('unresolved');
+      // Retiring a timed-out flight frees its logical slot even though the wire read hangs.
+      expect(f.verifier.outstandingReads()).toBe(0);
+    }
+    expect(calls).toBe(20);
+
+    for (const settle of releases) settle();
+    stalled = false;
+    await Promise.resolve();
+    expect(await f.verifier.verifyDescendant('child', 'ancestor', 'srv')).toEqual({
+      status: 'verified',
+    });
+  });
+
+  test('session deletion mid-walk prevents a deferred response from traversing further (#332)', async () => {
+    const requested: string[] = [];
+    let releaseChild!: (value: SessionSummary) => void;
+    let calls = 0;
+    const f = fixture({
+      getSession: async (_backend, sessionID) => {
+        requested.push(sessionID);
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<SessionSummary>((resolve) => {
+            releaseChild = resolve;
+          });
+        }
+        return summary(sessionID, f.parents.get(sessionID));
+      },
+    });
+    f.parents.set('child', 'mid');
+    f.parents.set('mid', 'ancestor');
+
+    const first = f.verifier.verifyDescendant('child', 'ancestor', 'srv');
+    expect(requested).toEqual(['child']);
+    f.verifier.forgetSession('srv|child');
+    expect(f.verifier.outstandingReads()).toBe(0);
+
+    releaseChild(summary('child', 'mid'));
+    expect((await first).status).toBe('unresolved');
+    expect(requested).toEqual(['child']);
+    expect(f.verifier.evidence().size).toBe(0);
+  });
+
   test('lifecycle teardown retires pending walks and ignores their late results (#332)', async () => {
     const release: Array<(value: SessionSummary) => void> = [];
     const f = fixture({

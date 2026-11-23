@@ -456,6 +456,8 @@ const incompleteFileRetryBaseMs = 2_000;
 const incompleteFileRetryMaxMs = 60_000;
 /** One delayed job-list probe after a tool call, to catch asynchronous job registration. */
 const jobStartProbeDelayMs = 300;
+/** Pause between a settled transcript read and its coalesced dirty follow-up (#333). */
+const transcriptFollowUpDelayMs = 80;
 const exportPageSize = 500;
 /** Lines a diff patch scrolls per PageUp/PageDown; matches the rendered window. */
 export const diffPageLines = 18;
@@ -520,6 +522,15 @@ export class AppController {
   private readonly transcriptFlights = new TranscriptFlightTracker();
   /** Bounded retry state for a failed canonical refetch (#295). */
   private readonly transcriptRetryTimers = new Map<string, TimerHandle>();
+  /**
+   * Owned, cancellable pauses between a settled read and its deferred dirty follow-up (#333).
+   * Retiring one settles its promise so an awaiting continuation abandons stale work instead
+   * of hanging after teardown.
+   */
+  private readonly pendingDelays = new Map<
+    string,
+    { readonly handle: TimerHandle; readonly settle: () => void }
+  >();
   /** Sole owner of bounded transcript retry attempts (#309). */
   private readonly transcriptRetries = new TranscriptRetryTracker();
   /**
@@ -765,17 +776,45 @@ export class AppController {
     this.transcriptRetryTimers.clear();
     for (const timer of this.jobStartProbes.values()) this.scheduler.clearTimeout(timer);
     this.jobStartProbes.clear();
+    // Cancel every owned pause, including 80 ms dirty-follow-up delays, and settle their
+    // continuations so awaiting work cannot hang after teardown (#333).
+    for (const key of this.pendingDelays.keys()) this.retireDelay(key);
     this.transcriptFlights.dispose();
     this.ancestry.dispose();
     this.creations.clear();
     this.recoveredInbox.clear();
   }
 
-  /** Short scheduler-driven pause between a settled read and a coalesced rerun. */
-  private delay(ms: number): Promise<void> {
-    return new Promise((done) => {
-      this.scheduler.setTimeout(done, ms);
+  /**
+   * Short scheduler-driven pause between a settled read and a coalesced rerun. The handle is
+   * owned under `key` so teardown can cancel it, and retiring it settles the promise (false)
+   * so an awaiting continuation abandons stale work instead of hanging forever (#333).
+   */
+  private delay(key: string, ms: number): Promise<boolean> {
+    this.retireDelay(key);
+    return new Promise((settle) => {
+      const handle = this.scheduler.setTimeout(() => {
+        this.pendingDelays.delete(key);
+        settle(true);
+      }, ms);
+      this.pendingDelays.set(key, { handle, settle: () => settle(false) });
     });
+  }
+
+  /** Cancels one owned delay and settles its continuation as abandoned (#333). */
+  private retireDelay(key: string): void {
+    const pending = this.pendingDelays.get(key);
+    if (pending === undefined) return;
+    this.pendingDelays.delete(key);
+    this.scheduler.clearTimeout(pending.handle);
+    pending.settle();
+  }
+
+  /** Retires every owned delay matching a predicate, leaving other lifetimes alone (#333). */
+  private retireDelaysWhere(matches: (key: string) => boolean): void {
+    for (const key of this.pendingDelays.keys()) {
+      if (matches(key)) this.retireDelay(key);
+    }
   }
 
   /**
@@ -1602,6 +1641,9 @@ export class AppController {
       this.scheduler.clearTimeout(retryTimer);
       this.transcriptRetryTimers.delete(retryKey);
     }
+    // Cancel a deferred dirty follow-up for this lifetime so it cannot refresh a recreated
+    // session after the 80ms hold (#333).
+    this.retireDelay(retryKey);
     this.transcriptRetries.reset(retryKey);
     this.clearJobStartProbe(key);
     const expansionPrefix = `${key} `;
@@ -2560,6 +2602,9 @@ export class AppController {
     const key = `${serverID} ${sessionID}`;
     const qualifiedKey = this.keyFor(serverID, sessionID);
     const epoch = this.sessionEpoch(qualifiedKey);
+    // Capture the backend identity before any await. The delayed dirty follow-up must not
+    // re-admit against a replacement registration or a recreated session (#333).
+    const backend = this.backendFor(serverID);
     // A fresh signal supersedes a pending backoff retry; it must not wait behind it.
     const retryTimer = this.transcriptRetryTimers.get(key);
     if (retryTimer !== undefined) {
@@ -2600,8 +2645,21 @@ export class AppController {
       }
       this.transcriptRetries.reset(key);
       if (refreshJobs) this.scheduleJobRefresh(sessionID, serverID);
-      await this.delay(80);
-      if (dirty && !this.disposed) this.scheduleTranscript(sessionID, serverID, dirtyJobs);
+      const elapsed = await this.delay(key, transcriptFollowUpDelayMs);
+      // The pause may have been retired by deletion, unpair or disposal. Revalidate the
+      // lifetime, backend and session identity captured before the read before admitting a
+      // stale dirty hint against a replacement (#333).
+      if (
+        !elapsed ||
+        this.disposed ||
+        !dirty ||
+        !this.isSessionCurrent(qualifiedKey, epoch) ||
+        this.state.sessions[qualifiedKey] === undefined ||
+        !this.serverIDs().includes(serverID) ||
+        !this.isRegisteredBackend(serverID, backend)
+      )
+        return;
+      this.scheduleTranscript(sessionID, serverID, dirtyJobs);
     })();
     void this.track('transcript', run);
   }
@@ -5343,7 +5401,21 @@ export class AppController {
     if (route.kind !== 'overview' && route.serverID === serverID) this.openOverview();
     this.inbox.forgetServer(serverID);
     // Only this host's reads are retired; other hosts keep their background progress.
-    this.transcriptFlights.retireWhere((key) => key.startsWith(`${serverID} `));
+    const hostPrefix = `${serverID} `;
+    this.transcriptFlights.retireWhere((key) => key.startsWith(hostPrefix));
+    // Retire every host-owned timer so an unpair/re-pair cannot run a stale continuation
+    // against a replacement registration (#333). Other hosts keep their pending work.
+    this.retireDelaysWhere((key) => key.startsWith(hostPrefix));
+    for (const [key, timer] of this.transcriptRetryTimers) {
+      if (!key.startsWith(hostPrefix)) continue;
+      this.scheduler.clearTimeout(timer);
+      this.transcriptRetryTimers.delete(key);
+    }
+    for (const [key, timer] of this.summaryTimers) {
+      if (!key.startsWith(hostPrefix)) continue;
+      this.scheduler.clearTimeout(timer);
+      this.summaryTimers.delete(key);
+    }
     for (const key of this.generations.jobKeys()) {
       if (parseSessionKey(key).serverID === serverID) this.invalidateJobRefresh(key);
     }
