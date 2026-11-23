@@ -1644,6 +1644,13 @@ export class AppController {
     // Cancel a deferred dirty follow-up for this lifetime so it cannot refresh a recreated
     // session after the 80ms hold (#333).
     this.retireDelay(retryKey);
+    // A debounced summary refresh is owned by the same host/session key. A deleted lifetime
+    // must not run a stale summary read after its timer fires (#326, #333).
+    const summaryTimer = this.summaryTimers.get(retryKey);
+    if (summaryTimer !== undefined) {
+      this.scheduler.clearTimeout(summaryTimer);
+      this.summaryTimers.delete(retryKey);
+    }
     this.transcriptRetries.reset(retryKey);
     this.clearJobStartProbe(key);
     const expansionPrefix = `${key} `;

@@ -273,6 +273,43 @@ describe('time-driven behavior under an injected scheduler (#326)', () => {
     expect(harness.scheduler.pendingCount()).toBe(0);
   });
 
+  test('a pending summary coalescing timer is cancelled on dispose (#326)', async () => {
+    const harness = await createHarness();
+    harness.controller.openSession(harness.sessionID, 'local');
+    await harness.settle();
+    const before = harness.scheduler.pendingCount();
+    // session-changed schedules a debounced summary refresh through the injected scheduler.
+    harness.emit('local', [{ kind: 'session-changed', sessionID: harness.sessionID }], false);
+    await harness.settle();
+    expect(harness.scheduler.pendingCount()).toBeGreaterThan(before);
+    harness.dispose();
+    expect(harness.scheduler.pendingCount()).toBe(0);
+  });
+
+  test('a pending summary timer for a deleted lifetime cannot fire after teardown (#326)', async () => {
+    const harness = await createHarness();
+    harness.controller.openSession(harness.sessionID, 'local');
+    await harness.settle();
+    harness.emit('local', [{ kind: 'session-changed', sessionID: harness.sessionID }], false);
+    await harness.settle();
+    expect(harness.scheduler.pendingCount()).toBeGreaterThan(0);
+
+    // Deleting the session retires its owned summary timer, so advancing past its due time
+    // must not issue a stale getSession RPC (refreshSummary calls the backend before its
+    // own epoch check) or write a page for a replacement lifetime (#326, #333).
+    const marks = harness.marks();
+    harness.emit('local', [{ kind: 'session-deleted', sessionID: harness.sessionID }], false);
+    await harness.settle();
+    harness.scheduler.advanceBy(1000);
+    await harness.settle();
+    assertNoCalls(
+      harness.callsSince(marks),
+      (call) => call.name === 'getSession',
+      'deleted summary timer',
+    );
+    harness.dispose();
+  });
+
   test('a deleted lifetime cannot run its deferred dirty follow-up (#333)', async () => {
     const harness = await createHarness();
     harness.controller.openSession(harness.sessionID, 'local');

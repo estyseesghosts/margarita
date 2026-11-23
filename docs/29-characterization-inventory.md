@@ -68,9 +68,14 @@ protected, but the fixtures are tied to one concrete class.
 
 `test/characterization/controller-characterization.test.ts` proves the harness
 on deferred ordering, per-host call slicing, same-ID collision isolation,
-duplicate-Enter admission, route changes during a gated prompt, and three
-scheduler-driven cases: transcript backoff, ancestry deadline expiry and timer
-teardown on `dispose()` (#326). `scheduler.test.ts` covers the fake itself.
+duplicate-Enter admission, route changes during a gated prompt, and the
+scheduler-driven cases: transcript backoff, ancestry deadline expiry, and timer
+teardown under teardown (#326). The teardown cases prove that `dispose()`
+cancels every owned timer — including the debounced summary refresh and the
+80 ms transcript dirty-follow-up hold — that deleting a session retires its
+summary timer before it can issue a stale `getSession` RPC, and that a pending
+dirty-follow-up cannot refresh a recreated lifetime (#333). `scheduler.test.ts`
+covers the fake itself.
 
 **Remaining boundary:** timers owned outside `ControllerDeps.scheduler` (the UI
 renderer, the event pump and opt-in live/PTY harnesses) still use real time; so
