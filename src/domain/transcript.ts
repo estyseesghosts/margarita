@@ -5,7 +5,22 @@ import { sanitizeSingleLine, sanitizeTerminalText } from './sanitize-text.ts';
 import { assertNever, type TokenUsage } from './session.ts';
 import { truncatePrompt } from './sticky-prompt.ts';
 import { clipLineTailToCells, clipLineToCells, lineRows } from './text-width.ts';
+import {
+  classifyTool,
+  isBuiltinToolName,
+  type ToolCategory,
+  toolIdentity,
+} from './tool-classification.ts';
 import type { WorkerJob } from './worker.ts';
+
+// Kept as temporary re-exports while callers migrate to the focused module (#319).
+export {
+  classifyTool,
+  mcpNamespace,
+  toolIdentity,
+  type ToolCategory,
+  type ToolIdentity,
+} from './tool-classification.ts';
 
 /** Frontend projection of server messages; adapters map wire types into these. */
 export type ToolStatus = 'streaming' | 'running' | 'completed' | 'error';
@@ -222,9 +237,6 @@ export type TranscriptMessage =
   | { kind: 'compaction'; id: string; createdAt: number; state: 'running' | 'completed' | 'failed' }
   | { kind: 'note'; id: string; createdAt: number; text: string; source: 'synthetic' | 'system' };
 
-export type ToolCategory =
-  'read' | 'search' | 'edit' | 'shell' | 'code' | 'web' | 'delegate' | 'other';
-
 /** The display/identity facts the transcript fold needs to recognize calls. */
 export type ToolIdentityHints = Readonly<{
   /** Configured MCP servers; their flattened namespaces identify MCP calls. */
@@ -294,73 +306,6 @@ export type FoldOptions = Readonly<{
   markers?: ReadonlyMap<string, ExecutionMarker>;
 }>;
 
-const categoryByName: Readonly<Record<string, ToolCategory>> = {
-  read: 'read',
-  view: 'read',
-  list: 'search',
-  ls: 'search',
-  glob: 'search',
-  grep: 'search',
-  search: 'search',
-  codesearch: 'search',
-  edit: 'edit',
-  write: 'edit',
-  patch: 'edit',
-  apply_patch: 'edit',
-  multiedit: 'edit',
-  bash: 'shell',
-  shell: 'shell',
-  // Code Mode is a script host, not a shell; nested calls carry the real activity (#217).
-  execute: 'code',
-  webfetch: 'web',
-  websearch: 'web',
-  fetch: 'web',
-  task: 'delegate',
-  agent: 'delegate',
-  subagent: 'delegate',
-};
-
-const builtinCategories = new Set(Object.keys(categoryByName));
-
-/**
- * What one call is. Built-ins are matched by name. OpenCode v2 registers MCP tools as
- * `<normalizedName(server)>_<normalizedName(tool)>`, so a configured server's flattened
- * prefix recovers the server; a call matching no configured server stays honestly
- * external instead of being attributed to one (issue #74).
- */
-export type ToolIdentity =
-  | Readonly<{ kind: 'builtin'; category: ToolCategory }>
-  | Readonly<{ kind: 'mcp'; server: string; tool: string }>
-  | Readonly<{ kind: 'external' }>;
-
-/** The flattened registry namespace for an MCP server name (upstream `normalizedName`). */
-export function mcpNamespace(server: string): string {
-  return server.replace(/[^a-zA-Z0-9_-]/g, '_');
-}
-
-/** The longest matching configured server prefix wins; servers `a` and `a_b` stay distinct. */
-export function toolIdentity(name: string, mcpServers: readonly string[] = []): ToolIdentity {
-  const builtin = categoryByName[name.toLowerCase()];
-  if (builtin !== undefined) return { kind: 'builtin', category: builtin };
-  const matched = mcpServers
-    .flatMap((server) => {
-      const namespace = mcpNamespace(server);
-      return [
-        { server, prefix: `${namespace}_` },
-        // Code Mode reports nested calls with a qualified `<server>.<tool>` name.
-        { server, prefix: `${namespace}.` },
-      ];
-    })
-    .filter((entry) => entry.prefix.length > 1 && name.startsWith(entry.prefix))
-    .toSorted((left, right) => right.prefix.length - left.prefix.length)[0];
-  if (matched === undefined) return { kind: 'external' };
-  return { kind: 'mcp', server: matched.server, tool: name.slice(matched.prefix.length) };
-}
-
-export function classifyTool(name: string): ToolCategory {
-  return categoryByName[name.toLowerCase()] ?? 'other';
-}
-
 /**
  * Every call that visibly happened folds into the activity group, MCP calls included. A
  * call to a server that is not configured still folds, so its summary can say it was an
@@ -370,7 +315,7 @@ export function classifyTool(name: string): ToolCategory {
 function isFoldable(tool: ToolCall, mcpServers: readonly string[]): boolean {
   if (tool.status === 'error' || tool.executionError !== undefined) return false;
   if (tool.children?.some((child) => child.status === 'error') === true) return false;
-  if (builtinCategories.has(tool.name.toLowerCase())) {
+  if (isBuiltinToolName(tool.name)) {
     const category = classifyTool(tool.name);
     return (
       category === 'read' ||
