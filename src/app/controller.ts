@@ -211,6 +211,7 @@ import { descendantScope } from './descendant-scope.ts';
 import { DraftRegistry } from './draft-registry.ts';
 import { EditHistory } from './edit-history.ts';
 import { errorText, refreshOutcome } from './error-text.ts';
+import { admitEvent, type EventCommand } from './event-admission.ts';
 import { GoalRevisionGuard } from './goal-revision-guard.ts';
 import { GreetingSelector } from './greeting-selector.ts';
 import { InspectorDocumentCache } from './inspector-document.ts';
@@ -2015,85 +2016,80 @@ export class AppController {
   }
 
   private applyEvent(serverID: string, event: BackendEvent): void {
-    const attached = attachedSessionFor(this.state.route, serverID);
-    switch (event.kind) {
-      case 'connected':
-        return;
-      case 'catalog-changed': {
-        const route = this.state.route;
-        const routeServer = routeServerFor(route, this.state.overview.project.serverID);
-        if (routeServer !== serverID) return; // another host's catalog is not ours to reload
+    const commands = admitEvent({
+      event,
+      attached: attachedSessionFor(this.state.route, serverID),
+      routeMatchesHost:
+        routeServerFor(this.state.route, this.state.overview.project.serverID) === serverID,
+      hasSession: (sessionID) =>
+        this.state.sessions[this.keyFor(serverID, sessionID)] !== undefined,
+      requestTargets: () =>
+        this.inputRequestRefreshTargets('sessionID' in event ? event.sessionID : '', serverID),
+    });
+    for (const command of commands) this.executeEventCommand(serverID, command);
+  }
+
+  /** Executes one admitted event effect against this controller's owned state and backend. */
+  private executeEventCommand(serverID: string, command: EventCommand): void {
+    const sessionID = 'sessionID' in command ? command.sessionID : '';
+    switch (command.kind) {
+      case 'reload-catalog':
         void this.track('catalog', this.loadCatalog(this.currentDirectory(), serverID));
         return;
-      }
-      case 'revert-changed':
-        // Immediate reconcile (not debounced): opens the recovery dialog for a staged
-        // revert we do not know about, or drops one resolved elsewhere.
-        void this.track('revert', this.refreshSummary(event.sessionID, serverID));
+      case 'schedule-summary':
+        this.scheduleSummary(sessionID, serverID);
         return;
-      case 'session-changed':
-        this.scheduleSummary(event.sessionID, serverID);
+      case 'refresh-summary':
+        void this.track('revert', this.refreshSummary(sessionID, serverID));
         return;
-      case 'session-deleted':
-        this.setState('workers', this.keyFor(serverID, event.sessionID), []);
-        this.setState('shellJobs', this.keyFor(serverID, event.sessionID), []);
-        this.forgetSession(event.sessionID, serverID);
+      case 'clear-job-rows':
+        this.setState('workers', this.keyFor(serverID, sessionID), []);
+        this.setState('shellJobs', this.keyFor(serverID, sessionID), []);
         return;
-      case 'usage': {
-        const key = this.keyFor(serverID, event.sessionID);
-        // Only a listed session can display usage, but the evidence stamp is what keeps a
-        // summary snapshot that began earlier from rolling it back (#272).
-        if (this.state.sessions[key] !== undefined) {
-          this.generations.nextUsageSequence(key);
-          this.setState('sessions', key, { cost: event.cost, tokens: event.tokens });
-        }
+      case 'forget-session':
+        this.forgetSession(sessionID, serverID);
         return;
-      }
-      case 'execution': {
-        const key = this.keyFor(serverID, event.sessionID);
-        // Stamp the event so a snapshot that began before it can never overwrite it.
-        this.generations.nextEventSequence(key);
-        this.setState('running', key, event.state === 'started');
-        // A background confirmation is transient call status: it lives only inside the turn
-        // that produced it. Any execution transition (including a new turn) retires it (#135).
-        this.setState('backgrounded', key, []);
-        this.scheduleSummary(event.sessionID, serverID);
-        if (attached === event.sessionID) this.scheduleTranscript(event.sessionID, serverID, true);
-        else this.markStale(event.sessionID, serverID);
-        if (event.state !== 'started')
-          void this.track('requests', this.refreshInputRequests(event.sessionID, serverID));
+      case 'stamp-usage':
+        this.generations.nextUsageSequence(this.keyFor(serverID, sessionID));
         return;
-      }
-      case 'transcript-changed':
-        if (this.state.sessions[this.keyFor(serverID, event.sessionID)] === undefined)
-          this.scheduleSummary(event.sessionID, serverID);
-        if (attached === event.sessionID) {
-          this.scheduleTranscript(
-            event.sessionID,
-            serverID,
-            event.jobs === true || event.jobProbe === true,
-          );
-          if (event.jobProbe === true) this.scheduleJobStartProbe(event.sessionID, serverID);
-        } else this.markStale(event.sessionID, serverID);
+      case 'set-usage':
+        this.setState('sessions', this.keyFor(serverID, sessionID), {
+          cost: command.cost,
+          tokens: command.tokens,
+        });
         return;
-      case 'inbox-changed':
-        if (attached === event.sessionID)
-          void this.track('inbox', this.refreshInbox(event.sessionID, serverID));
+      case 'stamp-execution':
+        this.generations.nextEventSequence(this.keyFor(serverID, sessionID));
         return;
-      case 'input-requests-changed': {
-        // A `global` elicitation and a child-session form both belong to the viewed
-        // parent, whose bucket is the one that presents the card (#226). Refreshing only
-        // the event's own ID would update a bucket nobody is looking at.
-        for (const target of this.inputRequestRefreshTargets(event.sessionID, serverID)) {
-          void this.track('requests', this.refreshInputRequests(target, serverID));
-        }
+      case 'set-running':
+        this.setState('running', this.keyFor(serverID, sessionID), command.running);
         return;
-      }
-      case 'goal-changed':
-        this.bumpGoalVersion(event.sessionID, serverID);
+      case 'clear-backgrounded':
+        // A background confirmation lives only in the turn that produced it (#135).
+        this.setState('backgrounded', this.keyFor(serverID, sessionID), []);
+        return;
+      case 'schedule-transcript':
+        this.scheduleTranscript(sessionID, serverID, command.refreshJobs);
+        return;
+      case 'mark-stale':
+        this.markStale(sessionID, serverID);
+        return;
+      case 'schedule-job-start-probe':
+        this.scheduleJobStartProbe(sessionID, serverID);
+        return;
+      case 'refresh-input-requests':
+        void this.track('requests', this.refreshInputRequests(sessionID, serverID));
+        return;
+      case 'refresh-inbox':
+        void this.track('inbox', this.refreshInbox(sessionID, serverID));
+        return;
+      case 'bump-goal-version':
+        this.bumpGoalVersion(sessionID, serverID);
+        return;
+      case 'set-native-goal':
         this.setNativeGoalState(
-          event.sessionID,
-          event.goal === null ? { status: 'none' } : { status: 'verified', goal: event.goal },
+          sessionID,
+          command.goal === null ? { status: 'none' } : { status: 'verified', goal: command.goal },
           serverID,
         );
         return;

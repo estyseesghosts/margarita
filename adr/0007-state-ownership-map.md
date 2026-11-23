@@ -112,7 +112,8 @@ These are concrete source observations, not hypotheses:
   definite-not-found reconciliation lives in `src/app/session-fetch.ts`
   (second #308 slice), and the pure merge/page/flag rules for committing a verified
   snapshot are in `src/app/session-snapshot.ts` (third #308 slice) with eight
-  focused tests. Event admission remains in the facade.
+  focused tests. Event admission routing is now pure in `src/app/event-admission.ts`
+  (fourth #308 slice); the facade only executes the returned commands.
 - **Intended owner:** `HostSessionIndex` with contract
   `initialize(hosts)`, `refresh(host)`, `loadMore(host)`, `applyEvent(host, event)`,
   `resync(host)`, `status(host)`, `forget(host)`, `dispose()`; it updates an
@@ -133,12 +134,18 @@ These are concrete source observations, not hypotheses:
 - **Async/teardown:** one stream per host, generations and per-key epochs; event
   batches must be admitted atomically and drained independently of failed reads.
   The duplicated route-host and attached-session rules in `resync`/`applyEvent`
-  are now pure in `src/app/route-server.ts` (first event-admission #308 slice,
-  two tests).
-- **Intended owner:** `EventAdmission` inside the host/session service; public
-  contract is typed events in, named invalidations/commands out.
-- **Tests:** `src/adapter/event-pump.test.ts`, multi-server event suites,
-  `src/app/async-audit-regressions.test.ts`.
+  are pure in `src/app/route-server.ts` (two tests), and the full event→command
+  dispatcher is delivered as `src/app/event-admission.ts`: `admitEvent(context)`
+  takes an explicit `EventAdmissionContext` (event, attached session, route-host
+  match, session lookup, lazy request targets) and returns an ordered
+  `EventCommand[]`. The facade's `applyEvent` now only builds the context and
+  runs `executeEventCommand` per effect — no routing decisions remain in the
+  controller.
+- **Owner:** `admitEvent` in `src/app/event-admission.ts`; typed event in,
+  ordered named commands out. Still to extract: stream status and reconnect
+  handling (`onStreamStatus`, `resync`) and the `HostSessionIndex` itself.
+- **Tests:** `src/app/event-admission.test.ts` (8), `src/adapter/event-pump.test.ts`,
+  multi-server event suites, `src/app/async-audit-regressions.test.ts`.
 
 ### 3. Transcript refresh, pagination and cache lifetime (#309)
 
