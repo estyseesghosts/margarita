@@ -94,3 +94,141 @@ describe('event pump', () => {
     expect(reconnectDelay(50, () => 1)).toBe(15_000);
   });
 });
+
+/** A manually fired first-event watchdog, so never-yield streams can be tested without waiting. */
+function fakeWatchdog() {
+  const pending = new Map<number, () => void>();
+  let next = 0;
+  return {
+    schedule: (fire: () => void, _ms: number) => {
+      const id = ++next;
+      pending.set(id, fire);
+      return () => pending.delete(id);
+    },
+    fireAll: () => {
+      const due = [...pending.values()];
+      pending.clear();
+      for (const fire of due) fire();
+    },
+    count: () => pending.size,
+  };
+}
+
+function neverYieldingSource(signal: AbortSignal): AsyncIterable<BackendEvent> {
+  return {
+    [Symbol.asyncIterator]() {
+      return {
+        async next(): Promise<IteratorResult<BackendEvent>> {
+          await untilAborted(signal);
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
+}
+
+describe('first-event watchdog (#342)', () => {
+  test('a stream that never yields triggers reconnect and a fresh attempt', async () => {
+    const timers = fakeWatchdog();
+    const statuses: StreamStatus[] = [];
+    const sleeps: number[] = [];
+    let connections = 0;
+    const stop = startEventPump({
+      timeToFirstEventMs: 1000,
+      scheduleTimeout: timers.schedule,
+      random: () => 0.5,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      source: (signal) => {
+        connections += 1;
+        return neverYieldingSource(signal);
+      },
+      onStatus: (status) => statuses.push(status),
+      onBatch: () => undefined,
+    });
+    await waitFor(() => timers.count() === 1);
+    timers.fireAll();
+    await waitFor(() => connections === 2);
+    expect(statuses).toContain('reconnecting');
+    expect(sleeps).toEqual([500]);
+    // The fresh attempt armed its own watchdog; no indefinite `connecting`.
+    expect(timers.count()).toBe(1);
+    await stop();
+  });
+
+  test('a first frame before the deadline clears the watchdog and goes live', async () => {
+    const timers = fakeWatchdog();
+    const statuses: StreamStatus[] = [];
+    const { promise: gate, resolve } = Promise.withResolvers<void>();
+    const stop = startEventPump({
+      timeToFirstEventMs: 1000,
+      scheduleTimeout: timers.schedule,
+      source: (signal) =>
+        (async function* () {
+          await gate;
+          yield { kind: 'connected' };
+          await untilAborted(signal);
+        })(),
+      onStatus: (status) => statuses.push(status),
+      onBatch: () => undefined,
+    });
+    await waitFor(() => timers.count() === 1);
+    resolve();
+    await waitFor(() => statuses.includes('live'));
+    expect(timers.count()).toBe(0);
+    // An idle, connected stream stays live without periodic reconnection.
+    await new Promise((done) => setTimeout(done, 20));
+    expect(statuses).toEqual(['connecting', 'live']);
+    await stop();
+  });
+
+  test('a non-connected first frame also goes live without waiting for connected', async () => {
+    const timers = fakeWatchdog();
+    const statuses: StreamStatus[] = [];
+    const stop = startEventPump({
+      timeToFirstEventMs: 1000,
+      scheduleTimeout: timers.schedule,
+      source: (signal) =>
+        (async function* () {
+          yield changed('first');
+          await untilAborted(signal);
+        })(),
+      onStatus: (status) => statuses.push(status),
+      onBatch: () => undefined,
+    });
+    await waitFor(() => statuses.includes('live'));
+    expect(timers.count()).toBe(0);
+    await stop();
+  });
+
+  test('stop during a pending opening is bounded and publishes nothing afterward', async () => {
+    const timers = fakeWatchdog();
+    const statuses: StreamStatus[] = [];
+    const stop = startEventPump({
+      timeToFirstEventMs: 1000,
+      stopGraceMs: 10,
+      scheduleTimeout: timers.schedule,
+      // Deliberately ignores its signal: shutdown must not wait on it forever (#342).
+      source: () => ({
+        [Symbol.asyncIterator]() {
+          return {
+            next(): Promise<IteratorResult<BackendEvent>> {
+              return new Promise(() => {});
+            },
+          };
+        },
+      }),
+      onStatus: (status) => statuses.push(status),
+      onBatch: () => undefined,
+    });
+    await waitFor(() => timers.count() === 1);
+    const started = Date.now();
+    await stop();
+    expect(Date.now() - started).toBeLessThan(500);
+    const published = statuses.length;
+    timers.fireAll();
+    await new Promise((done) => setTimeout(done, 20));
+    expect(statuses.length).toBe(published);
+  });
+});
