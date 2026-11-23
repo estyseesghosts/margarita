@@ -210,6 +210,7 @@ import {
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { descendantScope } from './descendant-scope.ts';
 import { DraftRegistry } from './draft-registry.ts';
+import { errorText, refreshOutcome } from './error-text.ts';
 import { GreetingSelector } from './greeting-selector.ts';
 import { applyPin, modelScope } from './model-pins.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
@@ -8865,28 +8866,9 @@ export function mergeLatest(
   return [...older, ...page];
 }
 
-export function errorText(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
-}
-
-/** One bounded, paint-safe diagnostic for a failed job refresh (#230). */
-function jobRefreshDetail(error: unknown): string {
-  const text = sanitizeTerminalText(errorText(error)).replace(/\s+/g, ' ').trim();
-  if (text === '') return 'job refresh failed';
-  return text.length > 160 ? `${text.slice(0, 157)}…` : text;
-}
-
-type RefreshOutcome<T> = { ok: true; jobs: readonly T[] } | { ok: false; detail: string };
-
-/** A job RPC's two real outcomes: a confirmed list, or a failure that preserves old rows. */
-async function refreshOutcome<T>(request: () => Promise<readonly T[]>): Promise<RefreshOutcome<T>> {
-  try {
-    return { ok: true, jobs: await request() };
-  } catch (error) {
-    return { ok: false, detail: jobRefreshDetail(error) };
-  }
-}
+// Kept as a stable re-export while the CLI and production assembly migrate to the
+// focused module (#316).
+export { errorText } from './error-text.ts';
 
 /** Strict UTF-8 decode for a paste; undefined means the bytes are not text. */
 function decodePastedText(bytes: Uint8Array): string | undefined {
