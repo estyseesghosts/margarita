@@ -204,8 +204,9 @@ These are concrete source observations, not hypotheses:
 - **Mutable state:** `killBuffer` (548), `greetingCache`/`recentGreetings`
   (550-551), `undoStacks`/`redoStacks`/`lastEditAt`/`lastEditRoute` (553-556),
   `fileCache`/`fileScans` (609/619), `completionRequest`/`completionGeneration`
-  (620/623), `draftRevisions` (631), `pasteChain` (640), `editorRecoverySeq`
-  (632), `AppState.drafts/draftAttachments/stashes/composer`.
+  (620/623), `pasteChain` (640), `editorRecoverySeq` (632),
+  `AppState.drafts/draftAttachments/stashes/composer`. Route keys and per-route
+  revisions are now owned by `src/app/draft-registry.ts` (first #311 slice).
 - **Async/teardown:** paste and editor transactions capture origin before IO;
   serialized pastes reject stale completion scans; file scans never block paint.
 - **Intended owner:** `RouteScopedComposer` with route/session identity,

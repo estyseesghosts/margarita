@@ -209,6 +209,7 @@ import {
   type Route,
 } from './app-state.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
+import { DraftRegistry } from './draft-registry.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
 
@@ -624,12 +625,8 @@ export class AppController {
   private disposed = false;
   /** Sole owner of staged local-state snapshots and serialized writes (#317). */
   private readonly persistence: PersistenceCoordinator;
-  /**
-   * Per-route draft edit generations. A route keeps its revision while it is parked, so editing
-   * a different route cannot invalidate an untouched draft. Restoring a draft does not bump it;
-   * every content/cursor/attachment edit does (#299).
-   */
-  private readonly draftRevisions = new Map<string, number>();
+  /** Sole owner of route keys and per-route draft revisions (#311). */
+  private readonly drafts: DraftRegistry;
   private editorRecoverySeq = 0;
   /** Canonical per-scope pin operations, kept in sync with the latest merged disk state. */
   private pinOperations: Readonly<Record<string, PinnedModelOperation>>;
@@ -698,6 +695,9 @@ export class AppController {
         this.overviewRevision[1]((value) => value + 1);
       });
     };
+    this.drafts = new DraftRegistry({
+      projectKey: (directory, serverID) => this.projectKeyOf(directory, serverID),
+    });
     this.pinOperations = deps.localState.pinnedModelOps ?? {};
     this.persistence = new PersistenceCoordinator({
       initial: deps.localState,
@@ -3418,13 +3418,13 @@ export class AppController {
   private writeComposer(composer: Composer, draftEdit = true): void {
     if (draftEdit) {
       const key = this.routeKey(this.state.route);
-      this.draftRevisions.set(key, this.draftRevision(key) + 1);
+      this.drafts.bump(key);
     }
     this.setState({ composer: { ...composer } });
   }
 
   private draftRevision(key: string): number {
-    return this.draftRevisions.get(key) ?? 0;
+    return this.drafts.revision(key);
   }
 
   private saveDraft(): void {
@@ -3440,14 +3440,7 @@ export class AppController {
    * other's drafts, even with identical session IDs or directory paths.
    */
   private routeKey(route: Route): string {
-    switch (route.kind) {
-      case 'overview':
-        return 'overview';
-      case 'new':
-        return `new:${this.projectKeyOf(route.directory, route.serverID)}`;
-      default:
-        return this.keyFor(route.serverID, route.sessionID);
-    }
+    return this.drafts.keyFor(route);
   }
 
   /** Restores a route's saved text and its attachments together. */
