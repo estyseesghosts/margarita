@@ -97,7 +97,6 @@ import {
 import { greetingPeriod } from '../domain/greeting-time.ts';
 import {
   type InspectorIndex,
-  inspectorIndex,
   inspectorText,
   inspectorWindow,
   nextMatch,
@@ -190,7 +189,6 @@ import {
   findToolMessage,
   foldTranscript,
   type ToolCall,
-  type ToolResultPayload,
   type TranscriptMessage,
   type TranscriptNode,
   transcriptWindowStep,
@@ -214,6 +212,7 @@ import { DraftRegistry } from './draft-registry.ts';
 import { errorText, refreshOutcome } from './error-text.ts';
 import { GoalRevisionGuard } from './goal-revision-guard.ts';
 import { GreetingSelector } from './greeting-selector.ts';
+import { InspectorDocumentCache } from './inspector-document.ts';
 import { applyPin, modelScope } from './model-pins.ts';
 import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-url.ts';
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
@@ -565,9 +564,8 @@ export class AppController {
   private readonly redoStacks = new Map<string, UndoSnapshot[]>();
   private lastEditAt = 0;
   private lastEditRoute = '';
-  /** Materialized inspector document for the current payload, reused across renders (#234). */
-  private inspectorCache:
-    { payload: ToolResultPayload | undefined; index: InspectorIndex } | undefined;
+  /** Sole owner of the memoized inspector document (#315). */
+  private readonly inspectorCache = new InspectorDocumentCache();
   /**
    * Reactive invalidation clock for overview projections (#288, #293). The getters read the
    * accessor, so a mounted Solid observer subscribes to invalidation itself rather than only
@@ -7742,13 +7740,7 @@ export class AppController {
   private inspectorDoc(): InspectorIndex | undefined {
     const overlay = this.state.overlay;
     if (overlay.kind !== 'inspector') return undefined;
-    const payload = overlay.payload;
-    if (this.inspectorCache !== undefined && this.inspectorCache.payload === payload) {
-      return this.inspectorCache.index;
-    }
-    const index = inspectorIndex(payload ?? { files: [], completeness: 'complete' });
-    this.inspectorCache = { payload, index };
-    return index;
+    return this.inspectorCache.get(overlay.payload);
   }
 
   /** The visible window for the inspector view; materializes only `rows` lines. */

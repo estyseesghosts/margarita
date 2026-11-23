@@ -293,7 +293,8 @@ These are concrete source observations, not hypotheses:
   revert/rewind mutations.
 - **Readers / writers:** diff, inspector and rewind overlays read it; openDiff, loadInspector, refreshRewindPreview and explicit confirmation write it.
 - **Mutable state:** `rewindPreviewSeq` (488), `diffRequestSeq` (489),
-  `inspectorCache` (558), `AppState.overlay` plus expansion/page state.
+  `AppState.overlay` plus expansion/page state. The memoized inspector document
+  is now owned by `src/app/inspector-document.ts` (first #315 slice, three tests).
 - **Async/teardown:** a late preview cannot publish into a reopened overlay;
   revert guards against route change, session replacement, removed host and
   stale preview; exit flush is `flushRevertOnExit()` at 8974.
