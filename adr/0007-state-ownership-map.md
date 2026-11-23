@@ -109,8 +109,10 @@ These are concrete source observations, not hypotheses:
 - **Async/teardown:** per-host refresh epochs (`RefreshGenerations`), host-qualified
   keys, timers in `summaryTimers`; `forgetServer()` and
   `clearRuntimeStateForServer()` are the current teardown points. Paged reads and
-  definite-not-found reconciliation now live in `src/app/session-fetch.ts`
-  (second #308 slice); snapshot commit and event admission remain in the facade.
+  definite-not-found reconciliation lives in `src/app/session-fetch.ts`
+  (second #308 slice), and the pure merge/page/flag rules for committing a verified
+  snapshot are in `src/app/session-snapshot.ts` (third #308 slice) with eight
+  focused tests. Event admission remains in the facade.
 - **Intended owner:** `HostSessionIndex` with contract
   `initialize(hosts)`, `refresh(host)`, `loadMore(host)`, `applyEvent(host, event)`,
   `resync(host)`, `status(host)`, `forget(host)`, `dispose()`; it updates an

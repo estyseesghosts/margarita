@@ -217,6 +217,7 @@ import { openExternalUrl, type OpenUrlResult, parseExternalUrl } from './open-ur
 import { PersistenceCoordinator } from './persistence-coordinator.ts';
 import { RefreshGenerations } from './refresh-generations.ts';
 import { SessionFetcher } from './session-fetch.ts';
+import { mergeCommittedSessions, sessionFlags, sessionPage } from './session-snapshot.ts';
 import { UsageAnalyticsSelector } from './usage-selector.ts';
 
 /** A point an edit can be undone/redone back to. Attachments are kept, never duplicated. */
@@ -1469,57 +1470,32 @@ export class AppController {
         continue;
 
       batch(() => {
-        this.setState('sessions', (current) => {
-          const fresh: Record<string, SessionSummary> = {};
-          for (const [key, summary] of Object.entries(result.fresh)) {
-            const existing = current[key];
-            const liveUsageAdvanced = this.generations.usageEvidence(key) > result.usageSeq;
-            fresh[key] =
-              liveUsageAdvanced && existing !== undefined
-                ? {
-                    ...summary,
-                    ...(existing.cost === undefined ? {} : { cost: existing.cost }),
-                    ...(existing.tokens === undefined ? {} : { tokens: existing.tokens }),
-                  }
-                : summary;
-          }
-          return { ...current, ...reconciled.found, ...fresh };
-        });
+        this.setState('sessions', (current) =>
+          mergeCommittedSessions(current, result.fresh, reconciled.found, result.usageSeq, (key) =>
+            this.generations.usageEvidence(key),
+          ),
+        );
         for (const ref of reconciled.deleted) this.forgetSession(ref.sessionID, ref.serverID);
-        const page: { cursor?: string; complete: boolean; loading: boolean; error?: string } = {
-          ...(result.cursor === undefined ? {} : { cursor: result.cursor }),
-          complete: result.cursor === undefined,
-          loading: false,
-          ...(result.ok ? {} : { error: result.error ?? 'Could not reach the server' }),
-        };
-        this.setState('serverPages', result.serverID, page);
+        this.setState('serverPages', result.serverID, sessionPage(result));
         if (result.ok) this.reconcileRunning(result.serverID, result.active, result.snapshotSeq);
       });
       committed.push(result.serverID);
       if (result.ok) activeByServer.set(result.serverID, result.active);
     }
 
+    const flags = sessionFlags(
+      applied,
+      committed.length,
+      () => this.serverIDs().every((id) => this.state.serverPages[id]?.complete === true),
+      serverID,
+    );
     batch(() => {
-      if (serverID === undefined) {
-        this.setState(
-          'sessionsComplete',
-          applied.every((result) => result.ok && result.cursor === undefined),
-        );
-        this.setState(
-          'sessionsCursor',
-          applied.find((result) => result.cursor !== undefined)?.cursor,
-        );
-      } else {
-        // A single-server resync updates that host's page only; the rest keep their state.
-        this.setState(
-          'sessionsComplete',
-          this.serverIDs().every((id) => this.state.serverPages[id]?.complete === true),
-        );
-      }
+      this.setState('sessionsComplete', flags.complete);
+      if (serverID === undefined) this.setState('sessionsCursor', flags.cursor);
       // Only a refresh that actually applied a host may clear the loading flag; a newer
       // or unrelated refresh keeps it set until that operation completes.
-      if (committed.length > 0) this.setState('sessionsLoading', false);
-      this.setState('sessionsError', applied.find((result) => !result.ok)?.error);
+      if (flags.loading) this.setState('sessionsLoading', false);
+      this.setState('sessionsError', flags.error);
     });
 
     // Running sessions are the ones that can be blocked on input right now. The attached
