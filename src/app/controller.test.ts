@@ -2092,6 +2092,59 @@ describe('session pagination', () => {
     controller.dispose();
   });
 
+  test('overview inputs and bulk teardown invalidate the projections (#316)', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = ['ses_a', 'ses_b'].map((id, index) => ({
+      ...fakeSession(id),
+      updatedAt: index + 1,
+    }));
+    const controller = makeController(() => Promise.resolve([]), backend);
+    await controller.bootstrap();
+    controller.openOverview();
+
+    const snapshot = () => ({
+      groups: controller.groups(),
+      tabs: controller.tabCounts(),
+      rows: controller.overviewRows(),
+    });
+    const expectInvalidated = (before: ReturnType<typeof snapshot>) => {
+      expect(controller.groups()).not.toBe(before.groups);
+      expect(controller.tabCounts()).not.toBe(before.tabs);
+      expect(controller.overviewRows()).not.toBe(before.rows);
+    };
+
+    let before = snapshot();
+    controller.setOverviewTab('active');
+    expectInvalidated(before);
+
+    before = snapshot();
+    const group = controller.groups()[0];
+    if (group !== undefined) {
+      controller.toggleOverviewGroup(group.key);
+      expectInvalidated(before);
+    }
+
+    // A running execution writes `running`, then the deletion performs a bulk produce that
+    // tears down many overview inputs at once.
+    before = snapshot();
+    controller.onEvents(
+      'local',
+      [{ kind: 'execution', sessionID: 'ses_a', state: 'started' }],
+      false,
+    );
+    expectInvalidated(before);
+
+    before = snapshot();
+    controller.onEvents('local', [{ kind: 'session-deleted', sessionID: 'ses_b' }], false);
+    expectInvalidated(before);
+
+    before = snapshot();
+    controller.openSession('ses_a');
+    expectInvalidated(before);
+
+    controller.dispose();
+  });
+
   test('a remote status change invalidates counts even without a store write (#293)', async () => {
     const local = new FakeBackend();
     local.sessions = [fakeSession('ses_a')];

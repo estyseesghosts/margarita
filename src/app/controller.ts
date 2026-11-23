@@ -496,6 +496,8 @@ const stoppedByUserReason = 'Stopped by the user';
 export class AppController {
   readonly state: AppState;
   private readonly setState: SetStoreFunction<AppState>;
+  /** Explicitly invalidating store write; same typed surface, chosen only at overview inputs. */
+  private readonly setStateTouchingOverview: SetStoreFunction<AppState>;
   /** Guards read-only rewind previews against late replies for a previously selected row. */
   private rewindPreviewSeq = 0;
   private diffRequestSeq = 0;
@@ -643,33 +645,14 @@ export class AppController {
     const [state, setState] = createStore<AppState>(initialState(deps.cwd, this.serverID));
     this.state = state;
     this.overview = new OverviewProjection(() => this.overviewServerKey());
-    // Track only inputs that can change grouped rows or tab counts. Selection, focus,
-    // composer and notice updates must not invalidate the overview projection (#288).
-    const overviewInputs = new Set([
-      'sessions',
-      'sessionsComplete',
-      'openedAt',
-      'running',
-      'permissions',
-      'forms',
-      'stream',
-    ]);
-    this.setState = (...args: unknown[]) => {
-      // The store setter is overloaded; forward the captured arguments unchanged. This
-      // wrapper exists only to observe which state paths changed (#288).
-      const first: unknown = args[0];
-      const changed =
-        typeof first === 'function' ||
-        (typeof first === 'string' &&
-          (first === 'overview'
-            ? args[1] === 'tab' || args[1] === 'expanded' || typeof args[1] === 'function'
-            : overviewInputs.has(first)));
-      if (!changed) {
-        Reflect.apply(setState, undefined, args);
-        return;
-      }
-      // One batch: a store notification must never reach an observer while the revision
-      // still names the previous projection's cache entry (#293).
+    // Invalidation is explicit: call sites that change an overview input use
+    // `setStateTouchingOverview`, so adding a new input can no longer silently depend on a
+    // magic key list or argument sniffing (#316). All other writes use the raw setter.
+    this.setState = setState;
+    // One batch: a store notification must never reach an observer while the revision still
+    // names the previous projection's cache entry (#293). The setter is overloaded, so its
+    // arguments are forwarded unchanged.
+    this.setStateTouchingOverview = (...args: unknown[]) => {
       batch(() => {
         Reflect.apply(setState, undefined, args);
         this.overview.invalidate();
@@ -1028,12 +1011,12 @@ export class AppController {
   }
 
   cycleOverviewTab(direction: -1 | 1): void {
-    this.setState('overview', 'tab', nextTab(this.state.overview.tab, direction));
+    this.setStateTouchingOverview('overview', 'tab', nextTab(this.state.overview.tab, direction));
     this.invalidateCompletion();
   }
 
   setOverviewTab(tab: OverviewTab): void {
-    this.setState('overview', 'tab', tab);
+    this.setStateTouchingOverview('overview', 'tab', tab);
     this.invalidateCompletion();
   }
 
@@ -1366,7 +1349,7 @@ export class AppController {
     snapshotSeq: number,
   ): void {
     const superseded = (key: string) => this.generations.eventSequence(key) > snapshotSeq;
-    this.setState(
+    this.setStateTouchingOverview(
       produce((state) => {
         for (const key of Object.keys(state.running)) {
           const ref = parseSessionKey(key);
@@ -1476,7 +1459,7 @@ export class AppController {
         continue;
 
       batch(() => {
-        this.setState('sessions', (current) =>
+        this.setStateTouchingOverview('sessions', (current) =>
           mergeCommittedSessions(current, result.fresh, reconciled.found, result.usageSeq, (key) =>
             this.generations.usageEvidence(key),
           ),
@@ -1496,7 +1479,7 @@ export class AppController {
       serverID,
     );
     batch(() => {
-      this.setState('sessionsComplete', flags.complete);
+      this.setStateTouchingOverview('sessionsComplete', flags.complete);
       if (serverID === undefined) this.setState('sessionsCursor', flags.cursor);
       // Only a refresh that actually applied a host may clear the loading flag; a newer
       // or unrelated refresh keeps it set until that operation completes.
@@ -1583,7 +1566,7 @@ export class AppController {
     this.transcriptRetries.reset(retryKey);
     this.clearJobStartProbe(key);
     const expansionPrefix = `${key} `;
-    this.setState(
+    this.setStateTouchingOverview(
       produce((state) => {
         delete state.sessions[key];
         delete state.transcripts[key];
@@ -1725,7 +1708,7 @@ export class AppController {
           }));
           continue;
         }
-        this.setState('sessions', (current) => {
+        this.setStateTouchingOverview('sessions', (current) => {
           const merged = { ...current };
           for (const session of result.page.sessions) {
             merged[this.keyFor(result.serverID, session.id)] = {
@@ -1743,7 +1726,7 @@ export class AppController {
         this.reconcileRunning(result.serverID, result.active, result.snapshotSeq);
       }
       const all = this.serverIDs().map((serverID) => this.state.serverPages[serverID]);
-      this.setState(
+      this.setStateTouchingOverview(
         'sessionsComplete',
         all.every((page) => page?.complete === true),
       );
@@ -1914,7 +1897,7 @@ export class AppController {
         this.clearRuntimeStateForServer(command.serverID);
         return;
       case 'set-badge':
-        this.setState('stream', command.status);
+        this.setStateTouchingOverview('stream', command.status);
         return;
       case 'show-lost-notice':
         this.showNotice('Connection lost · retrying', 'warn', false);
@@ -1960,7 +1943,7 @@ export class AppController {
     for (const key of this.jobStartProbes.keys()) {
       if (parseSessionKey(key).serverID === serverID) this.clearJobStartProbe(key);
     }
-    this.setState(
+    this.setStateTouchingOverview(
       produce((state) => {
         for (const key of Object.keys(state.backgrounded)) {
           if (parseSessionKey(key).serverID === serverID) delete state.backgrounded[key];
@@ -2088,7 +2071,7 @@ export class AppController {
         this.generations.nextUsageSequence(this.keyFor(serverID, sessionID));
         return;
       case 'set-usage':
-        this.setState('sessions', this.keyFor(serverID, sessionID), {
+        this.setStateTouchingOverview('sessions', this.keyFor(serverID, sessionID), {
           cost: command.cost,
           tokens: command.tokens,
         });
@@ -2097,7 +2080,7 @@ export class AppController {
         this.generations.nextEventSequence(this.keyFor(serverID, sessionID));
         return;
       case 'set-running':
-        this.setState('running', this.keyFor(serverID, sessionID), command.running);
+        this.setStateTouchingOverview('running', this.keyFor(serverID, sessionID), command.running);
         return;
       case 'clear-backgrounded':
         // A background confirmation lives only in the turn that produced it (#135).
@@ -2190,7 +2173,7 @@ export class AppController {
               ...(current.tokens === undefined ? {} : { tokens: current.tokens }),
             }
           : next;
-      this.setState('sessions', key, reconcile(committed));
+      this.setStateTouchingOverview('sessions', key, reconcile(committed));
       if (session.agent !== undefined) this.acceptServerAgent(key, session.agent);
       else this.adoptTranscriptAgent(key);
       this.reconcileStagedRevert(sessionID, serverID);
@@ -2252,10 +2235,10 @@ export class AppController {
   private executeRequestInboxCommand(command: RequestInboxCommand): void {
     switch (command.kind) {
       case 'set-permissions':
-        this.setState('permissions', command.key, command.value);
+        this.setStateTouchingOverview('permissions', command.key, command.value);
         return;
       case 'set-forms':
-        this.setState('forms', command.key, command.value);
+        this.setStateTouchingOverview('forms', command.key, command.value);
         return;
       case 'set-request-errors':
         // Replace the whole per-key record: a successful retry clears an old error without
@@ -2840,7 +2823,7 @@ export class AppController {
     });
     this.transcriptOrder = plan.order;
     if (plan.evicted.length === 0) return;
-    this.setState(
+    this.setStateTouchingOverview(
       produce((state) => {
         for (const entry of plan.evicted) delete state.transcripts[entry];
       }),
@@ -2889,7 +2872,7 @@ export class AppController {
       this.setState('focusedGroup', undefined);
       this.setState('permissionChoice', 0);
       this.setState('permissionFocused', false);
-      this.setState('openedAt', this.keyFor(serverID, sessionID), this.deps.now());
+      this.setStateTouchingOverview('openedAt', this.keyFor(serverID, sessionID), this.deps.now());
       this.restoreDraft(this.keyFor(serverID, sessionID));
       if (transcript === undefined) {
         this.setState('transcripts', this.keyFor(serverID, sessionID), {
@@ -3468,7 +3451,7 @@ export class AppController {
   }
 
   toggleOverviewGroup(groupKey: string): void {
-    this.setState(
+    this.setStateTouchingOverview(
       produce((state) => {
         if (state.overview.expanded[groupKey] === true) delete state.overview.expanded[groupKey];
         else state.overview.expanded[groupKey] = true;
@@ -4553,7 +4536,7 @@ export class AppController {
     }
     this.setState('admitting', false);
     const sessionServerID = session.serverID ?? serverID;
-    this.setState('sessions', this.keyFor(sessionServerID, session.id), {
+    this.setStateTouchingOverview('sessions', this.keyFor(sessionServerID, session.id), {
       ...session,
       serverID: sessionServerID,
     });
@@ -4709,7 +4692,11 @@ export class AppController {
   private storeSessionSummary(session: SessionSummary): void {
     const serverID = session.serverID ?? this.serverID;
     const key = this.keyFor(serverID, session.id);
-    this.setState('sessions', key, this.withConfirmedModel(key, { ...session, serverID }));
+    this.setStateTouchingOverview(
+      'sessions',
+      key,
+      this.withConfirmedModel(key, { ...session, serverID }),
+    );
   }
 
   /**
@@ -5173,7 +5160,7 @@ export class AppController {
         cache.delete(key);
       }
     }
-    this.setState(
+    this.setStateTouchingOverview(
       produce((state) => {
         delete state.mcpCatalogs[serverID];
         for (const [key, summary] of Object.entries(state.sessions)) {
@@ -5288,7 +5275,7 @@ export class AppController {
     const key = this.keyFor(session.serverID, session.id);
     const epoch = this.sessionEpoch(key);
     const previous = this.agentSwitches.get(key);
-    this.setState('sessions', key, { ...session, agent: agentID });
+    this.setStateTouchingOverview('sessions', key, { ...session, agent: agentID });
     const operation = (async (): Promise<boolean> => {
       if (previous !== undefined) await previous;
       try {
@@ -5308,7 +5295,7 @@ export class AppController {
         if (confirmed.agent !== undefined && confirmed.agent !== agentID) {
           throw new Error('Server did not confirm the requested agent');
         }
-        this.setState('sessions', key, {
+        this.setStateTouchingOverview('sessions', key, {
           ...confirmed,
           serverID: session.serverID,
           agent: confirmed.agent ?? agentID,
@@ -5323,7 +5310,7 @@ export class AppController {
         if (!this.isSessionCurrent(key, epoch)) return false;
         // `agent` is optional; restoring the whole captured summary avoids an absent-property
         // write under exactOptionalPropertyTypes. refreshSummary below reconciles with the server.
-        this.setState('sessions', key, session);
+        this.setStateTouchingOverview('sessions', key, session);
         this.failedAgentSwitches.add(key);
         this.showNotice(
           `Agent selection failed: ${errorText(error)}. Select an agent again before sending.`,
@@ -6004,7 +5991,10 @@ export class AppController {
         if (confirmed.model === undefined || !sameModel(confirmed.model, model)) {
           throw new Error('Server did not confirm the requested model');
         }
-        this.setState('sessions', key, { ...confirmed, serverID: session.serverID });
+        this.setStateTouchingOverview('sessions', key, {
+          ...confirmed,
+          serverID: session.serverID,
+        });
         this.failedModelSwitches.delete(key);
         return true;
       } catch (error) {
@@ -6561,7 +6551,7 @@ export class AppController {
   }
 
   private clearSteerIntent(sessionID: string, serverID: string = this.activeServerID()): void {
-    this.setState(
+    this.setStateTouchingOverview(
       produce((state) => {
         delete state.awaitingSteer[this.keyFor(serverID, sessionID)];
       }),
@@ -7080,7 +7070,7 @@ export class AppController {
     const prefix = this.expansionPrefix();
     if (prefix === undefined) return;
     const qualified = `${prefix}${id}`;
-    this.setState(
+    this.setStateTouchingOverview(
       produce((state) => {
         if (state.expandedTools[qualified] === true) delete state.expandedTools[qualified];
         else state.expandedTools[qualified] = true;
@@ -7092,7 +7082,7 @@ export class AppController {
     const prefix = this.expansionPrefix();
     if (prefix === undefined) return;
     const qualified = `${prefix}${key}`;
-    this.setState(
+    this.setStateTouchingOverview(
       produce((state) => {
         if (state.expandedGroups[qualified] === true) delete state.expandedGroups[qualified];
         else state.expandedGroups[qualified] = true;
@@ -7252,7 +7242,7 @@ export class AppController {
     const prefix = this.expansionPrefix();
     if (prefix === undefined) return;
     const qualified = `${prefix}${id}`;
-    this.setState(
+    this.setStateTouchingOverview(
       produce((state) => {
         if (state.expandedDiffs[qualified] === true) delete state.expandedDiffs[qualified];
         else state.expandedDiffs[qualified] = true;
@@ -8210,7 +8200,10 @@ export class AppController {
       // A host unpaired during the RPC must not get its row resurrected.
       if (!this.isRegisteredBackend(session.serverID, backend)) return;
       // The server's session event carries the authoritative title; reflect it now too.
-      this.setState('sessions', this.keyFor(session.serverID, session.id), { ...session, title });
+      this.setStateTouchingOverview('sessions', this.keyFor(session.serverID, session.id), {
+        ...session,
+        title,
+      });
       this.showNotice(`Renamed to ${title}`, 'dim');
     } catch (error) {
       this.showNotice(`Rename failed: ${errorText(error)}`, 'error');
@@ -8229,7 +8222,7 @@ export class AppController {
       const forked = await backend.forkSession(sessionID);
       const forkKey = this.keyFor(serverID, forked.id);
       if (this.isRegisteredBackend(serverID, backend)) {
-        this.setState('sessions', forkKey, { ...forked, serverID });
+        this.setStateTouchingOverview('sessions', forkKey, { ...forked, serverID });
       }
       let goalError: string | undefined;
       if (doc !== undefined) {
@@ -8453,7 +8446,7 @@ export class AppController {
       return;
     }
     const staged = summary?.revert;
-    this.setState(
+    this.setStateTouchingOverview(
       'sessions',
       this.keyFor(overlay.serverID, overlay.sessionID),
       reconcile({ ...summary, serverID: overlay.serverID }),

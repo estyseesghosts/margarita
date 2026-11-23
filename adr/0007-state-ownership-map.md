@@ -399,11 +399,15 @@ These are concrete source observations, not hypotheses:
 
 ### 12. Reactive coordination and view boundaries (#316/#318/#319)
 
-- **Current owner:** the store setter wrapper at 680-685, the `overviewRevision`
-  signal, and the main UI at `src/ui/app.tsx`, `transcript-view.tsx` and
-  `overlays.tsx`. The three overview projection caches now use the shared
-  `src/app/revision-cache.ts` primitive (four tests); usage and greeting memo
-  owners are in `src/app/usage-selector.ts` and `src/app/greeting-selector.ts`.
+- **Current owner:** `OverviewProjection` and the main UI at `src/ui/app.tsx`,
+  `transcript-view.tsx` and `overlays.tsx`. The overloaded setter wrapper and its
+  magic `overviewInputs` list are gone (third #316 slice): the controller assigns
+  the raw store setter and the 32 writes that can change an overview projection
+  explicitly call `setStateTouchingOverview`, which batches the write with
+  `invalidate()`. All other writes use the plain setter. The three projection
+  caches use the shared `src/app/revision-cache.ts` primitive (four tests); usage
+  and greeting memo owners are in `src/app/usage-selector.ts` and
+  `src/app/greeting-selector.ts`.
 - **Authoritative source:** the owning capability's state; derived views must
   subscribe only to fields that can change them.
 - **Readers / writers:** all mounted Solid views read it; AppController store updates, revision signals and UI-local view state write it.
@@ -417,15 +421,16 @@ These are concrete source observations, not hypotheses:
   usage-analytics memo and stable greeting selection are owned by
   `src/app/usage-selector.ts` and `src/app/greeting-selector.ts` (first #316/#318
   slices); the controller only supplies evidence and the time period.
-  Still to remove: the overloaded setter wrapper's argument sniffing, now the
-  only place that implicitly decides which writes invalidate the overview.
+  Invalidation is now visible at each call site rather than inferred from setter
+  arguments; the remaining work is narrowing UI dependencies to view-models.
 - **Async/teardown:** store changes and revision bumps are batched atomically
   (#293); composer keystrokes must not regroup sessions or reformat hidden rows.
 - **Intended owner:** named capability write operations plus derived selectors;
   UI receives narrow view-models/action ports, not the whole controller and state.
   Pure folding/preview policy moves to domain modules without losing
   incremental projector reuse (#319).
-- **Tests:** `src/app/overview-projection.test.ts` (5),
+- **Tests:** `src/app/controller.test.ts` (#288/#293/#316 invalidation parity),
+  `src/app/overview-projection.test.ts` (5),
   `src/app/revision-cache.test.ts` (4), `src/ui/app.test.tsx`,
   `test/perf.test.tsx`, `scripts/bench-render.ts`, PTY smoke scripts.
 
