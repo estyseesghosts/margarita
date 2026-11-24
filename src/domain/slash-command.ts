@@ -8,7 +8,7 @@ export const localCommands = {
   model: 'Pick or set model: /model [provider/model#variant]',
   effort: 'Set variant for the current model: /effort <variant>',
   transcript: 'Toggle detailed transcript',
-  copy: 'Copy exact tool output, diff or code block: /copy',
+  copy: 'Copy exact tool output, diff, code block or response: /copy · /copy last',
   diff: 'Files changed: /diff (session) or /diff turn (since your last message)',
   usage: 'Show token and spend breakdown',
   // Side questions are a desktop-only feature; the v2.3.x HTTP API has no equivalent.

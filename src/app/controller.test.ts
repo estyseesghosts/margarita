@@ -2642,9 +2642,12 @@ describe('output inspector (#221, #222)', () => {
     const copied: string[] = [];
     const saved: { path: string; text: string }[] = [];
     const { controller, full } = inspectorFixture({
-      copyText: async (text) => {
-        copied.push(text);
-        return { method: 'clipboard' };
+      clipboard: {
+        writeText: async (text) => {
+          copied.push(text);
+          return { status: 'written', backend: 'native' };
+        },
+        read: async () => ({ status: 'unsupported', detail: 'test' }),
       },
       writeFile: async (path, text) => {
         saved.push({ path, text });
@@ -6600,9 +6603,12 @@ describe('copy picker (#105)', () => {
       saveLocalState: async () => {},
       listFiles: () => Promise.resolve([]),
       requestExit: () => {},
-      copyText: async (text) => {
-        copied.push(text);
-        return { method: 'clipboard' };
+      clipboard: {
+        writeText: async (text) => {
+          copied.push(text);
+          return { status: 'written', backend: 'native' };
+        },
+        read: async () => ({ status: 'unsupported', detail: 'test' }),
       },
     });
     await attach(controller, 'ses_a');

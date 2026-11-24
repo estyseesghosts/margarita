@@ -16,7 +16,7 @@ import {
   type ServerProfiles,
 } from '../config/server-profiles.ts';
 import { enqueueCredentialCleanup, reconcileCredentialCleanup } from '../config/unpair-recovery.ts';
-import { copyToClipboard } from './clipboard.ts';
+import { type ClipboardService, createSystemClipboard } from './clipboard.ts';
 import { AppController, errorText, type ServerAdmin, type ServerListing } from './controller.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { openExternalUrl } from './open-url.ts';
@@ -74,12 +74,16 @@ export type ProductionAssemblyInput = Readonly<{
   generateID?: () => string;
   /** Backend factory override for restore/pair paths; production uses the real SDK backend. */
   createBackend?: typeof createBackend;
+  /** Clipboard transport override for tests; production uses this machine's clipboard. */
+  clipboard?: ClipboardService;
   requestExit: () => void;
 }>;
 
 export type ProductionAssembly = Readonly<{
   servers: ServerConnectionManager;
   controller: AppController;
+  /** The one client-local clipboard every copy and paste consumer shares. */
+  clipboard: ClipboardService;
   /** The same admin surface the controller wires; exposed for assembly-path tests. */
   serverAdmin: ServerAdmin;
 }>;
@@ -243,6 +247,14 @@ export async function createProductionAssembly(
     },
   };
 
+  const clipboard =
+    input.clipboard ??
+    createSystemClipboard({
+      stateDir: input.paths.stateDir,
+      pid: process.pid,
+      env: input.env,
+    });
+
   const controller = new AppController({
     backend: launchBackend,
     serverID: launchServerID,
@@ -303,14 +315,10 @@ export async function createProductionAssembly(
     // OSC 52 only when a real terminal can receive it AND the single set operation fits the
     // explicit byte limit; otherwise save an exact local file with a visible path (#105, #131).
     // The fallback directory is client-local state, never the active (possibly remote) cwd (#153).
-    copyText: (text) =>
-      copyToClipboard(text, {
-        term: input.env['TERM'],
-        isTTY: process.stdout.isTTY,
-        write: (sequence) => void process.stdout.write(sequence),
-        stateDir: input.paths.stateDir,
-        pid: process.pid,
-      }),
+    // One client-local clipboard: native first, OSC 52 where the terminal owns the channel,
+    // and an explicit owner-only file only when the caller allows it (#105, #131).
+    // The fallback directory is client-local state, never the active (possibly remote) cwd (#153).
+    clipboard,
     // External MCP elicitations open in the client's browser only after http(s) validation.
     openUrl: (url) => openExternalUrl(url, process.platform),
     goalStore:
@@ -371,5 +379,5 @@ export async function createProductionAssembly(
     controller.showNotice(errorText(error), 'error', false);
   }
 
-  return { servers, controller, serverAdmin };
+  return { servers, controller, clipboard, serverAdmin };
 }

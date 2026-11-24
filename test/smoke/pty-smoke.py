@@ -8,6 +8,8 @@ Scenarios:
   keys         typing, Unicode, backspace, Ctrl+J, bracketed paste, F1 help,
                Alt+P picker dismissal, Ctrl+O/R/S/T/B, F6: no crash, no submit
   mouse        SGR click/release/wheel over transcript and footer: no crash, no submit
+  clipboard    Ctrl+V and right-click without a selection: truthful acquisition feedback,
+               no crash, no submit
   editor       Ctrl+G with an EDITOR path containing spaces: draft round-trips,
                temp directory removed, terminal usable after
   editor-fail  editor exits 1: draft kept, app keeps running
@@ -114,6 +116,15 @@ def main():
         if not read_until(fd, buffer, lambda data: fragment in screen(), 8):
             failures.append(f'{label}: never saw {fragment!r}')
 
+    def expect_any(fragments, label):
+        if not read_until(
+            fd,
+            buffer,
+            lambda _data: any(fragment in screen() for fragment in fragments),
+            8,
+        ):
+            failures.append(f'{label}: never saw any of {fragments!r}')
+
     def resize(rows, cols):
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
 
@@ -164,6 +175,24 @@ def main():
             send(sequence)
         if not alive():
             failures.append('process died during mouse input')
+    elif scenario == 'clipboard':
+        # Ctrl+V: no desktop clipboard exists in this minimal PTY environment, so the
+        # application must say so instead of inserting anything or submitting the prompt.
+        send(b'\x16')
+        expect_any(
+            (
+                'Cannot read the clipboard',
+                'The clipboard is empty',
+                'Clipboard read failed',
+                'Clipboard unavailable',
+            ),
+            'Ctrl+V acquisition feedback',
+        )
+        # Right-click without a selection goes through the same common paste entry point.
+        send(b'\x1b[<2;10;10M')
+        send(b'\x1b[<2;10;10m')
+        if not alive():
+            failures.append('process died during clipboard input')
     elif scenario in ('editor', 'editor-fail'):
         send('draft text'.encode())
         expect('draft text', 'draft before editor')
@@ -236,7 +265,7 @@ def main():
         if '\x1b[?1000h' in text and '\x1b[?1000l' not in text:
             failures.append('mouse reporting was left enabled')
     submitted = os.environ.get('STUB_LOG')
-    if scenario in ('keys', 'mouse') and submitted and os.path.exists(submitted):
+    if scenario in ('keys', 'mouse', 'clipboard') and submitted and os.path.exists(submitted):
         with open(submitted, encoding='utf-8') as handle:
             writes = [line for line in handle.read().splitlines() if not line.startswith('GET ')]
         if writes:

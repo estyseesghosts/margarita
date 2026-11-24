@@ -28,6 +28,10 @@ Run on the exact build being released (`bun run build`, then the binary from `di
 - [ ] `/rename`, `/fork` (plan copied, not shared), `/revert` (Esc restores, Enter commits).
 - [ ] `/export` writes `marg-<session>.json` with every message, not only the visible window.
 - [ ] `ui.theme` `light` and `high-contrast` are readable; `NO_COLOR=1` gives plain output; `ui.ascii` and `ui.animation: false` work.
+- [ ] Drag over an assistant reply: selection is visible and copies once on release; `Ctrl+Shift+C` copies a selection with autocopy off; `Alt+Shift+C` copies the last complete reply.
+- [ ] `Ctrl+V` pastes multiline text without submitting; right-click copies a selection and pastes when there is none.
+- [ ] `/copy` lists responses alongside tool output; `/copy last` works without the shortcut.
+- [ ] Copy a large reply and a Unicode code block on Windows Terminal first, then a Wayland/X11 terminal, macOS and an SSH/tmux session; the notice distinguishes native, unconfirmed OSC 52 and unavailable, and the paste round-trips without corrupted characters.
 - [ ] Ctrl+C interrupts, then clears, then asks before exit; the terminal is restored after exit and after a crash.
 
 ## Performance review

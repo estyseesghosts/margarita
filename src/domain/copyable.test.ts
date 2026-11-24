@@ -87,4 +87,24 @@ describe('copyable text projection (#105)', () => {
     expect(items[1]?.truncation).toBe('server');
     expect(items[1]?.label).toContain('server truncated');
   });
+
+  test('complete responses are an additional picker category (#issue 5)', () => {
+    const messages: TranscriptMessage[] = [
+      {
+        kind: 'user',
+        id: 'u1',
+        createdAt: 0,
+        text: 'show me the code',
+        attachments: [],
+      },
+      assistant([{ kind: 'text', text: 'Here:\n```ts\nconst x = 1;\n```' }]),
+      { kind: 'idle', id: 'i1', createdAt: 2, outcome: 'succeeded' },
+    ];
+    const items = copyableFromMessages(messages);
+    expect(items.map((item) => item.kind)).toEqual(['code', 'response']);
+    const response = items[1];
+    expect(response?.text).toBe('Here:\n```ts\nconst x = 1;\n```');
+    expect(response?.truncation).toBe('none');
+    expect(response?.label).toContain('Response · Here:');
+  });
 });

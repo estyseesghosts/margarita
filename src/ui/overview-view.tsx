@@ -16,6 +16,7 @@ import { sanitizeSingleLine } from '../domain/sanitize-text.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import { executionLabel } from '../domain/session.ts';
 import { formatAge } from '../domain/usage-format.ts';
+import { useActivate } from './pointer.ts';
 import { isNoColorTheme, type Theme } from './theme.ts';
 
 type RowOf<K extends OverviewRow['kind']> = Extract<OverviewRow, { kind: K }>;
@@ -32,6 +33,7 @@ export function Overview(props: {
   ascii?: boolean;
 }) {
   const state = props.controller.state;
+  const activate = useActivate();
   const groups = () => props.controller.groups();
   const selected = (key: string) =>
     state.overview.focus === 'list' && state.overview.selectedRow === key;
@@ -89,11 +91,11 @@ export function Overview(props: {
                   ? props.theme.accent
                   : props.theme.dim
               }
-              onMouseDown={() =>
+              onMouseUp={activate(() =>
                 props.controller.setOverviewTab(
                   (['all', 'local', 'remotes', 'active', 'needs-input'] as const)[index()] ?? 'all',
-                )
-              }
+                ),
+              )}
             >
               {tab}
             </text>
@@ -168,7 +170,7 @@ export function Overview(props: {
                       <text
                         id={rowID(row.key)}
                         fg={selected(row.key) ? props.theme.accent : props.theme.dim}
-                        onMouseDown={() => props.controller.clickOverviewRow(row.key)}
+                        onMouseUp={activate(() => props.controller.clickOverviewRow(row.key))}
                       >
                         {`${selected(row.key) ? '  ❯ ' : '    '}${
                           toggle().expanded ? '[Show less]' : `[Show more] ${toggle().hidden}`
@@ -227,6 +229,7 @@ function SessionLine(props: {
   width: number;
   ascii?: boolean | undefined;
 }) {
+  const activate = useActivate();
   const execution = () => props.controller.executionOf(props.session.id, props.session.serverID);
   const tasks = () => {
     const count = props.controller.planProgress(props.session.id, props.session.serverID);
@@ -262,7 +265,7 @@ function SessionLine(props: {
       id={props.id}
       flexDirection="column"
       flexShrink={0}
-      onMouseDown={() => props.controller.clickOverviewRow(props.rowKey)}
+      onMouseUp={activate(() => props.controller.clickOverviewRow(props.rowKey))}
     >
       <box flexDirection="row">
         <text fg={props.selected ? props.theme.accent : props.theme.dim}>

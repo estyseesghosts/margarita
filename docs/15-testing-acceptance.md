@@ -35,6 +35,27 @@ Observed against OpenCode 2.3.0 (pinned by the suite and by the fixtures below):
 
 `.github/workflows/verify.yml` runs `bun run verify` on Windows and Linux. The writable suite is not part of it; run it locally or in a dedicated job that has OpenCode installed.
 
+## Clipboard and selection acceptance
+
+The automated unit and mounted-UI tests cover the deterministic rules; real terminal/desktop behaviour is checked separately and never in the standard suite.
+
+| Scenario | Automated coverage | Required result |
+| --- | --- | --- |
+| `Ctrl+V` with multiline text | mounted UI (`src/ui/app.test.tsx`) + controller | Exact insertion, no submission, one undo step |
+| Right-click without selection | mounted UI + controller | One paste |
+| Right-click with selection | mounted UI | One copy, no paste |
+| Drag and release | mounted UI | Selection copied once |
+| Autocopy disabled | mounted UI | Explicit `Ctrl+Shift+C` still copies |
+| Copy 100 KB response | `test/clipboard-live.test.ts` (opt-in) | Complete native clipboard contents |
+| Copy Unicode code block | `test/clipboard-live.test.ts` (opt-in) | No corrupted characters; CRLF normalized on paste |
+| Copy during streaming | controller + domain | Previous completed response |
+| Switch session during clipboard read | controller | No cross-session contamination |
+| Paste image or PDF | controller | Existing attachment behaviour, no binary in the draft |
+| Clipboard unavailable | mounted UI + controller | Clear, truthful feedback, nothing inserted |
+| Exit application | PTY smoke | Terminal state restored |
+
+`MARGARITA_CLIPBOARD_LIVE=1 bun test test/clipboard-live.test.ts` is the only test that touches the real desktop clipboard; it restores the previous plain-text clipboard. `test/smoke/pty-smoke.py clipboard` runs the acquisition path under a minimal PTY (no desktop clipboard) and asserts the app reports it instead of submitting. Manual verification is still required on Windows Terminal first, then representative Wayland/X11 terminals, macOS terminals and an SSH/tmux session; those environments cannot be proven from one machine.
+
 ## Fixtures to check in
 
 `test-fixtures/cases/` must include synthetic but schema-valid versions of:

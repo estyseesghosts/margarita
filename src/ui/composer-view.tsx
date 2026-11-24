@@ -16,6 +16,7 @@ import { goalBadge } from '../domain/native-goal.ts';
 import { directoryName } from '../domain/path-identity.ts';
 import { executionLabel } from '../domain/session.ts';
 import { agentColor } from './agent-color.ts';
+import { useActivate } from './pointer.ts';
 import type { Theme } from './theme.ts';
 
 /**
@@ -88,6 +89,7 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
 /** The only persistent chrome: one line under the composer (docs/13). */
 export function Footer(props: { controller: AppController; theme: Theme; width: number }) {
   const state = props.controller.state;
+  const activate = useActivate();
   // One projection per reactive revision: segments and their colours share this value
   // instead of scanning usage/history for every segment (#285).
   const facts = createMemo<FooterFacts>(() => {
@@ -177,7 +179,7 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
                 fg={segmentColor(segment)}
                 {...(action === undefined
                   ? {}
-                  : { onMouseDown: () => props.controller.activateFooter(action) })}
+                  : { onMouseUp: activate(() => props.controller.activateFooter(action)) })}
               >
                 {segment.text}
               </text>

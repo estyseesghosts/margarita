@@ -41,6 +41,7 @@ import {
   splitPastedPaths,
 } from '../domain/attachment.ts';
 import type { BackendEvent } from '../domain/backend-event.ts';
+import { lastCompleteResponse } from '../domain/complete-response.ts';
 import {
   type Composer,
   composerFrom,
@@ -208,6 +209,7 @@ import {
   type Overlay,
   type Route,
 } from './app-state.ts';
+import type { ClipboardPort, ClipboardRead, CopyOutcome } from './clipboard.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { descendantScope } from './descendant-scope.ts';
 import { DraftRegistry } from './draft-registry.ts';
@@ -310,9 +312,6 @@ export type ConversationView = Readonly<{
   execution: Execution;
 }>;
 
-/** Where a copy operation actually landed; the UI always reports this truthfully. */
-export type CopyResult = Readonly<{ method: 'clipboard' | 'file'; path?: string }>;
-
 /**
  * A local project listing plus whether the scan covered the whole tree. `detail` is a
  * user-facing, path-redacted reason for incompleteness (#300).
@@ -321,6 +320,16 @@ export type ProjectFileListing = Readonly<{
   files: readonly string[];
   complete: boolean;
   detail?: string;
+}>;
+
+/**
+ * Everything one paste must stay bound to while buffered bytes are processed. Captured
+ * synchronously, before an asynchronous clipboard read can yield to a route or dialog change.
+ */
+type PasteOrigin = Readonly<{
+  routeKey: string;
+  formToken: number | undefined;
+  overlayKind: Overlay['kind'];
 }>;
 
 /**
@@ -398,10 +407,11 @@ export type ControllerDeps = Readonly<{
   /** Writes an exported file; defaults to Bun.write. */
   writeFile?: (path: string, text: string) => Promise<void>;
   /**
-   * Copies exact text to the terminal clipboard (OSC52). The default writes a local file so
-   * copy always has an explicit, visible fallback when the terminal cannot receive OSC52.
+   * Client-local clipboard transport injected by the assembly. It never performs a server
+   * RPC and never runs on the OpenCode host. When absent (unit tests, print mode), copy
+   * actions use an explicit local file so nothing silently reports success.
    */
-  copyText?: (text: string) => Promise<CopyResult>;
+  clipboard?: ClipboardPort;
   /** Client-local directory for copy fallback files; never derived from a remote cwd (#153). */
   copyFallbackDir?: string;
   /** Opens an explicitly validated http(s) URL in the client's browser (#233). */
@@ -703,6 +713,11 @@ export class AppController {
   /** In-flight pastes, serialized in arrival order so a route switch mid-paste cannot
    * interleave two paste transactions. */
   private pasteChain: Promise<void> = Promise.resolve();
+  /** The last terminal-originated paste, so a terminal that also delivers Ctrl+V cannot
+   * duplicate the same physical paste within one gesture window. */
+  private recentTerminalPaste: { text: string; at: number } | undefined;
+  /** The last automatic selection copy, so duplicate selection events write at most once. */
+  private recentAutocopy: { text: string; at: number } | undefined;
   private readonly goalStore: GoalStore;
   /**
    * Highest goal revision whose UI state was confirmed for a server-qualified session. A late
@@ -3438,13 +3453,111 @@ export class AppController {
     metadata?: { mimeType?: string; kind?: 'text' | 'binary' | 'unknown' },
   ): Promise<void> {
     // Serialize paste transactions in arrival order. The originating route is captured
-    // synchronously here (before `run` is deferred onto the microtask queue) so a route
-    // switch while files are read cannot retarget the paste (issues #87, #154).
+    // synchronously here (before the transaction is deferred onto the microtask queue) so a
+    // route switch while files are read cannot retarget the paste (issues #87, #154).
     if (this.disposed) return;
-    const originKey = this.routeKey(this.state.route);
-    // Bind the paste to the question that is active *now*, before the ordered paste queue
-    // defers it. A later close/reopen must drop this paste, never retarget it (#229).
-    const formOrigin = this.pasteFormOrigin();
+    // Record text pastes synchronously, before any queueing: a terminal that also delivers
+    // `clipboard.paste` must not insert the same physical paste twice, and the key handler
+    // may run before the queued transaction does.
+    if (metadata?.kind !== 'binary') {
+      const text = decodePastedText(bytes);
+      if (text !== undefined) this.recentTerminalPaste = { text, at: this.deps.now() };
+    }
+    await this.runPaste(bytes, metadata, this.capturePasteOrigin(), 'terminal');
+  }
+
+  /**
+   * One explicit clipboard paste (`clipboard.paste`). The origin is captured before the
+   * asynchronous read: a route switch, a closed question or a replaced dialog must drop the
+   * transaction instead of pasting into whatever happens to be focused after the read.
+   */
+  async pasteFromClipboard(): Promise<void> {
+    if (this.disposed) return;
+    // Help is dismiss-on-paste; the paste belongs to the surface behind it.
+    if (this.state.overlay.kind === 'help') this.closeOverlay();
+    const origin = this.capturePasteOrigin();
+    const read = await this.readClipboard();
+    if (read.status !== 'read') {
+      this.showClipboardReadNotice(read);
+      return;
+    }
+    if (this.disposed) return;
+    if (this.state.overlay.kind === 'help') this.closeOverlay();
+    if (this.state.overlay.kind !== origin.overlayKind) {
+      this.showNotice(
+        'The dialog changed before the clipboard paste landed; nothing was inserted.',
+        'warn',
+      );
+      return;
+    }
+    const metadata = {
+      mimeType: read.mimeType,
+      kind: read.mimeType.toLowerCase().startsWith('text/')
+        ? ('text' as const)
+        : ('binary' as const),
+    };
+    const text = metadata.kind === 'text' ? decodePastedText(read.bytes) : undefined;
+    // A terminal that both handles the shortcut and emits a bracketed paste must insert the
+    // bytes exactly once. The terminal-originated transaction records itself first.
+    if (text !== undefined && this.isRecentTerminalPaste(text)) return;
+    if (origin.overlayKind !== 'none' && origin.overlayKind !== 'form') {
+      if (this.pasteIntoOverlay(read.bytes, metadata)) return;
+    }
+    await this.runPaste(read.bytes, metadata, origin, 'clipboard');
+  }
+
+  /** Reads through the injected client clipboard; tests never touch a desktop clipboard. */
+  private async readClipboard(): Promise<ClipboardRead> {
+    if (this.deps.clipboard === undefined) {
+      return { status: 'unsupported', detail: 'clipboard reads are not available in this build' };
+    }
+    try {
+      return await this.deps.clipboard.read();
+    } catch (error) {
+      return { status: 'failed', detail: errorText(error) };
+    }
+  }
+
+  private showClipboardReadNotice(read: ClipboardRead): void {
+    switch (read.status) {
+      case 'empty':
+        this.showNotice('The clipboard is empty.', 'dim');
+        return;
+      case 'unsupported':
+        this.showNotice(`Cannot read the clipboard: ${read.detail}.`, 'warn');
+        return;
+      case 'too-large':
+        this.showNotice(`Cannot paste: ${read.detail}.`, 'warn');
+        return;
+      case 'failed':
+        this.showNotice(`Clipboard read failed: ${read.detail}.`, 'error');
+        return;
+      case 'read':
+        return;
+    }
+  }
+
+  private capturePasteOrigin(): PasteOrigin {
+    return {
+      routeKey: this.routeKey(this.state.route),
+      formToken: this.pasteFormOrigin()?.token,
+      overlayKind: this.state.overlay.kind,
+    };
+  }
+
+  private isRecentTerminalPaste(text: string): boolean {
+    const recent = this.recentTerminalPaste;
+    return recent !== undefined && recent.text === text && this.deps.now() - recent.at <= 250;
+  }
+
+  private async runPaste(
+    bytes: Uint8Array,
+    metadata: { mimeType?: string; kind?: 'text' | 'binary' | 'unknown' } | undefined,
+    origin: PasteOrigin,
+    source: 'terminal' | 'clipboard',
+  ): Promise<void> {
+    const originKey = origin.routeKey;
+    const formOrigin = origin.formToken === undefined ? undefined : { token: origin.formToken };
 
     const run = async (): Promise<void> => {
       if (this.disposed) return;
@@ -3505,6 +3618,7 @@ export class AppController {
       if (!binaryDeclared) {
         const text = decodePastedText(bytes);
         if (text !== undefined) {
+          if (source === 'terminal') this.recentTerminalPaste = { text, at: this.deps.now() };
           const consumed = await this.attachPastedPaths(text, originKey);
           if (consumed) return;
           this.insertPastedText(text, originKey);
@@ -5457,6 +5571,11 @@ export class AppController {
       case 'diff':
         await this.openDiff(args.trim() === 'turn' ? 'turn' : 'session');
         return;
+      case 'copy':
+        if (args === '') this.openCopyPicker();
+        else if (args.trim() === 'last') await this.copyLastResponse();
+        else this.showNotice('Usage: /copy · /copy last', 'warn');
+        return;
       case 'transcript':
         this.toggleDetails();
         return;
@@ -6119,31 +6238,98 @@ export class AppController {
     const item = this.copyChoices(overlay.query)[overlay.index];
     this.setOverlay({ kind: 'none' });
     if (item === undefined) return;
-    try {
-      const result = await this.copyToDestination(item.text);
-      const suffix =
-        item.truncation === 'none'
-          ? ''
-          : ` (${item.truncation === 'server' ? 'server-truncated' : 'UI cap only'})`;
+    const suffix =
+      item.truncation === 'none'
+        ? ''
+        : ` (${item.truncation === 'server' ? 'server-truncated' : 'UI cap only'})`;
+    await this.writeClipboardText(item.text, `the ${item.kind}`, suffix);
+  }
+
+  /** Clipboard preferences are read from config; copying is always available regardless. */
+  get clipboardPreferences(): AppConfig['clipboard'] {
+    return this.deps.config.clipboard;
+  }
+
+  /**
+   * Copies the terminal's visible selection. Autocopy is one write per selection gesture and
+   * never falls back to a file silently; explicit actions may, with the path reported.
+   */
+  async copySelection(
+    text: string,
+    trigger: 'autocopy' | 'explicit' | 'right-click',
+  ): Promise<void> {
+    if (text === '') {
+      if (trigger !== 'autocopy') this.showNotice('No text is selected.', 'warn');
+      return;
+    }
+    if (trigger === 'autocopy') {
+      const recent = this.recentAutocopy;
+      if (recent !== undefined && recent.text === text && this.deps.now() - recent.at <= 250)
+        return;
+      this.recentAutocopy = { text, at: this.deps.now() };
+    }
+    await this.writeClipboardText(text, 'the selection', '', trigger !== 'autocopy');
+  }
+
+  /**
+   * Copies the last complete agent response from canonical messages. A running or failed
+   * tail is skipped rather than copied; the notice says when an earlier response was used.
+   */
+  async copyLastResponse(): Promise<void> {
+    if (this.state.route.kind !== 'conversation') {
+      this.showNotice('Open a session before copying a response.', 'warn');
+      return;
+    }
+    const transcript =
+      this.state.transcripts[this.keyFor(this.state.route.serverID, this.state.route.sessionID)];
+    const result = lastCompleteResponse(this.loadedMessages(), {
+      historyIncomplete:
+        transcript?.olderCursor !== undefined || transcript?.olderCheckFailed === true,
+    });
+    if (!result.ok) {
       this.showNotice(
-        result.method === 'clipboard'
-          ? `Clipboard sequence emitted for ${item.kind}${suffix} (no terminal acknowledgement).`
-          : `Clipboard unavailable; saved ${result.path ?? 'a file'}${suffix}.`,
-        'dim',
+        result.reason === 'history-incomplete'
+          ? 'No complete response is fully loaded; earlier history remains. Scroll to the top to load it.'
+          : 'No complete agent response in this session yet.',
+        'warn',
+      );
+      return;
+    }
+    const suffix = result.incompleteTail
+      ? ' · the current run has not produced a complete response'
+      : '';
+    await this.writeClipboardText(result.response.text, 'the last complete response', suffix);
+  }
+
+  private async writeClipboardText(
+    text: string,
+    label: string,
+    suffix: string,
+    fileFallback = true,
+  ): Promise<void> {
+    try {
+      const outcome = await this.copyToDestination(text, fileFallback);
+      this.showNotice(
+        copyNotice(outcome, label, suffix),
+        outcome.status === 'unavailable' ? 'warn' : 'dim',
       );
     } catch (error) {
       this.showNotice(`Copy failed: ${errorText(error)}`, 'error');
     }
   }
 
-  private async copyToDestination(text: string): Promise<CopyResult> {
-    if (this.deps.copyText !== undefined) return this.deps.copyText(text);
-    // Fall back to a client-local directory, not the (possibly remote) project cwd (#153).
+  private async copyToDestination(text: string, fileFallback = true): Promise<CopyOutcome> {
+    if (this.deps.clipboard !== undefined) {
+      return this.deps.clipboard.writeText(text, { fileFallback });
+    }
+    // A client-local directory, not the (possibly remote) project cwd (#153). This path is
+    // only reached when no clipboard port was injected (unit tests, print mode).
+    if (!fileFallback) return { status: 'unavailable', detail: 'no clipboard is available' };
     const dir = this.deps.copyFallbackDir ?? this.deps.cwd;
     const path = join(dir, `marg-copy-${process.pid}-${this.deps.now()}.txt`);
     const write = this.deps.writeFile ?? (async (file, body) => void (await Bun.write(file, body)));
     await write(path, text);
-    return { method: 'file', path };
+    return { status: 'file', path };
   }
 
   async openModelPicker(admit?: () => boolean): Promise<void> {
@@ -7537,17 +7723,11 @@ export class AppController {
     if (overlay.kind !== 'form' || form === undefined) return;
     const field = currentField(form, overlay.editor);
     if (field?.kind !== 'external') return;
-    try {
-      const result = await this.copyToDestination(field.url);
-      this.showNotice(
-        result.method === 'clipboard'
-          ? 'External URL copied. The question stays pending until the server completes it.'
-          : `Clipboard unavailable; saved the URL to ${result.path ?? 'a local file'}.`,
-        'dim',
-      );
-    } catch (error) {
-      this.showNotice(`Copy failed: ${errorText(error)}`, 'error');
-    }
+    await this.writeClipboardText(
+      field.url,
+      'the external URL',
+      ' · the question stays pending until the server completes it',
+    );
   }
 
   formKey(key: FormKey): void {
@@ -8318,18 +8498,8 @@ export class AppController {
       this.showNotice('This result has no text to copy; file metadata is shown instead.', 'warn');
       return;
     }
-    try {
-      const result = await this.copyToDestination(text);
-      const suffix = ` · ${completenessLabel(overlay.payload.completeness)}`;
-      this.showNotice(
-        result.method === 'clipboard'
-          ? `Clipboard sequence emitted (no terminal acknowledgement)${suffix}.`
-          : `Clipboard unavailable; saved ${result.path ?? 'a local file'}${suffix}.`,
-        'dim',
-      );
-    } catch (error) {
-      this.showNotice(`Copy failed: ${errorText(error)}`, 'error');
-    }
+    const suffix = ` · ${completenessLabel(overlay.payload.completeness)}`;
+    await this.writeClipboardText(text, 'the inspected result', suffix);
   }
 
   /** Save exactly what the source supplied to a client-local file. */
@@ -9209,6 +9379,25 @@ function decodePastedText(bytes: Uint8Array): string | undefined {
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/\r\n?/g, '\n');
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Truthful copy wording for every transport outcome. Nothing claims acknowledgement from
+ * OSC 52, and an unavailable clipboard says so instead of reporting a phantom copy.
+ */
+function copyNotice(outcome: CopyOutcome, label: string, suffix: string): string {
+  switch (outcome.status) {
+    case 'written':
+      return `Copied ${label} to the system clipboard${suffix}.`;
+    case 'unconfirmed':
+      return `Clipboard sequence emitted for ${label}${suffix} (no terminal acknowledgement).`;
+    case 'file':
+      return `Clipboard unavailable; saved ${label} to ${outcome.path}${suffix}.`;
+    case 'unavailable':
+      return `Clipboard unavailable for ${label}: ${outcome.detail}${suffix}. Nothing was copied.`;
+    default:
+      return `Copy failed${suffix}.`;
   }
 }
 

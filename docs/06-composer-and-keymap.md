@@ -45,6 +45,13 @@ The mapping is deliberately not an exact Claude clone. `Shift+Tab` must never fl
 | Composer | `Ctrl+Enter` | Explicit **steer now** if terminal supports; fallback `/steer` command |
 | Composer | `Shift+Enter` | Newline where distinguishable; else `Ctrl+J` |
 | Composer | `Ctrl+J` | Insert newline, universal fallback |
+| Composer | `Ctrl+V` / `Ctrl+Shift+V` | Paste the system clipboard through the common paste entry point (text, image, PDF or file paths); multiline text never submits |
+| Conversation | `Ctrl+Shift+C` | Copy the visible mouse selection; works in the composer, transcript, inspector and dialogs without dismissing them |
+| Conversation | `Alt+Shift+C` | Copy the last complete agent response from canonical messages, never rendered rows |
+| Conversation | drag, then release | Copy the nonempty selection automatically when `clipboard.autoCopy` is enabled (default on) |
+| Conversation | right-click | Copy an active selection; with no selection, paste (each governed by `clipboard.rightClickCopy` / `clipboard.rightClickPaste`) |
+| Conversation | `/copy` | Searchable picker of exact tool output, diffs, errors, shell output, code blocks and complete responses |
+| Conversation | `/copy last` | Copy the last complete response from terminals that cannot deliver `Alt+Shift+C` |
 | Composer | `Up` / `Down` | Move within multiline; boundary navigates history |
 | Composer | `Ctrl+P` / `Ctrl+N` | Previous/next history unless completion owns keys |
 | Composer | `Ctrl+C` | Interrupt executing session; else clear draft; then confirm exit |
@@ -82,6 +89,18 @@ The mapping is deliberately not an exact Claude clone. `Shift+Tab` must never fl
 | Global | `?` | Keybinding help when not editing |
 
 `Ctrl+Enter` is the default steer binding, but it may be indistinguishable from Enter in terminals without extended keyboard protocols: **never claim it worked** for a terminal you have not tested. Keep `Alt+Enter` or `/steer` as a tested one-keystroke alternative for terminals that misdecode it. Primary Enter always queues while busy. Backend delivery modes are `queue` and `steer`; test semantics with the real server rather than client-side buffering. [OpenCode API](https://opencode.ai/docs/api).
+
+## Clipboard precedence
+
+The clipboard actions are ordinary `actionID`s in the central keymap, so overrides and collision detection apply to them like every other action. They keep one precedence across surfaces:
+
+1. **Paste** (`clipboard.paste`) captures the originating route, session, host, overlay and form token *before* the asynchronous clipboard read. It targets an editable overlay or a pending question when one owns focus, otherwise the composer; an owner change while the read is in flight drops the transaction with a notice. A terminal that both delivers the shortcut and emits a bracketed paste inserts the bytes once.
+2. **Selection copy** (`clipboard.copySelection`) reads the renderer's live selection and does not modify the composer, dismiss a dialog or change focus. While the inspector paints over the conversation, the selection is restricted to the inspector subtree.
+3. **Response copy** (`transcript.copyLastResponse`) reads canonical transcript messages only; it never scrapes rendered rows and never requests history from the server mid-copy.
+
+A terminal that consumes `Ctrl+V`, `Ctrl+Shift+V` or `Ctrl+Shift+C` for its own clipboard simply never delivers those keys; bracketed paste and right-click remain. The help overlay always prints the *effective* bindings, so an overridden shortcut is never advertised.
+
+Interactive rows (transcript disclosure, overview tabs and sessions, picker choices, footer controls, form options) activate on the primary button's **release** and only when that gesture never became a drag. A press that moves is a text selection: it must not also toggle a group, switch a model, open a session or answer an agent question. Right-click is consumed at the root and never propagates into those handlers.
 
 ## Input state machine
 

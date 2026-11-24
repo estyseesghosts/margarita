@@ -41,7 +41,13 @@ async function flush(): Promise<void> {
 
 type HarnessOverrides = Partial<{
   openUrl: (url: URL) => Promise<{ ok: true } | { ok: false; error: string }>;
-  copyText: (text: string) => Promise<{ method: 'clipboard' | 'file'; path?: string }>;
+  clipboard: {
+    writeText: (text: string) => Promise<{
+      status: 'written';
+      backend: 'native';
+    }>;
+    read: () => Promise<{ status: 'unsupported'; detail: string }>;
+  };
   ancestryVerifyTimeoutMs: number;
 }>;
 
@@ -687,9 +693,12 @@ describe('external MCP elicitation actions (#233)', () => {
         opened.push(url.toString());
         return { ok: true };
       },
-      copyText: async (text) => {
-        copied.push(text);
-        return { method: 'clipboard' };
+      clipboard: {
+        writeText: async (text) => {
+          copied.push(text);
+          return { status: 'written', backend: 'native' };
+        },
+        read: async () => ({ status: 'unsupported', detail: 'test' }),
       },
     });
     const url = 'https://example.test/auth?client=margarita&x=1';

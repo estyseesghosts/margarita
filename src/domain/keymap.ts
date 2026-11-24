@@ -14,6 +14,7 @@ export const actionIDs = [
   'model.recentNext',
   'transcript.details',
   'transcript.copy',
+  'transcript.copyLastResponse',
   'transcript.pageUp',
   'transcript.pageDown',
   'transcript.top',
@@ -26,6 +27,8 @@ export const actionIDs = [
   'form.open',
   'requests.retry',
   'history.search',
+  'clipboard.paste',
+  'clipboard.copySelection',
   'composer.stash',
   'composer.editor',
   'composer.newline',
@@ -67,6 +70,8 @@ export const defaultBindings: Readonly<Record<ActionID, readonly string[]>> = {
   'model.recentNext': ['f2'],
   'transcript.details': ['ctrl+o'],
   'transcript.copy': ['alt+c'],
+  // Alt+Shift+C copies canonical assistant text, never the rendered rows (issue #5).
+  'transcript.copyLastResponse': ['alt+shift+c'],
   'transcript.pageUp': ['pageup'],
   'transcript.pageDown': ['pagedown'],
   'transcript.top': ['ctrl+home'],
@@ -85,6 +90,10 @@ export const defaultBindings: Readonly<Record<ActionID, readonly string[]>> = {
   // Retry the request reconciliation after a partial permission/form fetch failure.
   'requests.retry': ['alt+r'],
   'history.search': ['ctrl+r'],
+  // Ctrl+Shift+V is the terminal-native paste in many terminals; where it is forwarded it
+  // must not fall through to a different action. Terminals that consume it never send it.
+  'clipboard.paste': ['ctrl+v', 'ctrl+shift+v'],
+  'clipboard.copySelection': ['ctrl+shift+c'],
   'composer.stash': ['ctrl+s'],
   'composer.editor': ['ctrl+g'],
   'composer.newline': ['ctrl+j'],

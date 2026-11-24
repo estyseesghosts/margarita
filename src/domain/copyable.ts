@@ -1,7 +1,9 @@
-import { sanitizeTerminalText } from './sanitize-text.ts';
+import { completeResponses } from './complete-response.ts';
+import { sanitizeSingleLine, sanitizeTerminalText } from './sanitize-text.ts';
+import { truncatePrompt } from './sticky-prompt.ts';
 import type { TranscriptMessage } from './transcript.ts';
 
-export type CopyKind = 'output' | 'diff' | 'error' | 'code' | 'shell';
+export type CopyKind = 'output' | 'diff' | 'error' | 'code' | 'shell' | 'response';
 export type CopyTruncation = 'none' | 'frontend' | 'server';
 
 /** Exact, UI-independent payload offered by the copy picker. */
@@ -23,10 +25,20 @@ function truncationNote(truncation: CopyTruncation): string {
   return '';
 }
 
+/** One picker row for a whole completed response, named by its first displayable line. */
+function responseLabel(text: string): string {
+  const firstLine = sanitizeTerminalText(text)
+    .split('\n')
+    .find((line) => line.trim() !== '');
+  const preview = firstLine === undefined ? '' : sanitizeSingleLine(firstLine).trim();
+  return preview === '' ? 'Response' : `Response · ${truncatePrompt(preview, 48)}`;
+}
+
 /**
  * Projects loaded transcript messages into copyable payloads. This is deliberately separate
- * from rendering: the copied bytes are the underlying tool output, diff, error or fenced code
- * block, never styled/wrapped terminal rows. Clipping and truncation are reported, not hidden.
+ * from rendering: the copied bytes are the underlying tool output, diff, error, fenced code
+ * block or complete assistant response, never styled/wrapped terminal rows. Clipping and
+ * truncation are reported, not hidden.
  */
 export function copyableFromMessages(messages: readonly TranscriptMessage[]): Copyable[] {
   const items: Copyable[] = [];
@@ -89,6 +101,11 @@ export function copyableFromMessages(messages: readonly TranscriptMessage[]): Co
       if (tool.error !== undefined)
         add(`${tool.id}:error`, `Error · ${tool.name}`, 'error', tool.error, 'none');
     });
+  }
+
+  // Whole responses are an additional category: canonical text only, never rendered rows.
+  for (const response of completeResponses(messages)) {
+    add(`response:${response.id}`, responseLabel(response.text), 'response', response.text, 'none');
   }
   return items;
 }

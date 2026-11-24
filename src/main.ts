@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { isAbsolute, resolve } from 'node:path';
 
-import { createCliRenderer } from '@opentui/core';
+import { createCliRenderer, createRendererClipboardAdapter } from '@opentui/core';
 import { render } from '@opentui/solid';
 
 import { type Backend, BackendError, createBackend } from './adapter/backend.ts';
@@ -237,7 +237,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
   if (stateLoad.warning !== undefined) process.stderr.write(`${stateLoad.warning}\n`);
 
   const exit: { request?: () => void } = {};
-  const { servers, controller } = await createProductionAssembly({
+  const { servers, controller, clipboard } = await createProductionAssembly({
     config: configLoad.config,
     platform,
     cwd,
@@ -272,6 +272,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     // event loop alive with a TUI that has already been torn down (#287).
     await stopPump();
     controller.dispose();
+    await clipboard.dispose();
   };
   if (interactive) {
     // One stream per registered server. Manager-level guards drop callbacks from stale
@@ -288,6 +289,9 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
       openConsoleOnError: false,
     });
     const surface = renderer;
+    // OSC 52 is a renderer channel (capability-aware and terminal-owned), so it is attached
+    // after the renderer exists and before any UI can trigger a copy.
+    clipboard.attachTerminal(createRendererClipboardAdapter(surface));
     exit.request = () => {
       if (!surface.isDestroyed) surface.destroy();
     };
@@ -498,6 +502,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     process.stderr.write(`marg: could not cancel the staged revert: ${revertError}\n`);
   }
   controller.dispose();
+  await clipboard.dispose();
   return exitCodes.ok;
 }
 

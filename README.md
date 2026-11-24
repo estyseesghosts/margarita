@@ -68,6 +68,11 @@ Print mode is always explicit: giving a prompt never silently turns it on.
 | `Ctrl+G` | Edit the prompt in `$EDITOR` |
 | Paste an image or image path | Attach it (PNG, JPEG, GIF, WebP, AVIF, PDF) |
 | `Backspace` (empty prompt) | Remove the newest attachment |
+| `Ctrl+V` / `Ctrl+Shift+V` | Paste from the system clipboard (text, image or PDF) |
+| `Ctrl+Shift+C` | Copy the text selected with the mouse |
+| `Alt+Shift+C` | Copy the last complete agent response |
+| Drag to select · release | Copy automatically (disable with `clipboard.autoCopy`) |
+| Right-click | Copy the selection, or paste when nothing is selected |
 | `Ctrl+J` | Newline |
 | `F6` (or `Ctrl+Enter` / `Alt+Enter`) | Steer the running agent. `F6` always works; the modified Enter works only where the terminal reports modified Enter (e.g. kitty keyboard protocol) — Windows Terminal needs kitty support for those two |
 | `Ctrl+T` | Goal and task checklist |
@@ -81,12 +86,14 @@ Everything is a single key press. There are no chords. Rebind any of them in the
 
 Paste a screenshot from the clipboard, or paste the path of an image/PDF file (quoted paths with spaces work). It appears as a chip above the input, is sent as an inline OpenCode prompt file, and works the same against a local or remote (`--server`) service. `Backspace` on an empty input removes the newest chip. Text pastes, bracketed pastes and multiline code behave as before.
 
+Margarita reads and writes the desktop clipboard natively on Windows, macOS, Wayland and X11. It keeps OSC 52 as the fallback for terminals that own the clipboard channel (SSH, mosh, tmux and conservative VT sessions), and never splits an oversized payload across several OSC 52 writes. A copy is reported as “unconfirmed” when only OSC 52 was possible, and as unavailable — with the reason — when neither route exists. Only an explicit copy may fall back to an owner-only local file with a visible path; an automatic selection copy never writes private text to disk.
+
 Terminals that cannot deliver clipboard images (for example Windows Terminal pasting a raw bitmap, or a WSL/SSH session) should paste the file path instead; a path that is not a supported file is still inserted as text. Binary data that is not a recognised image is refused rather than decoded into the prompt. Attachments are capped at 20 MB each.
 
 ### Slash commands
 
 `/goal <objective>` · `/criteria a; b` · `/plan step one; step two` · `/plan propose` · `/plan adopt` ·
-`/rename` · `/fork` · `/revert` · `/diff [turn]` · `/export [file]` · `/compact`
+`/rename` · `/fork` · `/revert` · `/diff [turn]` · `/export [file]` · `/compact` · `/copy [last]`
 
 `/export` writes a JSON chat log on the client. Its default filename and relative paths
 resolve from the directory where Margarita was launched, including for remote sessions.
@@ -182,6 +189,11 @@ services, tunnels, or filesystem sync, and exiting never interrupts a session.
 {
   "agents": { "default": "build", "cycle": ["build", "plan"] },
   "input": { "enterWhileRunning": "queue" },       // or "steer"
+  "clipboard": {
+    "autoCopy": true,           // copy a nonempty drag selection on release
+    "rightClickCopy": true,     // right-click copies an active selection
+    "rightClickPaste": true     // right-click with no selection pastes
+  },
   "keys": { "tasks.toggle": "alt+t" },              // single keys only; F1 lists action IDs
   "ui": { "theme": "dark", "animation": true, "ascii": false }  // dark | light | high-contrast
 }
@@ -196,6 +208,7 @@ bun run verify     # format check + oxlint (type-aware) + typecheck + tests
 ```
 
 - `MARGARITA_LIVE=1 bun test test/live-smoke.test.tsx` runs a read-only check against your running service.
+- `MARGARITA_CLIPBOARD_LIVE=1 bun test test/clipboard-live.test.ts` exercises the real desktop clipboard (100 KB Unicode round trip); it is opt-in and restores the previous plain-text clipboard.
 - `bun run test:writable` runs the writable integration suite against a disposable OpenCode service it starts and deletes itself (private config and data, mock model); it never touches your service or sessions. See [docs/15](docs/15-testing-acceptance.md).
 - Code layout: `src/domain` (pure logic) · `src/adapter` (OpenCode client and events) · `src/app` (controller, keys) · `src/ui` (OpenTUI + Solid) · `src/cli` (args, print mode).
 - Code style lives in the TypeScript guide used across this project: Bun, strict TS, small modules.

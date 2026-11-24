@@ -20,7 +20,15 @@ Use bracketed paste. Buffer an entire paste as one ordered text transaction; pre
 
 ### Clipboard images/files
 
-Clipboard images need OS integration: on Windows native clipboard APIs or PowerShell helper with predictable encoding; on macOS NSPasteboard/osascript helper; on Wayland/X11 platform tools. These are *proposed adapters* requiring security review. The server file attachment payload types exist; inspect generated SDK `Prompt.FileAttachment`. If clipboard image unsupported, provide an explicit file-path attach workflow. Do not build an unsafe arbitrary shell clipboard command from user text.
+One client-local clipboard service owns every copy and paste path (`src/app/clipboard.ts`). It prefers the native desktop clipboard through OpenTUI's bundled backend — Windows, macOS, Wayland and X11 are handled by the native library, with no shell command per operation — and keeps the terminal's OSC 52 channel as the fallback where the terminal owns the clipboard (SSH/mosh, tmux, conservative VT sessions). Reads exist only through the native backend; there is no portable terminal clipboard read, and the UI says so when a read cannot be served.
+
+- Never split an oversized payload across several OSC 52 writes: receivers replace rather than append, so the result would be the last fragment. The native path has an 8 MB ceiling and no 4 KB limit; an OSC 52 attempt is one write and is reported as *unconfirmed* because terminals do not acknowledge it.
+- A missing native backend and a terminal without OSC 52 produce an unavailable outcome with a reason. Only an explicit copy may fall back to an owner-only local file whose path is shown; an automatic selection copy never writes private text to disk.
+- Windows' native text clipboard stores CRLF. A native paste normalizes `\r\n` back to `\n` before insertion; copying to the system clipboard keeps the platform's convention.
+- SSH/mosh sessions never touch the remote machine's desktop clipboard: the terminal's OSC 52 is the only truthful route.
+- Wayland clipboard ownership and helper-process lifetimes belong to the native backend; Margarita never spawns a clipboard helper per mouse movement or per frame.
+- The service serializes writes, so two overlapping copies complete in arrival order and the newest request wins.
+- Clipboard images and PDFs arrive with their MIME type; binary data is never decoded into the prompt, and unsupported binaries are refused. If clipboard images are unsupported, the explicit file-path attach workflow remains. Do not build an unsafe arbitrary shell clipboard command from user text.
 
 ## Renderer design
 

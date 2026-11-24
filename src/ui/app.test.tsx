@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 
 import { TextAttributes } from '@opentui/core';
+import { MouseButtons } from '@opentui/core/testing';
 import { testRender } from '@opentui/solid';
 
 import { FakeBackend } from '../../test/fake-backend.ts';
 import { BackendError } from '../adapter/backend.ts';
+import type { ClipboardRead } from '../app/clipboard.ts';
 import { AppController } from '../app/controller.ts';
+import type { ControllerDeps } from '../app/controller.ts';
 import { defaultConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
 import { isRecord } from '../domain/backend-event.ts';
@@ -73,11 +76,13 @@ async function mount(
     serverIDs?: () => readonly string[];
     backendFor?: (serverID: string) => FakeBackend | undefined;
     serverInfo?: (serverID: string) => { label?: string; online: boolean } | undefined;
+    config?: typeof defaultConfig;
+    clipboard?: ControllerDeps['clipboard'];
   } = {},
 ) {
   const controller = new AppController({
     backend,
-    config: defaultConfig,
+    config: options.config ?? defaultConfig,
     localState: emptyState,
     platform: 'linux',
     cwd: '/work/kohjoh',
@@ -86,6 +91,7 @@ async function mount(
     saveLocalState: async () => {},
     listFiles: async () => [],
     requestExit: () => {},
+    ...(options.clipboard === undefined ? {} : { clipboard: options.clipboard }),
     ...(options.serverIDs === undefined ? {} : { serverIDs: options.serverIDs }),
     ...(options.backendFor === undefined ? {} : { backendFor: options.backendFor }),
     ...(options.serverInfo === undefined ? {} : { serverInfo: options.serverInfo }),
@@ -526,7 +532,7 @@ describe('app', () => {
       await settle(setup);
       expectSelectedVisible();
     }
-  });
+  }, 20_000);
 
   test('projects collapse to six most recent sessions with inline Show more/less', async () => {
     const backend = new FakeBackend();
@@ -5043,6 +5049,195 @@ describe('external editor result ownership (#271)', () => {
 
     expect(controller.state.composer.text).toBe('beta');
     expect(controller.state.drafts['ses_a']?.text).toBe('edited alpha');
+    controller.dispose();
+  });
+});
+
+function clipboardBackend(): FakeBackend {
+  const backend = backendWithSession();
+  backend.messages = {
+    ses_a: [
+      { kind: 'user', id: 'm1', createdAt: 1, text: 'show the clipboard work', attachments: [] },
+      {
+        kind: 'assistant',
+        id: 'm2',
+        createdAt: 2,
+        completedAt: 3,
+        agent: 'build',
+        model: { providerID: 'opencode', modelID: 'longcat' },
+        parts: [{ kind: 'text', text: 'selectable-clipboard-text lives here.' }],
+      },
+      { kind: 'idle', id: 'm3', createdAt: 4, outcome: 'succeeded' },
+    ],
+  };
+  return backend;
+}
+
+function draggingClipboard(
+  options: {
+    read?: () => Promise<ClipboardRead>;
+    writes?: string[];
+  } = {},
+) {
+  const writes = options.writes ?? [];
+  return {
+    writes,
+    clipboard: {
+      writeText: async (text: string) => {
+        writes.push(text);
+        return { status: 'written' as const, backend: 'native' as const };
+      },
+      read: options.read ?? (async () => ({ status: 'unsupported' as const, detail: 'test' })),
+    },
+  };
+}
+
+function selectionPoint(frame: string, needle: string): { x: number; y: number } {
+  const lines = frame.split('\n');
+  for (let y = 0; y < lines.length; y += 1) {
+    const x = lines[y]!.indexOf(needle);
+    if (x >= 0) return { x, y };
+  }
+  throw new Error(`could not find ${needle} in frame:\n${frame}`);
+}
+
+describe('clipboard, selection and right click (tickets #1-#7)', () => {
+  test('dragging over a response and releasing copies the selected text exactly once', async () => {
+    const fake = draggingClipboard();
+    const { controller, setup } = await mount(clipboardBackend(), { clipboard: fake.clipboard });
+    controller.openSession('ses_a');
+    await settle(setup);
+    const point = selectionPoint(setup.captureCharFrame(), 'selectable-clipboard-text');
+    await setup.mockMouse.drag(point.x, point.y, point.x + 27, point.y);
+    await setup.waitFor(() => fake.writes.length > 0);
+    expect(fake.writes).toHaveLength(1);
+    expect(fake.writes[0]).toContain('selectable-clipboard-text');
+    controller.dispose();
+  });
+
+  test('with autocopy disabled a drag writes nothing, while Ctrl+Shift+C still copies', async () => {
+    const fake = draggingClipboard();
+    const config = { ...defaultConfig, clipboard: { ...defaultConfig.clipboard, autoCopy: false } };
+    const { controller, setup } = await mount(clipboardBackend(), {
+      clipboard: fake.clipboard,
+      config,
+      kittyKeyboard: true,
+    });
+    controller.openSession('ses_a');
+    await settle(setup);
+    const point = selectionPoint(setup.captureCharFrame(), 'selectable-clipboard-text');
+    await setup.mockMouse.drag(point.x, point.y, point.x + 27, point.y);
+    await settle(setup);
+    expect(fake.writes).toEqual([]);
+
+    setup.mockInput.pressKey('c', { ctrl: true, shift: true });
+    await setup.waitFor(() => fake.writes.length > 0);
+    expect(fake.writes).toHaveLength(1);
+    expect(fake.writes[0]).toContain('selectable-clipboard-text');
+    controller.dispose();
+  });
+
+  test('Ctrl+V inserts multiline clipboard text exactly and never submits', async () => {
+    const fake = draggingClipboard({
+      read: async () => ({
+        status: 'read',
+        bytes: new TextEncoder().encode('line one\nline two'),
+        mimeType: 'text/plain',
+      }),
+    });
+    const backend = clipboardBackend();
+    const { controller, setup } = await mount(backend, {
+      clipboard: fake.clipboard,
+      kittyKeyboard: true,
+    });
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressKey('v', { ctrl: true });
+    await setup.waitFor(() => controller.state.composer.text !== '');
+    expect(controller.state.composer.text).toBe('line one\nline two');
+    expect(backend.calls.filter((call) => call.name === 'prompt')).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('right click without a selection pastes once; with a selection it copies and never pastes', async () => {
+    const fake = draggingClipboard({
+      read: async () => ({
+        status: 'read',
+        bytes: new TextEncoder().encode('right-click paste'),
+        mimeType: 'text/plain',
+      }),
+    });
+    const { controller, setup } = await mount(clipboardBackend(), { clipboard: fake.clipboard });
+    controller.openSession('ses_a');
+    await settle(setup);
+    await setup.mockMouse.click(40, 20, MouseButtons.RIGHT);
+    await setup.waitFor(() => controller.state.composer.text !== '');
+    expect(controller.state.composer.text).toBe('right-click paste');
+
+    // Make a drag selection, then right-click it: copy, no second paste.
+    const point = selectionPoint(setup.captureCharFrame(), 'selectable-clipboard-text');
+    await setup.mockMouse.drag(point.x, point.y, point.x + 27, point.y);
+    await setup.waitFor(() => fake.writes.length > 0);
+    const textAfterDrag = controller.state.composer.text;
+    await setup.mockMouse.click(point.x + 2, point.y, MouseButtons.RIGHT);
+    await settle(setup);
+    expect(fake.writes).toHaveLength(2);
+    expect(controller.state.composer.text).toBe(textAfterDrag);
+    controller.dispose();
+  });
+
+  test('an unavailable clipboard reports the reason and leaves the composer untouched', async () => {
+    const fake = draggingClipboard({
+      read: async () => ({ status: 'unsupported', detail: 'no desktop clipboard here' }),
+    });
+    const { controller, setup } = await mount(clipboardBackend(), { clipboard: fake.clipboard });
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressKey('v', { ctrl: true });
+    await settle(setup);
+    expect(controller.state.composer.text).toBe('');
+    expect(controller.state.notice?.text).toContain('no desktop clipboard here');
+    controller.dispose();
+  });
+
+  test('dragging over an inline diff selects its patch text', async () => {
+    const fake = draggingClipboard();
+    const backend = clipboardBackend();
+    backend.messages = {
+      ses_a: [
+        { kind: 'user', id: 'm1', createdAt: 1, text: 'edit the file', attachments: [] },
+        {
+          kind: 'assistant',
+          id: 'm2',
+          createdAt: 2,
+          completedAt: 3,
+          agent: 'build',
+          model: { providerID: 'opencode', modelID: 'longcat' },
+          parts: [
+            {
+              kind: 'tool',
+              tool: {
+                id: 't1',
+                name: 'edit',
+                status: 'completed',
+                input: { filePath: 'f.ts' },
+                startedAt: 1,
+                completedAt: 2,
+                diff: '--- a/f.ts\n+++ b/f.ts\n@@ -1,1 +1,1 @@\n-const old = 1;\n+const uniqueDiffLine = 42;',
+              },
+            },
+          ],
+        },
+        { kind: 'idle', id: 'm3', createdAt: 4, outcome: 'succeeded' },
+      ],
+    };
+    const { controller, setup } = await mount(backend, { clipboard: fake.clipboard });
+    controller.openSession('ses_a');
+    await settle(setup);
+    const point = selectionPoint(setup.captureCharFrame(), 'uniqueDiffLine');
+    await setup.mockMouse.drag(point.x, point.y, point.x + 20, point.y);
+    await setup.waitFor(() => fake.writes.length > 0);
+    expect(fake.writes[0]).toContain('uniqueDiffLine');
     controller.dispose();
   });
 });

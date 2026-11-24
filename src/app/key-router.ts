@@ -38,6 +38,11 @@ export type RouterServices = Readonly<{
   overviewPageRows?: number;
   /** Patch/file rows one diff-dialog PageUp/PageDown moves, from the live terminal height. */
   diffPageRows?: number;
+  /**
+   * Copies the renderer's live text selection. The terminal selection itself belongs to
+   * the UI layer, so the router only asks for an explicit copy.
+   */
+  copySelection?: () => void;
 }>;
 
 /**
@@ -56,6 +61,10 @@ export function routeKey(
     controller.closeOverlay();
     return routeKey(controller, keymap, key, services);
   }
+  // Clipboard actions keep one precedence: they work in the composer, the overview, the
+  // transcript, the inspector and modal dialogs, and none of them dismisses a dialog or
+  // edits the composer on its own (docs/06).
+  if (routeClipboardAction(controller, keymap, key, services)) return true;
   if (state.overlay.kind !== 'none') return routeOverlay(controller, keymap, key, services);
   if (state.route.kind === 'conversation' && controller.pendingPermission() !== undefined) {
     if (routePermission(controller, key)) return true;
@@ -81,6 +90,34 @@ export function routeKey(
     return routeOverviewList(controller, key);
   }
   return routeComposer(controller, key);
+}
+
+/**
+ * Clipboard actions have their own precedence: paste routes through the common paste entry
+ * point (which respects an editable overlay or form), selection copy never dismisses an
+ * unrelated dialog, and response copy reads canonical messages only.
+ */
+function routeClipboardAction(
+  controller: AppController,
+  keymap: Keymap,
+  key: KeyInput,
+  services: RouterServices,
+): boolean {
+  switch (actionFor(keymap, key)) {
+    case 'clipboard.paste':
+      // Help is dismiss-on-paste; the same paste still belongs to the surface behind it.
+      if (controller.state.overlay.kind === 'help') controller.closeOverlay();
+      void controller.pasteFromClipboard();
+      return true;
+    case 'clipboard.copySelection':
+      services.copySelection?.();
+      return true;
+    case 'transcript.copyLastResponse':
+      void controller.copyLastResponse();
+      return true;
+    default:
+      return false;
+  }
 }
 
 function runAction(controller: AppController, action: ActionID, services: RouterServices): boolean {

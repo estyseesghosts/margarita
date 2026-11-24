@@ -32,6 +32,7 @@ import { localCommands } from '../domain/slash-command.ts';
 import { cellWidth, sliceCells } from '../domain/text-width.ts';
 import { completenessLabel } from '../domain/transcript.ts';
 import { formatCost, formatTokenCount } from '../domain/usage-format.ts';
+import { useActivate } from './pointer.ts';
 import type { Theme } from './theme.ts';
 
 const PICKER_MAX_ROWS = 10;
@@ -94,6 +95,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
     maxHeight: Math.max(6, terminal().height - 5),
   });
   const dim = () => props.theme.dim;
+  const activate = useActivate();
 
   // One projector feeds the footer meter and this summary, so /usage and a context click
   // always show the same numbers (#124).
@@ -371,10 +373,10 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                     return (
                       <text
                         fg={selected() ? props.theme.accent : props.theme.text}
-                        onMouseDown={() => {
+                        onMouseUp={activate(() => {
                           props.controller.selectModelPickerIndex(absolute());
                           void props.controller.acceptModelPicker();
-                        }}
+                        })}
                       >
                         {
                           sliceCells(
@@ -415,10 +417,10 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                     return (
                       <text
                         fg={selected() ? props.theme.accent : props.theme.text}
-                        onMouseDown={() => {
+                        onMouseUp={activate(() => {
                           props.controller.selectEffortPickerIndex(absolute());
                           void props.controller.acceptEffortPicker();
-                        }}
+                        })}
                       >
                         {
                           sliceCells(
@@ -465,10 +467,10 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                     return (
                       <text
                         fg={selected() ? props.theme.accent : props.theme.text}
-                        onMouseDown={() => {
+                        onMouseUp={activate(() => {
                           props.controller.selectAgentPickerIndex(absolute());
                           void props.controller.acceptAgentPicker();
-                        }}
+                        })}
                       >
                         {
                           sliceCells(
@@ -508,10 +510,10 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                     return (
                       <text
                         fg={selected() ? props.theme.accent : props.theme.text}
-                        onMouseDown={() => {
+                        onMouseUp={activate(() => {
                           props.controller.selectCopyPickerIndex(view().start + index());
                           void props.controller.acceptCopyPicker();
-                        }}
+                        })}
                       >
                         {
                           sliceCells(
@@ -660,6 +662,7 @@ function DiffDialog(props: {
   frame: Frame;
 }) {
   const terminal = useTerminalDimensions();
+  const activate = useActivate();
   const file = () => props.overlay.files[props.overlay.index];
   const scopeLabel = () => (props.overlay.scope === 'turn' ? 'this turn' : 'session');
   const width = () => Math.max(8, terminal().width - 6);
@@ -754,7 +757,7 @@ function DiffDialog(props: {
                   return (
                     <text
                       fg={selected() ? props.theme.accent : props.theme.text}
-                      onMouseDown={() => props.controller.openDiffFile(absolute())}
+                      onMouseUp={activate(() => props.controller.openDiffFile(absolute()))}
                     >
                       {row().mark}
                       {row().path}
@@ -789,6 +792,7 @@ function FormDialog(props: {
   theme: Theme;
   frame: Frame;
 }) {
+  const activate = useActivate();
   const fields = () => visibleFields(props.form, props.editor.answers);
   const field = () => currentField(props.form, props.editor);
   const value = () => {
@@ -881,7 +885,7 @@ function FormDialog(props: {
                 return (
                   <text
                     fg={highlighted() ? props.theme.accent : props.theme.text}
-                    onMouseDown={() => props.controller.clickFormChoice(position())}
+                    onMouseUp={activate(() => props.controller.clickFormChoice(position()))}
                   >
                     {
                       sliceCells(
@@ -932,14 +936,14 @@ function FormDialog(props: {
                   <box flexDirection="row">
                     <text
                       fg={props.theme.accent}
-                      onMouseDown={() => void props.controller.openFormExternalUrl()}
+                      onMouseUp={activate(() => void props.controller.openFormExternalUrl())}
                     >
                       {'[ Open URL ]'}
                     </text>
                     <text fg={props.theme.dim}>{'  '}</text>
                     <text
                       fg={props.theme.accent}
-                      onMouseDown={() => void props.controller.copyFormExternalUrl()}
+                      onMouseUp={activate(() => void props.controller.copyFormExternalUrl())}
                     >
                       {'[ Copy URL ]'}
                     </text>

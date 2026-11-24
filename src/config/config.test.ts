@@ -83,6 +83,28 @@ describe('config', () => {
     expect(bad.config.ui).toEqual(defaultConfig.ui);
     expect(bad.warnings).toHaveLength(2);
   });
+  test('clipboard preferences default on and validate as booleans (issue #4)', () => {
+    expect(defaultConfig.clipboard).toEqual({
+      autoCopy: true,
+      rightClickCopy: true,
+      rightClickPaste: true,
+    });
+    const parsed = parseConfig({
+      clipboard: { autoCopy: false, rightClickCopy: true, rightClickPaste: false },
+    });
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.config.clipboard).toEqual({
+      autoCopy: false,
+      rightClickCopy: true,
+      rightClickPaste: false,
+    });
+    const bad = parseConfig({ clipboard: { autoCopy: 'yes', rightClickPaste: 1 } });
+    expect(bad.config.clipboard).toEqual(defaultConfig.clipboard);
+    expect(bad.warnings).toEqual([
+      'clipboard.autoCopy must be a boolean',
+      'clipboard.rightClickPaste must be a boolean',
+    ]);
+  });
 });
 
 function luminance(hex: string): number {

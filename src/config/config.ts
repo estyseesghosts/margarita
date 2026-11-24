@@ -9,6 +9,7 @@ export type AppConfig = Readonly<{
   models: Readonly<{ recentLimit: number }>;
   history: Readonly<{ limit: number }>;
   transcript: Readonly<{ toolOutputChars: number }>;
+  clipboard: Readonly<{ autoCopy: boolean; rightClickCopy: boolean; rightClickPaste: boolean }>;
   keys: Readonly<Record<string, string>>;
   ui: Readonly<{ theme: ThemeName; animation: boolean; ascii: boolean }>;
 }>;
@@ -23,6 +24,7 @@ export const defaultConfig: AppConfig = {
   models: { recentLimit: 8 },
   history: { limit: 200 },
   transcript: { toolOutputChars: 64_000 },
+  clipboard: { autoCopy: true, rightClickCopy: true, rightClickPaste: true },
   keys: {},
   ui: { theme: 'dark', animation: true, ascii: false },
 };
@@ -74,6 +76,7 @@ export function parseConfig(raw: unknown): ConfigLoad {
     'models',
     'history',
     'transcript',
+    'clipboard',
     'keys',
     'ui',
   ]);
@@ -93,6 +96,7 @@ export function parseConfig(raw: unknown): ConfigLoad {
   const models = section('models');
   const history = section('history');
   const transcript = section('transcript');
+  const clipboard = section('clipboard');
   const keysRaw = section('keys');
   const ui = section('ui');
 
@@ -171,6 +175,11 @@ export function parseConfig(raw: unknown): ConfigLoad {
           defaultConfig.transcript.toolOutputChars,
           warnings,
         ),
+      },
+      clipboard: {
+        autoCopy: bool(clipboard['autoCopy'], 'clipboard.autoCopy', true),
+        rightClickCopy: bool(clipboard['rightClickCopy'], 'clipboard.rightClickCopy', true),
+        rightClickPaste: bool(clipboard['rightClickPaste'], 'clipboard.rightClickPaste', true),
       },
       keys,
       ui: {

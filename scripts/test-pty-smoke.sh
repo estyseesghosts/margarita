@@ -19,7 +19,7 @@ while [ ! -s "$root/port" ] && [ "$i" -lt 40 ]; do
 done
 port=$(cat "$root/port")
 url="http://127.0.0.1:$port"
-for scenario in ctrl-c keys mouse editor editor-fail sigterm resize crash; do
+for scenario in ctrl-c keys mouse clipboard editor editor-fail sigterm resize crash; do
   STUB_LOG="$root/stub.log" python3 test/smoke/pty-smoke.py "$bin" "$url" "$scenario"
 done
 echo "PTY scenario suite passed"

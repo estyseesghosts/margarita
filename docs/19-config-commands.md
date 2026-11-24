@@ -36,6 +36,11 @@ Proposed frontend-specific settings: `~/.config/unnamed/config.jsonc` under XDG 
   },
   "models": { "recentLimit": 8 },
   "transcript": { "toolOutputChars": 64000 },
+  "clipboard": {
+    "autoCopy": true,
+    "rightClickCopy": true,
+    "rightClickPaste": true
+  },
   "goals": { "syncInstructionEntries": "opt-in" },
   "keys": {
     "agent.cycle": "shift+tab",
@@ -51,6 +56,10 @@ Proposed frontend-specific settings: `~/.config/unnamed/config.jsonc` under XDG 
 ```
 
 The schema URL is a **placeholder**; implement a real local or published JSON schema before distributing config. `header:false`, `chords:false`, and `keepRunningOnDetach:true` are invariant defaults: rather than encourage turning them into true, reject unsupported values in first release. This keeps project requirements honest and limits migration complexity.
+
+### Clipboard preferences
+
+`clipboard.autoCopy` (default `true`) copies a nonempty drag selection when the pointer is released; `clipboard.rightClickCopy` and `clipboard.rightClickPaste` (both default `true`) choose the two right-click behaviours. Each field is validated as a boolean; an invalid value falls back with a warning, matching the rest of the config parser. Autocopy being off never disables `Ctrl+Shift+C`, `Alt+Shift+C`, `/copy` or `/copy last`. Clipboard shortcuts are ordinary keymap actions (`clipboard.paste`, `clipboard.copySelection`, `transcript.copyLastResponse`), so `keys` overrides and collision detection cover them.
 
 ## Commands
 

@@ -1,16 +1,26 @@
-import { useKeyboard, usePaste, useRenderer, useTerminalDimensions } from '@opentui/solid';
+import { MouseButton } from '@opentui/core';
+import {
+  useKeyboard,
+  usePaste,
+  useRenderer,
+  useSelectionHandler,
+  useTerminalDimensions,
+} from '@opentui/solid';
 import type { Accessor } from 'solid-js';
-import { createSignal, Match, onCleanup, Show, Switch } from 'solid-js';
+import { createEffect, createSignal, Match, onCleanup, Show, Switch } from 'solid-js';
 
 import type { AppController } from '../app/controller.ts';
 import { type KeyInput, routeKey, type ScrollMove } from '../app/key-router.ts';
 import { graphemes } from '../domain/composer.ts';
 import { diffWindowRows } from '../domain/diff.ts';
 import type { Keymap } from '../domain/keymap.ts';
+import { isDragSelection } from '../domain/selection-text.ts';
 import { ComposerView, Footer } from './composer-view.tsx';
 import { editExternally } from './external-editor.ts';
 import { OverlayView } from './overlays.tsx';
 import { Overview } from './overview-view.tsx';
+import { createPointerGesture, PointerGestureContext } from './pointer.ts';
+import { overlaySelectionRootID, selectionText } from './selection-text.ts';
 import type { Theme } from './theme.ts';
 import { NewSessionView, Transcript } from './transcript-view.tsx';
 
@@ -37,6 +47,10 @@ export type KeyEventLike = Readonly<{
   sequence: string;
 }>;
 
+/** MouseEvent.button is a plain number; these give it names without an enum comparison. */
+const primaryButton: number = MouseButton.LEFT;
+const secondaryButton: number = MouseButton.RIGHT;
+
 export function toKeyInput(event: KeyEventLike): KeyInput {
   const sequence = event.sequence;
   const printable = sequence.length > 0 && graphemes(sequence).length === 1 && !event.ctrl;
@@ -54,10 +68,33 @@ export function App(props: AppProps) {
   const dimensions = useTerminalDimensions();
   const controller = props.controller;
   const state = controller.state;
+  const pointer = createPointerGesture();
   const [now, setNow] = createSignal(controller.now());
   const clock = setInterval(() => setNow(controller.now()), 30_000);
   onCleanup(() => clearInterval(clock));
   let editing = false;
+
+  /** Selection text, restricted to the inspector when it paints over the conversation. */
+  const selectedText = () =>
+    selectionText(renderer.getSelection(), state.overlay.kind === 'inspector');
+  const copySelection = () => {
+    void controller.copySelection(selectedText(), 'explicit');
+  };
+
+  // A selection belongs to the surface it was made on. Navigation and a new dialog make it
+  // stale: its rows may be destroyed or repurposed, so it must never be copied later.
+  createEffect(() => {
+    void state.route;
+    void state.overlay.kind;
+    renderer.clearSelection();
+  });
+
+  useSelectionHandler((selection) => {
+    const text = selectionText(selection, state.overlay.kind === 'inspector');
+    if (text.trim() === '' || !isDragSelection(selection.bounds)) return;
+    if (!controller.clipboardPreferences.autoCopy) return;
+    void controller.copySelection(text, 'autocopy');
+  });
 
   const openEditor = () => {
     if (editing) return;
@@ -91,6 +128,7 @@ export function App(props: AppProps) {
       openEditor,
       redraw: () => renderer.requestRender(),
       scroll: (move) => scrollTranscript?.(move),
+      copySelection,
       // Overview chrome (title, tabs, composer, footer) is not part of the row viewport.
       overviewPageRows: Math.max(3, dimensions().height - 8),
       // Diff paging must match what the dialog can paint after its border and footer.
@@ -100,6 +138,9 @@ export function App(props: AppProps) {
   });
 
   usePaste((event) => {
+    // The external editor owns the terminal; a paste delivered at the moment it takes over
+    // must not land in a draft behind it.
+    if (editing) return;
     // Searchable overlays receive text in place; forms keep their token-bound async path.
     // Non-editable modals consume the paste instead of mutating the composer (#239).
     if (controller.pasteIntoOverlay(event.bytes, event.metadata)) return;
@@ -109,72 +150,95 @@ export function App(props: AppProps) {
   const width = () => dimensions().width;
 
   return (
-    <box
-      flexDirection="column"
-      width="100%"
-      height="100%"
-      onMouseDown={() => {
-        if (state.overlay.kind === 'help') controller.closeOverlay();
-      }}
-    >
-      <Switch>
-        <Match when={state.route.kind === 'conversation' ? state.route : undefined}>
-          {(route: Accessor<{ kind: 'conversation'; serverID: string; sessionID: string }>) => (
-            <Transcript
+    <PointerGestureContext.Provider value={pointer}>
+      <box
+        flexDirection="column"
+        width="100%"
+        height="100%"
+        onMouseDown={(event) => {
+          if (event.button === primaryButton) {
+            pointer.begin();
+            if (state.overlay.kind === 'help') controller.closeOverlay();
+            return;
+          }
+          if (event.button !== secondaryButton) return;
+          // A right click is always ours: it must never propagate into a disclosure row, a
+          // picker choice or a permission answer it did not visibly address (#issue 4).
+          event.stopPropagation();
+          if (state.overlay.kind === 'help') controller.closeOverlay();
+          const text = selectedText();
+          if (text.trim() !== '') {
+            if (controller.clipboardPreferences.rightClickCopy) {
+              void controller.copySelection(text, 'right-click');
+            }
+            return;
+          }
+          if (controller.clipboardPreferences.rightClickPaste) {
+            void controller.pasteFromClipboard();
+          }
+        }}
+        onMouseDrag={() => pointer.drag()}
+      >
+        <Switch>
+          <Match when={state.route.kind === 'conversation' ? state.route : undefined}>
+            {(route: Accessor<{ kind: 'conversation'; serverID: string; sessionID: string }>) => (
+              <Transcript
+                controller={controller}
+                keymap={props.keymap}
+                sessionID={route().sessionID}
+                serverID={route().serverID}
+                theme={props.theme}
+                width={width()}
+                animate={props.animate}
+                ascii={props.ascii}
+                hintTickMs={props.hintTickMs}
+                onScrollHandle={(handle) => {
+                  scrollTranscript = handle;
+                }}
+              />
+            )}
+          </Match>
+          <Match when={state.route.kind === 'new' ? state.route : undefined}>
+            {(route: Accessor<{ kind: 'new'; serverID: string; directory: string }>) => (
+              <NewSessionView
+                controller={controller}
+                serverID={route().serverID}
+                directory={route().directory}
+                theme={props.theme}
+                width={width()}
+              />
+            )}
+          </Match>
+          <Match when={state.route.kind === 'overview'}>
+            <Overview
               controller={controller}
-              keymap={props.keymap}
-              sessionID={route().sessionID}
-              serverID={route().serverID}
               theme={props.theme}
+              now={now()}
               width={width()}
-              animate={props.animate}
               ascii={props.ascii}
-              hintTickMs={props.hintTickMs}
-              onScrollHandle={(handle) => {
-                scrollTranscript = handle;
-              }}
             />
-          )}
-        </Match>
-        <Match when={state.route.kind === 'new' ? state.route : undefined}>
-          {(route: Accessor<{ kind: 'new'; serverID: string; directory: string }>) => (
-            <NewSessionView
-              controller={controller}
-              serverID={route().serverID}
-              directory={route().directory}
-              theme={props.theme}
-              width={width()}
-            />
-          )}
-        </Match>
-        <Match when={state.route.kind === 'overview'}>
-          <Overview
-            controller={controller}
-            theme={props.theme}
-            now={now()}
-            width={width()}
-            ascii={props.ascii}
-          />
-        </Match>
-      </Switch>
-      <Show when={state.overlay.kind !== 'none' && state.overlay.kind !== 'inspector'}>
-        <OverlayView controller={controller} keymap={props.keymap} theme={props.theme} />
-      </Show>
-      <ComposerView controller={controller} theme={props.theme} width={width()} />
-      <Footer controller={controller} theme={props.theme} width={width()} />
-      {/* Absolute so the conversation stays mounted (scroll anchor + draft survive) (#222). */}
-      <Show when={state.overlay.kind === 'inspector'}>
-        <box
-          position="absolute"
-          top={0}
-          left={0}
-          width="100%"
-          height="100%"
-          backgroundColor={props.theme.panelBg}
-        >
+          </Match>
+        </Switch>
+        <Show when={state.overlay.kind !== 'none' && state.overlay.kind !== 'inspector'}>
           <OverlayView controller={controller} keymap={props.keymap} theme={props.theme} />
-        </box>
-      </Show>
-    </box>
+        </Show>
+        <ComposerView controller={controller} theme={props.theme} width={width()} />
+        <Footer controller={controller} theme={props.theme} width={width()} />
+        {/* Absolute so the conversation stays mounted (scroll anchor + draft survive) (#222). */}
+        <Show when={state.overlay.kind === 'inspector'}>
+          <box
+            id={overlaySelectionRootID}
+            position="absolute"
+            top={0}
+            left={0}
+            width="100%"
+            height="100%"
+            backgroundColor={props.theme.panelBg}
+          >
+            <OverlayView controller={controller} keymap={props.keymap} theme={props.theme} />
+          </box>
+        </Show>
+      </box>
+    </PointerGestureContext.Provider>
   );
 }

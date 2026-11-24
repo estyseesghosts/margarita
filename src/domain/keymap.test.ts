@@ -33,6 +33,34 @@ test('requests.retry is bound to Alt+R by default', () => {
   );
 });
 
+test('clipboard actions have default bindings and override cleanly (issues #2, #5, #6)', () => {
+  const { keymap, errors } = buildKeymap({});
+  expect(errors).toEqual([]);
+  expect(actionFor(keymap, { name: 'v', ctrl: true, alt: false, shift: false })).toBe(
+    'clipboard.paste',
+  );
+  expect(actionFor(keymap, { name: 'v', ctrl: true, alt: false, shift: true })).toBe(
+    'clipboard.paste',
+  );
+  expect(actionFor(keymap, { name: 'c', ctrl: true, alt: false, shift: true })).toBe(
+    'clipboard.copySelection',
+  );
+  expect(actionFor(keymap, { name: 'c', ctrl: false, alt: true, shift: true })).toBe(
+    'transcript.copyLastResponse',
+  );
+  const overridden = buildKeymap({
+    'clipboard.paste': 'alt+v',
+    'clipboard.copySelection': 'alt+shift+x',
+  });
+  expect(overridden.errors).toEqual([]);
+  expect(actionFor(overridden.keymap, { name: 'v', ctrl: false, alt: true, shift: false })).toBe(
+    'clipboard.paste',
+  );
+  expect(
+    actionFor(overridden.keymap, { name: 'v', ctrl: true, alt: false, shift: false }),
+  ).toBeUndefined();
+});
+
 test('rejects final conflicts while retaining unrelated overrides', () => {
   const { keymap, errors } = buildKeymap({
     'model.pick': 'ctrl+o',

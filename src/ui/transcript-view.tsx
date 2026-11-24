@@ -69,6 +69,7 @@ import {
 import { workerNodes, type WorkerStatus, workerStatusLabel } from '../domain/worker.ts';
 import { countFormat } from '../perf/format-counts.ts';
 import { markerText } from './marker-text.ts';
+import { useActivate } from './pointer.ts';
 import { QueuedPreview } from './queued-preview.tsx';
 import { createSyntaxStyle } from './syntax.ts';
 import type { Theme } from './theme.ts';
@@ -657,6 +658,7 @@ function NodeView(props: {
   workerStale: boolean;
 }) {
   const theme = () => props.theme;
+  const activate = useActivate();
   return (
     <Switch>
       <Match when={props.node.kind === 'user' ? props.node : undefined}>
@@ -782,7 +784,7 @@ function NodeView(props: {
             <box flexDirection="column" marginTop={1}>
               <text
                 fg={props.focused ? theme().accent : theme().dim}
-                onMouseDown={() => props.controller.clickToolGroup(node().key)}
+                onMouseUp={activate(() => props.controller.clickToolGroup(node().key))}
               >
                 {`${props.focused ? '▸' : ' '}  ${node().summary}${node().running ? '…' : ''}${
                   props.focused ? '  (Enter)' : ''
@@ -1060,13 +1062,14 @@ function ToolDisclosure(props: {
       : props.tool.status === 'completed'
         ? 'done'
         : props.tool.status;
+  const activate = useActivate();
   const summary = () =>
     `${props.focused ? '❯' : ' '} ${expanded() ? '▾' : '▸'} ${describeTool(props.tool, props.mcpServers)} · ${status()} · ${formatToolTiming(props.tool, clock)}`;
   return (
     // The focus/reveal path addresses this row by the same tool ID standalone calls use,
     // so Ctrl+Down can bring an individual disclosure into view (#281).
     <box id={nodeID(props.tool.id)} flexDirection="column">
-      <text fg={tone()} onMouseDown={() => props.controller.clickToolRow(props.tool.id)}>
+      <text fg={tone()} onMouseUp={activate(() => props.controller.clickToolRow(props.tool.id))}>
         {truncateToWidth(summary(), Math.max(8, props.width - 4))}
       </text>
       <Show when={expanded()}>
@@ -1206,10 +1209,11 @@ function ToolView(props: {
       : props.tool.status === 'completed'
         ? props.theme.success
         : props.theme.dim;
+  const activate = useActivate();
   return (
     <box flexDirection="column" marginTop={1}>
       <Show when={props.showHeader !== false}>
-        <box flexDirection="row" onMouseDown={() => props.onActivate?.()}>
+        <box flexDirection="row" onMouseUp={activate(() => props.onActivate?.())}>
           <text fg={bullet()}>● </text>
           <text fg={props.theme.text}>
             {truncateToWidth(
@@ -1384,7 +1388,7 @@ function ToolView(props: {
                   </For>
                   <text
                     fg={props.focused ? props.theme.accent : props.theme.dim}
-                    onMouseDown={() => props.onActivate?.()}
+                    onMouseUp={activate(() => props.onActivate?.())}
                   >
                     {`${props.focused ? '▸ ' : '  '}${clampHint()}`}
                   </text>
