@@ -56,6 +56,7 @@ import {
   type LiveTool,
   previewBudget,
   type PreviewKind,
+  type ProjectionStats,
   semanticPreview,
   type ToolCall,
   type ToolCallChild,
@@ -88,6 +89,11 @@ export type TranscriptProps = Readonly<{
   hintTickMs?: number | undefined;
   /** Receives the scroll function for key routing while this transcript is mounted. */
   onScrollHandle?: (scroll: ((move: ScrollMove) => void) | undefined) => void;
+  /**
+   * Benchmark-only observation hook. Production leaves it undefined; keeping it optional
+   * means the projector does no extra work unless a caller explicitly asks for counters.
+   */
+  onProjectionStats?: ((stats: ProjectionStats) => void) | undefined;
 }>;
 
 type NodeOf<K extends TranscriptNode['kind']> = Extract<TranscriptNode, { kind: K }>;
@@ -146,6 +152,8 @@ export function Transcript(props: TranscriptProps) {
       mcpServers: mcpServers(),
       markers,
     });
+    const stats = projector.lastStats();
+    if (stats !== undefined) props.onProjectionStats?.(stats);
     // A background confirmation is a transcript event, not a footer notice: inserting it
     // here keeps the composer anchored (#129). It is attached to the *exact* owning tool node
     // by tool ID, never to "the last tool-looking node": a later appended call cannot inherit

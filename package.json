@@ -11,6 +11,7 @@
     "capture:fixtures": "bun run scripts/capture-fixtures.ts",
     "bench": "bun run scripts/bench.ts",
     "bench:render": "bun run scripts/bench-render.ts",
+    "bench:soak": "bun run scripts/bench-soak.ts",
     "bench:startup": "bun run scripts/bench-startup.ts",
     "start": "bun run src/main.ts",
     "format": "bun fmt --no-script",

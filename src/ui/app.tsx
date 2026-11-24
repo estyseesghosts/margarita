@@ -15,6 +15,7 @@ import { graphemes } from '../domain/composer.ts';
 import { diffWindowRows } from '../domain/diff.ts';
 import type { Keymap } from '../domain/keymap.ts';
 import { isDragSelection } from '../domain/selection-text.ts';
+import type { ProjectionStats } from '../domain/transcript.ts';
 import { ComposerView, Footer } from './composer-view.tsx';
 import { editExternally } from './external-editor.ts';
 import { OverlayView } from './overlays.tsx';
@@ -35,6 +36,8 @@ export type AppProps = Readonly<{
   hintTickMs?: number;
   /** Injectable for tests; defaults to the real external editor. */
   editText?: typeof editExternally;
+  /** Benchmark-only projector observation; production leaves it undefined. */
+  onProjectionStats?: (stats: ProjectionStats) => void;
 }>;
 
 /** Structural subset of a terminal key event; KeyEvent satisfies this. */
@@ -195,6 +198,7 @@ export function App(props: AppProps) {
                 onScrollHandle={(handle) => {
                   scrollTranscript = handle;
                 }}
+                onProjectionStats={props.onProjectionStats}
               />
             )}
           </Match>

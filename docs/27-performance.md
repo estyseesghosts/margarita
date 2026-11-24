@@ -243,6 +243,30 @@ queue are idle.
 
 
 
+## Long-session soak benchmark
+
+`bun run bench:soak` keeps one controller and one mounted Solid/OpenTUI tree alive while
+thousands of synthetic events arrive, instead of rebuilding a fixture per sample. It covers
+1,000 / 10,000 / 50,000 loaded messages (`--sizes` overrides), reports p50/p95/p99 in
+successive 60-event windows, and records heap, RSS, external bytes and a forced full-GC pause
+after each window.
+
+The mixed stream includes appended replies, growing text, tool status transitions, 256 KiB
+responses, large diffs, 24-tool turns, a 100-message single-announcement burst, expansion and
+collapse of tools/diffs, session switching, and pagination interleaved with live events.
+Correctness is checked alongside timing: the final frame must contain a unique appended
+marker, the controller must retain exactly the backend's message count, and the mounted
+projector must be reusing prefix nodes.
+
+- The 100 ms controlled stage must appear in the same end-to-end clock (no hard timing gate
+  otherwise).
+- Projector counters are observed through an optional `onProjectionStats` prop. Production
+  leaves it unset, so the projector performs no extra work on ordinary paths.
+- `gcPauseMs` is the cost of an explicit `Bun.gc(true)` checkpoint, an upper bound rather than
+  a natural incremental pause; Bun exposes no GC observer here.
+- `--smoke` runs one 400-message stage with 24 events for crash/runaway checks, not as a
+  performance gate.
+
 ## Reproducibility rules
 
 - Use the same commit, machine, terminal size, Bun version and power mode for comparisons.
