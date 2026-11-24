@@ -267,6 +267,46 @@ projector must be reusing prefix nodes.
 - `--smoke` runs one 400-message stage with 24 events for crash/runaway checks, not as a
   performance gate.
 
+## Incremental execution markers (#349)
+
+Execution markers are now derived by the controller from canonical transcript state, not
+recomputed by the view. `markersFor()` returns a read-only list; `updateExecutionMarkers()`
+receives an explicit change boundary from the latest-page merge or older-page prepend.
+
+- Closed `idle`-terminated segments are reused unchanged, including marker ids, durations,
+  compaction/interruption outcomes and activity.
+- A streamed tail update rescans only the open segment; a running-state change rewrites only
+  the trailing marker.
+- A canonical replacement invalidates the segment containing the change and its suffix.
+- A prepend rebuilds only the junction segment(s), reuses later closed segments and re-derives
+  the open tail with the current running value.
+- `markerStatsOf()` exposes messages scanned, segments rebuilt and segments reused for tests
+  and benchmarks. The pure `executionMarkers()` remains the correctness reference.
+
+## Indexed transcript reconciliation (#350)
+
+The controller keeps a per-transcript id index and retained-byte total. The index stores
+positions relative to a `baseOffset`, so an older-page prepend adjusts one number instead of
+rewriting every id mapping. It never stores a second copy of the messages.
+
+- A latest page is located with an O(1) id lookup. The normal path inspects only the page and
+  the messages it replaces; a disjoint/malformed page uses the defensive timestamp fallback.
+- Cached page objects are reused when the server payload is deep-equal, so the projector and
+  marker derivation see a stable prefix. `Bun.deepEquals` is bounded to the latest page.
+- Server authority still governs replacements, reordering and deletions inside the page;
+  duplicate ids in a malformed page are suppressed.
+- Older-page prepends suppress already-known ids through the index and leave cached mappings
+  valid. `transcriptAccountingOf()` exposes the incremental total for diagnostics.
+
+## Incremental retained bytes (#351)
+
+`approximateTranscriptBytes()` remains the full-recount reference. Each accepted latest-page
+merge subtracts the replaced messages and adds the page; each prepend adds only the new older
+rows. Eviction reads the maintained total instead of rescanning every transcript, and an
+explicit repair rebuild is recorded when state was written by another owner. Tests compare the
+incremental total against the full recount across randomized replacements, deletions,
+prepends, duplicate suppression and 1 MB-scale payload changes.
+
 ## Reproducibility rules
 
 - Use the same commit, machine, terminal size, Bun version and power mode for comparisons.

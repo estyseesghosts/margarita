@@ -29,7 +29,7 @@ import {
   isEditLike,
   toolPath,
 } from '../domain/edit-diff.ts';
-import { type ExecutionMarker, executionMarkers } from '../domain/execution-segment.ts';
+import { type ExecutionMarker } from '../domain/execution-segment.ts';
 import { type FormRequest, initialVisibleFields } from '../domain/form.ts';
 import { actionHint, type Keymap } from '../domain/keymap.ts';
 import { formatModelRef, type ModelSelection } from '../domain/model-ref.ts';
@@ -138,11 +138,12 @@ export function Transcript(props: TranscriptProps) {
     );
   const nodes = createMemo(() => {
     const messages = transcript()?.messages ?? [];
+    // Execution markers are derived by the controller from canonical transcript state; the
+    // view never scans messages itself (#349). Running changes only redraw the open segment.
     const markers = new Map(
-      executionMarkers(messages, state.running[sessionKeyValue()] === true).map((marker) => [
-        marker.afterMessageId,
-        marker,
-      ]),
+      props.controller
+        .markersFor(props.sessionID, props.serverID)
+        .map((marker) => [marker.afterMessageId, marker]),
     );
     const expanded = props.controller.expandedSets();
     const folded = projector.project(messages, {

@@ -1,0 +1,183 @@
+import { describe, expect, test } from 'bun:test';
+
+import { FakeBackend } from '../../test/fake-backend.ts';
+import { defaultConfig } from '../config/config.ts';
+import { emptyState } from '../config/local-state.ts';
+import { executionMarkers } from '../domain/execution-segment.ts';
+import { sessionKey } from '../domain/server-identity.ts';
+import type { SessionSummary } from '../domain/session.ts';
+import type { TranscriptMessage } from '../domain/transcript.ts';
+import { approximateTranscriptBytes } from '../perf/memory.ts';
+import { AppController } from './controller.ts';
+
+const model = { providerID: 'p', modelID: 'm' };
+const sessionID = 'ses_metadata';
+
+function user(index: number): TranscriptMessage {
+  return {
+    kind: 'user',
+    id: `u${index}`,
+    createdAt: index * 10,
+    text: `request ${index}`,
+    attachments: [],
+  };
+}
+
+function assistant(index: number): Extract<TranscriptMessage, { kind: 'assistant' }> {
+  return {
+    kind: 'assistant',
+    id: `a${index}`,
+    createdAt: index * 10 + 1,
+    completedAt: index * 10 + 2,
+    agent: 'build',
+    model,
+    parts: [{ kind: 'text', text: `answer ${index}` }],
+  };
+}
+
+function idle(index: number): TranscriptMessage {
+  return { kind: 'idle', id: `i${index}`, createdAt: index * 10 + 3, outcome: 'succeeded' };
+}
+
+function history(turns: number): TranscriptMessage[] {
+  return Array.from({ length: turns }, (_, index) => [
+    user(index),
+    assistant(index),
+    idle(index),
+  ]).flat();
+}
+
+function summary(): SessionSummary {
+  return {
+    id: sessionID,
+    serverID: 'local',
+    projectID: 'p',
+    directory: '/work/metadata',
+    title: 'Metadata',
+    createdAt: 0,
+    updatedAt: 1,
+    archived: false,
+  };
+}
+
+function makeController(messages: readonly TranscriptMessage[]): {
+  controller: AppController;
+  backend: FakeBackend;
+} {
+  const backend = new FakeBackend();
+  backend.serverID = 'local';
+  backend.sessions = [summary()];
+  backend.messages[sessionID] = [...messages];
+  const controller = new AppController({
+    backend,
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/metadata',
+    version: '0.0.0',
+    now: () => 100_000,
+    saveLocalState: async () => {},
+    listFiles: async () => [],
+    requestExit: () => {},
+  });
+  return { controller, backend };
+}
+
+async function waitFor(predicate: () => boolean, description: string): Promise<void> {
+  const deadline = performance.now() + 5_000;
+  while (performance.now() < deadline) {
+    if (predicate()) return;
+    await Bun.sleep(1);
+  }
+  throw new Error(`metadata test: ${description} did not settle`);
+}
+
+function messagesOf(controller: AppController): readonly TranscriptMessage[] {
+  return controller.state.transcripts[sessionKey({ serverID: 'local', sessionID })]?.messages ?? [];
+}
+
+describe('controller transcript metadata (#349, #350)', () => {
+  test('appended messages reuse completed markers and keep incremental bytes exact', async () => {
+    const { controller, backend } = makeController(history(40));
+    const key = sessionKey({ serverID: 'local', sessionID });
+    try {
+      await controller.bootstrap();
+      controller.openSession(sessionID);
+      await waitFor(() => messagesOf(controller).length === 120, 'initial transcript');
+      const initial = messagesOf(controller);
+      expect(controller.markersFor(sessionID)).toEqual(
+        executionMarkers(initial, controller.state.running[key] === true),
+      );
+      expect(controller.transcriptAccountingOf(sessionID)?.bytes).toBe(
+        approximateTranscriptBytes(initial).total,
+      );
+
+      backend.messages[sessionID]?.push({
+        ...assistant(40),
+        id: 'a40-new',
+        parts: [{ kind: 'text', text: 'streamed tail' }],
+      });
+      controller.onEvents('local', [{ kind: 'transcript-changed', sessionID }], false);
+      await waitFor(
+        () => messagesOf(controller).some((message) => message.id === 'a40-new'),
+        'appended message',
+      );
+      const messages = messagesOf(controller);
+      expect(controller.markersFor(sessionID)).toEqual(
+        executionMarkers(messages, controller.state.running[key] === true),
+      );
+      const stats = controller.markerStatsOf(sessionID);
+      expect(stats?.messagesScanned ?? Infinity).toBeLessThan(messages.length);
+      expect(controller.transcriptAccountingOf(sessionID)?.bytes).toBe(
+        approximateTranscriptBytes(messages).total,
+      );
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('older-page prepend keeps markers correct and rescans less than the full history', async () => {
+    const { controller } = makeController(history(60));
+    const key = sessionKey({ serverID: 'local', sessionID });
+    try {
+      await controller.bootstrap();
+      controller.openSession(sessionID);
+      await waitFor(() => messagesOf(controller).length === 120, 'first page');
+      await controller.loadOlder(sessionID);
+      await waitFor(() => messagesOf(controller).length === 180, 'older page');
+      const messages = messagesOf(controller);
+      expect(controller.markersFor(sessionID)).toEqual(
+        executionMarkers(messages, controller.state.running[key] === true),
+      );
+      const stats = controller.markerStatsOf(sessionID);
+      expect(stats?.messagesScanned ?? Infinity).toBeLessThan(messages.length);
+      expect(stats?.segmentsReused ?? 0).toBeGreaterThan(0);
+      expect(controller.transcriptAccountingOf(sessionID)?.bytes).toBe(
+        approximateTranscriptBytes(messages).total,
+      );
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('a running-state change rewrites only the open segment', async () => {
+    const { controller } = makeController(history(40));
+    const key = sessionKey({ serverID: 'local', sessionID });
+    try {
+      await controller.bootstrap();
+      controller.openSession(sessionID);
+      await waitFor(() => messagesOf(controller).length === 120, 'initial transcript');
+      const before = controller.markerStatsOf(sessionID)?.messagesScanned;
+      controller.onEvents('local', [{ kind: 'execution', sessionID, state: 'started' }], false);
+      await waitFor(() => controller.state.running[key] === true, 'running event');
+      expect(controller.markersFor(sessionID)).toEqual(
+        executionMarkers(messagesOf(controller), true),
+      );
+      const stats = controller.markerStatsOf(sessionID);
+      expect(stats?.messagesScanned ?? Infinity).toBeLessThanOrEqual(3);
+      expect(stats?.messagesScanned ?? Infinity).toBeLessThan(before ?? Infinity);
+    } finally {
+      controller.dispose();
+    }
+  });
+});

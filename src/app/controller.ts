@@ -58,6 +58,12 @@ import {
 import { type Copyable, copyableFromMessages } from '../domain/copyable.ts';
 import { type DiffScope, type FileDiff, patchLinesFor, turnStart } from '../domain/diff.ts';
 import { hasOversizedDiff, isEditLike } from '../domain/edit-diff.ts';
+import {
+  createExecutionMarkerProjector,
+  type MarkerChange,
+  type MarkerProjectionStats,
+} from '../domain/execution-projector.ts';
+import type { ExecutionMarker } from '../domain/execution-segment.ts';
 import { projectExecution } from '../domain/execution.ts';
 import {
   activeMention,
@@ -197,7 +203,6 @@ import {
 } from '../domain/transcript.ts';
 import type { UsageAnalytics } from '../domain/usage-analytics.ts';
 import { type WorkerNode, workerNodes } from '../domain/worker.ts';
-import { approximateTranscriptBytes } from '../perf/memory.ts';
 import { AdmissionGate } from './admission-gate.ts';
 import { AncestryVerifier, type DescendantCheck } from './ancestry-verifier.ts';
 import {
@@ -259,6 +264,12 @@ import {
   transcriptRetryBaseDelayMs,
   TranscriptRetryTracker,
 } from './transcript-retry.ts';
+import {
+  ensureTranscriptIndex,
+  mergeLatestIndexed,
+  prependOlderIndexed,
+  type TranscriptIndex,
+} from './transcript-store.ts';
 import { UsageAnalyticsSelector } from './usage-selector.ts';
 
 /**
@@ -865,6 +876,9 @@ export class AppController {
     this.hydrationInFlight.clear();
     this.hydrationDirty.clear();
     this.pendingActivity.clear();
+    this.transcriptIndexes.clear();
+    this.markerProjectors.clear();
+    this.markerCache.clear();
     // Disposal retires every permission reply lock; late callbacks find no matching token
     // and cannot publish into the disposed controller (#340).
     this.answeringPermissions.clear();
@@ -1721,6 +1735,21 @@ export class AppController {
   private readonly hydrationInFlight = new Map<string, Promise<void>>();
   private readonly hydrationDirty = new Set<string>();
   private readonly pendingActivity = new Set<string>();
+  /** Derived reconciliation metadata; never a second copy of the messages (#350, #351). */
+  private readonly transcriptIndexes = new Map<string, TranscriptIndex>();
+  /** One incremental execution-marker derivation per transcript (#349). */
+  private readonly markerProjectors = new Map<
+    string,
+    ReturnType<typeof createExecutionMarkerProjector>
+  >();
+  private readonly markerCache = new Map<
+    string,
+    {
+      messages: readonly TranscriptMessage[];
+      running: boolean;
+      markers: readonly ExecutionMarker[];
+    }
+  >();
 
   /**
    * Loads the first page of every requested host, publishes it immediately and continues
@@ -2140,6 +2169,89 @@ export class AppController {
     return this.sessionFetcher.reconcile(refs);
   }
 
+  /** Derived metadata for one transcript; rebuilds only when another owner replaced the array. */
+  private transcriptIndexFor(key: string, messages: readonly TranscriptMessage[]): TranscriptIndex {
+    const raw = unwrap(messages);
+    const existing = this.transcriptIndexes.get(key);
+    const index = ensureTranscriptIndex(existing, raw);
+    if (index !== existing) {
+      this.transcriptIndexes.set(key, index);
+      if (existing !== undefined) {
+        this.debugLog.write('transcript-index-rebuilt', { key, messages: raw.length });
+      }
+    }
+    return index;
+  }
+
+  /** Re-derives markers with an explicit boundary; one projector per session key (#349). */
+  private updateExecutionMarkers(
+    key: string,
+    messages: readonly TranscriptMessage[],
+    change: MarkerChange,
+  ): void {
+    let projector = this.markerProjectors.get(key);
+    if (projector === undefined) {
+      projector = createExecutionMarkerProjector();
+      this.markerProjectors.set(key, projector);
+    }
+    const running = this.state.running[key] === true;
+    const projection = projector.project(messages, running, change);
+    this.markerCache.set(key, { messages, running, markers: projection.markers });
+    this.debugLog.write('execution-markers', {
+      key,
+      change: change.kind,
+      scanned: projection.stats.messagesScanned,
+      rebuilt: projection.stats.segmentsRescanned,
+      reused: projection.stats.segmentsReused,
+    });
+  }
+
+  /** Read-only markers for one transcript; the UI never derives execution state itself. */
+  markersFor(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): readonly ExecutionMarker[] {
+    const key = this.keyFor(serverID, sessionID);
+    const transcript = this.state.transcripts[key];
+    if (transcript === undefined) return [];
+    const messages = unwrap(transcript.messages);
+    const running = this.state.running[key] === true;
+    const cached = this.markerCache.get(key);
+    if (cached === undefined || cached.messages !== messages) {
+      this.updateExecutionMarkers(key, messages, { kind: 'reset' });
+    } else if (cached.running !== running) {
+      this.updateExecutionMarkers(key, messages, { kind: 'tail' });
+    }
+    return this.markerCache.get(key)?.markers ?? [];
+  }
+
+  /** Last marker projection counters for tests and benchmarks (#349). */
+  markerStatsOf(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): MarkerProjectionStats | undefined {
+    return this.markerProjectors.get(this.keyFor(serverID, sessionID))?.lastStats();
+  }
+
+  /** Incremental retained-byte total; a full recount repairs state written by another owner. */
+  transcriptAccountingOf(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): { messages: number; bytes: number } | undefined {
+    const key = this.keyFor(serverID, sessionID);
+    const transcript = this.state.transcripts[key];
+    if (transcript === undefined) return undefined;
+    const messages = unwrap(transcript.messages);
+    const index = this.transcriptIndexFor(key, messages);
+    return { messages: messages.length, bytes: index.bytes.total };
+  }
+
+  private forgetTranscriptMetadata(key: string): void {
+    this.transcriptIndexes.delete(key);
+    this.markerProjectors.delete(key);
+    this.markerCache.delete(key);
+  }
+
   /** Drops every cached trace of a session the server no longer has. */
   private forgetSession(sessionID: string, serverID: string = this.activeServerID()): void {
     const key = this.keyFor(serverID, sessionID);
@@ -2171,6 +2283,7 @@ export class AppController {
     // recreated same-ID session is not blocked and late replies cannot mutate state (#340).
     this.retirePermissionReplies((host, sess) => host === serverID && sess === sessionID);
     this.failedPromptRecoveries.delete(key);
+    this.forgetTranscriptMetadata(key);
     this.hydrationQueue.delete(key);
     this.hydrationDirty.delete(key);
     const expansionPrefix = `${key} `;
@@ -3400,7 +3513,14 @@ export class AppController {
     // A newer accepted page is a watermark: this older snapshot must not replace it.
     if (!this.transcriptGenerations.shouldCommit(key, generation)) return;
     const existing = this.state.transcripts[key];
-    const merged = mergeLatest(existing?.messages ?? [], page.messages);
+    const existingMessages = existing === undefined ? [] : unwrap(existing.messages);
+    const outcome = mergeLatestIndexed(
+      existingMessages,
+      this.transcriptIndexes.get(key),
+      page.messages,
+    );
+    const merged = outcome.messages;
+    this.transcriptIndexes.set(key, outcome.index);
     // Cached messages older than this page keep their own cursor/retry state; otherwise the
     // page's cursor is the way further back (an empty placeholder transcript has none).
     // A confirmed-exhausted page must not keep a phantom "earlier" state, even when it still
@@ -3425,6 +3545,18 @@ export class AppController {
     );
     this.touchTranscript(key);
     this.transcriptGenerations.commit(key, generation);
+    this.updateExecutionMarkers(key, merged, {
+      kind: 'replace',
+      firstChangedIndex: outcome.firstChangedIndex,
+    });
+    this.debugLog.write('transcript-reconcile', {
+      key,
+      removed: outcome.removed,
+      added: outcome.added,
+      reconciled: outcome.reconciled,
+      pageProportional: outcome.pageProportional,
+      bytes: outcome.index.bytes.total,
+    });
     // The latest page is canonical for the session's current agent. Adopt a genuinely
     // newer switch (possibly made in another client) without letting an older cached
     // transcript message displace a fresh local acknowledgement (#253).
@@ -3453,25 +3585,35 @@ export class AppController {
       ) {
         return;
       }
-      const known = new Set(
-        (this.state.transcripts[key]?.messages ?? []).map((message) => message.id),
+      const current = this.state.transcripts[key];
+      if (current === undefined) return;
+      const outcome = prependOlderIndexed(
+        unwrap(current.messages),
+        this.transcriptIndexes.get(key),
+        page.messages,
       );
-      const older = page.messages.filter((message) => !known.has(message.id));
+      if (outcome.added > 0) this.transcriptIndexes.set(key, outcome.index);
       // Replace via produce: a merging setter would keep a stale cursor after the last page.
       this.setState(
         'transcripts',
         key,
-        produce((current) => {
-          current.messages = [...older, ...current.messages];
-          current.loading = false;
+        produce((draft) => {
+          if (outcome.added > 0) draft.messages = outcome.messages;
+          draft.loading = false;
           // Only a *confirmed* exhaustion clears the cursor. A failed lookahead keeps the
           // page's token as a retry path and records that the check is unverified (#144).
-          if (page.hasEarlier === false && page.retryable !== true) delete current.olderCursor;
-          else if (page.olderCursor !== undefined) current.olderCursor = page.olderCursor;
-          if (page.retryable === true) current.olderCheckFailed = true;
-          else delete current.olderCheckFailed;
+          if (page.hasEarlier === false && page.retryable !== true) delete draft.olderCursor;
+          else if (page.olderCursor !== undefined) draft.olderCursor = page.olderCursor;
+          if (page.retryable === true) draft.olderCheckFailed = true;
+          else delete draft.olderCheckFailed;
         }),
       );
+      if (outcome.added > 0) {
+        this.updateExecutionMarkers(key, outcome.messages, {
+          kind: 'prepend',
+          prependCount: outcome.added,
+        });
+      }
       this.touchTranscript(key);
     } catch (error) {
       // A failure from a retired lifetime says nothing about the current one; do not
@@ -3576,8 +3718,11 @@ export class AppController {
     const plan = planTranscriptEviction({
       order: this.transcriptOrder,
       touched: key,
-      sizes: (entry) =>
-        approximateTranscriptBytes(this.state.transcripts[entry]?.messages ?? []).total,
+      sizes: (entry) => {
+        const transcript = this.state.transcripts[entry];
+        const messages = transcript === undefined ? [] : unwrap(transcript.messages);
+        return this.transcriptIndexFor(entry, messages).bytes.total;
+      },
       activeKey:
         this.state.route.kind === 'conversation'
           ? this.keyFor(this.state.route.serverID, this.state.route.sessionID)
@@ -3590,7 +3735,10 @@ export class AppController {
     if (plan.evicted.length === 0) return;
     this.setStateTouchingOverview(
       produce((state) => {
-        for (const entry of plan.evicted) delete state.transcripts[entry];
+        for (const entry of plan.evicted) {
+          delete state.transcripts[entry];
+          this.forgetTranscriptMetadata(entry);
+        }
       }),
     );
   }
