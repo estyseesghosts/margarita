@@ -4,7 +4,12 @@ import { createEffect, For, Match, Show, Switch } from 'solid-js';
 
 import type { AppController } from '../app/controller.ts';
 import { groupRows, loadMoreRowKey, type OverviewRow } from '../domain/overview-groups.ts';
-import { layoutOverviewRow, layoutOverviewTabs } from '../domain/overview-row-layout.ts';
+import {
+  layoutOverviewRow,
+  layoutOverviewTabs,
+  overviewDotCells,
+  overviewMarkerCells,
+} from '../domain/overview-row-layout.ts';
 import { directoryKey, directoryName } from '../domain/path-identity.ts';
 import { projectLabel } from '../domain/project-label.ts';
 import { sanitizeSingleLine } from '../domain/sanitize-text.ts';
@@ -58,10 +63,21 @@ export function Overview(props: {
       <box flexDirection="row" marginBottom={1}>
         <For
           each={layoutOverviewTabs(
-            (['all', 'local', 'remotes', 'active', 'needs-input'] as const).map((tab) => {
-              const label = `${props.controller.tabLabel(tab)} ${props.controller.tabCounts()[tab]}`;
-              return state.overview.tab === tab ? `[${label}]` : ` ${label} `;
-            }),
+            (
+              [
+                ['all', 'All', 'A'],
+                ['local', 'Local', 'L'],
+                ['remotes', 'Remote', 'R'],
+                ['active', 'Active', 'C'],
+                ['needs-input', 'Needs', 'N'],
+              ] as const
+            ).map(([tab, compactLabel, tinyLabel]) => ({
+              label: props.controller.tabLabel(tab),
+              compactLabel,
+              tinyLabel,
+              count: props.controller.tabCounts()[tab] ?? 0,
+              selected: state.overview.tab === tab,
+            })),
             Math.max(8, props.width - 2),
           )}
         >
@@ -244,21 +260,30 @@ function SessionLine(props: {
   return (
     <box
       id={props.id}
-      flexDirection="row"
+      flexDirection="column"
       flexShrink={0}
       onMouseDown={() => props.controller.clickOverviewRow(props.rowKey)}
     >
-      <text fg={props.selected ? props.theme.accent : props.theme.dim}>
-        <span style={{ fg: props.selected ? props.theme.accent : props.theme.dim }}>
-          {columns().marker}
-        </span>
-        <span style={{ fg: dotColor() }}>{columns().dot}</span>
-        <span style={{ fg: props.theme.text }}>{columns().title}</span>
-        <span> </span>
-        <span style={{ fg: attention() ? props.theme.warn : props.theme.dim }}>
-          {columns().status}
-        </span>
-      </text>
+      <box flexDirection="row">
+        <text fg={props.selected ? props.theme.accent : props.theme.dim}>
+          <span style={{ fg: props.selected ? props.theme.accent : props.theme.dim }}>
+            {columns().marker}
+          </span>
+          <span style={{ fg: dotColor() }}>{columns().dot}</span>
+          <span style={{ fg: props.theme.text }}>{columns().titleLines[0] ?? ''}</span>
+          <span> </span>
+          <span style={{ fg: attention() ? props.theme.warn : props.theme.dim }}>
+            {columns().status}
+          </span>
+        </text>
+      </box>
+      <Show when={columns().titleLines.length > 1}>
+        <box flexDirection="row">
+          <text fg={props.theme.text}>
+            {`${' '.repeat(overviewMarkerCells + overviewDotCells)}${columns().titleLines[1] ?? ''}`}
+          </text>
+        </box>
+      </Show>
     </box>
   );
 }

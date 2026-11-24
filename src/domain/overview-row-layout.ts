@@ -16,10 +16,32 @@ const fixedCells = overviewMarkerCells + overviewDotCells + overviewGapCells;
 export interface OverviewRowColumns {
   readonly marker: string;
   readonly dot: string;
+  /** One or two display-cell-padded title lines; never a third, never ellipsis-only. */
+  readonly titleLines: readonly string[];
   readonly title: string;
   readonly status: string;
   readonly titleCells: number;
   readonly statusCells: number;
+}
+
+/** Packs whole words into at most two lines, clipping the second only when content is omitted. */
+export function wrapOverviewTitle(title: string, cells: number): string[] {
+  const words = title.split(/\s+/).filter((word) => word !== '');
+  const limit = Math.max(1, cells);
+  if (words.length === 0) return [''];
+  let first = '';
+  let index = 0;
+  while (index < words.length) {
+    const candidate = first === '' ? words[index]! : `${first} ${words[index]!}`;
+    if (cellWidth(candidate) > limit && first !== '') break;
+    first = candidate;
+    index += 1;
+  }
+  // A single token wider than the column is clipped safely rather than overrunning the row.
+  if (cellWidth(first) > limit) first = clipLineToCells(first, limit).text;
+  if (index >= words.length) return [first];
+  const rest = words.slice(index).join(' ');
+  return [first, cellWidth(rest) <= limit ? rest : clipLineToCells(rest, limit).text];
 }
 
 /** Right-pads to exactly `cells` cells; never emits more, even for wide graphemes. */
@@ -51,22 +73,59 @@ export function layoutOverviewRow(input: {
 }): OverviewRowColumns {
   const { titleCells, statusCells } = overviewColumnBudgets(input.contentWidth);
   const dot = input.dot.length === 1 ? `${input.dot} ` : input.dot;
+  const titleLines = wrapOverviewTitle(input.title, titleCells).map((line) =>
+    padCells(line, titleCells),
+  );
   return {
     marker: input.selected ? '  ❯ ' : '    ',
     dot: padCells(dot, overviewDotCells),
-    title: padCells(clipLineToCells(input.title, titleCells).text, titleCells),
+    titleLines,
+    title: titleLines[0] ?? '',
     status: padCells(clipLineToCells(input.status, statusCells).text, statusCells),
     titleCells,
     statusCells,
   };
 }
 
+/** One overview filter tab; compact labels are used before any count is clipped (#344). */
+export interface OverviewTabInput {
+  readonly label: string;
+  readonly compactLabel: string;
+  /** Single-character label used only when even compact labels cannot fit (#344). */
+  readonly tinyLabel: string;
+  readonly count: number;
+  readonly selected: boolean;
+}
+
 /**
- * Gives every overview tab an equal fixed width so the filter row stays on one line and the
- * counts never wrap under their labels, even on narrow terminals (#344).
+ * Keeps the filter row on one line without ever hiding a count: full labels first, then compact
+ * labels, and only as a last resort clipping the label while preserving every count (#344).
  */
-export function layoutOverviewTabs(labels: readonly string[], contentWidth: number): string[] {
-  if (labels.length === 0) return [];
-  const cells = Math.max(4, Math.floor(contentWidth / labels.length));
-  return labels.map((label) => padCells(clipLineToCells(label, cells).text, cells));
+export function layoutOverviewTabs(
+  tabs: readonly OverviewTabInput[],
+  contentWidth: number,
+): string[] {
+  if (tabs.length === 0) return [];
+  const render = (labels: readonly string[]) =>
+    tabs.map(
+      (tab, index) =>
+        `${tab.selected ? '[' : ' '}${labels[index] ?? tab.compactLabel} ${tab.count}${tab.selected ? ']' : ' '} `,
+    );
+  const full = render(tabs.map((tab) => tab.label));
+  if (cellWidth(full.join('')) <= contentWidth) return full;
+  const compact = render(tabs.map((tab) => tab.compactLabel));
+  if (cellWidth(compact.join('')) <= contentWidth) return compact;
+  // Tiny terminals: single-letter labels with counts still identify every filter.
+  const tiny = tabs.map((tab) => `${tab.tinyLabel}${tab.count} `);
+  if (cellWidth(tiny.join('')) <= contentWidth) return tiny;
+  const cells = Math.max(4, Math.floor(contentWidth / tabs.length));
+  return tabs.map((tab) => {
+    const count = String(tab.count);
+    const overhead = 4 + cellWidth(count); // surrounding spaces/brackets and the count itself
+    const label = clipLineToCells(tab.compactLabel, Math.max(1, cells - overhead)).text;
+    return padCells(
+      `${tab.selected ? '[' : ' '}${label} ${count}${tab.selected ? ']' : ' '} `,
+      cells,
+    );
+  });
 }

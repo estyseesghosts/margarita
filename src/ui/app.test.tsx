@@ -234,7 +234,7 @@ describe('app', () => {
     expect(frame).toContain('New session in kohjoh');
   });
 
-  test('overview keeps long session rows on one line with aligned indicator columns (#344)', async () => {
+  test('overview wraps long titles to two lines with aligned indicator columns (#344)', async () => {
     const backend = new FakeBackend();
     const longTitle = 'A very long session title that used to wrap across several terminal rows';
     backend.sessions = Array.from({ length: 3 }, (_, index) => ({
@@ -253,10 +253,12 @@ describe('app', () => {
     expect(rows).toHaveLength(3);
     const dotColumns = rows.map((line) => Math.max(line.indexOf('●'), line.indexOf('○')));
     const statusColumns = rows.map((line) => line.indexOf('idle'));
+    const titleLines = frame.split('\n').filter((line) => line.includes('A very long'));
     expect(new Set(dotColumns).size).toBe(1);
     expect(new Set(statusColumns).size).toBe(1);
-    for (const line of rows) expect(cellWidth(line)).toBeLessThanOrEqual(60);
-    expect(rows.some((line) => line.includes('…'))).toBe(true);
+    expect(titleLines.length).toBeLessThanOrEqual(6); // at most two lines per session
+    for (const line of frame.split('\n')) expect(cellWidth(line)).toBeLessThanOrEqual(60);
+    expect(frame.includes('…')).toBe(true);
   });
 
   test('attach shows welcome panel, transcript and footer; empty Left returns', async () => {
