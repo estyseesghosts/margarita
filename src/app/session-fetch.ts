@@ -41,10 +41,51 @@ export interface ReconciledSessions {
   readonly deleted: SessionRef[];
 }
 
+/** One page of session rows, independent of the slower activity capability. */
+export interface SessionPageSlice {
+  readonly sessions: readonly SessionSummary[];
+  readonly nextCursor?: string;
+}
+
+/** The current active-session set, or a truthful failure that leaves evidence unknown. */
+export interface SessionActivity {
+  readonly active?: ReadonlySet<string>;
+  readonly activeError?: string;
+}
+
 /** Owns paged session reads and definite-not-found reconciliation. */
 export class SessionFetcher {
   constructor(private readonly deps: SessionFetchDeps) {}
 
+  /**
+   * Reads exactly one page (#347). The caller publishes it immediately and keeps the cursor
+   * for the next page, so a slow server or later pages never withhold usable rows.
+   */
+  async loadPage(serverID: string, cursor?: string): Promise<SessionPageSlice> {
+    const backend = this.deps.backendFor(serverID);
+    const page = await backend.listSessions(cursor === undefined ? {} : { cursor });
+    return {
+      sessions: page.sessions.map((session) => ({ ...session, serverID })),
+      ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+    };
+  }
+
+  /**
+   * Reads activity independently of identity/pagination. A failed lookup is reported, never
+   * treated as "every session stopped" (#341, #347).
+   */
+  async loadActivity(serverID: string): Promise<SessionActivity> {
+    try {
+      return { active: await this.deps.backendFor(serverID).activeSessionIDs() };
+    } catch (error) {
+      return { activeError: error instanceof Error ? error.message : 'Activity lookup failed' };
+    }
+  }
+
+  /**
+   * Bounded full read kept as the correctness reference and for non-interactive callers.
+   * Interactive startup uses `loadPage` progressively instead.
+   */
   async loadServer(serverID: string, epoch: number): Promise<ServerSessionPage> {
     const backend = this.deps.backendFor(serverID);
     const loaded: SessionSummary[] = [];
@@ -69,14 +110,12 @@ export class SessionFetcher {
     // pagination. A failed activity lookup must not throw away a successful listing: report
     // the cause distinctly and leave running evidence unknown (#341). The caller's epoch and
     // registration guards still reject the whole page if the host was replaced mid-read.
-    try {
-      return { ...page, active: await backend.activeSessionIDs() };
-    } catch (error) {
-      return {
-        ...page,
-        activeError: error instanceof Error ? error.message : 'Activity lookup failed',
-      };
-    }
+    const activity = await this.loadActivity(serverID);
+    return {
+      ...page,
+      ...(activity.active === undefined ? {} : { active: activity.active }),
+      ...(activity.activeError === undefined ? {} : { activeError: activity.activeError }),
+    };
   }
 
   async reconcile(refs: readonly SessionRef[]): Promise<ReconciledSessions> {

@@ -199,6 +199,11 @@ export type AppState = {
   forms: Record<string, FormRequest[]>;
   /** Per-session input-request fetch failures; absent means both categories are known. */
   requestErrors: Record<string, { permissions?: string; forms?: string }>;
+  /**
+   * Whether request hydration has completed for a session. Absent means it has never been
+   * requested; `loading` must not be rendered as "no pending requests" (#348).
+   */
+  requestHydration: Record<string, 'loading' | 'ready'>;
   /** Goal/plan sidecar per session; absent until loaded. */
   goals: Record<string, GoalPlanV1>;
   /**
@@ -362,6 +367,7 @@ export function initialState(directory: string, serverID: string = localServerID
     permissions: {},
     forms: {},
     requestErrors: {},
+    requestHydration: {},
     goals: {},
     nativeGoals: {},
     awaitingSteer: {},

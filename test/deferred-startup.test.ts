@@ -268,7 +268,11 @@ describe('deferred paired-server restore (#346)', () => {
     const credentials = unavailableCredentialStore('no keyring');
     const { assembly } = await fixture([profileFor(1, 'none')], { credentials });
     await assembly.restoreSavedServers();
-    expect(assembly.servers.get('srv_1')?.state).toBe('connecting');
+    // Restore registers the host and starts its first index read; that read may complete
+    // before the assertion. The contract under test is the anonymous header, not a race.
+    await assembly.controller.settleSessionIndex();
+    await assembly.controller.settleRequestHydration();
+    expect(assembly.servers.get('srv_1')?.state).toBe('online');
     expect(assembly.servers.get('srv_1')?.connection.headers['authorization']).toBeUndefined();
     await dispose(assembly);
   });

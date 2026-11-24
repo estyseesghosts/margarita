@@ -250,18 +250,21 @@ async function runOnce(
     if (startup.catalogReadyAt !== undefined) {
       timeline.markAt('catalog-ready', startup.catalogReadyAt);
     }
-    if (startup.indexCompleteAt !== undefined) {
-      timeline.markAt('session-index-complete', startup.indexCompleteAt);
-    }
-    if (startup.hydrationReadyAt !== undefined) {
-      timeline.markAt('request-hydration-ready', startup.hydrationReadyAt);
-    }
     if (startup.readyAt !== undefined) {
       timeline.markAt('composer-ready', startup.readyAt);
     } else {
       timeline.mark('composer-ready');
     }
     await maintenance;
+    await assembly.controller.settleSessionIndex();
+    await assembly.controller.settleRequestHydration();
+    const settled = assembly.controller.state.startup;
+    if (settled.indexCompleteAt !== undefined) {
+      timeline.markAt('session-index-complete', settled.indexCompleteAt);
+    }
+    if (settled.hydrationReadyAt !== undefined) {
+      timeline.markAt('request-hydration-ready', settled.hydrationReadyAt);
+    }
     await setup.renderOnce();
     const snapshot = timeline.snapshot();
     const at = (stage: string): number =>

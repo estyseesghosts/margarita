@@ -552,7 +552,7 @@ describe('partial session index failures (#341)', () => {
     harness.dispose();
   });
 
-  test('a failed second page is a host failure, not a partial list published as complete', async () => {
+  test('a failed second page keeps page 1 visible and the host incomplete', async () => {
     const harness = await createHarness();
     harness.backend('local').listSessions = async (query) => {
       if (query?.cursor === undefined)
@@ -564,13 +564,15 @@ describe('partial session index failures (#341)', () => {
     };
 
     await harness.controller.loadSessions();
-    await harness.settle();
+    await harness.controller.settleSessionIndex();
 
-    // The incomplete listing is not committed; the prior host failure/empty page stays visible.
+    // Progressive startup publishes page 1 as soon as it lands (#347); the later failure is
+    // reported without discarding usable rows or pretending the index is complete.
     expect(
       harness.controller.state.sessions[sessionKey({ serverID: 'local', sessionID: 'ses_page1' })],
-    ).toBeUndefined();
+    ).toBeDefined();
     expect(harness.controller.state.serverPages['local']?.error).toContain('page 2 offline');
+    expect(harness.controller.state.serverPages['local']?.complete).toBe(false);
     harness.dispose();
   });
 

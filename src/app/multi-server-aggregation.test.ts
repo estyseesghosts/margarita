@@ -82,6 +82,8 @@ describe('cross-server aggregation', () => {
       return { sessions: [session('ses_r6', 'srv_1', '/work/lotus')] };
     };
     await controller.loadSessions();
+    // Page 1 is interactive immediately; the bounded background walk reaches page 5.
+    await controller.settleSessionIndex();
     expect(controller.state.serverPages['local']?.cursor).toBe('l5');
     expect(controller.state.serverPages['srv_1']?.cursor).toBe('r5');
     expect(controller.state.sessionsComplete).toBe(false);

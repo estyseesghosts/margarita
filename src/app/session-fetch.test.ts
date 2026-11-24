@@ -43,6 +43,54 @@ describe('session fetcher (#308)', () => {
     expect(page.fresh[sessionKey({ serverID: 'local', sessionID: 'a' })]?.serverID).toBe('local');
   });
 
+  test('loadPage reads exactly one page and never touches activity', async () => {
+    const backend = new FakeBackend();
+    let activityReads = 0;
+    backend.activeSessionIDs = async () => {
+      activityReads += 1;
+      return new Set();
+    };
+    backend.listSessionsHook = async (query) => ({
+      sessions: [summary(query.cursor === undefined ? 'a' : 'b')],
+      ...(query.cursor === undefined ? { nextCursor: 'page-2' } : {}),
+    });
+    const fetcher = new SessionFetcher(deps(backend));
+    const first = await fetcher.loadPage('local');
+    expect(first.sessions.map((session) => session.id)).toEqual(['a']);
+    expect(first.nextCursor).toBe('page-2');
+    expect(activityReads).toBe(0);
+    const second = await fetcher.loadPage('local', 'page-2');
+    expect(second.sessions.map((session) => session.id)).toEqual(['b']);
+    expect(second.nextCursor).toBeUndefined();
+    expect(activityReads).toBe(0);
+  });
+
+  test('loadActivity reports a failure without throwing or inventing an empty set (#341)', async () => {
+    const backend = new FakeBackend();
+    backend.activeSessionIDs = async () => {
+      throw new Error('activity offline');
+    };
+    const fetcher = new SessionFetcher(deps(backend));
+    const activity = await fetcher.loadActivity('local');
+    expect(activity.active).toBeUndefined();
+    expect(activity.activeError).toContain('activity offline');
+  });
+
+  test('loadPage propagates a failed page read so the caller keeps its previous cursor', async () => {
+    const backend = new FakeBackend();
+    backend.listSessionsHook = async () => {
+      throw new Error('cursor read failed');
+    };
+    const fetcher = new SessionFetcher(deps(backend));
+    let failure: unknown;
+    try {
+      await fetcher.loadPage('local', 'page-2');
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure instanceof Error ? failure.message : '').toContain('cursor read failed');
+  });
+
   test('a failed activity read keeps the successful page, cursor and rows (#341)', async () => {
     const backend = new FakeBackend();
     backend.sessions = [summary('a'), summary('b')];

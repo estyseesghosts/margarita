@@ -2122,12 +2122,26 @@ describe('earlier-history retry state (#144)', () => {
 });
 
 describe('session pagination', () => {
-  test('bootstrap caps the first load; Load more pages in older sessions keyboard-only', async () => {
+  test('bootstrap publishes page 1; background paging stops at the bound and Load more continues', async () => {
     const backend = new FakeBackend();
-    backend.listSessionsHook = onePerPageHook(pagedSessions(7));
+    const pages = pagedSessions(7);
+    const real = onePerPageHook(pages);
+    const secondPage = deferred<void>();
+    backend.listSessionsHook = async (query) => {
+      if (query.cursor === '1') await secondPage.promise;
+      return real(query);
+    };
     const controller = makeController(() => Promise.resolve([]), backend);
     await controller.bootstrap();
 
+    // Page 1 is already usable while page 2 is still in flight; nothing waits for the
+    // complete index (#347).
+    expect(Object.keys(controller.state.sessions)).toEqual(['s0']);
+    expect(controller.state.sessionsComplete).toBe(false);
+    expect(controller.state.sessionsLoading).toBe(false);
+
+    secondPage.resolve();
+    await controller.settleSessionIndex();
     expect(Object.keys(controller.state.sessions)).toEqual(['s0', 's1', 's2', 's3', 's4']);
     expect(controller.state.sessionsComplete).toBe(false);
 
@@ -2184,6 +2198,7 @@ describe('session pagination', () => {
     };
     const controller = makeController(() => Promise.resolve([]), backend);
     await controller.bootstrap();
+    await controller.settleSessionIndex();
     expect(Object.keys(controller.state.sessions)).toHaveLength(5);
 
     await controller.loadMoreSessions();
@@ -2351,6 +2366,7 @@ describe('session pagination', () => {
     backend.listSessionsHook = onePerPageHook(pagedSessions(6));
     const controller = makeController(() => Promise.resolve([]), backend);
     await controller.bootstrap();
+    await controller.settleSessionIndex();
     controller.openOverview();
     controller.setComposer(composerFrom('keep this draft'));
 

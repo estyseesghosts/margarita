@@ -18,6 +18,7 @@ import type { SessionMessageInfo } from '@opencode/client';
 
 import { toTranscriptMessage } from '../src/adapter/wire-mapping.ts';
 import { mergeLatest } from '../src/app/controller.ts';
+import { SessionFetcher } from '../src/app/session-fetch.ts';
 import {
   caretPaint,
   composerFrom,
@@ -34,6 +35,7 @@ import { createTranscriptProjector, foldTranscript } from '../src/domain/transcr
 import { projectUsage } from '../src/domain/usage-analytics.ts';
 import { type BenchStats, sampleOperation } from '../src/perf/measure.ts';
 import { approximateTranscriptBytes } from '../src/perf/memory.ts';
+import { FakeBackend } from '../test/fake-backend.ts';
 
 type Scenario = Readonly<{
   name: string;
@@ -201,6 +203,72 @@ async function memoryReport(): Promise<unknown> {
     },
     gcPauseMs: gcPause,
     note: 'JS heap only; native OpenTUI allocations and retained-object snapshots are not attributed here',
+  };
+}
+
+/**
+ * Progressive session-index benchmark (#347): 50/500/2,500 rows at 50 rows per page with a
+ * deterministic 5 ms latency per response. Reports the first usable page separately from the
+ * complete index, because startup readiness now depends on the former only.
+ */
+async function sessionPaginationReport(): Promise<unknown> {
+  const sizes = smoke ? [50] : [50, 500, 2500];
+  const pageSize = 50;
+  const latencyMs = 5;
+  const results: unknown[] = [];
+  for (const size of sizes) {
+    const sessionRows = Array.from({ length: size }, (_, index) => ({
+      id: `ses_${index}`,
+      serverID: 'local' as const,
+      projectID: `p${index % 17}`,
+      directory: `/work/project-${index % 7}`,
+      title: `Session ${index}`,
+      updatedAt: index,
+      createdAt: 0,
+      archived: false,
+    }));
+    const backend = new FakeBackend();
+    backend.listSessionsHook = async (query) => {
+      await Bun.sleep(latencyMs);
+      const start = query.cursor === undefined ? 0 : Number(query.cursor);
+      const page = sessionRows.slice(start, start + pageSize);
+      const next = start + pageSize;
+      return {
+        sessions: page,
+        ...(next < sessionRows.length ? { nextCursor: String(next) } : {}),
+      };
+    };
+    const fetcher = new SessionFetcher({
+      backendFor: () => backend,
+      keyFor: (serverID, sessionID) => `${serverID}/${sessionID}`,
+      pageLimit: 5,
+      concurrency: 4,
+    });
+    const started = performance.now();
+    const first = await fetcher.loadPage('local');
+    const firstPageMs = performance.now() - started;
+    let cursor = first.nextCursor;
+    let pages = 1;
+    let rows = first.sessions.length;
+    while (cursor !== undefined) {
+      const page = await fetcher.loadPage('local', cursor);
+      pages += 1;
+      rows += page.sessions.length;
+      cursor = page.nextCursor;
+    }
+    results.push({
+      size,
+      pageSize,
+      latencyPerPageMs: latencyMs,
+      firstPageMs,
+      completeIndexMs: performance.now() - started,
+      pages,
+      rows,
+    });
+  }
+  return {
+    note: 'fetcher-only progressive read; controller publication is covered by UI/startup benchmarks',
+    results,
   };
 }
 
@@ -421,6 +489,7 @@ for (const scenario of await scenarios()) {
 }
 
 const memory = await memoryReport();
+const sessionPagination = await sessionPaginationReport();
 function gitRevision(): string {
   try {
     const result = Bun.spawnSync(['git', 'rev-parse', 'HEAD']);
@@ -451,6 +520,7 @@ const report = {
   before: { heapUsedBytes: before.heapUsed, rssBytes: before.rss },
   scenarios: reports,
   memory,
+  sessionPagination,
   unavailable: [
     'event-receipt-to-paint latency (requires a live TTY/PTY trace)',
     'OpenTUI native frame/cell counters (@opentui/core 0.9.2 exposes no stable API)',

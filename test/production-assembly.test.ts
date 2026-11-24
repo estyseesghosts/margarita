@@ -788,6 +788,7 @@ describe('three-server failure isolation (issue #66)', () => {
     const a2Before = controller.state.sessions['ses_a_2'];
     if (a2Before === undefined) throw new Error('ses_a_2 missing before recovery');
     await controller.loadSessions();
+    await controller.settleSessionIndex();
     expect(assembly.servers.get('srv_b')?.state).toBe('online');
     expect(controller.state.sessions[bKey2]).toBeDefined();
     const bRecovered = controller.state.sessions[bKey];

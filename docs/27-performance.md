@@ -203,6 +203,44 @@ debug/notice path. Repeated calls in one process are idempotent. Startup fixture
 multiple queued deletions with a delayed/unavailable backend and assert that successful
 entries disappear while failed ones remain.
 
+## Progressive session index (#347)
+
+`SessionFetcher.loadPage()` reads and stamps one page. Interactive startup publishes page 1
+immediately and starts bounded background pagination (five pages) instead of waiting for up
+to five serial responses. The overview is usable after the first page; `sessionsComplete`
+stays false while any host retains a cursor, and `sessionsLoading` is reserved for an explicit
+"Load more" request. `settleSessionIndex()` exists for tests and benchmarks to await the
+background walk without sleeping.
+
+- Continuation cursors are preserved on failure, so "Load more" retries the same page.
+- A cursor that never advances fails the page walk instead of looping or claiming
+  completeness.
+- Deletions are proven only after the full page walk for that host; an omitted row on page 1
+  is not a deletion. Reconciliation runs asynchronously and cannot block the overview.
+- Every page rechecks the refresh epoch, host registration and backend identity, so a newer
+  refresh, unpair or host replacement discards late pages. Duplicate rows across page
+  boundaries merge by server-qualified key.
+- Activity (`activeSessionIDs`) starts independently of page 1 and never withholds rows; a
+  failed activity read leaves running evidence unknown and schedules only an activity retry.
+- `scripts/bench.ts` reports a `sessionPagination` section for 50/500/2,500 rows at 5 ms per
+  page, separating first-page latency from complete-index latency.
+
+## Request hydration independence (#348)
+
+Session-index completion no longer waits for permission/form hydration. Active sessions are
+queued behind a four-worker pool, deduplicated by server-qualified key. A refresh requested
+while another read is in flight marks the key dirty and runs exactly one follow-up, so an
+event that arrives during startup hydration is not lost and concurrent SSE/startup callers do
+not issue duplicate permission/form RPCs. The attached conversation is prioritized through
+`loadConversation`; other active sessions hydrate progressively.
+
+`state.requestHydration` (and `controller.requestHydrationOf()`) distinguishes `unknown` and
+`loading` from a confirmed empty request list. Failed hydration preserves the last confirmed
+permissions/forms and publishes `requestErrors`; it never clears a pending card. The
+`request-hydration-ready` startup milestone is recorded only after activity and the bounded
+queue are idle.
+
+
 
 
 ## Reproducibility rules

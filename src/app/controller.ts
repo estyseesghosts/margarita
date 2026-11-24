@@ -228,8 +228,8 @@ import { RefreshGenerations } from './refresh-generations.ts';
 import { type RequestInboxCommand, RequestInboxCoordinator } from './request-inbox-coordinator.ts';
 import { inputRequestRefreshTargets } from './request-targets.ts';
 import { attachedSessionFor, routeServerFor } from './route-server.ts';
-import { SessionFetcher } from './session-fetch.ts';
-import { mergeCommittedSessions, sessionFlags, sessionPage } from './session-snapshot.ts';
+import { type SessionActivity, SessionFetcher, type SessionPageSlice } from './session-fetch.ts';
+import { mergeCommittedSessions, sessionPage } from './session-snapshot.ts';
 import {
   admissionBlock,
   type AdmissionCommand,
@@ -461,6 +461,7 @@ const transcriptCacheLimit = 8;
 const transcriptCacheByteLimit = 32 * 1024 * 1024;
 const sessionPageLimit = 5;
 const reconcileConcurrency = 8;
+const hydrationConcurrency = 4;
 /** Ownership checks for uncached child questions run after confirmed data is published (#294). */
 const ancestryVerifyConcurrency = 4;
 const ancestryVerifyTimeoutMs = 2_000;
@@ -860,6 +861,10 @@ export class AppController {
     this.creations.clear();
     this.recoveredInbox.clear();
     this.failedPromptRecoveries.clear();
+    this.hydrationQueue.clear();
+    this.hydrationInFlight.clear();
+    this.hydrationDirty.clear();
+    this.pendingActivity.clear();
     // Disposal retires every permission reply lock; late callbacks find no matching token
     // and cannot publish into the disposed controller (#340).
     this.answeringPermissions.clear();
@@ -1262,6 +1267,7 @@ export class AppController {
   markFirstSessionPage(): void {
     if (this.state.startup.sessionsReadyAt !== undefined) return;
     this.setState('startup', 'sessionsReadyAt', this.startupNow());
+    this.maybeMarkHydrationReady();
   }
 
   /** Records the launch host's verified catalog (issue #345). */
@@ -1273,12 +1279,29 @@ export class AppController {
   /** Records completion of the bounded session index and request hydration (issue #345). */
   markSessionIndexComplete(): void {
     if (this.state.startup.indexCompleteAt !== undefined) return;
-    this.setState('startup', 'indexCompleteAt', this.startupNow());
+    const atMs = this.startupNow();
+    this.setState('startup', 'indexCompleteAt', atMs);
+    const started = this.state.startup.startedAt;
+    this.debugLog.write('startup-milestone', {
+      stage: 'session-index-complete',
+      atMs,
+      ...(started === undefined ? {} : { elapsedMs: Math.max(0, atMs - started) }),
+      hosts: this.serverIDs().length,
+      sessions: Object.keys(this.state.sessions).length,
+    });
   }
 
   markRequestHydrationReady(): void {
     if (this.state.startup.hydrationReadyAt !== undefined) return;
-    this.setState('startup', 'hydrationReadyAt', this.startupNow());
+    const atMs = this.startupNow();
+    this.setState('startup', 'hydrationReadyAt', atMs);
+    const started = this.state.startup.startedAt;
+    this.debugLog.write('startup-milestone', {
+      stage: 'request-hydration-ready',
+      atMs,
+      ...(started === undefined ? {} : { elapsedMs: Math.max(0, atMs - started) }),
+      sessions: Object.keys(this.state.requestHydration).length,
+    });
   }
 
   /** Loads catalogs and sessions. Errors propagate so startup can report them. */
@@ -1691,67 +1714,25 @@ export class AppController {
 
   /** Set when the launch server failed to refresh; bootstrap re-throws it for the CLI. */
   private launchLoadError: unknown;
+  /** In-flight background page walks; never block bootstrap, but tests can settle them. */
+  private readonly sessionPagination = new Set<Promise<void>>();
+  /** Bounded, deduplicated request hydration (#348). Keys are server-qualified sessions. */
+  private readonly hydrationQueue = new Map<string, { sessionID: string; serverID: string }>();
+  private readonly hydrationInFlight = new Map<string, Promise<void>>();
+  private readonly hydrationDirty = new Set<string>();
+  private readonly pendingActivity = new Set<string>();
 
+  /**
+   * Loads the first page of every requested host, publishes it immediately and continues
+   * pagination in the background (#347). Bootstrap awaits this method only through the first
+   * page, so a 2,500-session index becomes interactive after one response instead of five
+   * serial ones. Activity is a separate capability and never withholds the rows it describes.
+   */
   async loadSessions(serverID?: string): Promise<void> {
     if (serverID === undefined || serverID === this.serverID) this.launchLoadError = undefined;
     const servers = serverID === undefined ? this.serverIDs() : [serverID];
-    // One host's failure never aborts the refresh for the others: a failed server keeps its
-    // cached rows and records the error, healthy servers update normally.
-    type SessionLoadResult = Readonly<{
-      serverID: string;
-      epoch: number;
-      ok: boolean;
-      error: string | undefined;
-      cause: unknown;
-      fresh: Record<string, SessionSummary>;
-      /** Present only when the activity read succeeded; absence means stale/unknown (#341). */
-      active?: Set<string>;
-      activeError?: string;
-      cursor: string | undefined;
-      snapshotSeq: number;
-      usageSeq: number;
-    }>;
-    const results = await Promise.all<SessionLoadResult>(
-      servers.map(async (targetID): Promise<SessionLoadResult> => {
-        const epoch = this.nextRefreshEpoch(targetID);
-        // Captured before the first request: any execution event stamped after this point is
-        // newer than the snapshot and must not be overwritten by it.
-        const snapshotSeq = this.generations.eventClock();
-        const usageSeq = this.generations.usageClock();
-        try {
-          const loaded = await this.loadServerSessions(targetID, epoch);
-          return {
-            serverID: loaded.serverID,
-            epoch: loaded.epoch,
-            ok: true,
-            error: undefined as string | undefined,
-            cause: undefined as unknown,
-            fresh: loaded.fresh,
-            ...(loaded.active === undefined ? {} : { active: new Set(loaded.active) }),
-            ...(loaded.activeError === undefined ? {} : { activeError: loaded.activeError }),
-            cursor: loaded.cursor ?? undefined,
-            snapshotSeq,
-            usageSeq,
-          };
-        } catch (error) {
-          this.debugLog.write('load-sessions-failed', {
-            serverID: targetID,
-            errorKind: error instanceof BackendError ? error.kind : 'unknown',
-          });
-          if (targetID === this.serverID) this.launchLoadError = error;
-          return {
-            serverID: targetID,
-            epoch,
-            ok: false,
-            error: error instanceof Error ? error.message : 'Could not reach the server',
-            cause: error,
-            fresh: {},
-            cursor: undefined,
-            snapshotSeq,
-            usageSeq,
-          };
-        }
-      }),
+    const results = await Promise.all(
+      servers.map((targetID) => this.loadFirstSessionPage(targetID)),
     );
     // Only the freshest refresh for a still-registered host may be applied; anything older
     // or whose server was removed mid-flight is dropped so it cannot resurrect rows.
@@ -1760,96 +1741,374 @@ export class AppController {
       this.isRefreshCurrent(hostID, epoch),
     );
     for (const report of health) this.deps.setServerHealth?.(report.serverID, report.result);
-    const healthy = new Set(applied.filter((result) => result.ok).map((result) => result.serverID));
 
-    // Reconcile and commit per host, rechecking registration and freshness after every
-    // asynchronous stage: an old response must never clobber a newer refresh, and a host
-    // removed mid-flight must not resurrect its rows, active flags, or page metadata.
     const committed: string[] = [];
-    const activeByServer = new Map<string, Set<string>>();
-    // Live registration: a host may be unpaired while its refresh is in flight.
-    const isRegistered = (id: string) => this.serverIDs().includes(id);
+    let firstError: string | undefined;
     for (const result of applied) {
-      if (!isRegistered(result.serverID) || !this.isRefreshCurrent(result.serverID, result.epoch))
+      if (!this.serverIDs().includes(result.serverID)) continue;
+      if (!result.ok || result.page === undefined) {
+        const message = result.error ?? 'Could not reach the server';
+        firstError ??= message;
+        if (result.serverID === this.serverID) this.launchLoadError = result.cause;
+        this.setState('serverPages', result.serverID, (current) => ({
+          ...(current ?? { complete: false }),
+          loading: false,
+          complete: false,
+          error: message,
+        }));
         continue;
-
-      const missed = Object.keys(this.state.sessions)
-        .filter((key) => result.fresh[key] === undefined)
-        .map(parseSessionKey)
-        .filter((ref) => healthy.has(ref.serverID) && ref.serverID === result.serverID);
-
-      const reconciled = await this.reconcileKnownSessions(missed);
-
-      if (!isRegistered(result.serverID) || !this.isRefreshCurrent(result.serverID, result.epoch))
-        continue;
-
-      batch(() => {
-        this.setStateTouchingOverview('sessions', (current) =>
-          mergeCommittedSessions(current, result.fresh, reconciled.found, result.usageSeq, (key) =>
-            this.generations.usageEvidence(key),
-          ),
-        );
-        for (const ref of reconciled.deleted) this.forgetSession(ref.sessionID, ref.serverID);
-        this.setState('serverPages', result.serverID, sessionPage(result));
-        // Only a successful activity read may change running state. An unknown activity
-        // outcome leaves the last-known flags untouched — an empty set here would falsely
-        // declare every session stopped (#341).
-        if (result.active !== undefined)
-          this.reconcileRunning(result.serverID, result.active, result.snapshotSeq);
-      });
+      }
+      const seen = new Set(
+        result.page.sessions.map((session) => this.keyFor(result.serverID, session.id)),
+      );
+      this.commitSessionPageRows(result.serverID, result.page.sessions, result.usageSeq);
+      this.setState(
+        'serverPages',
+        result.serverID,
+        sessionPage({ ok: true, cursor: result.page.nextCursor, error: undefined }),
+      );
       committed.push(result.serverID);
-      if (result.active !== undefined) activeByServer.set(result.serverID, result.active);
-      if (result.activeError !== undefined) {
-        this.debugLog.write('activity-lookup-failed', {
-          serverID: result.serverID,
-          error: result.activeError,
-        });
-        // Retry only the activity capability; the successful list/cursor already committed.
-        this.scheduleActivityRetry(result.serverID, result.epoch);
+      // Apply activity only for a listing this refresh actually accepted. Activity is read in
+      // parallel so it never withholds rows, but an empty set from a refresh whose listing
+      // failed is not a complete snapshot and must not clear last-known running evidence
+      // (#341 trap 2).
+      void this.track(
+        'session-activity',
+        result.activity.then((activity) => {
+          this.applySessionActivity(result.serverID, result.epoch, result.snapshotSeq, activity);
+        }),
+      );
+      if (result.page.nextCursor === undefined) {
+        // The whole index for this host fit in page 1. Reconciliation is independent of the
+        // overview becoming usable, so it never blocks bootstrap.
+        void this.track(
+          'session-reconcile',
+          this.reconcileCompletedSessionIndex(result.serverID, seen, result.epoch, result.usageSeq),
+        );
       } else {
-        this.clearActivityRetry(result.serverID);
+        this.startSessionPagination({
+          serverID: result.serverID,
+          epoch: result.epoch,
+          cursor: result.page.nextCursor,
+          usageSeq: result.usageSeq,
+          seen,
+          pagesRead: 1,
+          targeted: serverID !== undefined,
+        });
       }
     }
 
-    // A refresh that committed nothing must not publish aggregate state at all: doing so
-    // could confirm completion from discarded/stale results or clear a newer spinner/error
-    // (#327). The host page snapshot remains the single source of completeness.
-    if (committed.length > 0) {
-      const flags = sessionFlags(
-        applied,
-        committed.length,
-        () => this.serverIDs().every((id) => this.state.serverPages[id]?.complete === true),
-        serverID,
-      );
+    // Publish page-1 aggregate state only when this refresh actually committed a host or
+    // surfaced a failure. A refresh whose every result was superseded must not publish
+    // completion/cursor from a newer refresh's state (#327).
+    if (committed.length > 0 || firstError !== undefined) {
       batch(() => {
-        this.setStateTouchingOverview('sessionsComplete', flags.complete);
-        if (serverID === undefined) this.setState('sessionsCursor', flags.cursor);
-        // Only a refresh that actually applied a host may clear the loading flag; a newer
-        // or unrelated refresh keeps it set until that operation completes.
-        if (flags.loading) this.setState('sessionsLoading', false);
-        this.setState('sessionsError', flags.error);
+        this.publishSessionFlags(firstError, serverID === undefined);
+        this.setState('sessionsLoading', false);
       });
     }
+    if (this.allSessionPagesComplete()) this.markSessionIndexComplete();
 
-    // Running sessions are the ones that can be blocked on input right now. The attached
-    // conversation is refreshed even when idle: a child that just appeared in this listing
-    // may own a question the location route already reported (#274).
-    const requestRefreshes = servers.flatMap((targetID) =>
-      [...(activeByServer.get(targetID) ?? [])].map((sessionID) =>
-        this.refreshInputRequests(sessionID, targetID).catch(() => {
-          // Unreachable host: its stale permission/form state stays as-is.
-        }),
-      ),
-    );
     const route = this.state.route;
     if (route.kind === 'conversation' && committed.includes(route.serverID)) {
-      requestRefreshes.push(
-        this.refreshInputRequests(route.sessionID, route.serverID).catch(() => {
-          // The transcript remains usable and the existing retry route stays available.
-        }),
-      );
+      this.queueRequestHydration([route.sessionID], route.serverID);
     }
-    await Promise.all(requestRefreshes);
+  }
+
+  /** Reads page 1 and starts activity independently; never waits for the slower capability. */
+  private async loadFirstSessionPage(targetID: string): Promise<{
+    serverID: string;
+    epoch: number;
+    snapshotSeq: number;
+    usageSeq: number;
+    ok: boolean;
+    error: string | undefined;
+    cause: unknown;
+    page?: SessionPageSlice;
+    activity: Promise<SessionActivity>;
+  }> {
+    const epoch = this.nextRefreshEpoch(targetID);
+    const snapshotSeq = this.generations.eventClock();
+    const usageSeq = this.generations.usageClock();
+    this.pendingActivity.add(targetID);
+    const activity = this.sessionFetcher.loadActivity(targetID).then((result) => {
+      this.pendingActivity.delete(targetID);
+      this.maybeMarkHydrationReady();
+      return result;
+    });
+    try {
+      const page = await this.sessionFetcher.loadPage(targetID);
+      return {
+        serverID: targetID,
+        epoch,
+        snapshotSeq,
+        usageSeq,
+        ok: true,
+        error: undefined,
+        cause: undefined,
+        page,
+        activity,
+      };
+    } catch (error) {
+      this.debugLog.write('load-sessions-failed', {
+        serverID: targetID,
+        errorKind: error instanceof BackendError ? error.kind : 'unknown',
+      });
+      return {
+        serverID: targetID,
+        epoch,
+        snapshotSeq,
+        usageSeq,
+        ok: false,
+        error: errorText(error),
+        cause: error,
+        activity,
+      };
+    }
+  }
+
+  /** Applies a late activity read for the exact refresh that started it. */
+  private applySessionActivity(
+    serverID: string,
+    epoch: number,
+    snapshotSeq: number,
+    activity: SessionActivity,
+  ): void {
+    if (
+      this.disposed ||
+      !this.serverIDs().includes(serverID) ||
+      !this.isRefreshCurrent(serverID, epoch)
+    ) {
+      return;
+    }
+    if (activity.active !== undefined) {
+      const active = activity.active;
+      batch(() => this.reconcileRunning(serverID, active, snapshotSeq));
+      this.clearActivityRetry(serverID);
+      this.queueRequestHydration([...active], serverID);
+      return;
+    }
+    if (activity.activeError !== undefined) {
+      this.debugLog.write('activity-lookup-failed', {
+        serverID,
+        error: activity.activeError,
+      });
+      // Retry only the activity capability; the successful listing already committed.
+      this.scheduleActivityRetry(serverID, epoch);
+    }
+  }
+
+  /** Starts background pagination bounded by the normal page count and generation. */
+  private startSessionPagination(entry: {
+    serverID: string;
+    epoch: number;
+    cursor: string;
+    usageSeq: number;
+    seen: Set<string>;
+    pagesRead: number;
+    targeted: boolean;
+  }): void {
+    const run = this.paginateSessions(entry).catch((error: unknown) => {
+      this.debugLog.write('session-pagination-failed', {
+        serverID: entry.serverID,
+        error: errorText(error),
+      });
+      this.showNotice(`Session index: ${errorText(error)}`, 'error');
+    });
+    this.sessionPagination.add(run);
+    void run.finally(() => this.sessionPagination.delete(run));
+  }
+
+  /**
+   * Waits for in-flight background session pagination. Bootstrap deliberately does not, so
+   * the shell can paint and accept input after page 1; tests and startup benchmarks use this
+   * to observe the settled index without sleeping.
+   */
+  async settleSessionIndex(): Promise<void> {
+    while (this.sessionPagination.size > 0) {
+      await Promise.all(this.sessionPagination);
+    }
+  }
+
+  /** Waits for activity plus the bounded request-hydration batch (tests and benchmarks). */
+  async settleRequestHydration(): Promise<void> {
+    while (
+      this.pendingActivity.size > 0 ||
+      this.hydrationQueue.size > 0 ||
+      this.hydrationInFlight.size > 0
+    ) {
+      if (this.hydrationInFlight.size > 0) {
+        await Promise.allSettled(this.hydrationInFlight.values());
+      } else {
+        await Promise.resolve();
+      }
+    }
+  }
+
+  private async paginateSessions(entry: {
+    serverID: string;
+    epoch: number;
+    cursor: string;
+    usageSeq: number;
+    seen: Set<string>;
+    pagesRead: number;
+    targeted: boolean;
+  }): Promise<void> {
+    let cursor: string | undefined = entry.cursor;
+    let pages = entry.pagesRead;
+    while (cursor !== undefined && pages < sessionPageLimit) {
+      if (
+        this.disposed ||
+        !this.serverIDs().includes(entry.serverID) ||
+        !this.isRefreshCurrent(entry.serverID, entry.epoch)
+      ) {
+        return;
+      }
+      let page: SessionPageSlice;
+      try {
+        page = await this.sessionFetcher.loadPage(entry.serverID, cursor);
+      } catch (error) {
+        if (
+          this.disposed ||
+          !this.serverIDs().includes(entry.serverID) ||
+          !this.isRefreshCurrent(entry.serverID, entry.epoch)
+        ) {
+          return;
+        }
+        const message = errorText(error);
+        this.setState('serverPages', entry.serverID, (current) => ({
+          ...(current ?? { complete: false }),
+          loading: false,
+          complete: false,
+          error: message,
+        }));
+        this.publishSessionFlags(message, !entry.targeted);
+        return;
+      }
+      if (
+        this.disposed ||
+        !this.serverIDs().includes(entry.serverID) ||
+        !this.isRefreshCurrent(entry.serverID, entry.epoch)
+      ) {
+        return;
+      }
+      for (const session of page.sessions) {
+        entry.seen.add(this.keyFor(entry.serverID, session.id));
+      }
+      this.commitSessionPageRows(entry.serverID, page.sessions, entry.usageSeq);
+      this.setState(
+        'serverPages',
+        entry.serverID,
+        sessionPage({ ok: true, cursor: page.nextCursor, error: undefined }),
+      );
+      this.publishSessionFlags(undefined, !entry.targeted);
+      if (page.nextCursor === cursor) {
+        // A cursor that never advances is not progress; keep it retryable and say so.
+        this.setState('serverPages', entry.serverID, (current) => ({
+          ...(current ?? { complete: false }),
+          error: 'The session index did not advance.',
+        }));
+        return;
+      }
+      cursor = page.nextCursor;
+      pages += 1;
+      // Let transcript RPCs and input events interleave with a long background index.
+      if (cursor !== undefined) await Promise.resolve();
+    }
+    if (cursor === undefined) {
+      await this.reconcileCompletedSessionIndex(
+        entry.serverID,
+        entry.seen,
+        entry.epoch,
+        entry.usageSeq,
+      );
+      if (
+        this.disposed ||
+        !this.serverIDs().includes(entry.serverID) ||
+        !this.isRefreshCurrent(entry.serverID, entry.epoch)
+      ) {
+        return;
+      }
+      this.publishSessionFlags(undefined, !entry.targeted);
+      if (this.allSessionPagesComplete()) this.markSessionIndexComplete();
+    }
+  }
+
+  /** Merges one page's rows without touching cursor/deletion semantics. */
+  private commitSessionPageRows(
+    serverID: string,
+    sessions: readonly SessionSummary[],
+    usageSeq: number,
+  ): void {
+    if (sessions.length === 0) return;
+    const fresh: Record<string, SessionSummary> = {};
+    for (const session of sessions) {
+      fresh[this.keyFor(serverID, session.id)] = { ...session, serverID };
+    }
+    this.setStateTouchingOverview('sessions', (current) =>
+      mergeCommittedSessions(current, fresh, {}, usageSeq, (key) =>
+        this.generations.usageEvidence(key),
+      ),
+    );
+  }
+
+  /**
+   * Only a completed page walk may prove a cached row was deleted. `seen` is the union of
+   * every page in this refresh, so a row on page 3 is never mistaken for a deletion.
+   */
+  private async reconcileCompletedSessionIndex(
+    serverID: string,
+    seen: ReadonlySet<string>,
+    epoch: number,
+    usageSeq: number,
+  ): Promise<void> {
+    if (!this.serverIDs().includes(serverID) || !this.isRefreshCurrent(serverID, epoch)) return;
+    const missed = Object.keys(this.state.sessions)
+      .filter((key) => parseSessionKey(key).serverID === serverID && !seen.has(key))
+      .map(parseSessionKey);
+    if (missed.length === 0) return;
+    const reconciled = await this.reconcileKnownSessions(missed);
+    if (!this.serverIDs().includes(serverID) || !this.isRefreshCurrent(serverID, epoch)) return;
+    batch(() => {
+      this.setStateTouchingOverview('sessions', (current) =>
+        mergeCommittedSessions(current, {}, reconciled.found, usageSeq, (key) =>
+          this.generations.usageEvidence(key),
+        ),
+      );
+      for (const ref of reconciled.deleted) this.forgetSession(ref.sessionID, ref.serverID);
+    });
+  }
+
+  /** Aggregate completeness/cursor/error from the current registered host pages. */
+  private publishSessionFlags(fallbackError?: string, updateCursor = true): void {
+    const pages = this.serverIDs().map((serverID) => this.state.serverPages[serverID]);
+    batch(() => {
+      this.setStateTouchingOverview(
+        'sessionsComplete',
+        pages.length > 0 && pages.every((page) => page?.complete === true),
+      );
+      if (updateCursor) this.setState('sessionsCursor', this.firstSessionCursor());
+      this.setState(
+        'sessionsError',
+        pages.find((page) => page?.error !== undefined)?.error ?? fallbackError,
+      );
+    });
+  }
+
+  private allSessionPagesComplete(): boolean {
+    const servers = this.serverIDs();
+    return (
+      servers.length > 0 &&
+      servers.every((serverID) => this.state.serverPages[serverID]?.complete === true)
+    );
+  }
+
+  private firstSessionCursor(): string | undefined {
+    for (const serverID of this.serverIDs()) {
+      const cursor = this.state.serverPages[serverID]?.cursor;
+      if (cursor !== undefined) return cursor;
+    }
+    return undefined;
   }
 
   // Generation checks are owned by RefreshGenerations; these thin wrappers keep the
@@ -1872,21 +2131,6 @@ export class AppController {
 
   private invalidateSession(key: string): void {
     this.generations.invalidateSession(key);
-  }
-
-  private async loadServerSessions(
-    serverID: string,
-    epoch?: number,
-  ): Promise<{
-    serverID: string;
-    epoch: number;
-    fresh: Record<string, SessionSummary>;
-    active?: ReadonlySet<string>;
-    activeError?: string;
-    cursor?: string;
-  }> {
-    const effectiveEpoch = epoch ?? this.nextRefreshEpoch(serverID);
-    return this.sessionFetcher.loadServer(serverID, effectiveEpoch);
   }
 
   /** Looks up cached sessions the listing did not return; only a definite not-found deletes. */
@@ -1927,6 +2171,8 @@ export class AppController {
     // recreated same-ID session is not blocked and late replies cannot mutate state (#340).
     this.retirePermissionReplies((host, sess) => host === serverID && sess === sessionID);
     this.failedPromptRecoveries.delete(key);
+    this.hydrationQueue.delete(key);
+    this.hydrationDirty.delete(key);
     const expansionPrefix = `${key} `;
     this.setStateTouchingOverview(
       produce((state) => {
@@ -1935,6 +2181,7 @@ export class AppController {
         delete state.inbox[key];
         delete state.permissions[key];
         delete state.forms[key];
+        delete state.requestHydration[key];
         delete state.goals[key];
         this.goalRevisions.forget(key);
         this.goalEditChains.delete(key);
@@ -2138,27 +2385,14 @@ export class AppController {
       this.setState('sessionsLoading', false);
       this.setState('sessionsError', anyError);
     });
-    // Follow-ups run only for applied (still registered, current-epoch) successful snapshots,
-    // and each failure is isolated so one host cannot abort or mask a healthy one (#196).
-    const followUps = applied.flatMap((result) =>
-      result.ok
-        ? [...(result.active ?? [])].map(async (sessionID) => {
-            if (!this.serverIDs().includes(result.serverID)) return;
-            try {
-              await this.refreshInputRequests(sessionID, result.serverID);
-            } catch (error) {
-              if (this.serverIDs().includes(result.serverID)) {
-                this.debugLog.write('action', {
-                  action: 'load-more-sessions-input-refresh',
-                  ok: false,
-                  error: errorText(error),
-                });
-              }
-            }
-          })
-        : [],
-    );
-    await Promise.all(followUps);
+    if (this.allSessionPagesComplete()) this.markSessionIndexComplete();
+    // Hydration is bounded and independent of the page commit; a slow permission/form read
+    // never holds up the session rows that already landed (#348).
+    for (const result of applied) {
+      if (!result.ok || result.active === undefined) continue;
+      if (!this.serverIDs().includes(result.serverID)) continue;
+      this.queueRequestHydration([...result.active], result.serverID);
+    }
     this.debugLog.write('action', { action: 'load-more-sessions', ok: true });
     if (this.state.sessionsComplete && this.state.overview.selectedRow === loadMoreRowKey) {
       const rows = this.overviewRows();
@@ -2491,7 +2725,7 @@ export class AppController {
         this.scheduleJobStartProbe(sessionID, serverID);
         return;
       case 'refresh-input-requests':
-        void this.track('requests', this.refreshInputRequests(sessionID, serverID));
+        this.queueRequestHydration([sessionID], serverID);
         return;
       case 'refresh-inbox':
         void this.track('inbox', this.refreshInbox(sessionID, serverID));
@@ -2654,6 +2888,89 @@ export class AppController {
     }
   }
 
+  /** Exposes whether request hydration is still unknown for one session (#348). */
+  requestHydrationOf(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): 'unknown' | 'loading' | 'ready' {
+    return this.state.requestHydration[this.keyFor(serverID, sessionID)] ?? 'unknown';
+  }
+
+  /**
+   * Starts (or joins) one hydration read for a session. Concurrent startup/SSE callers share
+   * the same promise, and a request that arrives mid-read marks the key dirty for one
+   * follow-up instead of being lost or duplicating the whole read (#348).
+   */
+  private requestHydrationFor(sessionID: string, serverID: string): Promise<void> {
+    const key = this.keyFor(serverID, sessionID);
+    const existing = this.hydrationInFlight.get(key);
+    if (existing !== undefined) {
+      this.hydrationDirty.add(key);
+      return existing;
+    }
+    this.setState('requestHydration', key, 'loading');
+    const promise = this.refreshInputRequests(sessionID, serverID).finally(() => {
+      if (this.hydrationInFlight.get(key) === promise) this.hydrationInFlight.delete(key);
+      if (this.disposed) return;
+      if (this.state.requestHydration[key] === 'loading') {
+        this.setState('requestHydration', key, 'ready');
+      }
+      const dirty = this.hydrationDirty.delete(key);
+      if (dirty && !this.disposed) this.queueRequestHydration([sessionID], serverID);
+      else this.maybeMarkHydrationReady();
+      this.pumpHydration();
+    });
+    this.hydrationInFlight.set(key, promise);
+    return promise;
+  }
+
+  /** Queues active-session hydration behind a small worker pool; duplicates coalesce. */
+  private queueRequestHydration(sessionIDs: readonly string[], serverID: string): void {
+    for (const sessionID of sessionIDs) {
+      const key = this.keyFor(serverID, sessionID);
+      if (this.hydrationInFlight.has(key)) {
+        this.hydrationDirty.add(key);
+        continue;
+      }
+      this.hydrationQueue.set(key, { sessionID, serverID });
+    }
+    this.pumpHydration();
+  }
+
+  private pumpHydration(): void {
+    while (this.hydrationInFlight.size < hydrationConcurrency && this.hydrationQueue.size > 0) {
+      const nextEntry = this.hydrationQueue.entries().next();
+      if (nextEntry.done === true) break;
+      const [key, item] = nextEntry.value;
+      this.hydrationQueue.delete(key);
+      if (this.hydrationInFlight.has(key)) {
+        this.hydrationDirty.add(key);
+        continue;
+      }
+      if (this.disposed || !this.serverIDs().includes(item.serverID)) continue;
+      void this.requestHydrationFor(item.sessionID, item.serverID).catch((error: unknown) => {
+        this.debugLog.write('backend-error', {
+          operation: 'requests',
+          kind: error instanceof BackendError ? error.kind : 'unknown',
+        });
+      });
+    }
+    this.maybeMarkHydrationReady();
+  }
+
+  /** The initial activity-driven hydration batch is done once every capability is idle. */
+  private maybeMarkHydrationReady(): void {
+    if (
+      this.pendingActivity.size > 0 ||
+      this.hydrationQueue.size > 0 ||
+      this.hydrationInFlight.size > 0
+    ) {
+      return;
+    }
+    if (this.state.startup.sessionsReadyAt === undefined) return;
+    this.markRequestHydrationReady();
+  }
+
   /** Executes one request-inbox store effect inside its publication batch. */
   private executeRequestInboxCommand(command: RequestInboxCommand): void {
     switch (command.kind) {
@@ -2754,7 +3071,7 @@ export class AppController {
   retryInputRequests(): void {
     const route = this.state.route;
     if (route.kind !== 'conversation') return;
-    void this.track('requests', this.refreshInputRequests(route.sessionID, route.serverID));
+    this.queueRequestHydration([route.sessionID], route.serverID);
   }
 
   /** Last partial-failure detail for the attached conversation's input requests (#264). */
@@ -3298,7 +3615,7 @@ export class AppController {
       this.refreshWorkers(sessionID, serverID),
       this.refreshShellJobs(sessionID, serverID),
       this.refreshInbox(sessionID, serverID),
-      this.refreshInputRequests(sessionID, serverID),
+      this.requestHydrationFor(sessionID, serverID),
       this.refreshSummary(sessionID, serverID),
       this.refreshNativeGoal(sessionID, serverID),
     ]);
