@@ -1527,6 +1527,57 @@ export class AppController {
     return [...new Set([this.serverID, ...(this.deps.serverIDs?.() ?? [])])];
   }
 
+  /** Registers paired-host metadata before any credential read (#346). */
+  registerDeferredServers(
+    entries: readonly {
+      serverID: string;
+      label: string;
+      baseUrl: string;
+      state: 'restoring' | 'unauthorized';
+    }[],
+  ): void {
+    this.setState(
+      'deferredServers',
+      Object.fromEntries(
+        entries.map((entry) => [
+          entry.serverID,
+          { label: entry.label, baseUrl: entry.baseUrl, state: entry.state },
+        ]),
+      ),
+    );
+  }
+
+  /** Replaces one deferred-host state; `ready` removes it once the host is registered. */
+  resolveDeferredServer(serverID: string, state: 'ready' | 'unauthorized'): void {
+    if (state === 'ready') {
+      this.setState(
+        'deferredServers',
+        produce((entries) => {
+          delete entries[serverID];
+        }),
+      );
+      return;
+    }
+    const current = this.state.deferredServers[serverID];
+    this.setState('deferredServers', serverID, {
+      label: current?.label ?? serverID,
+      baseUrl: current?.baseUrl ?? '',
+      state: 'unauthorized',
+    });
+  }
+
+  /** Deferred paired hosts in stable display order for the overview. */
+  deferredServerList(): {
+    serverID: string;
+    label: string;
+    baseUrl: string;
+    state: 'restoring' | 'unauthorized';
+  }[] {
+    return Object.entries(this.state.deferredServers)
+      .map(([serverID, entry]) => ({ serverID, ...entry }))
+      .toSorted((left, right) => left.serverID.localeCompare(right.serverID));
+  }
+
   private keyFor(serverID: string, sessionID: string): string {
     return sessionKey({ serverID, sessionID });
   }

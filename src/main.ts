@@ -279,27 +279,44 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
   if (stateLoad.warning !== undefined) process.stderr.write(`${stateLoad.warning}\n`);
 
   const exit: { request?: () => void } = {};
-  const { servers, controller, clipboard } = await createProductionAssembly({
-    config: configLoad.config,
-    platform,
-    cwd,
-    clientCwd: process.cwd(),
-    version,
-    paths: { stateFile: paths.stateFile, serversFile: paths.serversFile, stateDir: paths.stateDir },
-    env,
-    credentials,
-    connections: launchConnection === undefined ? [] : [launchConnection, ...connectionsExtra],
-    profiles,
-    localState: stateLoad.state,
-    remoteFilesystem,
-    now: Date.now,
-    monotonic: processElapsed,
-    debugLog,
-    requestExit: () => exit.request?.(),
-  });
-  startupTimeline.mark('assembly-ready');
-
   const interactive = !options.print;
+  // Interactive mode registers paired hosts immediately but decrypts their credentials only
+  // after the shell mounts (#346). Print mode keeps the strict "everything resolved before
+  // output" contract because --continue/--resume may need the remote index.
+  const restoredServerListener: { current?: (serverID: string) => void } = {};
+  const { servers, controller, clipboard, runDeferredMaintenance } = await createProductionAssembly(
+    {
+      config: configLoad.config,
+      platform,
+      cwd,
+      clientCwd: process.cwd(),
+      version,
+      paths: {
+        stateFile: paths.stateFile,
+        serversFile: paths.serversFile,
+        stateDir: paths.stateDir,
+      },
+      env,
+      credentials,
+      connections: launchConnection === undefined ? [] : [launchConnection, ...connectionsExtra],
+      profiles,
+      localState: stateLoad.state,
+      remoteFilesystem,
+      now: Date.now,
+      monotonic: processElapsed,
+      deferSavedServers: interactive,
+      onServerRestored: (restoredID) => restoredServerListener.current?.(restoredID),
+      debugLog,
+      requestExit: () => exit.request?.(),
+    },
+  );
+  startupTimeline.mark('assembly-ready');
+  restoredServerListener.current = (restoredID) => {
+    if (servers.get(restoredID) !== undefined) {
+      wireServerStream(servers, controller, restoredID);
+    }
+  };
+
   // Start loading immediately, but never make the interactive shell wait for catalog and
   // historical session indexing before its first frame (#287). Print mode keeps the strict
   // "no TUI" contract and settles the same promise before producing output.
@@ -311,6 +328,19 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
   let renderer: Awaited<ReturnType<typeof createCliRenderer>> | undefined;
   const finished = Promise.withResolvers<void>();
   const stopPump = () => servers.dispose();
+  let maintenanceStarted = false;
+  const startDeferredMaintenance = (): void => {
+    if (maintenanceStarted) return;
+    maintenanceStarted = true;
+    // The shell has painted: restore unrelated paired hosts and finish the durable unpair
+    // cleanup without holding up the first frame or target resolution (#346, #348).
+    void runDeferredMaintenance()
+      .then(() => startupTimeline.mark('post-mount-maintenance'))
+      .catch((error: unknown) => {
+        debugLog.write('post-mount-maintenance-failed', { error: errorText(error) });
+        controller.showNotice(`Post-mount maintenance failed: ${errorText(error)}`, 'error', false);
+      });
+  };
   const shutdown = async () => {
     if (renderer !== undefined && !renderer.isDestroyed) renderer.destroy();
     // Stop every stream before returning so a failed target resolution cannot leave the
@@ -335,7 +365,10 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     });
     startupTimeline.mark('renderer-created');
     const surface = renderer;
-    surface.once('frame', () => startupTimeline.mark('first-frame'));
+    surface.once('frame', () => {
+      startupTimeline.mark('first-frame');
+      startDeferredMaintenance();
+    });
     // OSC 52 is a renderer channel (capability-aware and terminal-owned), so it is attached
     // after the renderer exists and before any UI can trigger a copy.
     clipboard.attachTerminal(createRendererClipboardAdapter(surface));
@@ -398,7 +431,8 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     if (startup.hydrationReadyAt !== undefined) {
       startupTimeline.markAt('request-hydration-ready', startup.hydrationReadyAt);
     }
-    startupTimeline.mark('composer-ready');
+    if (startup.readyAt === undefined) startupTimeline.mark('composer-ready');
+    else startupTimeline.markAt('composer-ready', startup.readyAt);
     flushTimeline('ready');
     debugLog.write('bootstrap', {
       sessions: Object.keys(controller.state.sessions).length,

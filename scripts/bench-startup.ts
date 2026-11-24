@@ -211,6 +211,7 @@ async function runOnce(
     remoteFilesystem: input.launch === 'remote',
     now: Date.now,
     monotonic: elapsed,
+    deferSavedServers: true,
     createBackend,
     saveLocalState: async () => {},
     listFiles: async () => [],
@@ -237,6 +238,10 @@ async function runOnce(
     // mounted shell is the first frame boundary this harness can observe.
     await setup.renderOnce();
     timeline.mark('first-frame');
+    // Production starts this from the first native frame, after the shell has painted.
+    const maintenance = assembly.runDeferredMaintenance().then(() => {
+      timeline.mark('post-mount-maintenance');
+    });
     await bootstrap;
     const startup = assembly.controller.state.startup;
     if (startup.sessionsReadyAt !== undefined) {
@@ -251,7 +256,12 @@ async function runOnce(
     if (startup.hydrationReadyAt !== undefined) {
       timeline.markAt('request-hydration-ready', startup.hydrationReadyAt);
     }
-    timeline.mark('composer-ready');
+    if (startup.readyAt !== undefined) {
+      timeline.markAt('composer-ready', startup.readyAt);
+    } else {
+      timeline.mark('composer-ready');
+    }
+    await maintenance;
     await setup.renderOnce();
     const snapshot = timeline.snapshot();
     const at = (stage: string): number =>
@@ -261,8 +271,9 @@ async function runOnce(
       temperature: input.temperature,
       stages: Object.fromEntries(snapshot.stages.map((entry) => [entry.stage, entry.atMs])),
       firstFrameMs: at('first-frame'),
-      usableOverviewMs: at('composer-ready'),
+      usableOverviewMs: Math.max(at('first-frame'), at('composer-ready')),
       fullyReadyMs: Math.max(
+        at('post-mount-maintenance'),
         at('session-index-complete'),
         at('request-hydration-ready'),
         at('composer-ready'),
@@ -310,6 +321,7 @@ async function runScenario(
     'session-page-ready',
     'catalog-ready',
     'composer-ready',
+    'post-mount-maintenance',
   ];
   const stats: Record<string, BenchStats> = {
     firstFrameMs: percentages(runs.map((run) => run.firstFrameMs)),

@@ -340,6 +340,15 @@ export type AppState = {
     string,
     Readonly<{ cursor?: string; complete: boolean; loading: boolean; error?: string }>
   >;
+  /**
+   * Paired hosts whose credentials are being restored after the shell mounted (#346).
+   * Metadata only: no secret, no session content, and no request issued before the host is
+   * actually registered with the connection manager.
+   */
+  deferredServers: Record<
+    string,
+    Readonly<{ label: string; baseUrl: string; state: 'restoring' | 'unauthorized' }>
+  >;
 };
 
 export function initialState(directory: string, serverID: string = localServerID): AppState {
@@ -404,5 +413,6 @@ export function initialState(directory: string, serverID: string = localServerID
     sessionsComplete: false,
     sessionsLoading: false,
     serverPages: {},
+    deferredServers: {},
   };
 }

@@ -40,6 +40,8 @@ export function Overview(props: {
   let box: ScrollBoxRenderable | undefined;
   /** Expansion changes row geometry without changing the selected key (#240). */
   const expansion = () => Object.keys(state.overview.expanded).toSorted().join('|');
+  /** Paired hosts whose credentials restore after the shell mounts (#346). */
+  const deferred = () => props.controller.deferredServerList();
   /** Keeps the selected row visible; only scrolls when it has moved outside the viewport. */
   createEffect(() => {
     expansion();
@@ -184,6 +186,17 @@ export function Overview(props: {
           </box>
         )}
       </For>
+      <Show when={deferred().length > 0}>
+        <For each={deferred()}>
+          {(server) => (
+            <text fg={server.state === 'unauthorized' ? props.theme.warn : props.theme.dim}>
+              {server.state === 'unauthorized'
+                ? `Paired server ${server.label} is unavailable (no usable credential).`
+                : `Restoring paired server ${server.label}…`}
+            </text>
+          )}
+        </For>
+      </Show>
       <Show when={!state.sessionsComplete}>
         <text fg={props.theme.dim}>Showing recent sessions only.</text>
         <text

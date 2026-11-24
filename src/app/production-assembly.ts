@@ -13,10 +13,12 @@ import {
   addServerProfile,
   removeServerProfile,
   renameServerProfile,
+  type ServerProfile,
   type ServerProfiles,
 } from '../config/server-profiles.ts';
 import { enqueueCredentialCleanup, reconcileCredentialCleanup } from '../config/unpair-recovery.ts';
 import { type ClipboardService, createSystemClipboard } from './clipboard.ts';
+import { mapConcurrent } from './concurrency.ts';
 import { AppController, errorText, type ServerAdmin, type ServerListing } from './controller.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { openExternalUrl } from './open-url.ts';
@@ -76,10 +78,22 @@ export type ProductionAssemblyInput = Readonly<{
   generateID?: () => string;
   /** Backend factory override for restore/pair paths; production uses the real SDK backend. */
   createBackend?: typeof createBackend;
+  /**
+   * Register paired-server metadata immediately and move credential reads/restores to
+   * `restoreSavedServers()` after the interactive shell mounts (#346). Tests default to the
+   * synchronous path; production `main.ts` opts in.
+   */
+  deferSavedServers?: boolean;
+  /** Called for each authenticated deferred server after it is registered (stream wiring). */
+  onServerRestored?: (serverID: string) => void;
+  /** Bounded credential/restore concurrency; defaults to four independent reads. */
+  restoreConcurrency?: number;
   /** Clipboard transport override for tests; production uses this machine's clipboard. */
   clipboard?: ClipboardService;
   requestExit: () => void;
 }>;
+
+export type DeferredServerState = 'restoring' | 'unauthorized';
 
 export type ProductionAssembly = Readonly<{
   servers: ServerConnectionManager;
@@ -88,6 +102,16 @@ export type ProductionAssembly = Readonly<{
   clipboard: ClipboardService;
   /** The same admin surface the controller wires; exposed for assembly-path tests. */
   serverAdmin: ServerAdmin;
+  /**
+   * Reads the remaining profiles' credentials and registers them with bounded concurrency.
+   * Idempotent: repeated calls share one restore. Safe after the shell has mounted.
+   */
+  restoreSavedServers(): Promise<string[]>;
+  /**
+   * Post-mount maintenance: deferred restore plus the durable unpair-credential recovery
+   * queue. Runs once per process; the queue is preserved until deletion actually succeeds.
+   */
+  runDeferredMaintenance(): Promise<void>;
 }>;
 
 /**
@@ -151,51 +175,24 @@ export async function createProductionAssembly(
   const debugLog = input.debugLog ?? noDebugLog;
   let profiles = input.profiles;
 
-  // Restore every persisted paired server alongside the launch connection. Missing or
-  // unreadable credentials never abort startup; they register as `unauthorized` with no
-  // headers, so the overview can show the host without ever issuing a request.
-  // `auth: 'none'` profiles restore anonymously: no stored secret exists by design and
-  // none is requested — a launch-time health check proves the host is reachable.
+  // Persisted paired servers are candidates for restoration. Missing or unreadable
+  // credentials never abort startup; they register as `unauthorized` with no headers, so the
+  // overview can show the host without ever issuing a request. `auth: 'none'` profiles
+  // restore anonymously: no stored secret exists by design and none is requested.
   const launchBase = baseOfUrl(launch.connection.baseUrl);
-  for (const profile of profiles.profiles) {
-    if (servers.get(profile.serverID) !== undefined) continue;
-    if (baseOfUrl(profile.baseUrl) === launchBase) continue;
-    const anonymous = profile.auth === 'none';
-    const secret = anonymous
-      ? undefined
-      : await input.credentials.get(profile.serverID).catch(() => undefined);
-    const auth = profile.auth ?? 'bearer';
-    const headers =
-      anonymous || secret === undefined
-        ? {}
-        : auth === 'basic'
-          ? { authorization: `Basic ${Buffer.from(`opencode:${secret}`).toString('base64')}` }
-          : { authorization: `Bearer ${secret}` };
-    const authorized = anonymous || secret !== undefined;
-    const connection: Connection = { baseUrl: profile.baseUrl, headers, origin: 'remote' };
-    const restored = (input.createBackend ?? createBackend)(connection, {
-      serverID: profile.serverID,
-      toolOutputChars: input.config.transcript.toolOutputChars,
-    });
-    servers.add({
-      serverID: profile.serverID,
-      label: profile.shortname,
-      connection,
-      backend: restored,
-      remoteFilesystem: true,
-      ...(profile.platform === undefined ? {} : { platform: profile.platform }),
-    });
-    servers.setState(profile.serverID, authorized ? 'connecting' : 'unauthorized');
-    debugLog.write('server-restored', {
-      serverID: profile.serverID,
-      authorized,
-    });
-  }
+  const savedProfiles = profiles.profiles.filter(
+    (profile) =>
+      servers.get(profile.serverID) === undefined && baseOfUrl(profile.baseUrl) !== launchBase,
+  );
 
   const keepFresh = (saved: ServerProfiles): ServerProfiles => {
     profiles = saved;
     return saved;
   };
+
+  // Late-bound because the controller is constructed after the admin surface it receives;
+  // unpairing must remove a not-yet-restored host's overview metadata as well.
+  const deferredMetadata: { forget: (serverID: string) => void } = { forget: () => {} };
 
   const serversListing = (): ServerListing[] =>
     servers.list().map((entry) => ({
@@ -230,6 +227,7 @@ export async function createProductionAssembly(
         profiles.profiles.find((profile) => profile.serverID === targetID)?.auth === 'none';
       keepFresh(await removeServerProfile(input.paths.serversFile, targetID));
       await servers.remove(targetID);
+      deferredMetadata.forget(targetID);
       if (anonymous) return { credentialCleanup: 'done' };
       try {
         await input.credentials.delete(targetID);
@@ -364,23 +362,167 @@ export async function createProductionAssembly(
     debugLog,
   });
 
-  // Reconcile an unpair whose credential deletion failed in a previous run (#156).
-  try {
-    const unpairRecovery = await reconcileCredentialCleanup(
-      input.paths.stateDir,
-      input.credentials,
-    );
-    if (unpairRecovery.cleared > 0 || unpairRecovery.remaining.length > 0) {
-      debugLog.write('unpair-recovery', {
-        cleared: unpairRecovery.cleared,
-        remaining: unpairRecovery.remaining,
+  deferredMetadata.forget = (serverID) => controller.resolveDeferredServer(serverID, 'ready');
+
+  // Deferred restoration (#346): the launch host and shell never wait for unrelated saved
+  // servers or their credential backends. The metadata is registered immediately so the
+  // overview can name hosts while they restore; credentials are read with bounded
+  // concurrency only when `runDeferredMaintenance()` is called after the shell mounts.
+  const clock = input.monotonic ?? (() => performance.now());
+  const deferredRestore = input.deferSavedServers === true;
+  const restoreConcurrency = Math.max(1, input.restoreConcurrency ?? 4);
+  let restoreInFlight: Promise<string[]> | undefined;
+  let maintenanceInFlight: Promise<void> | undefined;
+  let cleanupCompleted = false;
+
+  const restoreOne = async (
+    profile: ServerProfile,
+  ): Promise<{ serverID: string; authorized: boolean; skipped: boolean }> => {
+    const started = clock();
+    const anonymous = profile.auth === 'none';
+    let secret: string | undefined;
+    let credentialMs = 0;
+    if (!anonymous) {
+      const credentialStarted = clock();
+      try {
+        secret = await input.credentials.get(profile.serverID);
+      } catch {
+        // Missing, locked and unavailable stores all mean the same thing here: the host is
+        // registered unauthorized and no request is issued with an invented credential.
+        secret = undefined;
+      }
+      credentialMs = Math.max(0, clock() - credentialStarted);
+      // Explicitly report subprocess-backed credential cost (Windows DPAPI spawns PowerShell)
+      // without ever logging the secret or the stored blob.
+      debugLog.write('credential-read', {
+        serverID: profile.serverID,
+        platform: input.platform,
+        store: input.credentials.kind,
+        ms: Math.round(credentialMs * 100) / 100,
+        found: secret !== undefined,
       });
     }
-  } catch (error) {
-    // A damaged queue must not block startup, and must not be reported as "nothing pending".
-    debugLog.write('unpair-recovery', { failed: errorText(error) });
-    controller.showNotice(errorText(error), 'error', false);
+    // The user may have unpaired the host while its credential read was in flight. Never
+    // resurrect a removed profile; the durable queue/credential cleanup remains authoritative.
+    if (!profiles.profiles.some((entry) => entry.serverID === profile.serverID)) {
+      return { serverID: profile.serverID, authorized: false, skipped: true };
+    }
+    const auth = profile.auth ?? 'bearer';
+    const headers =
+      anonymous || secret === undefined
+        ? {}
+        : auth === 'basic'
+          ? { authorization: `Basic ${Buffer.from(`opencode:${secret}`).toString('base64')}` }
+          : { authorization: `Bearer ${secret}` };
+    const authorized = anonymous || secret !== undefined;
+    const connection: Connection = { baseUrl: profile.baseUrl, headers, origin: 'remote' };
+    const restored = (input.createBackend ?? createBackend)(connection, {
+      serverID: profile.serverID,
+      toolOutputChars: input.config.transcript.toolOutputChars,
+    });
+    servers.add({
+      serverID: profile.serverID,
+      label: profile.shortname,
+      connection,
+      backend: restored,
+      remoteFilesystem: true,
+      ...(profile.platform === undefined ? {} : { platform: profile.platform }),
+    });
+    servers.setState(profile.serverID, authorized ? 'connecting' : 'unauthorized');
+    controller.resolveDeferredServer(profile.serverID, authorized ? 'ready' : 'unauthorized');
+    debugLog.write('server-restored', {
+      serverID: profile.serverID,
+      authorized,
+      credentialMs: Math.round(credentialMs * 100) / 100,
+      totalMs: Math.round((clock() - started) * 100) / 100,
+    });
+    if (authorized) {
+      input.onServerRestored?.(profile.serverID);
+      // A deferred host appears after the shell mounted, so its first page is not part of the
+      // launch bootstrap. Synchronous composition still lets bootstrap load every host once.
+      if (deferredRestore) void controller.loadSessions(profile.serverID).catch(() => {});
+    }
+    return { serverID: profile.serverID, authorized, skipped: false };
+  };
+
+  const restoreSavedServers = (): Promise<string[]> => {
+    if (restoreInFlight !== undefined) return restoreInFlight;
+    restoreInFlight = (async () => {
+      if (savedProfiles.length === 0) return [];
+      const results = await mapConcurrent(savedProfiles, restoreConcurrency, restoreOne);
+      return results.filter((entry) => !entry.skipped).map((entry) => entry.serverID);
+    })();
+    return restoreInFlight;
+  };
+
+  const runCredentialCleanup = async (): Promise<void> => {
+    if (cleanupCompleted) return;
+    cleanupCompleted = true;
+    try {
+      const unpairRecovery = await reconcileCredentialCleanup(
+        input.paths.stateDir,
+        input.credentials,
+      );
+      if (unpairRecovery.cleared > 0 || unpairRecovery.remaining.length > 0) {
+        debugLog.write('unpair-recovery', {
+          cleared: unpairRecovery.cleared,
+          remaining: unpairRecovery.remaining,
+        });
+      }
+    } catch (error) {
+      // A damaged queue must not block startup, and must not be reported as "nothing pending".
+      debugLog.write('unpair-recovery', { failed: errorText(error) });
+      controller.showNotice(errorText(error), 'error', false);
+    }
+  };
+
+  const runDeferredMaintenance = (): Promise<void> => {
+    if (maintenanceInFlight !== undefined) return maintenanceInFlight;
+    maintenanceInFlight = (async () => {
+      const started = clock();
+      let restored: string[] = [];
+      let restoreError: string | undefined;
+      try {
+        restored = await restoreSavedServers();
+      } catch (error) {
+        restoreError = errorText(error);
+        debugLog.write('server-restore-failed', { error: restoreError });
+        controller.showNotice(`Could not restore paired servers: ${restoreError}`, 'error', false);
+      }
+      const cleanupStarted = clock();
+      await runCredentialCleanup();
+      debugLog.write('post-mount-maintenance', {
+        restoreMs: Math.round((cleanupStarted - started) * 100) / 100,
+        cleanupMs: Math.round((clock() - cleanupStarted) * 100) / 100,
+        restored: restored.length,
+        ...(restoreError === undefined ? {} : { restoreError }),
+      });
+    })();
+    return maintenanceInFlight;
+  };
+
+  if (input.deferSavedServers === true) {
+    controller.registerDeferredServers(
+      savedProfiles.map((profile) => ({
+        serverID: profile.serverID,
+        label: profile.shortname,
+        baseUrl: profile.baseUrl,
+        state: 'restoring' as const,
+      })),
+    );
+  } else {
+    // Legacy/synchronous composition (tests and non-interactive callers). It still uses the
+    // same bounded restore and timing path, just before returning instead of after mount.
+    await restoreSavedServers();
+    await runCredentialCleanup();
   }
 
-  return { servers, controller, clipboard, serverAdmin };
+  return {
+    servers,
+    controller,
+    clipboard,
+    serverAdmin,
+    restoreSavedServers,
+    runDeferredMaintenance,
+  };
 }

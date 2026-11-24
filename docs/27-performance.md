@@ -172,6 +172,38 @@ bun run bench:startup -- --smoke --json .bench/startup.json
 A synthetic injected delay is verified by `src/perf/startup.test.ts` (stage deltas) and the
 benchmark labels missing stages instead of substituting a different stage's duration.
 
+## Deferred paired-host restore (#346)
+
+Interactive startup registers saved paired-host metadata immediately, but does not decrypt
+credentials before the shell exists. `ProductionAssembly.restoreSavedServers()` reads the
+remaining secrets with **bounded concurrency (4 by default)** after the first native frame.
+The launch host is never queued behind unrelated remotes: it is connected and bootstrapped
+first, and `bootstrap()` marks the UI ready before remote pages load. Print mode keeps the
+strict synchronous path because `--continue`/`--resume` may need the remote index.
+
+- The overview names restoring hosts (`Restoring paired server buildbox…`) without any
+  secret, session content or request. An unavailable credential becomes a truthful
+  `unauthorized` host instead of a phantom online one.
+- `auth: none` profiles never touch the credential store.
+- Unpairing while a restore is in flight cannot resurrect the profile: the profile list is
+  rechecked after the credential read, and the overview metadata is removed on unpair.
+- Each credential read is logged as `credential-read` with `serverID`, frontend platform,
+  store kind, duration and `found` — never the secret or blob. This makes the Windows
+  PowerShell/DPAPI cost explicit alongside macOS Keychain and Linux Secret Service.
+- `startup-timeline` records `post-mount-maintenance`; the benchmark reports it separately
+  from `first-frame` and the composer-ready milestone.
+
+## Deferred credential-cleanup recovery (#348)
+
+`reconcileCredentialCleanup()` is part of the same once-per-process post-mount maintenance,
+not synchronous production assembly. It runs only after a frame has painted, takes the queue
+lock, and keeps every entry whose credential deletion failed (including a locked/unavailable
+keyring). A malformed queue is left byte-for-byte intact and surfaced through the existing
+debug/notice path. Repeated calls in one process are idempotent. Startup fixtures cover
+multiple queued deletions with a delayed/unavailable backend and assert that successful
+entries disappear while failed ones remain.
+
+
 
 ## Reproducibility rules
 
