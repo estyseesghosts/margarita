@@ -133,6 +133,46 @@ SIGTERM) during startup disposes streams and returns without resolving a target 
 dead TUI; target-resolution failures after the renderer exists also restore the terminal and
 dispose the server manager exactly once.
 
+## Complete cold-start timeline (#345)
+
+`src/perf/startup.ts` records monotonic stages in memory and emits one
+`startup-timeline` JSON record at startup completion or failure. It never writes per frame,
+never touches display or network I/O, and contains only stage names and millisecond offsets.
+The stages cover process entry, `execute()`, config/profile/state loads, connection
+discovery, production assembly, renderer creation, Solid mount, first frame, first session
+page, catalog readiness, bounded session-index completion, request hydration,
+post-mount maintenance and composer readiness.
+
+Three different numbers are reported explicitly instead of using one "ready" claim:
+
+- **time to first frame** — `process-entry -> first-frame` (the early shell may still be
+  loading);
+- **time to usable overview** — `process-entry -> session-page-ready` plus catalog
+  readiness (`composer-ready` consumes both);
+- **time to fully ready** — `process-entry -> session-index-complete` and
+  `request-hydration-ready`, whichever finishes later.
+
+`controller.state.startup` carries the same milestones (`sessionsReadyAt`,
+`catalogReadyAt`, `indexCompleteAt`, `hydrationReadyAt`, `readyAt`) using an injected
+monotonic clock. Wall-clock timestamps are never substituted: a backward clock adjustment
+must not look like slow startup.
+
+`bun run bench:startup` composes the real assembly, bootstrap and mounted Solid tree over
+synthetic profiles and fake backends. It covers 0/1/5/20 paired servers, local and remote
+launch hosts, and cold/warm runs. The `credential` dimension compares an in-memory store with
+a simulated 120 ms DPAPI read; the simulation is labelled and never touches the user's
+keyring. `bun run bench:startup -- --smoke` is suitable for CI smoke, and
+`--json out.json` writes the same machine-readable report shown on stdout.
+
+```sh
+bun run bench:startup
+bun run bench:startup -- --smoke --json .bench/startup.json
+```
+
+A synthetic injected delay is verified by `src/perf/startup.test.ts` (stage deltas) and the
+benchmark labels missing stages instead of substituting a different stage's duration.
+
+
 ## Reproducibility rules
 
 - Use the same commit, machine, terminal size, Bun version and power mode for comparisons.

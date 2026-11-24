@@ -389,6 +389,11 @@ export type ControllerDeps = Readonly<{
   clientCwd?: string;
   version: string;
   now: () => number;
+  /**
+   * Monotonic process clock for startup milestones (#345). `now` is a wall clock used for
+   * display timestamps; mixing the two would make a clock adjustment look like slow startup.
+   */
+  monotonic?: () => number;
   /** Injectable timers for retries/deadlines/probes; defaults to runtime timers (#326). */
   scheduler?: TimerScheduler;
   saveLocalState: (state: LocalState) => Promise<SaveResult | void>;
@@ -1248,18 +1253,63 @@ export class AppController {
 
   // ---------------------------------------------------------------- startup
 
+  /** Monotonic process clock; never the wall clock used for display timestamps (#345). */
+  private startupNow(): number {
+    return (this.deps.monotonic ?? (() => performance.now()))();
+  }
+
+  /** Records the launch host's first displayable session page (issue #345). */
+  markFirstSessionPage(): void {
+    if (this.state.startup.sessionsReadyAt !== undefined) return;
+    this.setState('startup', 'sessionsReadyAt', this.startupNow());
+  }
+
+  /** Records the launch host's verified catalog (issue #345). */
+  markCatalogReady(): void {
+    if (this.state.startup.catalogReadyAt !== undefined) return;
+    this.setState('startup', 'catalogReadyAt', this.startupNow());
+  }
+
+  /** Records completion of the bounded session index and request hydration (issue #345). */
+  markSessionIndexComplete(): void {
+    if (this.state.startup.indexCompleteAt !== undefined) return;
+    this.setState('startup', 'indexCompleteAt', this.startupNow());
+  }
+
+  markRequestHydrationReady(): void {
+    if (this.state.startup.hydrationReadyAt !== undefined) return;
+    this.setState('startup', 'hydrationReadyAt', this.startupNow());
+  }
+
   /** Loads catalogs and sessions. Errors propagate so startup can report them. */
   async bootstrap(): Promise<void> {
-    const startedAt = this.deps.now();
+    const startedAt = this.startupNow();
     this.setState('startup', { phase: 'loading', startedAt });
     try {
       // The launch host gets the screen ready first; paired remotes continue below without
-      // making the local UI wait for an unrelated slow host (#287).
+      // making the local UI wait for an unrelated slow host (#287). Each milestone is
+      // recorded independently so a slow catalog is distinguishable from slow sessions.
       await Promise.all([
-        this.loadCatalog(this.deps.cwd, this.serverID),
-        this.loadSessions(this.serverID),
+        this.loadCatalog(this.deps.cwd, this.serverID).then(() => this.markCatalogReady()),
+        this.loadSessions(this.serverID).then(() => this.markFirstSessionPage()),
       ]);
-      this.setState('startup', { phase: 'ready', startedAt, readyAt: this.deps.now() });
+      this.setState('startup', {
+        phase: 'ready',
+        startedAt,
+        ...(this.state.startup.catalogReadyAt === undefined
+          ? {}
+          : { catalogReadyAt: this.state.startup.catalogReadyAt }),
+        ...(this.state.startup.sessionsReadyAt === undefined
+          ? {}
+          : { sessionsReadyAt: this.state.startup.sessionsReadyAt }),
+        ...(this.state.startup.indexCompleteAt === undefined
+          ? {}
+          : { indexCompleteAt: this.state.startup.indexCompleteAt }),
+        ...(this.state.startup.hydrationReadyAt === undefined
+          ? {}
+          : { hydrationReadyAt: this.state.startup.hydrationReadyAt }),
+        readyAt: this.startupNow(),
+      });
       const remotes = this.serverIDs().filter((serverID) => serverID !== this.serverID);
       await Promise.all(remotes.map((serverID) => this.loadSessions(serverID).catch(() => {})));
       // A remote server failing to load must not abort startup; the launch server failing
@@ -1269,6 +1319,12 @@ export class AppController {
       this.setState('startup', {
         phase: 'failed',
         startedAt,
+        ...(this.state.startup.catalogReadyAt === undefined
+          ? {}
+          : { catalogReadyAt: this.state.startup.catalogReadyAt }),
+        ...(this.state.startup.sessionsReadyAt === undefined
+          ? {}
+          : { sessionsReadyAt: this.state.startup.sessionsReadyAt }),
         detail: error instanceof Error ? error.message : String(error),
       });
       throw error;

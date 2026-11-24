@@ -473,6 +473,71 @@ describe('startup shell before indexing (#287)', () => {
     controller.dispose();
   });
 
+  test('records monotonic per-stage startup milestones without a wall clock jump (#345)', async () => {
+    let tick = 0;
+    const monotonic = () => {
+      tick += 1;
+      return tick;
+    };
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    const controller = makeController(
+      async () => [],
+      backend,
+      () => 10_000,
+      { monotonic },
+    );
+    await controller.bootstrap();
+    const startup = controller.state.startup;
+    expect(startup.phase).toBe('ready');
+    expect(startup.startedAt).toBeDefined();
+    expect(startup.sessionsReadyAt).toBeDefined();
+    expect(startup.catalogReadyAt).toBeDefined();
+    expect(startup.readyAt).toBeDefined();
+    expect(startup.startedAt!).toBeLessThan(startup.sessionsReadyAt!);
+    expect(startup.startedAt!).toBeLessThan(startup.catalogReadyAt!);
+    expect(startup.readyAt!).toBeGreaterThanOrEqual(startup.sessionsReadyAt!);
+    expect(startup.readyAt!).toBeGreaterThanOrEqual(startup.catalogReadyAt!);
+
+    controller.markFirstSessionPage();
+    controller.markCatalogReady();
+    expect(controller.state.startup.sessionsReadyAt).toBe(startup.sessionsReadyAt);
+    expect(controller.state.startup.catalogReadyAt).toBe(startup.catalogReadyAt);
+    controller.markSessionIndexComplete();
+    controller.markRequestHydrationReady();
+    expect(controller.state.startup.indexCompleteAt).toBeDefined();
+    expect(controller.state.startup.hydrationReadyAt).toBeDefined();
+    controller.dispose();
+  });
+
+  test('does not reuse wall-clock timestamps for startup spans (#345)', async () => {
+    // Wall clock jumps backwards in 2026 while monotonic time keeps advancing; the stage
+    // ordering must remain truthful.
+    let wall = 2_000;
+    let mono = 0;
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    const controller = makeController(
+      async () => [],
+      backend,
+      () => {
+        wall -= 500;
+        return wall;
+      },
+      {
+        monotonic: () => {
+          mono += 25;
+          return mono;
+        },
+      },
+    );
+    await controller.bootstrap();
+    const startup = controller.state.startup;
+    expect(startup.readyAt!).toBeGreaterThan(startup.startedAt!);
+    expect(startup.readyAt! - startup.startedAt!).toBeLessThan(10_000);
+    controller.dispose();
+  });
+
   test('a launch-host failure marks the phase failed and still propagates to the CLI', async () => {
     const backend = new FakeBackend();
     backend.listSessionsHook = () => Promise.reject(new Error('launch unreachable'));

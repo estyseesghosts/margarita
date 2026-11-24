@@ -62,6 +62,8 @@ export type ProductionAssemblyInput = Readonly<{
   /** True only for the directly configured launch connection; paired servers get their own. */
   remoteFilesystem?: boolean;
   now?: () => number;
+  /** Monotonic process clock for startup milestones; defaults to performance.now. */
+  monotonic?: () => number;
   goalStore?: GoalStore;
   debugLog?: DebugLog;
   /** Reports host health to the manager so the overview dots reflect reality. */
@@ -265,6 +267,7 @@ export async function createProductionAssembly(
     clientCwd: input.clientCwd ?? process.cwd(),
     version: input.version,
     now: input.now ?? Date.now,
+    ...(input.monotonic === undefined ? {} : { monotonic: input.monotonic }),
     saveLocalState: (state) =>
       input.saveLocalState === undefined
         ? saveState(input.paths.stateFile, state)

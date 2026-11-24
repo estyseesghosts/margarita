@@ -176,7 +176,17 @@ export type AppState = {
    */
   startup: {
     phase: 'loading' | 'ready' | 'failed';
+    /** Monotonic milliseconds from the process-wide startup clock. */
     startedAt?: number;
+    /** The launch host's first session page is displayable; later pages may still load. */
+    sessionsReadyAt?: number;
+    /** The launch host's catalog (agents/models/commands) is verified. */
+    catalogReadyAt?: number;
+    /** The launch host's bounded automatic pagination has exhausted or stopped. */
+    indexCompleteAt?: number;
+    /** Request hydration for known active sessions finished (successfully or not). */
+    hydrationReadyAt?: number;
+    /** The composer may accept a prompt: catalog plus first session page are available. */
     readyAt?: number;
     detail?: string;
   };

@@ -27,8 +27,31 @@ import { loadServerProfiles } from './config/server-profiles.ts';
 import { buildKeymap } from './domain/keymap.ts';
 import type { ModelSelection } from './domain/model-ref.ts';
 import type { SessionRef } from './domain/server-identity.ts';
+import { createStartupTimeline } from './perf/startup.ts';
 import { App } from './ui/app.tsx';
 import { pickTheme } from './ui/theme.ts';
+
+// Monotonic elapsed time since process entry. The controller receives the same function, so
+// its milestones and main.ts's stages share one origin (#345).
+const processEntryClock = performance.now();
+const processElapsed = (): number => performance.now() - processEntryClock;
+const startupTimeline = createStartupTimeline({ clock: processElapsed });
+startupTimeline.mark('process-entry');
+
+type StartupTimelineMeta = Readonly<{
+  outcome: 'ready' | 'aborted' | 'failed';
+  mode: 'interactive' | 'print';
+  launchMargin: 'local' | 'remote';
+}>;
+
+let startupTimelineWritten = false;
+
+/** Flushes the in-memory timeline once; later calls are ignored. */
+function writeStartupTimeline(log: DebugLog, meta: StartupTimelineMeta): void {
+  if (startupTimelineWritten) return;
+  startupTimelineWritten = true;
+  log.write('startup-timeline', { ...startupTimeline.snapshot(), ...meta });
+}
 
 async function main(argv: readonly string[]): Promise<number> {
   const version = buildVersion();
@@ -76,6 +99,11 @@ async function run(options: CliOptions, version: string): Promise<number> {
     debugLog.write('exit', { code, ms: Date.now() - startedAt });
     return code;
   } catch (error) {
+    writeStartupTimeline(debugLog, {
+      outcome: 'failed',
+      mode: options.print ? 'print' : 'interactive',
+      launchMargin: options.remote === undefined ? 'local' : 'remote',
+    });
     debugLog.write('crash', { errorName: error instanceof Error ? error.name : 'unknown' });
     process.stderr.write(`marg: ${errorText(error)}\n`);
     return exitCodes.failed;
@@ -104,16 +132,27 @@ function installCrashHandlers(log: DebugLog): void {
 }
 
 async function execute(options: CliOptions, debugLog: DebugLog, version: string): Promise<number> {
+  startupTimeline.mark('execute-entry');
+  const timelineMeta = (outcome: StartupTimelineMeta['outcome']): StartupTimelineMeta => ({
+    outcome,
+    mode: options.print ? 'print' : 'interactive',
+    launchMargin: options.remote === undefined ? 'local' : 'remote',
+  });
+  const flushTimeline = (outcome: StartupTimelineMeta['outcome']): void => {
+    writeStartupTimeline(debugLog, timelineMeta(outcome));
+  };
   const env = process.env;
   const platform = process.platform;
   const localCwd = options.cwd === undefined ? process.cwd() : absolute(options.cwd);
   const paths = appPaths(env, platform);
   const configLoad = await loadConfig(options.config ?? paths.configFile);
+  startupTimeline.mark('config-loaded');
   for (const warning of configLoad.warnings) process.stderr.write(`config: ${warning}\n`);
   const keymapBuild = buildKeymap(configLoad.config.keys);
   for (const error of keymapBuild.errors) process.stderr.write(`keys: ${error}\n`);
 
   const profileLoad = await loadServerProfiles(paths.serversFile);
+  startupTimeline.mark('profiles-loaded');
   if (profileLoad.warning !== undefined) process.stderr.write(`${profileLoad.warning}\n`);
   const profiles = profileLoad.profiles;
   const credentials = systemCredentialStore(platform, paths.stateDir);
@@ -220,7 +259,9 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
       }
     }
     debugLog.write('connected', { baseUrl: redactUrl(backend.baseUrl), serverID });
+    startupTimeline.mark('connection-ready');
   } catch (error) {
+    flushTimeline('failed');
     debugLog.write('connect-failed', {
       errorName: error instanceof Error ? error.name : 'unknown',
     });
@@ -234,6 +275,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
   }
 
   const stateLoad = await loadState(paths.stateFile);
+  startupTimeline.mark('state-loaded');
   if (stateLoad.warning !== undefined) process.stderr.write(`${stateLoad.warning}\n`);
 
   const exit: { request?: () => void } = {};
@@ -250,9 +292,12 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     profiles,
     localState: stateLoad.state,
     remoteFilesystem,
+    now: Date.now,
+    monotonic: processElapsed,
     debugLog,
     requestExit: () => exit.request?.(),
   });
+  startupTimeline.mark('assembly-ready');
 
   const interactive = !options.print;
   // Start loading immediately, but never make the interactive shell wait for catalog and
@@ -288,7 +333,9 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
       autoFocus: false,
       openConsoleOnError: false,
     });
+    startupTimeline.mark('renderer-created');
     const surface = renderer;
+    surface.once('frame', () => startupTimeline.mark('first-frame'));
     // OSC 52 is a renderer channel (capability-aware and terminal-owned), so it is attached
     // after the renderer exists and before any UI can trigger a copy.
     clipboard.attachTerminal(createRendererClipboardAdapter(surface));
@@ -317,8 +364,10 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
           }),
         renderer,
       );
+      startupTimeline.mark('ui-mounted');
     } catch (error) {
       // A renderer that mounted and then failed must still restore the terminal.
+      flushTimeline('failed');
       await shutdown();
       throw error;
     }
@@ -332,10 +381,25 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
       finished.promise.then(() => 'aborted' as const),
     ]);
     if (phase === 'aborted') {
+      flushTimeline('aborted');
       await shutdown();
       return exitCodes.ok;
     }
     const startup = controller.state.startup;
+    if (startup.sessionsReadyAt !== undefined) {
+      startupTimeline.markAt('session-page-ready', startup.sessionsReadyAt);
+    }
+    if (startup.catalogReadyAt !== undefined) {
+      startupTimeline.markAt('catalog-ready', startup.catalogReadyAt);
+    }
+    if (startup.indexCompleteAt !== undefined) {
+      startupTimeline.markAt('session-index-complete', startup.indexCompleteAt);
+    }
+    if (startup.hydrationReadyAt !== undefined) {
+      startupTimeline.markAt('request-hydration-ready', startup.hydrationReadyAt);
+    }
+    startupTimeline.mark('composer-ready');
+    flushTimeline('ready');
     debugLog.write('bootstrap', {
       sessions: Object.keys(controller.state.sessions).length,
       ...(startup.startedAt === undefined || startup.readyAt === undefined
@@ -343,6 +407,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
         : { readyInMs: startup.readyAt - startup.startedAt }),
     });
   } catch (error) {
+    flushTimeline('failed');
     debugLog.write('bootstrap-failed', {
       errorKind: error instanceof BackendError ? error.kind : 'unknown',
     });
