@@ -194,11 +194,15 @@ import { pagedToolChildren, toolChildBudget } from '../domain/tool-children.ts';
 import {
   cachedToolResult,
   completenessLabel,
+  createTranscriptProjector,
   findToolMessage,
-  foldTranscript,
+  nodeViewFromArray,
+  type ProjectionStats,
   type ToolCall,
   type TranscriptMessage,
   type TranscriptNode,
+  type TranscriptNodeView,
+  type TranscriptProjector,
   transcriptWindowStep,
 } from '../domain/transcript.ts';
 import type { UsageAnalytics } from '../domain/usage-analytics.ts';
@@ -531,6 +535,84 @@ const stoppedByUserReason = 'Stopped by the user';
  * instance per client, call `dispose()` to release owned timers, and `flushLocalState()`
  * before exit so queued saves are not lost.
  */
+/** One collapsible transcript row in render order (#353). */
+type CollapsibleItem = Readonly<{ key: string; kind: 'group' | 'diff' | 'worker' | 'tool' }>;
+
+/** Read-only indexes over one authoritative presentation projection (#353). */
+type PresentationIndex = Readonly<{
+  nodes: readonly TranscriptNode[];
+  keyToIndex: Map<string, number>;
+  tools: Map<string, ToolCall>;
+  groups: Map<string, Extract<TranscriptNode, { kind: 'tool-group' }>>;
+  groupNodes: Extract<TranscriptNode, { kind: 'tool-group' }>[];
+  collapsible: CollapsibleItem[];
+}>;
+
+type PresentationCache = Readonly<{
+  messages: readonly TranscriptMessage[];
+  detailed: boolean;
+  expanded: string;
+  changedFrom: number | undefined;
+  workers: number;
+  view: TranscriptNodeView;
+  index: PresentationIndex;
+}>;
+
+/** Empty index used outside an attached conversation. */
+function emptyPresentationIndex(): PresentationIndex {
+  return {
+    nodes: [],
+    keyToIndex: new Map(),
+    tools: new Map(),
+    groups: new Map(),
+    groupNodes: [],
+    collapsible: [],
+  };
+}
+
+/** Builds the read-only navigation indexes from one authoritative projection (#353). */
+function buildPresentationIndex(
+  nodes: readonly TranscriptNode[],
+  detailed: boolean,
+  expandedGroups: ReadonlySet<string>,
+): PresentationIndex {
+  const keyToIndex = new Map<string, number>();
+  const tools = new Map<string, ToolCall>();
+  const groups = new Map<string, Extract<TranscriptNode, { kind: 'tool-group' }>>();
+  const groupNodes: Extract<TranscriptNode, { kind: 'tool-group' }>[] = [];
+  const collapsible: CollapsibleItem[] = [];
+  for (const [index, node] of nodes.entries()) {
+    keyToIndex.set(node.key, index);
+    if (node.kind === 'worker') {
+      collapsible.push({ key: node.key, kind: 'worker' });
+      continue;
+    }
+    if (node.kind === 'tool') {
+      tools.set(node.tool.id, node.tool);
+      if (detailed) {
+        collapsible.push({ key: `tool:${node.tool.id}`, kind: 'tool' });
+      } else if (node.expanded || isEditLike(node.tool)) {
+        if (hasOversizedDiff(node.tool))
+          collapsible.push({ key: `diff:${node.tool.id}`, kind: 'diff' });
+      } else {
+        collapsible.push({ key: `tool:${node.tool.id}`, kind: 'tool' });
+      }
+      continue;
+    }
+    if (node.kind === 'tool-group') {
+      groups.set(node.key, node);
+      groupNodes.push(node);
+      for (const tool of node.tools) tools.set(tool.id, tool);
+      if (detailed) continue;
+      collapsible.push({ key: node.key, kind: 'group' });
+      if (expandedGroups.has(node.key)) {
+        for (const tool of node.tools) collapsible.push({ key: `tool:${tool.id}`, kind: 'tool' });
+      }
+    }
+  }
+  return { nodes, keyToIndex, tools, groups, groupNodes, collapsible };
+}
+
 export class AppController {
   readonly state: AppState;
   private readonly setState: SetStoreFunction<AppState>;
@@ -879,6 +961,9 @@ export class AppController {
     this.transcriptIndexes.clear();
     this.markerProjectors.clear();
     this.markerCache.clear();
+    this.presentationProjectors.clear();
+    this.presentationViewCache.clear();
+    this.presentationCache.clear();
     // Disposal retires every permission reply lock; late callbacks find no matching token
     // and cannot publish into the disposed controller (#340).
     this.answeringPermissions.clear();
@@ -1750,6 +1835,22 @@ export class AppController {
       markers: readonly ExecutionMarker[];
     }
   >();
+  /** One authoritative folded projection per attached transcript (#353). */
+  private readonly presentationProjectors = new Map<string, TranscriptProjector>();
+  private readonly presentationViewCache = new Map<
+    string,
+    {
+      messages: readonly TranscriptMessage[];
+      detailed: boolean;
+      expanded: string;
+      mcp: string;
+      changedFrom: number | undefined;
+      workers: number;
+      running: boolean;
+      view: TranscriptNodeView;
+    }
+  >();
+  private readonly presentationCache = new Map<string, PresentationCache>();
 
   /**
    * Loads the first page of every requested host, publishes it immediately and continues
@@ -2250,6 +2351,9 @@ export class AppController {
     this.transcriptIndexes.delete(key);
     this.markerProjectors.delete(key);
     this.markerCache.delete(key);
+    this.presentationProjectors.delete(key);
+    this.presentationViewCache.delete(key);
+    this.presentationCache.delete(key);
   }
 
   /** Drops every cached trace of a session the server no longer has. */
@@ -3672,11 +3776,11 @@ export class AppController {
     const route = this.state.route;
     if (route.kind !== 'conversation') return false;
     if (route.serverID !== serverID || route.sessionID !== sessionID) return false;
-    const nodes = this.conversationNodes();
-    const index = nodes.findIndex((node) => node.key === nodeKey);
-    if (index < 0) return false;
+    const presentation = this.presentationIndexFor(sessionID, serverID);
+    const position = presentation.keyToIndex.get(nodeKey);
+    if (position === undefined) return false;
     // Leave a few rows of context around the target rather than pinning it to the edge.
-    const needed = nodes.length - index + 8;
+    const needed = presentation.nodes.length - position + 8;
     if (this.transcriptWindow(sessionID, serverID) < needed) {
       this.setState('transcriptWindow', this.keyFor(serverID, sessionID), needed);
     }
@@ -8527,21 +8631,125 @@ export class AppController {
     this.toggleToolExpanded(id);
   }
 
-  /** Folded nodes for the attached conversation; empty elsewhere. */
-  private conversationNodes(): TranscriptNode[] {
-    if (this.state.route.kind !== 'conversation') return [];
-    const route = this.state.route;
-    const target = route.sessionID;
-    const key = this.keyFor(route.serverID, target);
-    const messages = this.state.transcripts[key]?.messages ?? [];
+  /**
+   * One authoritative folded projection for a transcript (#353). The controller owns the
+   * projector and its derived index; the UI renders the returned view and navigation helpers
+   * read the index instead of re-folding the canonical messages.
+   */
+  presentationFor(sessionID: string, serverID: string = this.activeServerID()): TranscriptNodeView {
+    const key = this.keyFor(serverID, sessionID);
+    const transcript = this.state.transcripts[key];
+    if (transcript === undefined) return nodeViewFromArray([]);
     const expanded = this.expandedSets();
-    const folded = foldTranscript(messages, {
+    const expandedSignature = [
+      [...expanded.groups].toSorted().join('\u0001'),
+      [...expanded.diffs].toSorted().join('\u0001'),
+    ].join('\u0002');
+    const mcp = this.mcpServersFor(serverID, this.state.sessions[key]?.directory ?? '').join(
+      '\u0001',
+    );
+    const messages = unwrap(transcript.messages);
+    const workers = this.state.workers[key]?.length ?? 0;
+    const running = this.state.running[key] === true;
+    const cached = this.presentationViewCache.get(key);
+    if (
+      cached !== undefined &&
+      cached.messages === messages &&
+      cached.detailed === this.state.detailed &&
+      cached.expanded === expandedSignature &&
+      cached.mcp === mcp &&
+      cached.changedFrom === transcript.changedFrom &&
+      cached.workers === workers &&
+      cached.running === running
+    ) {
+      return cached.view;
+    }
+    let projector = this.presentationProjectors.get(key);
+    if (projector === undefined) {
+      projector = createTranscriptProjector();
+      this.presentationProjectors.set(key, projector);
+    }
+    const markers = new Map(
+      this.markersFor(sessionID, serverID).map((marker) => [marker.afterMessageId, marker]),
+    );
+    const changedFrom = transcript.changedFrom;
+    const view = projector.projectView(messages, {
       detailed: this.state.detailed,
       expandedGroups: expanded.groups,
       expandedDiffs: expanded.diffs,
-      mcpServers: this.mcpServersFor(route.serverID, this.state.sessions[key]?.directory ?? ''),
+      mcpServers: this.mcpServersFor(serverID, this.state.sessions[key]?.directory ?? ''),
+      markers,
+      ...(changedFrom === undefined ? {} : { changedFrom }),
     });
-    return [...folded, ...workerNodes(this.state.workers[key] ?? [], expanded.groups)];
+    const workerRows = workerNodes(this.state.workers[key] ?? [], expanded.groups);
+    const withWorkers = workerRows.length === 0 ? view : view.append(workerRows);
+    this.presentationViewCache.set(key, {
+      messages,
+      detailed: this.state.detailed,
+      expanded: expandedSignature,
+      mcp,
+      changedFrom,
+      workers,
+      running,
+      view: withWorkers,
+    });
+    return withWorkers;
+  }
+
+  /** Last projection counters for benchmarks and tests (#352). */
+  presentationStatsOf(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): ProjectionStats | undefined {
+    return this.presentationProjectors.get(this.keyFor(serverID, sessionID))?.lastStats();
+  }
+
+  /** Read-only indexes for the attached transcript; rebuilt only when inputs change (#353). */
+  private presentationIndexFor(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): PresentationIndex {
+    const key = this.keyFor(serverID, sessionID);
+    const transcript = this.state.transcripts[key];
+    if (transcript === undefined) return emptyPresentationIndex();
+    const expanded = this.expandedSets();
+    const expandedSignature = [
+      [...expanded.groups].toSorted().join('\u0001'),
+      [...expanded.diffs].toSorted().join('\u0001'),
+    ].join('\u0002');
+    const messages = unwrap(transcript.messages);
+    const workers = this.state.workers[key]?.length ?? 0;
+    const cached = this.presentationCache.get(key);
+    if (
+      cached !== undefined &&
+      cached.messages === messages &&
+      cached.detailed === this.state.detailed &&
+      cached.expanded === expandedSignature &&
+      cached.changedFrom === transcript.changedFrom &&
+      cached.workers === workers
+    ) {
+      return cached.index;
+    }
+    const view = this.presentationFor(sessionID, serverID);
+    const index = buildPresentationIndex(view.toArray(), this.state.detailed, expanded.groups);
+    this.presentationCache.set(key, {
+      messages,
+      detailed: this.state.detailed,
+      expanded: expandedSignature,
+      changedFrom: transcript.changedFrom,
+      workers,
+      view,
+      index,
+    });
+    return index;
+  }
+
+  /** Indexes for the attached conversation; empty elsewhere. */
+  private attachedPresentation(): PresentationIndex {
+    const route = this.state.route;
+    return route.kind === 'conversation'
+      ? this.presentationIndexFor(route.sessionID, route.serverID)
+      : emptyPresentationIndex();
   }
 
   /** Server-confirmed workers for a session, in stable render order (#101). */
@@ -8570,7 +8778,7 @@ export class AppController {
 
   /** Tool groups in render order; empty outside conversations and in detailed mode. */
   toolGroups(): Extract<TranscriptNode, { kind: 'tool-group' }>[] {
-    return this.conversationNodes().filter((node) => node.kind === 'tool-group');
+    return this.attachedPresentation().groupNodes;
   }
 
   /**
@@ -8580,36 +8788,7 @@ export class AppController {
    * tool results (keys `tool:<toolID>`) because everything is already expanded (#222).
    */
   collapsibleItems(): { key: string; kind: 'group' | 'diff' | 'worker' | 'tool' }[] {
-    const expandedGroups = this.expandedSets().groups;
-    return this.conversationNodes().flatMap(
-      (node): { key: string; kind: 'group' | 'diff' | 'worker' | 'tool' }[] => {
-        if (node.kind === 'worker') return [{ key: node.key, kind: 'worker' as const }];
-        if (node.kind === 'tool' && this.state.detailed) {
-          return [{ key: `tool:${node.tool.id}`, kind: 'tool' as const }];
-        }
-        if (this.state.detailed) return [];
-        if (node.kind === 'tool') {
-          // Failures stay expanded and edits keep their inline diff. Other standalone calls
-          // (notably delegated task/agent tools) get the same local disclosure as grouped
-          // rows, without requiring global detailed mode (#298).
-          if (node.expanded || isEditLike(node.tool)) {
-            return hasOversizedDiff(node.tool)
-              ? [{ key: `diff:${node.tool.id}`, kind: 'diff' as const }]
-              : [];
-          }
-          return [{ key: `tool:${node.tool.id}`, kind: 'tool' as const }];
-        }
-        if (node.kind === 'tool-group') {
-          const group = [{ key: node.key, kind: 'group' as const }];
-          if (!expandedGroups.has(node.key)) return group;
-          return [
-            ...group,
-            ...node.tools.map((tool) => ({ key: `tool:${tool.id}`, kind: 'tool' as const })),
-          ];
-        }
-        return [];
-      },
-    );
+    return [...this.attachedPresentation().collapsible];
   }
 
   /** Ctrl+↑/↓ while reading: move the lightweight selection between collapsible items. */
@@ -8653,14 +8832,7 @@ export class AppController {
 
   /** The rendered tool call with this ID, if it is in the attached conversation. */
   private toolByID(id: string): ToolCall | undefined {
-    for (const node of this.conversationNodes()) {
-      if (node.kind === 'tool' && node.tool.id === id) return node.tool;
-      if (node.kind === 'tool-group') {
-        const tool = node.tools.find((entry) => entry.id === id);
-        if (tool !== undefined) return tool;
-      }
-    }
-    return undefined;
+    return this.attachedPresentation().tools.get(id);
   }
 
   toggleDiffExpanded(id: string): void {
@@ -8683,20 +8855,15 @@ export class AppController {
   private focusedChildTool(): ToolCall | undefined {
     const focused = this.state.focusedGroup;
     if (focused === undefined) return undefined;
-    const nodes = this.conversationNodes();
+    const index = this.attachedPresentation();
     if (focused.startsWith('tool:') || focused.startsWith('diff:')) {
-      const id = focused.slice(focused.indexOf(':') + 1);
-      return nodes
-        .flatMap((node) =>
-          node.kind === 'tool' ? [node.tool] : node.kind === 'tool-group' ? [...node.tools] : [],
-        )
-        .find((tool) => tool.id === id);
+      return index.tools.get(focused.slice(focused.indexOf(':') + 1));
     }
     if (!focused.startsWith('group:')) return undefined;
-    const group = nodes.find((node) => node.kind === 'tool-group' && node.key === focused);
-    if (group?.kind !== 'tool-group') return undefined;
-    for (let index = group.tools.length - 1; index >= 0; index -= 1) {
-      const tool = group.tools[index];
+    const group = index.groups.get(focused);
+    if (group === undefined) return undefined;
+    for (let position = group.tools.length - 1; position >= 0; position -= 1) {
+      const tool = group.tools[position];
       if (tool !== undefined && (tool.children?.length ?? 0) > 0) return tool;
     }
     return group.tools.at(-1);
@@ -8743,19 +8910,14 @@ export class AppController {
 
   /** The focused tool result, if the current selection names one. */
   private inspectableTool(): { tool: ToolCall; messageID: string } | undefined {
-    const nodes = this.conversationNodes();
-    const tools = nodes.flatMap((node) =>
-      node.kind === 'tool' ? [node.tool] : node.kind === 'tool-group' ? [...node.tools] : [],
-    );
+    const index = this.attachedPresentation();
     const focused = this.state.focusedGroup;
     if (focused === undefined) return undefined;
     let candidate: ToolCall | undefined;
     if (focused.startsWith('tool:') || focused.startsWith('diff:')) {
-      const id = focused.slice(focused.indexOf(':') + 1);
-      candidate = tools.find((tool) => tool.id === id);
+      candidate = index.tools.get(focused.slice(focused.indexOf(':') + 1));
     } else if (focused.startsWith('group:')) {
-      const group = nodes.find((node) => node.kind === 'tool-group' && node.key === focused);
-      candidate = group?.kind === 'tool-group' ? group.tools.at(-1) : undefined;
+      candidate = index.groups.get(focused)?.tools.at(-1);
     }
     if (candidate === undefined) return undefined;
     const found = findToolMessage(this.loadedMessages(), candidate.id);

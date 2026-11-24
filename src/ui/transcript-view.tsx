@@ -50,7 +50,6 @@ import {
   backgroundHint,
   boundedPreview,
   boundedTailPreview,
-  createTranscriptProjector,
   describeTool,
   formatToolTiming,
   type LiveTool,
@@ -69,7 +68,7 @@ import {
   type TranscriptNodeView,
   windowNodeView,
 } from '../domain/transcript.ts';
-import { workerNodes, type WorkerStatus, workerStatusLabel } from '../domain/worker.ts';
+import { type WorkerStatus, workerStatusLabel } from '../domain/worker.ts';
 import { countFormat } from '../perf/format-counts.ts';
 import { markerText } from './marker-text.ts';
 import { useActivate } from './pointer.ts';
@@ -130,35 +129,21 @@ export function Transcript(props: TranscriptProps) {
   }, props.hintTickMs ?? 1000);
   onCleanup(() => clearInterval(hintTimer));
   const transcript = () => state.transcripts[sessionKeyValue()];
-  // Stable per-message derivation (#283): streaming updates refold only the changed turn,
-  // and untouched node objects keep their identity so their rows do not re-render (#286).
-  const projector = createTranscriptProjector();
   const mcpServers = () =>
     props.controller.mcpServersFor(
       props.serverID,
       state.sessions[sessionKeyValue()]?.directory ?? '',
     );
-  const nodes = createMemo((): TranscriptNodeView => {
-    const messages = transcript()?.messages ?? [];
-    // Execution markers are derived by the controller from canonical transcript state; the
-    // view never scans messages itself (#349). Running changes only redraw the open segment.
-    const markers = new Map(
-      props.controller
-        .markersFor(props.sessionID, props.serverID)
-        .map((marker) => [marker.afterMessageId, marker]),
-    );
-    const expanded = props.controller.expandedSets();
-    const changedFrom = transcript()?.changedFrom;
-    const folded = projector.projectView(messages, {
-      detailed: state.detailed,
-      expandedGroups: expanded.groups,
-      expandedDiffs: expanded.diffs,
-      mcpServers: mcpServers(),
-      markers,
-      ...(changedFrom === undefined ? {} : { changedFrom }),
-    });
-    const stats = projector.lastStats();
+  // The controller owns one authoritative projection per transcript (#353); the view only
+  // attaches transient client-local notices and renders the visible tail.
+  const base = createMemo(() => {
+    const view = props.controller.presentationFor(props.sessionID, props.serverID);
+    const stats = props.controller.presentationStatsOf(props.sessionID, props.serverID);
     if (stats !== undefined) props.onProjectionStats?.(stats);
+    return view;
+  });
+  const nodes = createMemo((): TranscriptNodeView => {
+    const folded = base();
     // A background confirmation is a transcript event, not a footer notice: inserting it
     // here keeps the composer anchored (#129). It is attached to the *exact* owning tool node
     // by tool ID, never to "the last tool-looking node": a later appended call cannot inherit
@@ -168,18 +153,15 @@ export function Transcript(props: TranscriptProps) {
       background.length > 0 && state.running[sessionKeyValue()] === true
         ? nodeViewFromArray(attachBackgroundNotices(folded.toArray(), background))
         : folded;
-    // Workers are server-confirmed rows (#101), appended after the turn so a still-running
-    // parent stays visible above them. No client timer contributes to their status. A failed
-    // refresh keeps the last confirmed rows and adds one bounded stale warning (#230).
+    // A failed worker/shell refresh keeps the last confirmed rows and adds one bounded stale
+    // warning. The rows themselves are already part of the controller projection (#101, #230).
     const key = sessionKeyValue();
     const warning = jobWarning(state.workerStatus[key], state.shellStatus[key]);
-    const extra: TranscriptNode[] = [
-      ...workerNodes(state.workers[key] ?? [], expanded.groups),
-      ...(warning === undefined
+    return withBackground.append(
+      warning === undefined
         ? []
-        : [{ kind: 'meta' as const, key: `job-status:${key}`, text: warning }]),
-    ];
-    return withBackground.append(extra);
+        : [{ kind: 'meta' as const, key: `job-status:${key}`, text: warning }],
+    );
   });
   const windowed = createMemo(() =>
     windowNodeView(nodes(), props.controller.transcriptWindow(props.sessionID, props.serverID)),

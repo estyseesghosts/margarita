@@ -180,4 +180,26 @@ describe('controller transcript metadata (#349, #350)', () => {
       controller.dispose();
     }
   });
+
+  test('navigation reads one cached projection instead of re-folding', async () => {
+    const { controller } = makeController(history(40));
+    try {
+      await controller.bootstrap();
+      controller.openSession(sessionID);
+      await waitFor(() => messagesOf(controller).length === 120, 'initial transcript');
+      const view = controller.presentationFor(sessionID);
+      expect(view.length).toBeGreaterThan(0);
+      const stats = controller.presentationStatsOf(sessionID);
+      expect(stats).toBeDefined();
+      controller.collapsibleItems();
+      controller.toolGroups();
+      expect(controller.presentationStatsOf(sessionID)).toBe(stats);
+      const key = view.at(0)?.key;
+      if (key === undefined) throw new Error('projection is empty');
+      expect(controller.ensureTranscriptNodeVisible(sessionID, key)).toBe(true);
+      expect(controller.presentationStatsOf(sessionID)).toBe(stats);
+    } finally {
+      controller.dispose();
+    }
+  });
 });

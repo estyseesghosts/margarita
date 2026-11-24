@@ -328,6 +328,26 @@ the reuse unit.
 - The mounted transcript uses `windowNodeView` so only the visible tail is materialized; the
   scroll-anchor index is built lazily when sticky-prompt logic needs it.
 
+## One authoritative presentation projection (#353)
+
+The controller owns the folded-node projector for each attached transcript. The view renders
+`presentationFor()` and the navigation helpers (`collapsibleItems`, `toolGroups`,
+`focusedChildTool`, `inspectableTool`, `ensureTranscriptNodeVisible`) read one cached
+`PresentationIndex` built from the same projection. There is no second controller-side
+`foldTranscript()` path for keyboard interaction.
+
+- The index exposes node-key → position, tool-ID → tool, group → member tools and the ordered
+  collapsible rows. Worker rows are appended before the index is built, so worker navigation
+  works without a canonical re-fold.
+- A projection view cache keys on the message array, detailed mode, expansion signature, MCP
+  catalog, changed range, worker count and running state; repeated renders and focus movement
+  reuse the same view and projector counters.
+- `presentationStatsOf()` exposes the last projection counters for benchmarks. Tests assert
+  that collapsible-item and focus-reveal calls do not change those counters.
+- Ownership stays explicit: the domain projector produces nodes; the controller owns the
+  derived read-only index; the UI only attaches transient client-local notices and renders the
+  visible window.
+
 ## Reproducibility rules
 
 - Use the same commit, machine, terminal size, Bun version and power mode for comparisons.
