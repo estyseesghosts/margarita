@@ -289,6 +289,67 @@ async function openAndLoad(
   );
 }
 
+/**
+ * Navigation latency on the same live controller (#353): Ctrl+Up/Down, Enter expansion and
+ * focus reveal. Projection counters are captured around each phase so a refold caused by
+ * pure navigation would be visible instead of hidden inside wall-clock noise.
+ */
+async function navigationReport(fixture: StageFixture, sessionID: string) {
+  const { controller, setup } = fixture;
+  const items = controller.collapsibleItems();
+  controller.presentationFor(sessionID);
+  const before = controller.presentationStatsOf(sessionID);
+
+  const focusSamples: number[] = [];
+  for (let index = 0; index < 10 && items.length > 0; index += 1) {
+    const started = performance.now();
+    controller.moveGroupFocus(1);
+    await setup.renderOnce();
+    focusSamples.push(performance.now() - started);
+  }
+  const afterFocus = controller.presentationStatsOf(sessionID);
+
+  const expansionSamples: number[] = [];
+  if (items.length > 0) {
+    for (let index = 0; index < 4; index += 1) {
+      const started = performance.now();
+      controller.toggleFocusedGroup();
+      await setup.renderOnce();
+      controller.toggleFocusedGroup();
+      await setup.renderOnce();
+      expansionSamples.push(performance.now() - started);
+    }
+  }
+  const afterExpansion = controller.presentationStatsOf(sessionID);
+
+  const target = items[0];
+  const revealStarted = performance.now();
+  const revealed =
+    target === undefined ? false : controller.ensureTranscriptNodeVisible(sessionID, target.key);
+  await setup.renderOnce();
+  const revealMs = performance.now() - revealStarted;
+  const afterReveal = controller.presentationStatsOf(sessionID);
+
+  return {
+    collapsibleItems: items.length,
+    focus: summarizeSamples(focusSamples),
+    expansion: summarizeSamples(expansionSamples),
+    focusReveal: {
+      target: target?.key ?? null,
+      revealed,
+      elapsedMs: revealMs,
+    },
+    focusRefolds:
+      before === undefined || afterFocus === undefined
+        ? null
+        : afterFocus.messagesFolded - before.messagesFolded,
+    revealRefolds:
+      afterExpansion === undefined || afterReveal === undefined
+        ? null
+        : afterReveal.messagesFolded - afterExpansion.messagesFolded,
+  };
+}
+
 /** One measured event: mutate the fixture, announce it, wait for commit, paint one frame. */
 type EventKind =
   'append' | 'stream' | 'tool-status' | 'large-response' | 'large-diff' | 'many-tools';
@@ -708,10 +769,13 @@ async function historyStage(loadedMessages: number) {
       );
     }
 
+    const navigation = await navigationReport(fixture, mainSessionID);
+
     return {
       loadedMessages,
       events: eventCount,
       windows,
+      navigation,
       burst: {
         messages: 100,
         elapsedMs: burstMs,
@@ -800,6 +864,13 @@ console.log(
           p95Ms: Number(window.latency.p95Ms.toFixed(3)),
           p99Ms: Number(window.latency.p99Ms.toFixed(3)),
         })),
+        navigation: {
+          focusP50Ms: Number(entry.navigation.focus.p50Ms.toFixed(3)),
+          expansionP50Ms: Number(entry.navigation.expansion.p50Ms.toFixed(3)),
+          focusRevealMs: Number(entry.navigation.focusReveal.elapsedMs.toFixed(3)),
+          focusRefolds: entry.navigation.focusRefolds,
+          revealRefolds: entry.navigation.revealRefolds,
+        },
       })),
     },
     null,

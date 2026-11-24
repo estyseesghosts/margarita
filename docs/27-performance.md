@@ -297,6 +297,10 @@ rewriting every id mapping. It never stores a second copy of the messages.
   duplicate ids in a malformed page are suppressed.
 - Older-page prepends suppress already-known ids through the index and leave cached mappings
   valid. `transcriptAccountingOf()` exposes the incremental total for diagnostics.
+- `bun run bench` reports a `transcriptReconcile` section for a fresh 120-message page against
+  1k/10k/50k loaded histories. Alongside latency it records `reconciledMessages`,
+  `pageObjectsRecreated`, `pageProportional` and the retained-byte total; the 50k case is the
+  evidence that reconciliation cost follows the page rather than the loaded history.
 
 ## Incremental retained bytes (#351)
 
@@ -344,6 +348,10 @@ The controller owns the folded-node projector for each attached transcript. The 
   reuse the same view and projector counters.
 - `presentationStatsOf()` exposes the last projection counters for benchmarks. Tests assert
   that collapsible-item and focus-reveal calls do not change those counters.
+- `bun run bench:soak` measures Ctrl+Up/Down (`moveGroupFocus`), Enter expansion
+  (`toggleFocusedGroup`) and focus reveal (`ensureTranscriptNodeVisible`) on the same live
+  controller, including one rendered frame per operation. It reports `focusRefolds` and
+  `revealRefolds`, which must stay at zero; the full run exercises 1k/10k/50k histories.
 - Ownership stays explicit: the domain projector produces nodes; the controller owns the
   derived read-only index; the UI only attaches transient client-local notices and renders the
   visible window.
@@ -386,6 +394,10 @@ global permanent payload cache or second formatted copy.
   the retained source, which keeps ownership tied to the canonical object.
 - Tests cover 1 MB prose, 1 MB reasoning, a multi-MB diff, Unicode/long-line exactness and the
   shallow-copy boundary. `scripts/bench.ts` reports source/preview sizes for the same fixtures.
+- A controller-level GC test loads nine transcripts past the eight-entry cache bound, drops
+  the fixture's canonical copy, forces collection and asserts the evicted assistant part (the
+  WeakMap key) is gone. That verifies eviction releases the preview and full source together,
+  without a permanent payload cache.
 
 ## Reproducibility rules
 

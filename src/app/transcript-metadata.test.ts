@@ -4,6 +4,7 @@ import { FakeBackend } from '../../test/fake-backend.ts';
 import { defaultConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
 import { executionMarkers } from '../domain/execution-segment.ts';
+import { payloadLimits, retainPayload } from '../domain/payload-retention.ts';
 import { sessionKey } from '../domain/server-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
@@ -198,6 +199,75 @@ describe('controller transcript metadata (#349, #350)', () => {
       if (key === undefined) throw new Error('projection is empty');
       expect(controller.ensureTranscriptNodeVisible(sessionID, key)).toBe(true);
       expect(controller.presentationStatsOf(sessionID)).toBe(stats);
+    } finally {
+      controller.dispose();
+    }
+  });
+});
+
+describe('large payload reclamation (#356)', () => {
+  test('evicting a cached transcript releases its canonical payload', async () => {
+    const backend = new FakeBackend();
+    backend.serverID = 'local';
+    const ids = Array.from({ length: 9 }, (_, index) => `ses_reclaim_${index}`);
+    backend.sessions = ids.map((id, index) => ({
+      id,
+      serverID: 'local',
+      projectID: 'p',
+      directory: `/work/reclaim-${index}`,
+      title: `Reclaim ${index}`,
+      createdAt: 0,
+      updatedAt: 1,
+      archived: false,
+    }));
+    const full = 'x'.repeat(1_000_000);
+    let firstOwner: WeakRef<object> | undefined;
+    for (const [index, id] of ids.entries()) {
+      const part = { kind: 'text' as const, text: '' };
+      part.text = retainPayload(part, full, payloadLimits.text);
+      const message: Extract<TranscriptMessage, { kind: 'assistant' }> = {
+        ...assistant(index),
+        parts: [part],
+      };
+      backend.messages[id] = [user(index), message, idle(index)];
+      if (index === 0) firstOwner = new WeakRef(part);
+    }
+    const controller = new AppController({
+      backend,
+      config: defaultConfig,
+      localState: emptyState,
+      platform: 'linux',
+      cwd: '/work/reclaim',
+      version: '0.0.0',
+      now: () => 100_000,
+      saveLocalState: async () => {},
+      listFiles: async () => [],
+      requestExit: () => {},
+    });
+    try {
+      await controller.bootstrap();
+      for (const id of ids) {
+        controller.openSession(id);
+        await waitFor(
+          () =>
+            controller.state.transcripts[sessionKey({ serverID: 'local', sessionID: id })]?.messages
+              .length === 3,
+          `load ${id}`,
+        );
+      }
+      await Bun.sleep(1);
+      const firstID = ids[0];
+      if (firstID === undefined) throw new Error('missing first eviction fixture');
+      const firstKey = sessionKey({ serverID: 'local', sessionID: firstID });
+      expect(controller.state.transcripts[firstKey]).toBeUndefined();
+      // The backend also held the canonical objects; eviction from the controller cannot
+      // reclaim them until the fixture copy is dropped.
+      delete backend.messages[firstID];
+      if (firstOwner === undefined) throw new Error('missing reclamation reference');
+      for (let attempt = 0; attempt < 20 && firstOwner.deref() !== undefined; attempt += 1) {
+        Bun.gc(true);
+      }
+      expect(firstOwner.deref()).toBeUndefined();
     } finally {
       controller.dispose();
     }

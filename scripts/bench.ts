@@ -19,6 +19,7 @@ import type { SessionMessageInfo } from '@opencode/client';
 import { toTranscriptMessage } from '../src/adapter/wire-mapping.ts';
 import { mergeLatest } from '../src/app/controller.ts';
 import { SessionFetcher } from '../src/app/session-fetch.ts';
+import { buildTranscriptIndex, mergeLatestIndexed } from '../src/app/transcript-store.ts';
 import {
   caretPaint,
   composerFrom,
@@ -34,7 +35,7 @@ import type { SessionSummary } from '../src/domain/session.ts';
 import type { AssistantPart, TranscriptMessage } from '../src/domain/transcript.ts';
 import { createTranscriptProjector, foldTranscript } from '../src/domain/transcript.ts';
 import { projectUsage } from '../src/domain/usage-analytics.ts';
-import { type BenchStats, sampleOperation } from '../src/perf/measure.ts';
+import { type BenchStats, sampleOperation, summarizeSamples } from '../src/perf/measure.ts';
 import { approximateTranscriptBytes } from '../src/perf/memory.ts';
 import { FakeBackend } from '../test/fake-backend.ts';
 
@@ -293,6 +294,54 @@ async function sessionPaginationReport(): Promise<unknown> {
   };
 }
 
+/**
+ * Indexed latest-page reconciliation (#350): a fresh 120-message page against 1k/10k/50k
+ * loaded histories. Reports the touched-message count alongside latency so it is visible
+ * that the work stays page-sized instead of following total history.
+ */
+function transcriptReconcileReport(): unknown {
+  const sizes = smoke ? [1_000] : [1_000, 10_000, 50_000];
+  const pageSize = 120;
+  const results: unknown[] = [];
+  for (const size of sizes) {
+    let cached = messageCount(size);
+    let index = buildTranscriptIndex(cached);
+    const samples: number[] = [];
+    let last = mergeLatestIndexed(cached, index, cached.slice(-pageSize));
+    for (let iteration = 0; iteration < (smoke ? 1 : 20); iteration += 1) {
+      const page = structuredClone(cached.slice(-pageSize));
+      const targetIndex = page.findLastIndex((message) => message.kind === 'assistant');
+      const target = page[targetIndex];
+      if (target?.kind === 'assistant') {
+        page[targetIndex] = {
+          ...target,
+          parts: [...target.parts, { kind: 'text', text: `reconcile ${iteration}` }],
+        };
+      }
+      const started = performance.now();
+      last = mergeLatestIndexed(cached, index, page);
+      samples.push(performance.now() - started);
+      cached = last.messages;
+      index = last.index;
+    }
+    results.push({
+      size,
+      pageSize,
+      pageObjectsRecreated: pageSize,
+      latency: summarizeSamples(samples),
+      reconciledMessages: last.reconciled,
+      removed: last.removed,
+      added: last.added,
+      pageProportional: last.pageProportional,
+      retainedBytes: index.bytes.total,
+    });
+  }
+  return {
+    note: 'indexed merge with a fresh page identity; reconciledMessages is the touched tail, not total history',
+    results,
+  };
+}
+
 async function scenarios(): Promise<Scenario[]> {
   const sizes = smoke ? [120] : [120, 1000, 10_000];
   const result: Scenario[] = [];
@@ -511,6 +560,7 @@ for (const scenario of await scenarios()) {
 
 const memory = await memoryReport();
 const sessionPagination = await sessionPaginationReport();
+const transcriptReconcile = transcriptReconcileReport();
 function gitRevision(): string {
   try {
     const result = Bun.spawnSync(['git', 'rev-parse', 'HEAD']);
@@ -543,6 +593,7 @@ const report = {
   memory,
   payloadRetention: payloadRetentionReport(),
   sessionPagination,
+  transcriptReconcile,
   unavailable: [
     'event-receipt-to-paint latency (requires a live TTY/PTY trace)',
     'OpenTUI native frame/cell counters (@opentui/core 0.9.2 exposes no stable API)',
