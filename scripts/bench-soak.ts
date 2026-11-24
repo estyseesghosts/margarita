@@ -380,7 +380,7 @@ async function runEvent(
         model,
         parts: [{ kind: 'text', text: marker }],
       });
-      settled = () => messagesOf(controller, sessionID).some((message) => message.id === id);
+      settled = () => messagesOf(controller, sessionID).at(-1)?.id === id;
       break;
     }
     case 'stream': {
@@ -394,9 +394,9 @@ async function runEvent(
       );
       messages[index] = { ...source, parts };
       settled = () => {
-        const current = messagesOf(controller, sessionID).find(
-          (message) => message.id === target.id,
-        );
+        // The streamed turn is still the newest text response; scanning backward from the
+        // tail keeps settlement O(1) instead of searching the whole loaded history.
+        const current = lastTextAssistant(messagesOf(controller, sessionID));
         return (
           current?.kind === 'assistant' &&
           current.parts.some((part) => part.kind === 'text' && part.text.includes(marker))
@@ -437,7 +437,7 @@ async function runEvent(
         model,
         parts: [{ kind: 'text', text: `${marker}\n${'x'.repeat(256 * 1024)}` }],
       });
-      settled = () => messagesOf(controller, sessionID).some((message) => message.id === id);
+      settled = () => messagesOf(controller, sessionID).at(-1)?.id === id;
       break;
     }
     case 'large-diff': {
@@ -461,7 +461,7 @@ async function runEvent(
         model,
         parts: [{ kind: 'tool', tool }],
       });
-      settled = () => messagesOf(controller, sessionID).some((message) => message.id === id);
+      settled = () => messagesOf(controller, sessionID).at(-1)?.id === id;
       break;
     }
     case 'many-tools': {
@@ -487,7 +487,7 @@ async function runEvent(
         model,
         parts,
       });
-      settled = () => messagesOf(controller, sessionID).some((message) => message.id === id);
+      settled = () => messagesOf(controller, sessionID).at(-1)?.id === id;
       break;
     }
     default: {
@@ -642,7 +642,7 @@ async function historyStage(loadedMessages: number) {
       false,
     );
     await waitFor(
-      () => messagesOf(controller, mainSessionID).some((message) => message.id === 'soak-burst-99'),
+      () => messagesOf(controller, mainSessionID).at(-1)?.id === 'soak-burst-99',
       '100-event burst',
     );
     if ((backend.messages[mainSessionID]?.length ?? 0) !== burstBase + 100) {
@@ -723,10 +723,7 @@ async function historyStage(loadedMessages: number) {
         false,
       );
       await waitFor(
-        () =>
-          messagesOf(controller, pagingSessionID).some(
-            (message) => message.id === `soak-page-${index}`,
-          ),
+        () => messagesOf(controller, pagingSessionID).at(-1)?.id === `soak-page-${index}`,
         `paging event ${index}`,
       );
       await setup.renderOnce();

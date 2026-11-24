@@ -249,7 +249,10 @@ queue are idle.
 thousands of synthetic events arrive, instead of rebuilding a fixture per sample. It covers
 1,000 / 10,000 / 50,000 loaded messages (`--sizes` overrides), reports p50/p95/p99 in
 successive 60-event windows, and records heap, RSS, external bytes and a forced full-GC pause
-after each window.
+after each window. Settlement polling checks the transcript tail, so waiting for an append or
+burst does not itself rescan the loaded history. Absolute soak milliseconds include the test
+renderer's Solid store/effect machinery; compare window-to-window trends and the projector
+counters, not as a production frame budget.
 
 The mixed stream includes appended replies, growing text, tool status transitions, 256 KiB
 responses, large diffs, 24-tool turns, a 100-message single-announcement burst, expansion and
