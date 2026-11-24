@@ -3538,6 +3538,7 @@ export class AppController {
           messages: merged,
           loading: false,
           stale: false,
+          changedFrom: outcome.firstChangedIndex,
           ...(olderCursor === undefined ? {} : { olderCursor }),
           ...(olderCheckFailed === true ? { olderCheckFailed: true } : {}),
         };
@@ -3598,7 +3599,10 @@ export class AppController {
         'transcripts',
         key,
         produce((draft) => {
-          if (outcome.added > 0) draft.messages = outcome.messages;
+          if (outcome.added > 0) {
+            draft.messages = outcome.messages;
+            draft.changedFrom = 0;
+          }
           draft.loading = false;
           // Only a *confirmed* exhaustion clears the cursor. A failed lookahead keeps the
           // page's token as a retry path and records that the check is unverified (#144).

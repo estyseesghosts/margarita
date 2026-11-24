@@ -307,6 +307,27 @@ explicit repair rebuild is recorded when state was written by another owner. Tes
 incremental total against the full recount across randomized replacements, deletions,
 prepends, duplicate suppression and 1 MB-scale payload changes.
 
+## Bounded incremental projection (#352)
+
+The projector accepts an explicit `changedFrom` boundary from canonical reconciliation instead
+of rediscovering it by scanning every message. A false boundary is rejected by an O(1) identity
+check at that position and falls back to the identity scan. Closed execution segments remain
+the reuse unit.
+
+- Final nodes are stored as shared chunks behind `TranscriptNodeView`. `at()`, `tail()` and
+  `toArray()` make random access and windowing explicit; a tail update shares the stable prefix
+  chunks instead of copying thousands of node references.
+- Per-message base lists and final-node offsets are truncated/rebuilt in place; only the
+  changed suffix is touched.
+- `Bun.deepEquals` content fallback is restricted to the latest 120-message region; older
+  messages must keep object identity. This prevents an accidental whole-history comparison.
+- `ProjectionStats` adds `nodesCopied`, `arraysAllocated` and `changedFrom`. Tests compare
+  1,000- and 50,000-message tail updates and assert zero copied prefix nodes and only the new
+  turn folded, while the chunked view still matches the full reference for random access,
+  iteration and appended worker/warning rows.
+- The mounted transcript uses `windowNodeView` so only the visible tail is materialized; the
+  scroll-anchor index is built lazily when sticky-prompt logic needs it.
+
 ## Reproducibility rules
 
 - Use the same commit, machine, terminal size, Bun version and power mode for comparisons.

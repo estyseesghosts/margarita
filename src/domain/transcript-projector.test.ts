@@ -315,3 +315,85 @@ describe('incremental transcript projector (#283)', () => {
     }
   });
 });
+
+function simpleHistory(count: number): TranscriptMessage[] {
+  const messages: TranscriptMessage[] = [];
+  let ordinal = 0;
+  while (messages.length < count) {
+    messages.push(user(`simple-u${ordinal}`, `request ${ordinal}`));
+    messages.push(assistant(`simple-a${ordinal}`, [{ kind: 'text', text: `answer ${ordinal}` }]));
+    messages.push(idle(`simple-i${ordinal}`, 'succeeded'));
+    ordinal += 1;
+  }
+  return messages.slice(0, count);
+}
+
+describe('bounded chunked projection (#352)', () => {
+  test('a node view exposes random access, the live tail and append', () => {
+    const messages = history(4);
+    const projector = createTranscriptProjector();
+    const flat = project(projector, messages);
+    const view = projector.projectView(messages, { ...compact, markers: markerFor(messages) });
+    expect(view.length).toBe(flat.length);
+    for (let index = 0; index < flat.length; index += 1) {
+      expect(view.at(index)).toBe(flat[index]);
+    }
+    expect(view.tail(3)).toEqual(flat.slice(-3));
+    expect([...view]).toEqual(flat);
+    expect(view.append([{ kind: 'meta', key: 'appended', text: 'x' }]).at(view.length)?.key).toBe(
+      'appended',
+    );
+  });
+
+  test('tail updates at 1k and 50k copy no prefix nodes and fold only the new turn', () => {
+    for (const size of [1_000, 50_000]) {
+      const messages = simpleHistory(size);
+      const projector = createTranscriptProjector();
+      const first = projector.projectView(messages, {
+        ...compact,
+        markers: markerFor(messages),
+      });
+      const appended = [...messages, ...turn(size + 1)];
+      const view = projector.projectView(appended, {
+        ...compact,
+        markers: markerFor(appended),
+        changedFrom: messages.length,
+      });
+      const stats = projector.lastStats();
+      expect(stats?.nodesCopied).toBe(0);
+      expect(stats?.prefixNodesReused ?? 0).toBeGreaterThan(0);
+      expect(stats?.prefixNodesReused ?? 0).toBeLessThanOrEqual(first.length);
+      expect(stats?.messagesFolded ?? Infinity).toBeLessThanOrEqual(5);
+      expect(view.length).toBeGreaterThan(first.length);
+      if (size === 1_000) {
+        expect(view.toArray()).toEqual(reference(appended));
+      } else {
+        expect(view.tail(4)).toEqual(view.toArray().slice(-4));
+      }
+    }
+  });
+
+  test('deep-equal reuse is restricted to the latest page', () => {
+    const messages = history(100);
+    const projector = createTranscriptProjector();
+    project(projector, messages);
+
+    const oldIndex = 10;
+    const old = messages[oldIndex];
+    if (old === undefined) throw new Error('fixture missing');
+    const older = [...messages];
+    older[oldIndex] = { ...old };
+    project(projector, older);
+    expect(projector.lastStats()?.messagesFolded).toBe(1);
+
+    const lateIndex = messages.length - 1;
+    const late = messages[lateIndex];
+    if (late === undefined) throw new Error('fixture missing');
+    const latest = [...messages];
+    latest[lateIndex] = { ...late };
+    const lateProjector = createTranscriptProjector();
+    project(lateProjector, messages);
+    project(lateProjector, latest);
+    expect(lateProjector.lastStats()?.messagesFolded).toBe(0);
+  });
+});

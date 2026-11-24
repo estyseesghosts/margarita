@@ -54,6 +54,7 @@ import {
   describeTool,
   formatToolTiming,
   type LiveTool,
+  nodeViewFromArray,
   previewBudget,
   type PreviewKind,
   type ProjectionStats,
@@ -65,7 +66,8 @@ import {
   toolIdentity,
   toolMetadataRowBudget,
   type TranscriptNode,
-  windowNodes,
+  type TranscriptNodeView,
+  windowNodeView,
 } from '../domain/transcript.ts';
 import { workerNodes, type WorkerStatus, workerStatusLabel } from '../domain/worker.ts';
 import { countFormat } from '../perf/format-counts.ts';
@@ -136,7 +138,7 @@ export function Transcript(props: TranscriptProps) {
       props.serverID,
       state.sessions[sessionKeyValue()]?.directory ?? '',
     );
-  const nodes = createMemo(() => {
+  const nodes = createMemo((): TranscriptNodeView => {
     const messages = transcript()?.messages ?? [];
     // Execution markers are derived by the controller from canonical transcript state; the
     // view never scans messages itself (#349). Running changes only redraw the open segment.
@@ -146,12 +148,14 @@ export function Transcript(props: TranscriptProps) {
         .map((marker) => [marker.afterMessageId, marker]),
     );
     const expanded = props.controller.expandedSets();
-    const folded = projector.project(messages, {
+    const changedFrom = transcript()?.changedFrom;
+    const folded = projector.projectView(messages, {
       detailed: state.detailed,
       expandedGroups: expanded.groups,
       expandedDiffs: expanded.diffs,
       mcpServers: mcpServers(),
       markers,
+      ...(changedFrom === undefined ? {} : { changedFrom }),
     });
     const stats = projector.lastStats();
     if (stats !== undefined) props.onProjectionStats?.(stats);
@@ -160,25 +164,25 @@ export function Transcript(props: TranscriptProps) {
     // by tool ID, never to "the last tool-looking node": a later appended call cannot inherit
     // it, and a call outside this window simply shows no notice instead of a wrong one (#135).
     const background = state.backgrounded[sessionKeyValue()] ?? [];
-    const withBackground: TranscriptNode[] =
+    const withBackground =
       background.length > 0 && state.running[sessionKeyValue()] === true
-        ? attachBackgroundNotices(folded, background)
+        ? nodeViewFromArray(attachBackgroundNotices(folded.toArray(), background))
         : folded;
     // Workers are server-confirmed rows (#101), appended after the turn so a still-running
     // parent stays visible above them. No client timer contributes to their status. A failed
     // refresh keeps the last confirmed rows and adds one bounded stale warning (#230).
     const key = sessionKeyValue();
     const warning = jobWarning(state.workerStatus[key], state.shellStatus[key]);
-    return [
-      ...withBackground,
+    const extra: TranscriptNode[] = [
       ...workerNodes(state.workers[key] ?? [], expanded.groups),
       ...(warning === undefined
         ? []
         : [{ kind: 'meta' as const, key: `job-status:${key}`, text: warning }]),
     ];
+    return withBackground.append(extra);
   });
   const windowed = createMemo(() =>
-    windowNodes(nodes(), props.controller.transcriptWindow(props.sessionID, props.serverID)),
+    windowNodeView(nodes(), props.controller.transcriptWindow(props.sessionID, props.serverID)),
   );
   // Server-confirmed pending user follow-ups, FIFO (server order) — rendered in the
   // activity region right above the running task marker, never inside the composer.
@@ -200,9 +204,12 @@ export function Transcript(props: TranscriptProps) {
   const [pendingAnchor, setPendingAnchor] = createSignal<
     { key: string; offset: number } | undefined
   >(undefined);
-  const nodeIndex = createMemo(
-    () => new Map(nodes().map((node, index) => [node.key, index] as const)),
-  );
+  const nodeIndexFor = () =>
+    new Map(
+      nodes()
+        .toArray()
+        .map((node, index) => [node.key, index] as const),
+    );
 
   /**
    * Recomputes which earlier prompt, if any, has scrolled out above the viewport. The
@@ -239,10 +246,10 @@ export function Transcript(props: TranscriptProps) {
       const element = scrollbox.findDescendantById(nodeID(node.key));
       return element !== undefined && element.y + element.height > scrollbox.y;
     });
-    const index = top === undefined ? undefined : nodeIndex().get(top.key);
+    const index = top === undefined ? undefined : nodeIndexFor().get(top.key);
     if (index !== undefined) {
       for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-        const node = nodes()[cursor];
+        const node = nodes().at(cursor);
         if (node?.kind === 'user') {
           setSticky(node.text);
           return;

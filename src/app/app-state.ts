@@ -147,6 +147,11 @@ export type TranscriptState = {
   loading: boolean;
   /** Events arrived while detached; refetch on attach. */
   stale: boolean;
+  /**
+   * First canonical message index that differs from the previous array (#352). Presentation
+   * derives an explicit changed range instead of rediscovering it by identity every frame.
+   */
+  changedFrom?: number;
 };
 
 export type Completion = Readonly<{

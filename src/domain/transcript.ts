@@ -304,6 +304,13 @@ export type FoldOptions = Readonly<{
    * total extent: its idle message, or its last message while running).
    */
   markers?: ReadonlyMap<string, ExecutionMarker>;
+  /**
+   * First message index known to differ from the previous projection (#352). The controller
+   * supplies this from canonical reconciliation so the projector does not rediscover the
+   * changed range by scanning the whole history. A false boundary is rejected by an O(1)
+   * identity check at the boundary and falls back to the safe scan.
+   */
+  changedFrom?: number;
 }>;
 
 /**
@@ -501,10 +508,33 @@ export type ProjectionStats = Readonly<{
   groupsReused: number;
   /** Final nodes carried over verbatim from the previous projection. */
   prefixNodesReused: number;
+  /** Prefix node references copied into a new flat array; 0 through the chunked view. */
+  nodesCopied: number;
+  /** Chunk/array allocations; each chunk holds many nodes and is not a per-node copy. */
+  arraysAllocated: number;
+  /** First message index the projection treated as changed. */
+  changedFrom: number;
 }>;
+
+/**
+ * A chunked, random-access view of final transcript nodes (#352). The stable prefix is kept
+ * as chunks shared between projections; only the changed tail is rebuilt. Consumers that
+ * truly need a flat array call `toArray()` and pay for it explicitly.
+ */
+export interface TranscriptNodeView {
+  readonly length: number;
+  at(index: number): TranscriptNode | undefined;
+  tail(limit: number): readonly TranscriptNode[];
+  toArray(): TranscriptNode[];
+  some(predicate: (node: TranscriptNode) => boolean): boolean;
+  /** Returns a view with `nodes` appended as one additional chunk. */
+  append(nodes: readonly TranscriptNode[]): TranscriptNodeView;
+  [Symbol.iterator](): IterableIterator<TranscriptNode>;
+}
 
 export type TranscriptProjector = Readonly<{
   project(messages: readonly TranscriptMessage[], options: FoldOptions): TranscriptNode[];
+  projectView(messages: readonly TranscriptMessage[], options: FoldOptions): TranscriptNodeView;
   lastStats(): ProjectionStats | undefined;
 }>;
 
@@ -525,47 +555,154 @@ type MergeTracker = { computed: number; reused: number };
 const mergeCacheLimit = 512;
 
 /**
- * Incremental folded-node projector (#283).
+ * Content equality is only a latest-page fallback (#283/#352). Older messages must be the
+ * same object; otherwise a fresh DTO identity could trigger an accidental whole-history
+ * deep comparison.
+ */
+const latestMessageRegion = 120;
+
+function createNodeView(chunks: readonly (readonly TranscriptNode[])[]): TranscriptNodeView {
+  const offsets: number[] = [];
+  let total = 0;
+  for (const chunk of chunks) {
+    offsets.push(total);
+    total += chunk.length;
+  }
+
+  function at(index: number): TranscriptNode | undefined {
+    if (index < 0 || index >= total) return undefined;
+    let low = 0;
+    let high = chunks.length - 1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      const start = offsets[middle] ?? 0;
+      const chunk = chunks[middle];
+      if (chunk === undefined) return undefined;
+      if (index < start) high = middle - 1;
+      else if (index >= start + chunk.length) low = middle + 1;
+      else return chunk[index - start];
+    }
+    return undefined;
+  }
+
+  function tail(limit: number): readonly TranscriptNode[] {
+    const count = Math.max(0, Math.min(limit, total));
+    if (count === 0) return [];
+    const result: TranscriptNode[] = [];
+    let needed = count;
+    for (let index = chunks.length - 1; index >= 0 && needed > 0; index -= 1) {
+      const chunk = chunks[index];
+      if (chunk === undefined || chunk.length === 0) continue;
+      if (chunk.length <= needed) {
+        result.unshift(...chunk);
+        needed -= chunk.length;
+      } else {
+        result.unshift(...chunk.slice(chunk.length - needed));
+        needed = 0;
+      }
+    }
+    return result;
+  }
+
+  return {
+    length: total,
+    at,
+    tail,
+    toArray: () => chunks.flat(),
+    some: (predicate) => chunks.some((chunk) => chunk.some(predicate)),
+    append: (nodes) => createNodeView(nodes.length === 0 ? chunks : [...chunks, nodes]),
+    *[Symbol.iterator]() {
+      for (const chunk of chunks) yield* chunk;
+    },
+  };
+}
+
+/** Builds a one-chunk view for a flat array; use only when a flat result is unavoidable. */
+export function nodeViewFromArray(nodes: readonly TranscriptNode[]): TranscriptNodeView {
+  return createNodeView(nodes.length === 0 ? [] : [nodes]);
+}
+
+/** Truncates a chunk list to exactly `length` nodes without flattening the retained prefix. */
+function truncateChunks(
+  chunks: readonly (readonly TranscriptNode[])[],
+  length: number,
+): (readonly TranscriptNode[])[] {
+  if (length <= 0) return [];
+  const kept: (readonly TranscriptNode[])[] = [];
+  let remaining = length;
+  for (const chunk of chunks) {
+    if (remaining <= 0) break;
+    if (chunk.length <= remaining) {
+      kept.push(chunk);
+      remaining -= chunk.length;
+    } else {
+      kept.push(chunk.slice(0, remaining));
+      remaining = 0;
+    }
+  }
+  return kept;
+}
+
+/**
+ * Incremental folded-node projector (#283, #352).
  *
  * Canonical messages are folded once and cached by object identity; cross-message work is
- * limited to the current segment. A projection reuses the previous final node list up to
- * the last execution marker in the unchanged prefix, because an execution marker closes a
- * segment: interruption consolidation and tool grouping never cross one. The remaining
- * passes still walk the suffix's nodes, but a single tail update re-folds and regroups only
- * its own turn instead of the entire loaded history.
+ * limited to the current segment. A projection reuses the previous final nodes up to the last
+ * execution marker in the unchanged prefix, because an execution marker closes a segment:
+ * interruption consolidation and tool grouping never cross one. Stable prefix nodes live in
+ * chunks shared between projections, so a tail update does not copy the loaded history.
  */
 export function createTranscriptProjector(): TranscriptProjector {
   let messageCache = new WeakMap<TranscriptMessage, MessageCacheEntry>();
   let signature: string | undefined;
   let mergeCache: MergeCache = new Map();
-  let baseLists: readonly (readonly TranscriptNode[])[] = [];
+  let baseLists: (readonly TranscriptNode[])[] = [];
   let previousMessages: readonly TranscriptMessage[] = [];
-  let finalNodes: readonly TranscriptNode[] = [];
+  let chunks: readonly (readonly TranscriptNode[])[] = [];
   let endOffsetByMessage: number[] = [];
   let stats: ProjectionStats | undefined;
 
-  function project(messages: readonly TranscriptMessage[], options: FoldOptions): TranscriptNode[] {
+  function reset(): void {
+    messageCache = new WeakMap();
+    mergeCache = new Map();
+    baseLists = [];
+    previousMessages = [];
+    chunks = [];
+    endOffsetByMessage = [];
+  }
+
+  function projectView(
+    messages: readonly TranscriptMessage[],
+    options: FoldOptions,
+  ): TranscriptNodeView {
     const nextSignature = foldOptionSignature(options);
     if (nextSignature !== signature) {
       signature = nextSignature;
-      messageCache = new WeakMap();
-      mergeCache = new Map();
-      baseLists = [];
-      previousMessages = [];
-      finalNodes = [];
-      endOffsetByMessage = [];
+      reset();
     }
 
-    // Only the messages that can have changed need cache/format work. A live page refresh
-    // keeps cached history objects beyond the page, so the differing region is bounded by
-    // the page rather than by loaded history (#283).
-    let firstDifference = 0;
+    // The controller knows the first changed message from canonical reconciliation. Accept the
+    // hint only when the message before it is still the same object; otherwise fall back to the
+    // bounded identity scan so a stale hint can never reuse a stale prefix.
     const comparable = Math.min(previousMessages.length, messages.length);
-    while (
-      firstDifference < comparable &&
-      previousMessages[firstDifference] === messages[firstDifference]
+    const hint = options.changedFrom;
+    let firstDifference: number;
+    if (
+      hint !== undefined &&
+      Number.isInteger(hint) &&
+      hint >= 0 &&
+      hint <= messages.length &&
+      (hint === 0 || (hint <= comparable && previousMessages[hint - 1] === messages[hint - 1]))
     ) {
-      firstDifference += 1;
+      firstDifference = hint;
+    } else {
+      firstDifference = 0;
+      while (
+        firstDifference < comparable &&
+        previousMessages[firstDifference] === messages[firstDifference]
+      ) {
+        firstDifference += 1;
+      }
     }
 
     // Never reuse the final open turn: its marker (running phase, activity) can change
@@ -583,29 +720,34 @@ export function createTranscriptProjector(): TranscriptProjector {
       }
     }
 
+    // Keep the old suffix refs only for the bounded region being rebuilt; the stable prefix is
+    // never copied. This also lets us extend reuse across identical rebuilt lists.
+    const rebuildStart = reusableEnd + 1;
+    const oldSuffix = baseLists.slice(rebuildStart);
+    baseLists.length = rebuildStart;
+
     let messagesFolded = 0;
-    let messagesReused = reusableEnd + 1;
-    const nextBaseLists: (readonly TranscriptNode[])[] = [];
-    for (let index = 0; index <= reusableEnd; index += 1) {
-      const nodes = baseLists[index];
-      if (nodes !== undefined) nextBaseLists.push(nodes);
-    }
-    for (let index = reusableEnd + 1; index < messages.length; index += 1) {
+    let messagesReused = rebuildStart;
+    for (let index = rebuildStart; index < messages.length; index += 1) {
       const message = messages[index];
-      if (message === undefined) continue;
+      if (message === undefined) {
+        baseLists.push([]);
+        continue;
+      }
       const marker = options.markers?.get(message.id);
       const markerKey = marker === undefined ? '' : markerFingerprint(marker);
       // A server page arrives as fresh objects even when its content is unchanged, so a
-      // reference miss falls back to content equality against the same slot. This keeps
-      // derived nodes (and their mounted rows) stable across live page refreshes without
-      // assuming append-only history (#205/#262).
+      // reference miss falls back to content equality against the same slot. The fallback is
+      // deliberately restricted to the latest page; older history must keep identity (#352).
       const previous = previousMessages[index];
       const candidate =
         messageCache.get(message) ??
         (previous === undefined ? undefined : messageCache.get(previous));
       const contentUnchanged =
         candidate !== undefined &&
-        (previous === undefined || previous === message || Bun.deepEquals(previous, message));
+        (previous === undefined ||
+          previous === message ||
+          (index >= messages.length - latestMessageRegion && Bun.deepEquals(previous, message)));
       if (contentUnchanged && candidate !== undefined) {
         // A segment marker may move or change phase without changing the message. Reuse the
         // content nodes and only rebuild the tiny marker tail, so a streaming activity update
@@ -617,31 +759,31 @@ export function createTranscriptProjector(): TranscriptProjector {
               ? candidate.content
               : [...candidate.content, executionNode(marker)];
         messageCache.set(message, { content: candidate.content, markerKey, nodes });
-        nextBaseLists.push(nodes);
+        baseLists.push(nodes);
         messagesReused += 1;
         continue;
       }
       const content = foldMessageNodes(message, options);
       const nodes = marker === undefined ? content : [...content, executionNode(marker)];
       messageCache.set(message, { content, markerKey, nodes });
-      nextBaseLists.push(nodes);
+      baseLists.push(nodes);
       messagesFolded += 1;
     }
 
     // Extend reuse only across matching lists that also end a segment.
     let cut = reusableEnd;
-    const shared = Math.min(baseLists.length, nextBaseLists.length);
-    for (let index = reusableEnd + 1; index < shared; index += 1) {
-      if (baseLists[index] !== nextBaseLists[index]) break;
-      const nodes = nextBaseLists[index];
+    for (let index = rebuildStart; index < baseLists.length; index += 1) {
+      const old = oldSuffix[index - rebuildStart];
+      if (old !== baseLists[index]) break;
+      const nodes = baseLists[index];
       if (nodes !== undefined && endsSegment(nodes)) cut = index;
     }
 
     const prefixLength = cut >= 0 ? (endOffsetByMessage[cut] ?? 0) : 0;
     const startIndex = cut >= 0 ? cut + 1 : 0;
     const indexed: IndexedNode[] = [];
-    for (let index = startIndex; index < nextBaseLists.length; index += 1) {
-      for (const node of nextBaseLists[index] ?? []) indexed.push({ node, messageIndex: index });
+    for (let index = startIndex; index < baseLists.length; index += 1) {
+      for (const node of baseLists[index] ?? []) indexed.push({ node, messageIndex: index });
     }
 
     const tracker: MergeTracker = { computed: 0, reused: 0 };
@@ -650,38 +792,43 @@ export function createTranscriptProjector(): TranscriptProjector {
       ? consolidated
       : mergeAdjacentGroupsIndexed(consolidated, options, mergeCache, tracker);
 
-    const nextFinal: TranscriptNode[] =
-      prefixLength === 0
-        ? finished.map((entry) => entry.node)
-        : [...finalNodes.slice(0, prefixLength), ...finished.map((entry) => entry.node)];
+    const suffixNodes = finished.map((entry) => entry.node);
+    const keptChunks = truncateChunks(chunks, prefixLength);
+    chunks = suffixNodes.length === 0 ? keptChunks : [...keptChunks, suffixNodes];
 
     // Record how many final nodes each message owns, so a later projection can cut at an
     // execution marker without replaying consolidation/grouping before it.
     let cursor = 0;
-    for (let index = startIndex; index < nextBaseLists.length; index += 1) {
+    for (let index = startIndex; index < baseLists.length; index += 1) {
       while (cursor < finished.length && (finished[cursor]?.messageIndex ?? 0) <= index) {
         cursor += 1;
       }
       endOffsetByMessage[index] = prefixLength + cursor;
     }
-    endOffsetByMessage.length = nextBaseLists.length;
+    endOffsetByMessage.length = baseLists.length;
 
     const nextStats: ProjectionStats = {
       messagesFolded,
       messagesReused,
-      messagesReprocessed: nextBaseLists.length - startIndex,
+      messagesReprocessed: baseLists.length - startIndex,
       groupsComputed: tracker.computed,
       groupsReused: tracker.reused,
       prefixNodesReused: prefixLength,
+      nodesCopied: 0,
+      arraysAllocated:
+        1 + (suffixNodes.length === 0 ? 0 : 1) + (keptChunks.length === chunks.length ? 0 : 1),
+      changedFrom: firstDifference,
     };
-    baseLists = nextBaseLists;
     previousMessages = messages;
-    finalNodes = nextFinal;
     stats = nextStats;
-    return nextFinal;
+    return createNodeView(chunks);
   }
 
-  return { project, lastStats: () => stats };
+  function project(messages: readonly TranscriptMessage[], options: FoldOptions): TranscriptNode[] {
+    return projectView(messages, options).toArray();
+  }
+
+  return { project, projectView, lastStats: () => stats };
 }
 
 function endsSegment(nodes: readonly TranscriptNode[]): boolean {
@@ -1221,6 +1368,16 @@ export function windowNodes<T>(
 ): { visible: readonly T[]; hidden: number } {
   if (nodes.length <= limit) return { visible: nodes, hidden: 0 };
   return { visible: nodes.slice(nodes.length - limit), hidden: nodes.length - limit };
+}
+
+/** Windowing over a chunked view; only the visible tail is materialized (#352). */
+export function windowNodeView(
+  view: TranscriptNodeView,
+  limit: number,
+): { visible: readonly TranscriptNode[]; hidden: number; total: number } {
+  if (view.length <= limit) return { visible: view.toArray(), hidden: 0, total: view.length };
+  const visible = view.tail(limit);
+  return { visible, hidden: view.length - visible.length, total: view.length };
 }
 
 /** `14:03:07 · 1.2s` for detailed tool rows; duration omitted while running. */
