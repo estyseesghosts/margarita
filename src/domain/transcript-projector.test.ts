@@ -397,3 +397,32 @@ describe('bounded chunked projection (#352)', () => {
     expect(lateProjector.lastStats()?.messagesFolded).toBe(0);
   });
 });
+
+describe('local disclosure invalidation (#354)', () => {
+  test('toggling one old group refolds only its owning message', () => {
+    const messages = history(2_500);
+    const projector = createTranscriptProjector();
+    project(projector, messages);
+    const group = project(projector, messages).find((node) => node.kind === 'tool-group');
+    if (group === undefined) throw new Error('fixture has no tool group');
+    const firstTool = group.tools[0];
+    if (firstTool === undefined) throw new Error('fixture group has no tool');
+    const messageIndex = messages.findIndex(
+      (message) =>
+        message.kind === 'assistant' &&
+        message.parts.some((part) => part.kind === 'tool' && part.tool.id === firstTool.id),
+    );
+    expect(messageIndex).toBeGreaterThanOrEqual(0);
+
+    const after = projector.project(messages, {
+      detailed: false,
+      expandedGroups: new Set([group.key]),
+      expandedDiffs: new Set(),
+      markers: markerFor(messages),
+      changedFrom: messageIndex,
+    });
+    expect(projector.lastStats()?.messagesFolded).toBe(1);
+    expect(projector.lastStats()?.messagesReused ?? 0).toBeGreaterThan(9_000);
+    expect(after.length).toBeGreaterThan(0);
+  });
+});

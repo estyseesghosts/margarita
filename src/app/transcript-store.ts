@@ -18,6 +18,8 @@ import {
 export type TranscriptIndex = {
   messages: readonly TranscriptMessage[];
   readonly idToIndex: Map<string, number>;
+  /** Tool ID -> owning message ID, maintained with the same page-sized deltas. */
+  readonly toolMessages: Map<string, string>;
   baseOffset: number;
   bytes: RetainedBytes;
 };
@@ -59,17 +61,28 @@ function subtractBytes(left: RetainedBytes, right: RetainedBytes): RetainedBytes
 
 export function buildTranscriptIndex(messages: readonly TranscriptMessage[]): TranscriptIndex {
   const idToIndex = new Map<string, number>();
+  const toolMessages = new Map<string, string>();
   for (const [index, message] of messages.entries()) {
     // Malformed payloads may repeat an id. The first position is canonical; a later duplicate
     // still renders but must not steal the boundary lookup from the earlier message.
     if (!idToIndex.has(message.id)) idToIndex.set(message.id, index);
+    if (message.kind !== 'assistant') continue;
+    for (const part of message.parts) {
+      if (part.kind === 'tool') toolMessages.set(part.tool.id, message.id);
+    }
   }
   return {
     messages,
     idToIndex,
+    toolMessages,
     baseOffset: 0,
     bytes: approximateTranscriptBytes(messages),
   };
+}
+
+/** Owning message id for a rendered tool call, if it is loaded. */
+export function messageIDOfTool(index: TranscriptIndex, toolID: string): string | undefined {
+  return index.toolMessages.get(toolID);
 }
 
 /** Returns the current absolute index of `id`, or undefined when it is not loaded. */
@@ -111,6 +124,11 @@ function removeIds(
     const message = messages[position];
     if (message === undefined) continue;
     index.idToIndex.delete(message.id);
+    if (message.kind === 'assistant') {
+      for (const part of message.parts) {
+        if (part.kind === 'tool') index.toolMessages.delete(part.tool.id);
+      }
+    }
     removed = addBytes(removed, approximateMessageBytes(message));
   }
   return removed;
@@ -187,6 +205,11 @@ export function mergeLatestIndexed(
   let addedBytes = { total: 0, text: 0, structure: 0 };
   for (const [offset, message] of canonical.entries()) {
     index.idToIndex.set(message.id, older.length + offset - index.baseOffset);
+    if (message.kind === 'assistant') {
+      for (const part of message.parts) {
+        if (part.kind === 'tool') index.toolMessages.set(part.tool.id, message.id);
+      }
+    }
     addedBytes = addBytes(addedBytes, approximateMessageBytes(message));
   }
   index.bytes = subtractBytes(addBytes(index.bytes, addedBytes), removedBytes);
@@ -236,6 +259,11 @@ export function prependOlderIndexed(
   index.baseOffset += added;
   for (const [offset, message] of older.entries()) {
     index.idToIndex.set(message.id, offset - index.baseOffset);
+    if (message.kind === 'assistant') {
+      for (const part of message.parts) {
+        if (part.kind === 'tool') index.toolMessages.set(part.tool.id, message.id);
+      }
+    }
   }
   let addedBytes = { total: 0, text: 0, structure: 0 };
   for (const message of older) addedBytes = addBytes(addedBytes, approximateMessageBytes(message));

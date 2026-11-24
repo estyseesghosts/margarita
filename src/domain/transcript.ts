@@ -472,13 +472,32 @@ function toolArrayKey(tools: readonly ToolCall[]): string {
 
 /** Fold options that change per-message derivation. Cleared wholesale when they change. */
 function foldOptionSignature(options: FoldOptions): string {
-  const expandedGroups = [...options.expandedGroups].toSorted().join('\u0001');
-  const expandedDiffs = [...(options.expandedDiffs ?? [])].toSorted().join('\u0001');
+  // Group/diff disclosure is local to the affected message; it must not clear the entire
+  // per-message cache. Detailed mode and the MCP catalog remain genuinely global (#354).
   return [
     options.detailed ? 'detailed' : 'compact',
     (options.mcpServers ?? []).join('\u0001'),
-    expandedGroups,
-    expandedDiffs,
+  ].join('\u0000');
+}
+
+/** Disclosure state that changes this message's folded nodes (#354). */
+function messageDisclosureKey(message: TranscriptMessage, options: FoldOptions): string {
+  if (message.kind !== 'assistant') return '';
+  const entries: string[] = [];
+  for (const part of message.parts) {
+    if (part.kind !== 'tool') continue;
+    const id = part.tool.id;
+    if (options.expandedDiffs?.has(id) === true) entries.push(`diff:${id}`);
+    if (options.expandedGroups.has(`group:${id}`)) entries.push(`group:${id}`);
+  }
+  return entries.join('\u0001');
+}
+
+/** Disclosure state that changes the set of cached message derivations (#354). */
+function disclosureOptionSignature(options: FoldOptions): string {
+  return [
+    [...options.expandedGroups].toSorted().join('\u0001'),
+    [...(options.expandedDiffs ?? [])].toSorted().join('\u0001'),
   ].join('\u0000');
 }
 
@@ -542,6 +561,8 @@ type MessageCacheEntry = Readonly<{
   /** Nodes derived from the message alone; expensive Markdown/diff work lives here. */
   content: readonly TranscriptNode[];
   markerKey: string;
+  /** Local group/diff disclosure that produced `content` (#354). */
+  disclosureKey: string;
   /** Content plus the marker node for `markerKey`; reused only while the marker agrees. */
   nodes: readonly TranscriptNode[];
 }>;
@@ -661,6 +682,7 @@ export function createTranscriptProjector(): TranscriptProjector {
   let chunks: readonly (readonly TranscriptNode[])[] = [];
   let endOffsetByMessage: number[] = [];
   let stats: ProjectionStats | undefined;
+  let disclosureSignature: string | undefined;
 
   function reset(): void {
     messageCache = new WeakMap();
@@ -669,6 +691,7 @@ export function createTranscriptProjector(): TranscriptProjector {
     previousMessages = [];
     chunks = [];
     endOffsetByMessage = [];
+    disclosureSignature = undefined;
   }
 
   function projectView(
@@ -711,6 +734,30 @@ export function createTranscriptProjector(): TranscriptProjector {
     const openTurnStart = lastIdleIndex(messages) + 1;
     const previousOpenTurnStart = lastIdleIndex(previousMessages) + 1;
     let reusableEnd = -1;
+
+    // A disclosure-only change does not alter message identities. Scan cached disclosure keys
+    // to find the first affected message; this is cheap key work, not a Markdown/diff refold,
+    // and it prevents the prefix from being reused with stale expansion state (#354).
+    const nextDisclosure = disclosureOptionSignature(options);
+    const disclosureChanged = nextDisclosure !== disclosureSignature;
+    disclosureSignature = nextDisclosure;
+    if (disclosureChanged && previousMessages.length > 0) {
+      const comparableDisclosure = Math.min(previousMessages.length, messages.length);
+      for (let index = 0; index < comparableDisclosure; index += 1) {
+        const message = messages[index];
+        if (message === undefined) continue;
+        const previous = previousMessages[index];
+        const candidate =
+          messageCache.get(message) ??
+          (previous === undefined ? undefined : messageCache.get(previous));
+        if (candidate === undefined) continue;
+        if (candidate.disclosureKey !== messageDisclosureKey(message, options)) {
+          firstDifference = Math.min(firstDifference, index);
+          break;
+        }
+      }
+    }
+
     const reuseLimit = Math.min(firstDifference, openTurnStart, previousOpenTurnStart);
     for (let index = reuseLimit - 1; index >= 0; index -= 1) {
       const nodes = baseLists[index];
@@ -736,6 +783,7 @@ export function createTranscriptProjector(): TranscriptProjector {
       }
       const marker = options.markers?.get(message.id);
       const markerKey = marker === undefined ? '' : markerFingerprint(marker);
+      const disclosureKey = messageDisclosureKey(message, options);
       // A server page arrives as fresh objects even when its content is unchanged, so a
       // reference miss falls back to content equality against the same slot. The fallback is
       // deliberately restricted to the latest page; older history must keep identity (#352).
@@ -745,6 +793,7 @@ export function createTranscriptProjector(): TranscriptProjector {
         (previous === undefined ? undefined : messageCache.get(previous));
       const contentUnchanged =
         candidate !== undefined &&
+        candidate.disclosureKey === disclosureKey &&
         (previous === undefined ||
           previous === message ||
           (index >= messages.length - latestMessageRegion && Bun.deepEquals(previous, message)));
@@ -758,14 +807,19 @@ export function createTranscriptProjector(): TranscriptProjector {
             : marker === undefined
               ? candidate.content
               : [...candidate.content, executionNode(marker)];
-        messageCache.set(message, { content: candidate.content, markerKey, nodes });
+        messageCache.set(message, {
+          content: candidate.content,
+          markerKey,
+          disclosureKey,
+          nodes,
+        });
         baseLists.push(nodes);
         messagesReused += 1;
         continue;
       }
       const content = foldMessageNodes(message, options);
       const nodes = marker === undefined ? content : [...content, executionNode(marker)];
-      messageCache.set(message, { content, markerKey, nodes });
+      messageCache.set(message, { content, markerKey, disclosureKey, nodes });
       baseLists.push(nodes);
       messagesFolded += 1;
     }

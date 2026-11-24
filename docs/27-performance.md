@@ -348,6 +348,18 @@ The controller owns the folded-node projector for each attached transcript. The 
   derived read-only index; the UI only attaches transient client-local notices and renders the
   visible window.
 
+## Local disclosure invalidation (#354)
+
+Group and diff expansion are no longer part of the global projector signature. Each assistant
+message carries a disclosure key derived from the expanded diffs and groups whose first tool
+belongs to it; a cached message is reused only while that key and its marker agree. Detailed
+mode and the MCP catalog remain genuinely global invalidators.
+
+`toggleGroup()` and `toggleDiffExpanded()` mark the owning message index through a tool →
+message index maintained with the transcript metadata, so the projector rebuilds only that
+message and its bounded suffix. A test over 10,000 messages expands one old group and asserts a
+single message is folded while more than 9,000 keep their cached nodes.
+
 ## Reproducibility rules
 
 - Use the same commit, machine, terminal size, Bun version and power mode for comparisons.

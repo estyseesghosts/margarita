@@ -270,7 +270,9 @@ import {
 } from './transcript-retry.ts';
 import {
   ensureTranscriptIndex,
+  indexOfMessage,
   mergeLatestIndexed,
+  messageIDOfTool,
   prependOlderIndexed,
   type TranscriptIndex,
 } from './transcript-store.ts';
@@ -8617,6 +8619,7 @@ export class AppController {
         else state.expandedGroups[qualified] = true;
       }),
     );
+    if (key.startsWith('group:')) this.markDisclosureChanged([key.slice('group:'.length)]);
   }
 
   /** Mouse: select and disclose one group summary without touching other groups. */
@@ -8845,6 +8848,27 @@ export class AppController {
         else state.expandedDiffs[qualified] = true;
       }),
     );
+    this.markDisclosureChanged([id]);
+  }
+
+  /** Marks the owning message of a local disclosure change for targeted reprojection (#354). */
+  private markDisclosureChanged(toolIDs: readonly string[]): void {
+    const route = this.state.route;
+    if (route.kind !== 'conversation') return;
+    const key = this.keyFor(route.serverID, route.sessionID);
+    const transcript = this.state.transcripts[key];
+    if (transcript === undefined) return;
+    const index = this.transcriptIndexFor(key, unwrap(transcript.messages));
+    let changedFrom = transcript.messages.length;
+    for (const id of toolIDs) {
+      const messageID = messageIDOfTool(index, id);
+      if (messageID === undefined) continue;
+      const position = indexOfMessage(index, messageID);
+      if (position !== undefined) changedFrom = Math.min(changedFrom, position);
+    }
+    if (changedFrom !== transcript.changedFrom) {
+      this.setState('transcripts', key, 'changedFrom', changedFrom);
+    }
   }
 
   clearGroupFocus(): void {
