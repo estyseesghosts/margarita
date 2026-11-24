@@ -66,7 +66,8 @@ import {
   toolMetadataRowBudget,
   type TranscriptNode,
   type TranscriptNodeView,
-  windowNodeView,
+  transcriptRowBudget,
+  windowNodeViewByRows,
 } from '../domain/transcript.ts';
 import { type WorkerStatus, workerStatusLabel } from '../domain/worker.ts';
 import { countFormat } from '../perf/format-counts.ts';
@@ -164,7 +165,11 @@ export function Transcript(props: TranscriptProps) {
     );
   });
   const windowed = createMemo(() =>
-    windowNodeView(nodes(), props.controller.transcriptWindow(props.sessionID, props.serverID)),
+    windowNodeViewByRows(nodes(), {
+      nodeLimit: props.controller.transcriptWindow(props.sessionID, props.serverID),
+      rowBudget: transcriptRowBudget,
+      width: props.width,
+    }),
   );
   // Server-confirmed pending user follow-ups, FIFO (server order) — rendered in the
   // activity region right above the running task marker, never inside the composer.

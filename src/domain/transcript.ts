@@ -1434,6 +1434,90 @@ export function windowNodeView(
   return { visible, hidden: view.length - visible.length, total: view.length };
 }
 
+/** Physical rows the transcript may mount, independent of node count (#355). */
+export const transcriptRowBudget = 320;
+
+/** Deliberately conservative per-node row estimate; never scans a megabyte-scale diff. */
+function boundedTextRows(text: string, width: number, cap: number): number {
+  let rows = 0;
+  let start = 0;
+  while (start <= text.length && rows < cap) {
+    const end = text.indexOf('\n', start);
+    const line = end < 0 ? text.slice(start) : text.slice(start, end);
+    const sample = line.length > width * cap ? line.slice(0, width * cap) : line;
+    rows += lineRows(sample, width);
+    if (end < 0) break;
+    start = end + 1;
+  }
+  return Math.min(cap, Math.max(1, rows));
+}
+
+/** Estimated physical layout rows for one folded node. */
+export function estimatedNodeRows(node: TranscriptNode, width: number): number {
+  switch (node.kind) {
+    case 'user':
+      return boundedTextRows(node.text, width, 80) + 1;
+    case 'text':
+    case 'reasoning':
+      return boundedTextRows(node.text, width, 80);
+    case 'reasoning-unavailable':
+      return 1;
+    case 'tool':
+      // An expanded tool may contain a diff/output preview; the inline renderer clamps it.
+      return node.expanded ? 2 + Math.min(maxInlinePreviewRows, 24) : 1;
+    case 'tool-group':
+      return node.expanded
+        ? 1 + Math.min(maxInlinePreviewRows, node.tools.length + (node.live === undefined ? 0 : 1))
+        : 1;
+    case 'shell':
+      return 1 + (node.output === undefined ? 0 : boundedTextRows(node.output, width, 20));
+    case 'notice':
+    case 'meta':
+      return boundedTextRows(node.text, width, 24);
+    case 'worker':
+      return node.expanded ? 3 : 1;
+    case 'execution':
+      return 1;
+    default: {
+      const exhaustive: never = node;
+      void exhaustive;
+      return 1;
+    }
+  }
+}
+
+export type TranscriptRowWindow = Readonly<{
+  visible: readonly TranscriptNode[];
+  hidden: number;
+  total: number;
+  estimatedRows: number;
+}>;
+
+/**
+ * Walks backward from the live tail until the physical row budget is reached. A single node
+ * larger than the budget is mounted whole rather than looped over, hidden or truncated; the
+ * newest node is always kept.
+ */
+export function windowNodeViewByRows(
+  view: TranscriptNodeView,
+  options: Readonly<{ nodeLimit: number; rowBudget: number; width: number }>,
+): TranscriptRowWindow {
+  const nodeLimit = Math.max(1, Math.floor(options.nodeLimit));
+  const rowBudget = Math.max(1, Math.floor(options.rowBudget));
+  const visible: TranscriptNode[] = [];
+  let rows = 0;
+  for (let index = view.length - 1; index >= 0 && visible.length < nodeLimit; index -= 1) {
+    const node = view.at(index);
+    if (node === undefined) continue;
+    const cost = estimatedNodeRows(node, options.width);
+    if (visible.length > 0 && rows + cost > rowBudget) break;
+    visible.unshift(node);
+    rows += cost;
+    if (rows >= rowBudget) break;
+  }
+  return { visible, hidden: view.length - visible.length, total: view.length, estimatedRows: rows };
+}
+
 /** `14:03:07 · 1.2s` for detailed tool rows; duration omitted while running. */
 export function formatToolTiming(tool: ToolCall, formatClock: (at: number) => string): string {
   const started = formatClock(tool.startedAt);

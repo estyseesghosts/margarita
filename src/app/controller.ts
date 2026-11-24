@@ -3799,7 +3799,11 @@ export class AppController {
     serverID: string = this.activeServerID(),
   ): boolean {
     const key = this.keyFor(serverID, sessionID);
-    if (hiddenNodes > 0) {
+    // Hidden nodes can come from the node window or from the physical row budget. Only the
+    // former can be revealed by growing the node window; when every loaded node is already
+    // allowed, PageUp must fetch older history instead of looping on a row-bound window (#355).
+    const loadedNodes = this.presentationFor(sessionID, serverID).length;
+    if (hiddenNodes > 0 && this.transcriptWindow(sessionID, serverID) < loadedNodes) {
       this.setState(
         'transcriptWindow',
         key,

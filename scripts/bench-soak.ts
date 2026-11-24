@@ -33,6 +33,7 @@ import type {
   ToolCall,
   TranscriptMessage,
 } from '../src/domain/transcript.ts';
+import { transcriptRowBudget, windowNodeViewByRows } from '../src/domain/transcript.ts';
 import { summarizeSamples } from '../src/perf/measure.ts';
 import { App } from '../src/ui/app.tsx';
 import { pickTheme } from '../src/ui/theme.ts';
@@ -474,6 +475,11 @@ type WindowReport = Readonly<{
     prefixNodesReused: number;
     maxMessagesFolded: number;
   };
+  render: {
+    mountedNodes: number;
+    estimatedRows: number;
+    hiddenNodes: number;
+  };
   memory: ReturnType<typeof memoryCheckpoint>;
 }>;
 
@@ -532,6 +538,19 @@ async function historyStage(loadedMessages: number) {
             prefixNodesReused: reused,
             maxMessagesFolded: maxFolded,
           },
+          render: (() => {
+            const view = controller.presentationFor(mainSessionID);
+            const windowed = windowNodeViewByRows(view, {
+              nodeLimit: controller.transcriptWindow(mainSessionID),
+              rowBudget: transcriptRowBudget,
+              width,
+            });
+            return {
+              mountedNodes: windowed.visible.length,
+              estimatedRows: windowed.estimatedRows,
+              hiddenNodes: windowed.hidden,
+            };
+          })(),
           memory: memoryCheckpoint(),
         });
         windowStart = samples.length;

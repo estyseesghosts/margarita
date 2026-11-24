@@ -360,6 +360,16 @@ message index maintained with the transcript metadata, so the projector rebuilds
 message and its bounded suffix. A test over 10,000 messages expands one old group and asserts a
 single message is folded while more than 9,000 keep their cached nodes.
 
+## Physical row budget (#355)
+
+The transcript window now enforces a physical layout budget (`transcriptRowBudget`, 320 rows)
+in addition to the configurable node limit. `estimatedNodeRows()` counts wrapped text, expanded
+tool/diff previews, groups, shell output, notices and worker rows without scanning megabyte-scale
+diffs. `windowNodeViewByRows()` walks backward from the live tail, always includes the newest
+node, and mounts a single node larger than the budget whole instead of looping, hiding or
+truncating it. The estimate is conservative and recalculated when the terminal width changes.
+The soak benchmark reports mounted node count, estimated rows and hidden nodes per window.
+
 ## Reproducibility rules
 
 - Use the same commit, machine, terminal size, Bun version and power mode for comparisons.
