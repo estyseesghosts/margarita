@@ -1,6 +1,7 @@
 import { formatBytes } from './attachment.ts';
 import type { ExecutionMarker } from './execution-segment.ts';
 import type { ModelSelection } from './model-ref.ts';
+import { retainedPayload } from './payload-retention.ts';
 import { sanitizeSingleLine, sanitizeTerminalText } from './sanitize-text.ts';
 import { assertNever, type TokenUsage } from './session.ts';
 import { truncatePrompt } from './sticky-prompt.ts';
@@ -155,7 +156,7 @@ export type ToolResultPayload = Readonly<{
 export function cachedToolResult(tool: ToolCall): ToolResultPayload {
   return {
     ...(tool.output === undefined ? {} : { text: tool.output }),
-    ...(tool.diff === undefined ? {} : { diff: tool.diff }),
+    ...(tool.diff === undefined ? {} : { diff: retainedPayload(tool, tool.diff) }),
     files: tool.files ?? [],
     ...(tool.executionError === undefined ? {} : { executionError: tool.executionError }),
     completeness:

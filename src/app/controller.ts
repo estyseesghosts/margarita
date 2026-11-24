@@ -152,6 +152,7 @@ import {
   redactPairingCode,
 } from '../domain/pairing.ts';
 import { directoryKey } from '../domain/path-identity.ts';
+import { retainedPayload } from '../domain/payload-retention.ts';
 import {
   historyBack,
   historyForward,
@@ -9699,7 +9700,7 @@ export class AppController {
       const message = messages[index];
       if (message?.kind !== 'assistant') continue;
       const text = message.parts
-        .map((part) => (part.kind === 'text' ? part.text : ''))
+        .map((part) => (part.kind === 'text' ? retainedPayload(part, part.text) : ''))
         .join('\n')
         .trim();
       if (text !== '') return text;

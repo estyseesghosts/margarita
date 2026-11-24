@@ -18,6 +18,7 @@ import type { FileDiff } from '../domain/diff.ts';
 import type { FormField, FormRequest } from '../domain/form.ts';
 import { effectiveVariant, type ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
+import { payloadLimits, retainPayload } from '../domain/payload-retention.ts';
 import { sanitizeSingleLine, sanitizeTerminalText } from '../domain/sanitize-text.ts';
 import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary, StagedRevert } from '../domain/session.ts';
@@ -525,19 +526,36 @@ function toAssistantParts(
   const parts: AssistantPart[] = [];
   for (const part of message.content) {
     switch (part.type) {
-      case 'text':
-        parts.push({ kind: 'text', text: sanitizeTerminalText(part.text) });
+      case 'text': {
+        const sanitized = sanitizeTerminalText(part.text);
+        const owner: { kind: 'text'; text: string } = { kind: 'text', text: sanitized };
+        owner.text = retainPayload(owner, sanitized, payloadLimits.text);
+        parts.push(owner);
         break;
-      case 'reasoning':
-        parts.push({
+      }
+      case 'reasoning': {
+        const sanitized = sanitizeTerminalText(part.text);
+        const owner: { kind: 'reasoning'; text: string; done: boolean } = {
           kind: 'reasoning',
-          text: sanitizeTerminalText(part.text),
+          text: sanitized,
           done: part.time?.completed !== undefined || message.time.completed !== undefined,
-        });
+        };
+        owner.text = retainPayload(owner, sanitized, payloadLimits.text);
+        parts.push(owner);
         break;
-      case 'tool':
-        parts.push({ kind: 'tool', tool: toToolCall(part, mapping) });
+      }
+      case 'tool': {
+        const mapped = toToolCall(part, mapping);
+        if (mapped.diff === undefined || mapped.diff.length <= payloadLimits.diff) {
+          parts.push({ kind: 'tool', tool: mapped });
+          break;
+        }
+        // Keep the full patch once under the canonical tool object; display holds the preview.
+        const owner = { ...mapped, diff: '' };
+        owner.diff = retainPayload(owner, mapped.diff, payloadLimits.diff);
+        parts.push({ kind: 'tool', tool: owner });
         break;
+      }
       default:
         // Unknown part types from newer servers are skipped, not guessed at.
         break;

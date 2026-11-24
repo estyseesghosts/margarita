@@ -1,4 +1,5 @@
 import { completeResponses } from './complete-response.ts';
+import { retainedPayload } from './payload-retention.ts';
 import { sanitizeSingleLine, sanitizeTerminalText } from './sanitize-text.ts';
 import { truncatePrompt } from './sticky-prompt.ts';
 import type { TranscriptMessage } from './transcript.ts';
@@ -73,7 +74,8 @@ export function copyableFromMessages(messages: readonly TranscriptMessage[]): Co
     if (message.kind !== 'assistant') continue;
     message.parts.forEach((part, partIndex) => {
       if (part.kind === 'text') {
-        const blocks = [...part.text.matchAll(fencedCode)];
+        const full = retainedPayload(part, part.text);
+        const blocks = [...full.matchAll(fencedCode)];
         blocks.forEach((match, blockIndex) => {
           const language = (match[1] ?? '').trim();
           add(
@@ -97,7 +99,13 @@ export function copyableFromMessages(messages: readonly TranscriptMessage[]): Co
           tool.outputTruncated ?? 'none',
         );
       if (tool.diff !== undefined)
-        add(`${tool.id}:diff`, `Diff · ${tool.name}`, 'diff', tool.diff, 'none');
+        add(
+          `${tool.id}:diff`,
+          `Diff · ${tool.name}`,
+          'diff',
+          retainedPayload(tool, tool.diff),
+          'none',
+        );
       if (tool.error !== undefined)
         add(`${tool.id}:error`, `Error · ${tool.name}`, 'error', tool.error, 'none');
     });

@@ -29,6 +29,7 @@ import {
 import { type ExecutionMarker, executionMarkers } from '../src/domain/execution-segment.ts';
 import { activeMention } from '../src/domain/file-reference.ts';
 import { groupSessions } from '../src/domain/overview-groups.ts';
+import { payloadLimits, retainedPayload, retainPayload } from '../src/domain/payload-retention.ts';
 import type { SessionSummary } from '../src/domain/session.ts';
 import type { AssistantPart, TranscriptMessage } from '../src/domain/transcript.ts';
 import { createTranscriptProjector, foldTranscript } from '../src/domain/transcript.ts';
@@ -204,6 +205,26 @@ async function memoryReport(): Promise<unknown> {
     gcPauseMs: gcPause,
     note: 'JS heap only; native OpenTUI allocations and retained-object snapshots are not attributed here',
   };
+}
+
+/** Profiling evidence for the large-payload thresholds (#356). */
+function payloadRetentionReport(): unknown {
+  const cases = [
+    { kind: 'prose', full: 'word '.repeat(200_000), limit: payloadLimits.text },
+    { kind: 'reasoning', full: 'reason '.repeat(150_000), limit: payloadLimits.text },
+    { kind: 'diff', full: '+line\n'.repeat(300_000), limit: payloadLimits.diff },
+    { kind: 'repeated-64k', full: 'x'.repeat(64_000), limit: payloadLimits.text },
+  ];
+  return cases.map((entry) => {
+    const owner = {};
+    const preview = retainPayload(owner, entry.full, entry.limit);
+    return {
+      kind: entry.kind,
+      sourceChars: entry.full.length,
+      previewChars: preview.length,
+      exactFullRetained: retainedPayload(owner, preview) === entry.full,
+    };
+  });
 }
 
 /**
@@ -520,6 +541,7 @@ const report = {
   before: { heapUsedBytes: before.heapUsed, rssBytes: before.rss },
   scenarios: reports,
   memory,
+  payloadRetention: payloadRetentionReport(),
   sessionPagination,
   unavailable: [
     'event-receipt-to-paint latency (requires a live TTY/PTY trace)',

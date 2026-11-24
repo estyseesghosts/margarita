@@ -370,6 +370,23 @@ node, and mounts a single node larger than the budget whole instead of looping, 
 truncating it. The estimate is conservative and recalculated when the terminal width changes.
 The soak benchmark reports mounted node count, estimated rows and hidden nodes per window.
 
+## Large source payload retention (#356)
+
+Wire mapping keeps a bounded preview in canonical assistant text/reasoning and tool diffs; the
+full source is stored exactly once in a `WeakMap` keyed by the canonical part/tool object.
+Deleting or evicting that object releases both the preview and the full source, and there is no
+global permanent payload cache or second formatted copy.
+
+- Limits are 16 KiB for assistant text/reasoning and 32 KiB for a tool diff. The preview says
+  how many characters are retained and never claims the server truncated the source.
+- `retainedPayload()` is used by `/copy`, the copy picker, complete responses, inspector
+  fallback and the latest-assistant helper, so full content remains available while display
+  folds only the preview.
+- `cachedToolResult()` returns the full diff for the inspector; a shallow copy does not inherit
+  the retained source, which keeps ownership tied to the canonical object.
+- Tests cover 1 MB prose, 1 MB reasoning, a multi-MB diff, Unicode/long-line exactness and the
+  shallow-copy boundary. `scripts/bench.ts` reports source/preview sizes for the same fixtures.
+
 ## Reproducibility rules
 
 - Use the same commit, machine, terminal size, Bun version and power mode for comparisons.
