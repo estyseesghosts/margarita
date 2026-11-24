@@ -4,8 +4,10 @@ import { createEffect, For, Match, Show, Switch } from 'solid-js';
 
 import type { AppController } from '../app/controller.ts';
 import { groupRows, loadMoreRowKey, type OverviewRow } from '../domain/overview-groups.ts';
+import { layoutOverviewRow, layoutOverviewTabs } from '../domain/overview-row-layout.ts';
 import { directoryKey, directoryName } from '../domain/path-identity.ts';
 import { projectLabel } from '../domain/project-label.ts';
+import { sanitizeSingleLine } from '../domain/sanitize-text.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import { executionLabel } from '../domain/session.ts';
 import { formatAge } from '../domain/usage-format.ts';
@@ -21,6 +23,7 @@ export function Overview(props: {
   controller: AppController;
   theme: Theme;
   now: number;
+  width: number;
   ascii?: boolean;
 }) {
   const state = props.controller.state;
@@ -53,13 +56,30 @@ export function Overview(props: {
         <b>Sessions</b>
       </text>
       <box flexDirection="row" marginBottom={1}>
-        <For each={['all', 'local', 'remotes', 'active', 'needs-input'] as const}>
-          {(tab) => (
+        <For
+          each={layoutOverviewTabs(
+            (['all', 'local', 'remotes', 'active', 'needs-input'] as const).map((tab) => {
+              const label = `${props.controller.tabLabel(tab)} ${props.controller.tabCounts()[tab]}`;
+              return state.overview.tab === tab ? `[${label}]` : ` ${label} `;
+            }),
+            Math.max(8, props.width - 2),
+          )}
+        >
+          {(tab, index) => (
             <text
-              fg={state.overview.tab === tab ? props.theme.accent : props.theme.dim}
-              onMouseDown={() => props.controller.setOverviewTab(tab)}
+              fg={
+                (['all', 'local', 'remotes', 'active', 'needs-input'] as const)[index()] ===
+                state.overview.tab
+                  ? props.theme.accent
+                  : props.theme.dim
+              }
+              onMouseDown={() =>
+                props.controller.setOverviewTab(
+                  (['all', 'local', 'remotes', 'active', 'needs-input'] as const)[index()] ?? 'all',
+                )
+              }
             >
-              {`${state.overview.tab === tab ? '[' : ' '}${props.controller.tabLabel(tab)} ${props.controller.tabCounts()[tab]}${state.overview.tab === tab ? ']' : ' '} `}
+              {tab}
             </text>
           )}
         </For>
@@ -122,6 +142,7 @@ export function Overview(props: {
                         selected={selected(row.key)}
                         id={rowID(row.key)}
                         rowKey={row.key}
+                        width={props.width}
                         ascii={props.ascii}
                       />
                     )}
@@ -187,6 +208,7 @@ function SessionLine(props: {
   selected: boolean;
   id: string;
   rowKey: string;
+  width: number;
   ascii?: boolean | undefined;
 }) {
   const execution = () => props.controller.executionOf(props.session.id, props.session.serverID);
@@ -210,6 +232,15 @@ function SessionLine(props: {
       working: props.theme.success,
       unknown: props.theme.dim,
     })[state()];
+  const columns = () =>
+    layoutOverviewRow({
+      selected: props.selected,
+      dot: dot(),
+      title: sanitizeSingleLine(props.session.title ?? props.session.id),
+      status: sanitizeSingleLine(status()),
+      // The scrollbox reserves one cell of padding on each side.
+      contentWidth: Math.max(8, props.width - 2),
+    });
   return (
     <box
       id={props.id}
@@ -218,13 +249,16 @@ function SessionLine(props: {
       onMouseDown={() => props.controller.clickOverviewRow(props.rowKey)}
     >
       <text fg={props.selected ? props.theme.accent : props.theme.dim}>
-        {props.selected ? '  ❯ ' : '    '}
+        <span style={{ fg: props.selected ? props.theme.accent : props.theme.dim }}>
+          {columns().marker}
+        </span>
+        <span style={{ fg: dotColor() }}>{columns().dot}</span>
+        <span style={{ fg: props.theme.text }}>{columns().title}</span>
+        <span> </span>
+        <span style={{ fg: attention() ? props.theme.warn : props.theme.dim }}>
+          {columns().status}
+        </span>
       </text>
-      <text fg={dotColor()}>{`${dot()} `}</text>
-      <text flexGrow={1} fg={props.theme.text}>
-        {props.session.title ?? props.session.id}
-      </text>
-      <text fg={attention() ? props.theme.warn : props.theme.dim}>{` ${status()}`}</text>
     </box>
   );
 }

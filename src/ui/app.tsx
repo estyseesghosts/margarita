@@ -148,7 +148,13 @@ export function App(props: AppProps) {
           )}
         </Match>
         <Match when={state.route.kind === 'overview'}>
-          <Overview controller={controller} theme={props.theme} now={now()} ascii={props.ascii} />
+          <Overview
+            controller={controller}
+            theme={props.theme}
+            now={now()}
+            width={width()}
+            ascii={props.ascii}
+          />
         </Match>
       </Switch>
       <Show when={state.overlay.kind !== 'none' && state.overlay.kind !== 'inspector'}>

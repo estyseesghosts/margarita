@@ -234,6 +234,31 @@ describe('app', () => {
     expect(frame).toContain('New session in kohjoh');
   });
 
+  test('overview keeps long session rows on one line with aligned indicator columns (#344)', async () => {
+    const backend = new FakeBackend();
+    const longTitle = 'A very long session title that used to wrap across several terminal rows';
+    backend.sessions = Array.from({ length: 3 }, (_, index) => ({
+      id: `ses_${index}`,
+      serverID: 'local',
+      projectID: 'p',
+      directory: '/work/kohjoh',
+      title: `${longTitle} ${index}`,
+      createdAt: index,
+      updatedAt: index,
+      archived: false,
+    }));
+    const { setup } = await mount(backend, { width: 60, height: 20 });
+    const frame = setup.captureCharFrame();
+    const rows = frame.split('\n').filter((line) => line.includes('●') || line.includes('○'));
+    expect(rows).toHaveLength(3);
+    const dotColumns = rows.map((line) => Math.max(line.indexOf('●'), line.indexOf('○')));
+    const statusColumns = rows.map((line) => line.indexOf('idle'));
+    expect(new Set(dotColumns).size).toBe(1);
+    expect(new Set(statusColumns).size).toBe(1);
+    for (const line of rows) expect(cellWidth(line)).toBeLessThanOrEqual(60);
+    expect(rows.some((line) => line.includes('…'))).toBe(true);
+  });
+
   test('attach shows welcome panel, transcript and footer; empty Left returns', async () => {
     const { controller, setup } = await mount(backendWithSession());
     setup.mockInput.pressArrow('up');
