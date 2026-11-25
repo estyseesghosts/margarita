@@ -1,0 +1,110 @@
+{
+  // Margarita config (JSONC: comments and trailing commas are allowed).
+  // Invalid values fall back to these defaults and print a warning on stderr.
+  // Unknown keys inside a section are silently ignored, so watch for typos.
+  // Explicit CLI flags always beat config. Restart after editing.
+
+  // Agent used when a session has no explicit agent, and the Shift+Tab cycle order.
+  "agents": {
+    "default": "build",
+    "cycle": ["build", "plan"],
+  },
+
+  // Which sessions the overview includes, how projects are grouped and ordered.
+  "sessions": {
+    "showArchived": false,
+    "showChildren": false,
+    "sortBy": "activity", // activity | name
+    "groupBy": "project", // project | server
+  },
+
+  // What Enter does while a turn is running.
+  "input": {
+    "enterWhileRunning": "queue", // queue | steer
+  },
+
+  "models": {
+    "recentLimit": 8,
+    // Startup model: "model", "model#variant", "provider/model" or "provider/model#variant".
+    // CLI --model/--provider/--effort win. Example:
+    // "default": "anthropic/claude-sonnet-4#high",
+  },
+
+  // Prompt-history entries kept per project.
+  "history": {
+    "limit": 200,
+  },
+
+  "transcript": {
+    "toolOutputChars": 64000, // max tool output retained (1000..1000000)
+    "detailed": false, // initial Ctrl+O detail state
+    "reasoning": "details-only", // hidden | details-only | always
+    "previewRows": 12, // baseline inline preview rows; other budgets scale from it
+    "groupTools": "compact", // compact | none
+  },
+
+  // Selection and right-click behaviour.
+  "clipboard": {
+    "autoCopy": true,
+    "rightClickCopy": true,
+    "rightClickPaste": true,
+  },
+
+  // Every key is remappable. A value is one key ("alt+t"), an array of keys
+  // ("escape" and "f12"), or "unbound" to remove the binding. No chords.
+  // Press F1 in Margarita to see every action ID and its effective binding.
+  // Examples:
+  //   "tasks.toggle": "alt+t",
+  //   "nav.cancel": ["escape", "f12"],
+  //   "help.show": "unbound",
+  // Remapping a printable key (e.g. "x") makes that key a command everywhere,
+  // including while typing; prefer function or modifier keys for global roles.
+  //
+  // Command actions:
+  //   agent.cycle, agent.cyclePrevious, agent.pick, model.pick, model.effort,
+  //   model.recentNext, transcript.details, transcript.copy, transcript.copyLastResponse,
+  //   transcript.pageUp, transcript.pageDown, transcript.top, transcript.bottom,
+  //   transcript.groupPrevious, transcript.groupNext, transcript.childPrevious,
+  //   transcript.childNext, transcript.inspect, form.open, requests.retry,
+  //   history.search, clipboard.paste, clipboard.copySelection, composer.stash,
+  //   composer.editor, composer.newline, composer.undo, composer.redo,
+  //   composer.wordDeleteForward, composer.yank, composer.steer, screen.redraw,
+  //   tasks.toggle, tools.background, help.show
+  //
+  // Key roles (translate a physical key to the key its handlers expect):
+  //   nav.up, nav.down, nav.left, nav.right, nav.pageUp, nav.pageDown, nav.home,
+  //   nav.end, nav.confirm, nav.cancel, nav.tab, nav.backspace, nav.delete,
+  //   nav.space, nav.helpAlt, help.closeAlt, ui.exit, ui.forceExit,
+  //   composer.moveToStart, composer.moveToEnd, composer.deleteWordLeft,
+  //   composer.deleteToStart, composer.deleteToEnd, composer.historyPrevious,
+  //   composer.historyNext, composer.wordLeft, composer.wordRight,
+  //   composer.shiftNewline, queue.remove, queue.steer, form.decline,
+  //   form.openUrl, form.copyUrl, inspector.search, confirmation.yes,
+  //   confirmation.no, diff.info, tasks.propose, tasks.reject,
+  //   tasks.backgroundAll, tasks.cancel, tasks.edit
+  "keys": {},
+
+  // Paired-server shortnames only — never URLs, passwords or tokens.
+  // --local forces "local"; --remote/--server override this setting.
+  "servers": {
+    "launch": "local", // "local" or a paired shortname / server ID
+    // Omit to aggregate all paired servers. Set to an ordered list to narrow it:
+    // "connect": ["home", "work"],
+  },
+
+  // Optional diagnostics path; --debug-log overrides it.
+  // "debugLog": "/path/to/margarita-debug.log",
+
+  "ui": {
+    "theme": "dark", // dark | light | high-contrast
+    "animation": true,
+    "ascii": false,
+    "defaultRoute": "new", // new | overview (only when no explicit CLI target)
+    "reducedMotion": false, // also keeps the blinking caret steady
+    "footer": ["agent", "model", "state", "queued", "goal", "context", "tokens", "cost"], // any subset of these fields
+    // Optional #rrggbb accents. Omitted light accent and caret follow the accent.
+    // "accent": "#e4677e",      // cat, throbber, selections, syntax
+    // "accentLight": "#ffd3a8", // lighter accent
+    // "caret": "#e4677e"        // blinking cursor
+  },
+}
