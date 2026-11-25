@@ -61,7 +61,7 @@ describe('formatFooter', () => {
   test('a missing model shows a truthful loading or unavailable state, never "default model"', () => {
     const { model: _model, tokens: _t, cost: _c, ...bare } = facts;
     expect(formatFooter({ ...bare, modelStatus: 'loading' }, 120)).toBe(
-      'build · Loading model… · working',
+      'build · connecting… · working',
     );
     expect(formatFooter({ ...bare, modelStatus: 'unavailable' }, 120)).toContain(
       'model unavailable',

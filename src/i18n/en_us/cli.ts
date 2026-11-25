@@ -46,7 +46,7 @@ export const cliEnUs = {
       '--resume without an ID opens the overview; drop the prompt or pass a session ID.',
     printNeedsPrompt: '--print needs a prompt.',
   },
-  help: `marg (margarita) — a conversation-first terminal frontend for OpenCode
+  help: `marg (margarita) — a terminal frontend for OpenCode V2
 
 Usage:
   marg [options] [prompt...]

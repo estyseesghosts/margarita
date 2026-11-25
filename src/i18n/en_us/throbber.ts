@@ -15,6 +15,13 @@ export const throbberEnUs = {
     'shivering',
     'crawling',
     "jorkin' it",
+    'pawing',
+    'meowing',
+    'purring',
+    'loafing',
+    'rolling',
+    'smoking',
+    'chasing',
   ],
   fallbackVerb: 'thinking',
   activity: {

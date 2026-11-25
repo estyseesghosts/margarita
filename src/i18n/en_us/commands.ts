@@ -29,7 +29,7 @@ export const commandsEnUs = {
     status: 'Connection and session details',
     keys: 'Show key bindings',
     help: 'Show help',
-    quit: 'Exit (the session keeps running on the server)',
+    quit: 'Exit (session keeps running)',
     server: 'Run a server command explicitly: /server <name> [args]',
     pair: 'Pair a remote server: /pair <link> [--as name] or /pair --url <url> --as name',
     servers: 'List or rename paired servers: /servers · /servers rename <old> <new>',

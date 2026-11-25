@@ -40,9 +40,9 @@ describe('en_us formatters', () => {
   });
 
   test('form character limits pluralize "character"', () => {
-    expect(enUsStrings.forms.minLength(1)).toBe('Must be at least 1 character.');
-    expect(enUsStrings.forms.maxLength(3)).toBe('Must be at most 3 characters.');
-    expect(enUsStrings.forms.atLeast(2)).toBe('At least 2.');
+    expect(enUsStrings.forms.minLength(1)).toBe('minimum 1 character.');
+    expect(enUsStrings.forms.maxLength(3)).toBe('maximum 3 characters.');
+    expect(enUsStrings.forms.atLeast(2)).toBe('at least 2.');
   });
 
   test('footer counts and token rows interpolate without concatenation drift', () => {

@@ -3,7 +3,7 @@ import type { ErrorsStrings } from '../types.ts';
 /** English (United States) pairing validation and inspector metadata headings. */
 export const errorsEnUs = {
   pairing: {
-    invalidUrl: 'That is not a valid pairing URL.',
+    invalidUrl: 'Invalid pairing URL.',
     httpOnly: 'Pairing URLs must use http or https.',
     embeddedCredentials: 'Pairing URLs cannot contain embedded credentials.',
     queryOrFragment: 'A pairing URL cannot contain a query string or fragment.',
@@ -17,7 +17,7 @@ export const errorsEnUs = {
       'Usage: /pair <https://host/auth/connect/code> [--as <shortname>], or /pair --url <https://host> --as <shortname>',
     manualNeedsShortname:
       'A manual server URL needs a shortname: /pair --url <https://host> --as <shortname>',
-    invalidServerUrl: 'That is not a valid server URL.',
+    invalidServerUrl: 'Invalid server URL.',
     serverHttpOnly: 'Server URLs must use http or https.',
     serverEmbeddedCredentials: 'Server URLs cannot contain embedded credentials.',
     serverQueryOrFragment: 'A server URL cannot contain a query string or fragment.',

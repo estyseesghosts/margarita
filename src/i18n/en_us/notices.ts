@@ -4,34 +4,32 @@ import type { NoticesStrings } from '../types.ts';
 export const noticesEnUs = {
   clipboard: {
     empty: 'The clipboard is empty.',
-    cannotRead: (detail) => `Cannot read the clipboard: ${detail}.`,
-    cannotPaste: (detail) => `Cannot paste: ${detail}.`,
-    readFailed: (detail) => `Clipboard read failed: ${detail}.`,
-    copyFailed: (detail) => `Copy failed: ${detail}`,
-    copied: (label, suffix) => `Copied ${label} to the system clipboard${suffix}.`,
+    cannotRead: (detail) => `cannot read clipboard: ${detail}.`,
+    cannotPaste: (detail) => `cannot paste: ${detail}.`,
+    readFailed: (detail) => `clipboard read failed: ${detail}.`,
+    copyFailed: (detail) => `copy failed: ${detail}`,
+    copied: (label, suffix) => `copied ${label} to the clipboard${suffix}.`,
     unconfirmed: (label, suffix) =>
-      `Clipboard sequence emitted for ${label}${suffix} (no terminal acknowledgement).`,
+      `clipboard sequence emitted for ${label}${suffix} (no terminal acknowledgement).`,
     savedToFile: (label, path, suffix) =>
-      `Clipboard unavailable; saved ${label} to ${path}${suffix}.`,
+      `clipboard unavailable; saved ${label} to ${path}${suffix}.`,
     unavailable: (label, detail, suffix) =>
-      `Clipboard unavailable for ${label}: ${detail}${suffix}. Nothing was copied.`,
+      `clipboard unavailable for ${label}: ${detail}${suffix}. nothing was copied.`,
     failed: (suffix) => `Copy failed${suffix}.`,
-    noSelection: 'No text is selected.',
-    noSession: 'Open a session before copying a response.',
-    noCompleteResponseHistory:
-      'No complete response is fully loaded; earlier history remains. Scroll to the top to load it.',
-    noCompleteResponse: 'No complete agent response in this session yet.',
+    noSelection: 'no text selected.',
+    noSession: 'open a session before copying.',
+    noCompleteResponseHistory: 'scroll to the top to load earlier history.',
+    noCompleteResponse: 'no full agent messages in this session.',
   },
   attachments: {
-    notText: 'Pasted data is not text.',
-    notTextOrImage: 'Pasted data is not text or a supported image.',
-    questionsTextOnly: 'Questions accept pasted text only; attach files from the composer.',
-    dialogTextOnly: 'This dialog accepts pasted text only.',
-    questionChangedClipboard:
-      'The dialog changed before the clipboard paste landed; nothing was inserted.',
-    questionChanged: 'Question changed before the paste landed; nothing was inserted.',
+    notText: 'pasted data is not text.',
+    notTextOrImage: 'pasted data is not text or a supported image.',
+    questionsTextOnly: 'questions accept pasted text only; attach files from the composer.',
+    dialogTextOnly: 'this dialog accepts pasted text only.',
+    questionChangedClipboard: 'the dialog changed before the paste landed; nothing inserted.',
+    questionChanged: 'Question changed before the paste landed; nothing inserted.',
     answeredOrWithdrawn: 'This question was answered or withdrawn.',
-    pasteTruncated: (limit) => `Paste truncated to ${limit.toLocaleString('en-US')} characters.`,
+    pasteTruncated: (limit) => `paste truncated to ${limit.toLocaleString('en-US')} characters.`,
     pasteStashedImages: (count) =>
       `Paste stashed: the route changed while reading ${count} attachment(s); they await in the originating draft.`,
     pasteStashedText:

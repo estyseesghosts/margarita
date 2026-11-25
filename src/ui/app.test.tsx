@@ -237,7 +237,7 @@ describe('app', () => {
     expect(frame).toContain('Sessions');
     expect(frame).toContain('kohjoh');
     expect(frame).toContain('Renderer stalled near Goldenrod');
-    expect(frame).toContain('New session in kohjoh');
+    expect(frame).toContain('working in kohjoh');
   });
 
   test('overview wraps long titles to two lines with aligned indicator columns (#344)', async () => {
@@ -4430,7 +4430,7 @@ test('help is bounded and PageUp/PageDown reach every action (#241)', async () =
   expect(first).not.toBeNull();
   const total = Number(first?.[2]);
   expect(Number(first?.[1])).toBeLessThan(total);
-  expect(frame).toContain('Keys · PgUp/PgDn scroll');
+  expect(frame).toContain('keys · pgUp/pgDn scroll');
 
   setup.mockInput.pressKey(pageUp);
   await settle(setup);

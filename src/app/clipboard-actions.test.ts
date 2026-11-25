@@ -361,7 +361,7 @@ describe('copy last complete response (issue #5)', () => {
     await flush();
     await controller.copyLastResponse();
     expect(writes).toEqual([]);
-    expect(controller.state.notice?.text).toContain('No complete agent response');
+    expect(controller.state.notice?.text).toContain('no full agent messages');
     controller.dispose();
   });
 });
@@ -408,7 +408,7 @@ describe('selection copy outcomes (issues #1, #4)', () => {
 
     await controller.copySelection('dragged text', 'autocopy');
     expect(written).toEqual([]);
-    expect(controller.state.notice?.text).toContain('Nothing was copied');
+    expect(controller.state.notice?.text).toContain('nothing was copied');
 
     await controller.copySelection('dragged text', 'explicit');
     expect(written).toHaveLength(1);
@@ -427,9 +427,9 @@ describe('selection copy outcomes (issues #1, #4)', () => {
     await flush();
     await controller.copySelection('', 'explicit');
     expect(writes).toEqual([]);
-    expect(controller.state.notice?.text).toContain('No text is selected');
+    expect(controller.state.notice?.text).toContain('no text selected');
     await controller.copySelection('', 'autocopy');
-    expect(controller.state.notice?.text).toContain('No text is selected');
+    expect(controller.state.notice?.text).toContain('no text selected');
     controller.dispose();
   });
 });

@@ -5,10 +5,10 @@ export const overlaysEnUs = {
   keys: {
     unbound: 'unbound',
     left: 'Left',
-    leftDetail: 'overview (empty prompt only)',
-    interrupt: 'Ctrl+C',
+    leftDetail: 'overview',
+    interrupt: 'ctrl+c',
     interruptDetail: 'interrupt · clear · exit',
-    helpTitle: 'Keys · PgUp/PgDn scroll · Esc to close',
+    helpTitle: 'keys · pgUp/pgDn scroll · esc to close',
     helpRows: (start, end, total) => `rows ${start}–${end} of ${total} · PgUp/PgDn`,
   },
   inspector: {

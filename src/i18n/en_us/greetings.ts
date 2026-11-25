@@ -19,6 +19,8 @@ export const greetingsEnUs = {
       'what are you building?',
       'rm -rfv / --no-preserve-root',
       'new day, new project?',
+      'deleted System32',
+      'live laugh love linux',
     ],
   },
   fallback: 'welcome back!',

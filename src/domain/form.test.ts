@@ -97,9 +97,9 @@ describe('forms', () => {
   });
 
   test('validation reports the first invalid visible field', () => {
-    expect(firstInvalid(form, {})).toEqual({ index: 0, problem: 'Required.' });
-    expect(firstInvalid(form, { env: 'qa' })?.problem).toBe('Pick one of the options.');
-    expect(firstInvalid(form, { env: 'prod' })).toEqual({ index: 1, problem: 'Required.' });
+    expect(firstInvalid(form, {})).toEqual({ index: 0, problem: 'required.' });
+    expect(firstInvalid(form, { env: 'qa' })?.problem).toBe('pick one option.');
+    expect(firstInvalid(form, { env: 'prod' })).toEqual({ index: 1, problem: 'required.' });
     expect(firstInvalid(form, { env: 'prod', reason: 'hotfix' })).toBeUndefined();
   });
 
@@ -124,8 +124,8 @@ describe('forms', () => {
     expect(parseNumber(field, '3')).toBe(3);
     expect(parseNumber(field, '2.5')).toBeUndefined();
     expect(parseNumber(field, 'x')).toBeUndefined();
-    expect(validateField(field, 9)).toBe('At most 5.');
-    expect(validateField(field, '3')).toBe('Enter a whole number.');
+    expect(validateField(field, 9)).toBe('at most 5.');
+    expect(validateField(field, '3')).toBe('enter a whole number.');
   });
 
   test('editor walks visible fields, reveals conditional ones and submits', () => {
@@ -136,7 +136,7 @@ describe('forms', () => {
     expect(currentField(form, editor)?.key).toBe('reason');
 
     const blocked = editorKey(form, editor, press('return'));
-    expect(blocked.editor.problem).toBe('Required.');
+    expect(blocked.editor.problem).toBe('required.');
     editor = blocked.editor;
     for (const char of ['h', 'o', 't']) editor = editorKey(form, editor, press(char, char)).editor;
     editor = editorKey(form, editor, press('return')).editor;
@@ -169,7 +169,7 @@ describe('forms', () => {
     };
     expect(toggleOption(field, ['b'], 'a')).toEqual(['a', 'b']);
     expect(toggleOption(field, ['a', 'b'], 'a')).toEqual(['b']);
-    expect(validateField(field, ['a', 'b'])).toBe('Pick at most 1.');
+    expect(validateField(field, ['a', 'b'])).toBe('pick at most 1.');
   });
 
   test('string constraints are validated locally with actionable messages (#211)', () => {
@@ -184,12 +184,12 @@ describe('forms', () => {
       maxLength: 40,
       pattern: '^[^@]+@',
     };
-    expect(validateField(email, 'x')).toBe('Must be at least 6 characters.');
-    expect(validateField(email, 'xxxxx@y')).toBe('Enter an email address.');
+    expect(validateField(email, 'x')).toBe('minimum 6 characters.');
+    expect(validateField(email, 'xxxxx@y')).toBe('enter an email address.');
     expect(validateField(email, 'user@example.test')).toBeUndefined();
     expect(validateField({ ...email, pattern: '(' }, 'user@example.test')).toBeUndefined();
     expect(validateField({ ...email, pattern: '.*', format: 'date' }, '2026-02-30')).toBe(
-      'Enter a date (YYYY-MM-DD).',
+      'enter a date (YYYY-MM-DD).',
     );
     expect(
       validateField({ ...email, pattern: '.*', format: 'date' }, '2026-11-22'),
