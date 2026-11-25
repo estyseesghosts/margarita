@@ -254,7 +254,7 @@ describe('controller transcript metadata (#349, #350)', () => {
         const node = view.at(i)!;
         expect(index.keyToIndex.get(node.key)).toBe(i);
       }
-      expect(Array.from(index.keyToIndex.values()).sort((a, b) => a - b)).toEqual(
+      expect(Array.from(index.keyToIndex.values()).toSorted((a, b) => a - b)).toEqual(
         Array.from({ length: view.length }, (_, i) => i),
       );
     } finally {

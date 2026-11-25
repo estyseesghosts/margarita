@@ -215,6 +215,7 @@ import {
   type Route,
 } from './app-state.ts';
 import type { ClipboardPort, ClipboardRead, CopyOutcome } from './clipboard.ts';
+import { mapConcurrent } from './concurrency.ts';
 import { type DebugLog, noDebugLog } from './debug-log.ts';
 import { descendantScope } from './descendant-scope.ts';
 import { DraftRegistry } from './draft-registry.ts';
@@ -473,6 +474,9 @@ const transcriptCacheLimit = 8;
 /** Default retained-history budget; summaries and drafts live outside this cache. */
 const transcriptCacheByteLimit = 32 * 1024 * 1024;
 const sessionPageLimit = 5;
+/** First-page loads for every registered host run with bounded concurrency so a slow or
+ * failing host cannot exhaust the process or stall unrelated hosts (#audit-2 task 8). */
+const hostLoadConcurrency = 4;
 const reconcileConcurrency = 8;
 const hydrationConcurrency = 4;
 /** Ownership checks for uncached child questions run after confirmed data is published (#294). */
@@ -1868,8 +1872,8 @@ export class AppController {
   async loadSessions(serverID?: string): Promise<void> {
     if (serverID === undefined || serverID === this.serverID) this.launchLoadError = undefined;
     const servers = serverID === undefined ? this.serverIDs() : [serverID];
-    const results = await Promise.all(
-      servers.map((targetID) => this.loadFirstSessionPage(targetID)),
+    const results = await mapConcurrent(servers, hostLoadConcurrency, (targetID) =>
+      this.loadFirstSessionPage(targetID),
     );
     // Only the freshest refresh for a still-registered host may be applied; anything older
     // or whose server was removed mid-flight is dropped so it cannot resurrect rows.
@@ -2178,15 +2182,33 @@ export class AppController {
     usageSeq: number,
   ): void {
     if (sessions.length === 0) return;
-    const fresh: Record<string, SessionSummary> = {};
+    // A page commit touches only the rows present on this page. Unrelated cached rows keep
+    // their identity instead of being copied into a new whole-record object on every page
+    // arrival (#audit-2 task 9).
+    const updates: Array<[string, SessionSummary]> = [];
     for (const session of sessions) {
-      fresh[this.keyFor(serverID, session.id)] = { ...session, serverID };
+      const key = this.keyFor(serverID, session.id);
+      const existing = this.state.sessions[key];
+      const liveUsageAdvanced = this.generations.usageEvidence(key) > usageSeq;
+      let next: SessionSummary;
+      if (liveUsageAdvanced && existing !== undefined) {
+        next = {
+          ...session,
+          ...(existing.cost === undefined ? {} : { cost: existing.cost }),
+          ...(existing.tokens === undefined ? {} : { tokens: existing.tokens }),
+        };
+      } else {
+        next = { ...session };
+      }
+      if (existing !== next) updates.push([key, next]);
     }
-    this.setStateTouchingOverview('sessions', (current) =>
-      mergeCommittedSessions(current, fresh, {}, usageSeq, (key) =>
-        this.generations.usageEvidence(key),
-      ),
-    );
+    if (updates.length === 0) return;
+    // One batch and a single overview invalidation for the whole page; per-key writes never
+    // copy rows the page did not touch (#audit-2 task 9).
+    batch(() => {
+      for (const [key, next] of updates) this.setState('sessions', key, next);
+      this.overview.invalidate();
+    });
   }
 
   /**
