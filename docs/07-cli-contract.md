@@ -74,7 +74,7 @@ Expand `~` only deliberately; resolve `--cwd` before network calls. Preserve dri
 ## CLI acceptance matrix
 
 - Quoted prompt with punctuation/newlines intact.
-- No prompt opens overview, with current project preselected.
+- No prompt opens a new session in the current directory, or the overview when `ui.defaultRoute` is `"overview"`.
 - Full model ID + --provider mismatch fails before mutation.
 - Unknown effort lists supported variants.
 - Multiple providers with same model ID prompts or errors deterministically.

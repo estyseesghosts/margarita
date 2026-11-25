@@ -49,6 +49,30 @@ test('remapped task shortcut toggles the task overlay in overview and conversati
   controller.dispose();
 });
 
+test('a remapped navigation key reaches handlers that still expect the canonical key', () => {
+  const controller = new AppController({
+    backend: new FakeBackend(),
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work',
+    version: '0.0.1',
+    now: () => 1,
+    saveLocalState: async () => {},
+    listFiles: async () => [],
+    requestExit: () => {},
+  });
+  const keymap = buildKeymap({ 'nav.cancel': 'f12' }).keymap;
+  const services = { openEditor: () => {}, redraw: () => {}, scroll: () => {} };
+  const press = (name: string) =>
+    routeKey(controller, keymap, { name, ctrl: false, alt: false, shift: false }, services);
+  expect(press('f1')).toBe(true);
+  expect(controller.state.overlay.kind).toBe('help');
+  expect(press('f12')).toBe(true);
+  expect(controller.state.overlay.kind).toBe('none');
+  controller.dispose();
+});
+
 test('Ctrl+W deletes a whitespace-delimited unit while Ctrl+Backspace deletes a word', async () => {
   const backend = new FakeBackend();
   backend.sessions = [

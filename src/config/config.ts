@@ -1,35 +1,107 @@
 import { readFile } from 'node:fs/promises';
 
 import { isRecord } from '../domain/backend-event.ts';
-
-export type AppConfig = Readonly<{
-  agents: Readonly<{ default: string; cycle: readonly string[] }>;
-  sessions: Readonly<{ showArchived: boolean; showChildren: boolean }>;
-  input: Readonly<{ enterWhileRunning: 'queue' | 'steer' }>;
-  models: Readonly<{ recentLimit: number }>;
-  history: Readonly<{ limit: number }>;
-  transcript: Readonly<{ toolOutputChars: number }>;
-  clipboard: Readonly<{ autoCopy: boolean; rightClickCopy: boolean; rightClickPaste: boolean }>;
-  keys: Readonly<Record<string, string>>;
-  ui: Readonly<{ theme: ThemeName; animation: boolean; ascii: boolean }>;
-}>;
+import type { KeyOverride } from '../domain/keymap.ts';
+import { parseModelRef } from '../domain/model-ref.ts';
 
 export const themeNames = ['dark', 'light', 'high-contrast'] as const;
 export type ThemeName = (typeof themeNames)[number];
 
+export const routeNames = ['new', 'overview'] as const;
+export type RouteName = (typeof routeNames)[number];
+
+export const sortNames = ['activity', 'name'] as const;
+export type SortName = (typeof sortNames)[number];
+
+export const groupNames = ['project', 'server'] as const;
+export type GroupName = (typeof groupNames)[number];
+
+export const reasoningNames = ['hidden', 'details-only', 'always'] as const;
+export type ReasoningName = (typeof reasoningNames)[number];
+
+export const toolGroupNames = ['compact', 'none'] as const;
+export type ToolGroupName = (typeof toolGroupNames)[number];
+
+/** Footer fields a user may choose; `separator` is layout, never configurable. */
+export const footerNames = [
+  'agent',
+  'model',
+  'state',
+  'queued',
+  'goal',
+  'context',
+  'tokens',
+  'cost',
+] as const;
+export type FooterName = (typeof footerNames)[number];
+
+export type AppConfig = Readonly<{
+  agents: Readonly<{ default: string; cycle: readonly string[] }>;
+  sessions: Readonly<{
+    showArchived: boolean;
+    showChildren: boolean;
+    sortBy: SortName;
+    groupBy: GroupName;
+  }>;
+  input: Readonly<{ enterWhileRunning: 'queue' | 'steer' }>;
+  models: Readonly<{ recentLimit: number; default?: string }>;
+  history: Readonly<{ limit: number }>;
+  transcript: Readonly<{
+    toolOutputChars: number;
+    detailed: boolean;
+    reasoning: ReasoningName;
+    previewRows: number;
+    groupTools: ToolGroupName;
+  }>;
+  clipboard: Readonly<{ autoCopy: boolean; rightClickCopy: boolean; rightClickPaste: boolean }>;
+  keys: Readonly<Record<string, KeyOverride>>;
+  /** Paired-server shortnames only; secrets never live in this file. */
+  servers: Readonly<{ launch: string; connect?: readonly string[] }>;
+  debugLog?: string;
+  ui: Readonly<{
+    theme: ThemeName;
+    animation: boolean;
+    ascii: boolean;
+    accent?: string;
+    accentLight?: string;
+    caret?: string;
+    defaultRoute: RouteName;
+    footer: readonly FooterName[];
+    reducedMotion: boolean;
+  }>;
+}>;
+
 export const defaultConfig: AppConfig = {
   agents: { default: 'build', cycle: ['build', 'plan'] },
-  sessions: { showArchived: false, showChildren: false },
+  sessions: { showArchived: false, showChildren: false, sortBy: 'activity', groupBy: 'project' },
   input: { enterWhileRunning: 'queue' },
   models: { recentLimit: 8 },
   history: { limit: 200 },
-  transcript: { toolOutputChars: 64_000 },
+  transcript: {
+    toolOutputChars: 64_000,
+    detailed: false,
+    reasoning: 'details-only',
+    previewRows: 12,
+    groupTools: 'compact',
+  },
   clipboard: { autoCopy: true, rightClickCopy: true, rightClickPaste: true },
   keys: {},
-  ui: { theme: 'dark', animation: true, ascii: false },
+  servers: { launch: 'local' },
+  ui: {
+    theme: 'dark',
+    animation: true,
+    ascii: false,
+    defaultRoute: 'new',
+    footer: [...footerNames],
+    reducedMotion: false,
+  },
 };
 
 export type ConfigLoad = Readonly<{ config: AppConfig; warnings: readonly string[] }>;
+
+function isOneOf<T extends string>(value: unknown, names: readonly T[]): value is T {
+  return typeof value === 'string' && names.some((name) => name === value);
+}
 
 /** Loads config; a missing file is fine, invalid content falls back per field with warnings. */
 export async function loadConfig(path: string): Promise<ConfigLoad> {
@@ -78,6 +150,8 @@ export function parseConfig(raw: unknown): ConfigLoad {
     'transcript',
     'clipboard',
     'keys',
+    'servers',
+    'debugLog',
     'ui',
   ]);
   for (const key of Object.keys(raw)) {
@@ -98,6 +172,7 @@ export function parseConfig(raw: unknown): ConfigLoad {
   const transcript = section('transcript');
   const clipboard = section('clipboard');
   const keysRaw = section('keys');
+  const servers = section('servers');
   const ui = section('ui');
 
   const string = (value: unknown, path: string, fallback: string): string => {
@@ -119,6 +194,47 @@ export function parseConfig(raw: unknown): ConfigLoad {
     warnings.push(`${path} must be a positive integer`);
     return fallback;
   };
+  const hex = (value: unknown, path: string): string | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)) return value;
+    warnings.push(`${path} must be a #rrggbb colour`);
+    return undefined;
+  };
+  const oneOf = <T extends string>(
+    value: unknown,
+    path: string,
+    names: readonly T[],
+    fallback: T,
+  ): T => {
+    if (value === undefined) return fallback;
+    if (isOneOf(value, names)) return value;
+    warnings.push(`${path} must be one of ${names.join(', ')}`);
+    return fallback;
+  };
+  const stringList = (
+    value: unknown,
+    path: string,
+    allowed?: readonly string[],
+  ): string[] | undefined => {
+    if (value === undefined) return undefined;
+    if (!Array.isArray(value)) {
+      warnings.push(`${path} must be an array of strings`);
+      return undefined;
+    }
+    const result: string[] = [];
+    for (const entry of value) {
+      if (typeof entry !== 'string' || entry === '') {
+        warnings.push(`${path} must contain only non-empty strings`);
+        continue;
+      }
+      if (allowed !== undefined && !allowed.includes(entry)) {
+        warnings.push(`${path} has unknown entry "${entry}"`);
+        continue;
+      }
+      if (!result.includes(entry)) result.push(entry);
+    }
+    return result;
+  };
 
   let cycle = defaultConfig.agents.cycle;
   if (agents['cycle'] !== undefined) {
@@ -136,18 +252,41 @@ export function parseConfig(raw: unknown): ConfigLoad {
   if (enter === 'queue' || enter === 'steer') enterWhileRunning = enter;
   else if (enter !== undefined) warnings.push('input.enterWhileRunning must be "queue" or "steer"');
 
-  let theme = defaultConfig.ui.theme;
-  const themeRaw = ui['theme'];
-  const matched = themeNames.find((name) => name === themeRaw);
-  if (matched !== undefined) theme = matched;
-  else if (themeRaw !== undefined)
-    warnings.push(`ui.theme must be one of ${themeNames.join(', ')}`);
-
-  const keys: Record<string, string> = {};
+  const keys: Record<string, KeyOverride> = {};
   for (const [action, binding] of Object.entries(keysRaw)) {
-    if (typeof binding === 'string') keys[action] = binding;
-    else warnings.push(`keys.${action} must be a string`);
+    if (typeof binding === 'string' && binding !== '') keys[action] = binding;
+    else if (
+      Array.isArray(binding) &&
+      binding.length > 0 &&
+      binding.every((entry) => typeof entry === 'string' && entry !== '')
+    )
+      keys[action] = binding;
+    else warnings.push(`keys.${action} must be a single key or an array of keys`);
   }
+
+  const accent = hex(ui['accent'], 'ui.accent');
+  const accentLight = hex(ui['accentLight'], 'ui.accentLight');
+  const caret = hex(ui['caret'], 'ui.caret');
+  const footer = stringList(ui['footer'], 'ui.footer', footerNames);
+  const connect = stringList(servers['connect'], 'servers.connect');
+  if (connect !== undefined && connect.length === 0) {
+    warnings.push('servers.connect must not be empty; using all paired servers');
+  }
+  let defaultModel: string | undefined;
+  const modelRaw = models['default'];
+  if (modelRaw !== undefined) {
+    if (
+      typeof modelRaw === 'string' &&
+      /^\S+$/.test(modelRaw) &&
+      parseModelRef(modelRaw) !== undefined
+    )
+      defaultModel = modelRaw.trim();
+    else warnings.push('models.default must be model or provider/model[#variant]');
+  }
+  let debugLog: string | undefined;
+  const debugRaw = raw['debugLog'];
+  if (typeof debugRaw === 'string' && debugRaw !== '') debugLog = debugRaw;
+  else if (debugRaw !== undefined) warnings.push('debugLog must be a non-empty path');
 
   return {
     config: {
@@ -158,6 +297,8 @@ export function parseConfig(raw: unknown): ConfigLoad {
       sessions: {
         showArchived: bool(sessions['showArchived'], 'sessions.showArchived', false),
         showChildren: bool(sessions['showChildren'], 'sessions.showChildren', false),
+        sortBy: oneOf(sessions['sortBy'], 'sessions.sortBy', sortNames, 'activity'),
+        groupBy: oneOf(sessions['groupBy'], 'sessions.groupBy', groupNames, 'project'),
       },
       input: { enterWhileRunning },
       models: {
@@ -166,6 +307,7 @@ export function parseConfig(raw: unknown): ConfigLoad {
           'models.recentLimit',
           defaultConfig.models.recentLimit,
         ),
+        ...(defaultModel === undefined ? {} : { default: defaultModel }),
       },
       history: { limit: count(history['limit'], 'history.limit', defaultConfig.history.limit) },
       transcript: {
@@ -175,6 +317,24 @@ export function parseConfig(raw: unknown): ConfigLoad {
           defaultConfig.transcript.toolOutputChars,
           warnings,
         ),
+        detailed: bool(transcript['detailed'], 'transcript.detailed', false),
+        reasoning: oneOf(
+          transcript['reasoning'],
+          'transcript.reasoning',
+          reasoningNames,
+          'details-only',
+        ),
+        previewRows: count(
+          transcript['previewRows'],
+          'transcript.previewRows',
+          defaultConfig.transcript.previewRows,
+        ),
+        groupTools: oneOf(
+          transcript['groupTools'],
+          'transcript.groupTools',
+          toolGroupNames,
+          'compact',
+        ),
       },
       clipboard: {
         autoCopy: bool(clipboard['autoCopy'], 'clipboard.autoCopy', true),
@@ -182,10 +342,26 @@ export function parseConfig(raw: unknown): ConfigLoad {
         rightClickPaste: bool(clipboard['rightClickPaste'], 'clipboard.rightClickPaste', true),
       },
       keys,
+      servers: {
+        launch: string(servers['launch'], 'servers.launch', 'local'),
+        ...(connect === undefined || connect.length === 0 ? {} : { connect }),
+      },
+      ...(debugLog === undefined ? {} : { debugLog }),
       ui: {
-        theme,
+        theme: oneOf(ui['theme'], 'ui.theme', themeNames, 'dark'),
         animation: bool(ui['animation'], 'ui.animation', defaultConfig.ui.animation),
         ascii: bool(ui['ascii'], 'ui.ascii', defaultConfig.ui.ascii),
+        ...(accent === undefined ? {} : { accent }),
+        ...(accentLight === undefined ? {} : { accentLight }),
+        ...(caret === undefined ? {} : { caret }),
+        defaultRoute: oneOf(ui['defaultRoute'], 'ui.defaultRoute', routeNames, 'new'),
+        footer:
+          footer === undefined
+            ? defaultConfig.ui.footer
+            : footer.filter((entry): entry is FooterName =>
+                footerNames.some((name) => name === entry),
+              ),
+        reducedMotion: bool(ui['reducedMotion'], 'ui.reducedMotion', false),
       },
     },
     warnings,

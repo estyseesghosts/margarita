@@ -1,6 +1,19 @@
 import { posix, win32 } from 'node:path';
 
+import type { RouteName } from '../config/config.ts';
 import { isServerAbsolutePath, serverPathShape } from '../domain/server-path.ts';
+import type { StartTarget } from './args.ts';
+
+/**
+ * Applies the configured startup route only to the implicit no-argument target.
+ * Every explicit CLI selection (prompt, --continue, --resume) is left untouched.
+ */
+export function withDefaultRoute(target: StartTarget, defaultRoute: RouteName): StartTarget {
+  if (target.kind === 'new' && target.prompt === undefined && defaultRoute === 'overview') {
+    return { kind: 'overview' };
+  }
+  return target;
+}
 
 export type WorkingDirectoryResult =
   { ok: true; directory: string } | { ok: false; message: string };

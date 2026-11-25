@@ -18,7 +18,8 @@ import { remoteConnectionFor } from './app/remote-connection.ts';
 import { buildVersion } from './build-version.ts';
 import { type CliOptions, helpText, parseArgs } from './cli/args.ts';
 import { exitCodes, runPrint } from './cli/print.ts';
-import { resolveWorkingDirectory } from './cli/target.ts';
+import { resolveWorkingDirectory, withDefaultRoute } from './cli/target.ts';
+import { ensureConfigTemplate } from './config/config-template.ts';
 import { loadConfig } from './config/config.ts';
 import { systemCredentialStore } from './config/credentials.ts';
 import { loadState } from './config/local-state.ts';
@@ -27,10 +28,11 @@ import { loadServerProfiles } from './config/server-profiles.ts';
 import { buildKeymap } from './domain/keymap.ts';
 import type { ModelSelection } from './domain/model-ref.ts';
 import type { SessionRef } from './domain/server-identity.ts';
+import { configurePreviewRows } from './domain/transcript.ts';
 import { strings } from './i18n/index.ts';
 import { createStartupTimeline } from './perf/startup.ts';
 import { App } from './ui/app.tsx';
-import { pickTheme } from './ui/theme.ts';
+import { pickTheme, withAccentOverrides } from './ui/theme.ts';
 
 // Monotonic elapsed time since process entry. The controller receives the same function, so
 // its milestones and main.ts's stages share one origin (#345).
@@ -77,9 +79,15 @@ async function main(argv: readonly string[]): Promise<number> {
 async function run(options: CliOptions, version: string): Promise<number> {
   const env = process.env;
   const startedAt = Date.now();
+  // A configured log path is read before the main config load so crash handlers cover startup.
+  // execute() still loads config once as the authoritative source; this only picks the path.
+  const configuredLog =
+    options.debugLog ??
+    (await loadConfig(options.config ?? appPaths(env, process.platform).configFile)).config
+      .debugLog;
   let debugLog: DebugLog = noDebugLog;
-  if (options.debugLog !== undefined) {
-    const created = createDebugLog(options.debugLog);
+  if (configuredLog !== undefined) {
+    const created = createDebugLog(configuredLog);
     if (!created.ok) {
       process.stderr.write(`${strings.cli.prefix}: ${created.message}\n`);
       return exitCodes.usage;
@@ -146,10 +154,14 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
   const platform = process.platform;
   const localCwd = options.cwd === undefined ? process.cwd() : absolute(options.cwd);
   const paths = appPaths(env, platform);
-  const configLoad = await loadConfig(options.config ?? paths.configFile);
+  const configPath = options.config ?? paths.configFile;
+  const templateWarning = await ensureConfigTemplate(configPath);
+  const configLoad = await loadConfig(configPath);
   startupTimeline.mark('config-loaded');
-  for (const warning of configLoad.warnings)
-    process.stderr.write(`${strings.cli.configWarning(warning)}\n`);
+  for (const warning of [templateWarning, ...configLoad.warnings]) {
+    if (warning !== undefined) process.stderr.write(`${strings.cli.configWarning(warning)}\n`);
+  }
+  configurePreviewRows(configLoad.config.transcript.previewRows);
   const keymapBuild = buildKeymap(configLoad.config.keys);
   for (const error of keymapBuild.errors)
     process.stderr.write(`${strings.cli.keyWarning(error)}\n`);
@@ -160,6 +172,29 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
   const profiles = profileLoad.profiles;
   const credentials = systemCredentialStore(platform, paths.stateDir);
 
+  // Explicit CLI flags win. --local forces the local service even when config names a remote;
+  // a configured launch host behaves exactly like --remote, including its filesystem rules.
+  const configuredLaunch = configLoad.config.servers.launch;
+  const configProfile =
+    options.server === undefined && !options.local && configuredLaunch !== 'local'
+      ? profiles.profiles.find(
+          (profile) =>
+            profile.shortname.toLowerCase() === configuredLaunch.toLowerCase() ||
+            profile.serverID === configuredLaunch,
+        )
+      : undefined;
+  if (
+    options.server === undefined &&
+    !options.local &&
+    configuredLaunch !== 'local' &&
+    configProfile === undefined
+  ) {
+    process.stderr.write(
+      `${strings.cli.configWarning(`servers.launch "${configuredLaunch}" is not a paired server; using local`)}\n`,
+    );
+  }
+  const effectiveRemote = options.remote ?? configProfile?.shortname;
+
   let backend: Backend;
   let remoteFilesystem = false;
   let serverID = 'local';
@@ -168,8 +203,8 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
   const connectionsExtra: AssemblyConnection[] = [];
   try {
     let connection: Connection;
-    if (options.remote !== undefined) {
-      const alias = options.remote;
+    if (effectiveRemote !== undefined) {
+      const alias = effectiveRemote;
       const profile = profiles.profiles.find(
         (entry) => entry.shortname.toLowerCase() === alias.toLowerCase(),
       );
@@ -249,7 +284,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     // Policy: --server/--remote select the primary host, they never narrow the overview.
     // A discovered local service is registered alongside the explicit host and all paired
     // profiles stay available, so identical project names are always distinguishable.
-    if (options.remote !== undefined || options.server !== undefined) {
+    if (effectiveRemote !== undefined || options.server !== undefined) {
       const local = await connect({ startServer: false }).catch(() => undefined);
       if (local !== undefined) {
         const localServerID = serverIDForConnection(local);
@@ -300,6 +335,9 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
       env,
       credentials,
       connections: launchConnection === undefined ? [] : [launchConnection, ...connectionsExtra],
+      ...(configLoad.config.servers.connect === undefined
+        ? {}
+        : { restoreServerIDs: configLoad.config.servers.connect }),
       profiles,
       localState: stateLoad.state,
       remoteFilesystem,
@@ -388,16 +426,21 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
 
     const ui = configLoad.config.ui;
     const animate =
-      ui.animation && env['MARGARITA_NO_ANIMATION'] === undefined && env['NO_COLOR'] === undefined;
+      ui.animation &&
+      !ui.reducedMotion &&
+      env['MARGARITA_NO_ANIMATION'] === undefined &&
+      env['NO_COLOR'] === undefined;
     try {
       await render(
         () =>
           App({
             controller,
             keymap: keymapBuild.keymap,
-            theme: pickTheme(env, ui.theme),
+            theme: withAccentOverrides(pickTheme(env, ui.theme), ui),
             animate,
             ascii: ui.ascii || env['MARGARITA_ASCII'] !== undefined,
+            reducedMotion: ui.reducedMotion,
+            footer: ui.footer,
             env,
           }),
         renderer,
@@ -459,7 +502,8 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
       : exitCodes.unavailable;
   }
 
-  const target = options.target;
+  // Only the implicit no-argument target is configurable; every explicit CLI selection wins.
+  const target = withDefaultRoute(options.target, configLoad.config.ui.defaultRoute);
   // A remote target has no meaningful implicit directory: this machine's cwd is not on the
   // remote host. Starting or continuing without an explicit remote --cwd is an error.
   if (remoteFilesystem && cwd === '') {
@@ -476,7 +520,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
   // An explicit --remote/--server host is authoritative for resume/continue: resolution must
   // never silently search unrelated hosts (#149, #152).
   const explicitServerID =
-    options.remote !== undefined || options.server !== undefined ? serverID : undefined;
+    effectiveRemote !== undefined || options.server !== undefined ? serverID : undefined;
   let sessionRef: SessionRef | undefined;
   let resolvedDirectory = cwd;
   if (target.kind === 'resume') {
@@ -513,6 +557,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
 
   // An existing session keeps its own selections unless a flag says otherwise, and flags are
   // checked against that session's project. A new session uses the startup project's catalog.
+  const configuredModel = options.model ?? configLoad.config.models.default;
   let agent: { agent?: string } = {};
   let model: { model?: ModelSelection } = {};
   if (sessionRef === undefined) {
@@ -524,7 +569,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     }
     const resolvedModel = controller.resolveCliModel({
       ...(options.provider === undefined ? {} : { provider: options.provider }),
-      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(configuredModel === undefined ? {} : { model: configuredModel }),
       ...(options.effort === undefined ? {} : { effort: options.effort }),
     });
     if (!resolvedModel.ok) {
@@ -539,7 +584,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     const applied = await controller.applyCliOverrides(sessionRef, {
       ...(options.agent === undefined ? {} : { agent: options.agent }),
       ...(options.provider === undefined ? {} : { provider: options.provider }),
-      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(configuredModel === undefined ? {} : { model: configuredModel }),
       ...(options.effort === undefined ? {} : { effort: options.effort }),
     });
     if (!applied.ok) {

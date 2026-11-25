@@ -11,6 +11,7 @@ import { createEffect, createSignal, Match, onCleanup, Show, Switch } from 'soli
 
 import type { AppController } from '../app/controller.ts';
 import { type KeyInput, routeKey, type ScrollMove } from '../app/key-router.ts';
+import type { FooterName } from '../config/config.ts';
 import { graphemes } from '../domain/composer.ts';
 import { diffWindowRows } from '../domain/diff.ts';
 import type { Keymap } from '../domain/keymap.ts';
@@ -31,6 +32,10 @@ export type AppProps = Readonly<{
   theme: Theme;
   animate: boolean;
   ascii: boolean;
+  /** Reduced motion keeps the caret steady; defaults to false for existing callers. */
+  reducedMotion?: boolean;
+  /** Footer fields to show; defaults to the full built-in set. */
+  footer?: readonly FooterName[];
   env: NodeJS.ProcessEnv;
   /** How often the 10s background hint threshold is re-checked (default 1s). */
   hintTickMs?: number;
@@ -226,8 +231,18 @@ export function App(props: AppProps) {
         <Show when={state.overlay.kind !== 'none' && state.overlay.kind !== 'inspector'}>
           <OverlayView controller={controller} keymap={props.keymap} theme={props.theme} />
         </Show>
-        <ComposerView controller={controller} theme={props.theme} width={width()} />
-        <Footer controller={controller} theme={props.theme} width={width()} />
+        <ComposerView
+          controller={controller}
+          theme={props.theme}
+          width={width()}
+          blink={props.reducedMotion !== true}
+        />
+        <Footer
+          controller={controller}
+          theme={props.theme}
+          width={width()}
+          segments={props.footer}
+        />
         {/* Absolute so the conversation stays mounted (scroll anchor + draft survive) (#222). */}
         <Show when={state.overlay.kind === 'inspector'}>
           <box

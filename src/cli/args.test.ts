@@ -9,7 +9,7 @@ function run(argv: string[]) {
 }
 
 describe('parseArgs', () => {
-  test('no arguments opens the overview', () => {
+  test('no arguments opens a new session by default', () => {
     expect(run([]).target).toEqual({ kind: 'new' });
   });
   test('a positional prompt starts an interactive session', () => {

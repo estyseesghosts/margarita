@@ -926,6 +926,7 @@ export class AppController {
     setState('showScrollbar', deps.localState.showScrollbar ?? true);
     setState('pinnedModels', { ...deps.localState.pinnedModels });
     setState('lastModels', { ...deps.localState.lastModels });
+    setState('detailed', deps.config.transcript.detailed);
     this.loadHistoryFor(deps.cwd);
   }
 
@@ -1301,6 +1302,8 @@ export class AppController {
         activityOf: (session) => this.lastUsed(session),
         serverLabelOf: (serverID) => this.deps.serverInfo?.(serverID)?.label,
         serverOnline: (serverID) => this.deps.serverInfo?.(serverID)?.online ?? true,
+        groupBy: this.deps.config.sessions.groupBy,
+        sortBy: this.deps.config.sessions.sortBy,
       });
     });
   }
@@ -8602,6 +8605,8 @@ export class AppController {
     const changedFrom = transcript.changedFrom;
     const view = projector.projectView(messages, {
       detailed: this.state.detailed,
+      reasoningMode: this.deps.config.transcript.reasoning,
+      groupTools: this.deps.config.transcript.groupTools,
       expandedGroups: expanded.groups,
       expandedDiffs: expanded.diffs,
       mcpServers: this.mcpServersFor(serverID, this.state.sessions[key]?.directory ?? ''),

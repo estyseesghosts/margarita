@@ -10,14 +10,18 @@ import {
   boundedPreview,
   boundedTailPreview,
   cachedToolResult,
+  configurePreviewRows,
   describeTool,
+  type FoldOptions,
   foldTranscript,
   formatToolTiming,
   groupKey,
+  groupsEnabled,
   maxInlinePreviewRows,
   nodeIndexForTool,
   prettyJson,
   previewBudget,
+  reasoningVisible,
   semanticPreview,
   semanticResultKind,
   type ToolCall,
@@ -1278,5 +1282,36 @@ describe('interruption consolidation (#207)', () => {
     const nodes = foldTranscript(messages, compact);
     expect(kinds(nodes)).toEqual(['user', 'text', 'notice']);
     expect(nodes.some((node) => node.kind === 'notice' && node.text === 'Interrupted')).toBe(true);
+  });
+});
+
+function detailOptions(extra: Partial<FoldOptions> = {}): FoldOptions {
+  return { detailed: false, expandedGroups: new Set(), ...extra };
+}
+
+describe('configured transcript detail', () => {
+  test('reasoning visibility honours hidden, details-only and always', () => {
+    expect(reasoningVisible(detailOptions())).toBe(false);
+    expect(reasoningVisible(detailOptions({ detailed: true }))).toBe(true);
+    expect(reasoningVisible(detailOptions({ reasoningMode: 'hidden', detailed: true }))).toBe(
+      false,
+    );
+    expect(reasoningVisible(detailOptions({ reasoningMode: 'always' }))).toBe(true);
+  });
+
+  test('tool grouping can be disabled without changing detailed mode', () => {
+    expect(groupsEnabled(detailOptions())).toBe(true);
+    expect(groupsEnabled(detailOptions({ detailed: true }))).toBe(false);
+    expect(groupsEnabled(detailOptions({ groupTools: 'none' }))).toBe(false);
+  });
+
+  test('preview rows scale all budgets from the shipped defaults', () => {
+    expect(previewBudget('output', false)).toBe(12);
+    expect(previewBudget('shell', true)).toBe(60);
+    configurePreviewRows(24);
+    expect(previewBudget('output', false)).toBe(24);
+    expect(previewBudget('shell', true)).toBe(maxInlinePreviewRows); // hard ceiling
+    expect(toolMetadataRowBudget('files', false)).toBe(8);
+    configurePreviewRows(12);
   });
 });

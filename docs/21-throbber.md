@@ -50,6 +50,8 @@ Use short, slightly playful present-participle verbs such as:
 
 Rotate them occasionally during long tasks, but don't change them so frequently that the text becomes distracting. Prefer meaningful activity labels derived from agent state when available. A random verb is acceptable as decorative text, but must not imply an operation that isn't happening.
 
+State-derived labels (`throbber.activity` and `transcript.live` in `src/i18n/en_us/`) may be a single wording or a pool of equivalent wordings, e.g. `edit: ['vim-ing', 'editing', 'patching']`. A pool rotates one entry every few minutes, not per frame, while a change of state still switches pools immediately. Only put variants of the *same* state in a pool; never mix different facts into one.
+
 ### Timing and metadata
 
 - **Running:** Show elapsed wall-clock time since the current agent turn began, updating once per second.

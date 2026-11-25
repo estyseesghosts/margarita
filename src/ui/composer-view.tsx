@@ -3,6 +3,7 @@ import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 
 import type { Completion, Notice } from '../app/app-state.ts';
 import type { AppController } from '../app/controller.ts';
+import type { FooterName } from '../config/config.ts';
 import { attachmentLabel } from '../domain/attachment.ts';
 import { caretPaint } from '../domain/composer.ts';
 import { contextSeverity } from '../domain/context-occupancy.ts';
@@ -30,11 +31,18 @@ import type { Theme } from './theme.ts';
  * wrapping by one cell (#137); styling an existing grapheme keeps the layout identical in both
  * blink phases. The caret is always at the insertion point and can never leak outside this box.
  */
-export function ComposerView(props: { controller: AppController; theme: Theme; width: number }) {
+export function ComposerView(props: {
+  controller: AppController;
+  theme: Theme;
+  width: number;
+  blink?: boolean;
+}) {
   const state = props.controller.state;
   const [blinkOn, setBlinkOn] = createSignal(true);
-  const timer = setInterval(() => setBlinkOn((on) => !on), 530);
-  onCleanup(() => clearInterval(timer));
+  if (props.blink !== false) {
+    const timer = setInterval(() => setBlinkOn((on) => !on), 530);
+    onCleanup(() => clearInterval(timer));
+  }
   const active = () => state.route.kind !== 'overview' || state.overview.focus === 'composer';
   const ownsCaret = () => active() && state.overlay.kind === 'none';
   // The caret marks an existing grapheme's cell; the text itself is never changed (#137).
@@ -63,7 +71,7 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
         <text fg={empty() || !active() ? props.theme.dim : props.theme.text}>
           {paint().before}
           <Show when={paint().marked !== ''}>
-            <span style={{ underline: true, fg: props.theme.accentLight }}>{paint().marked}</span>
+            <span style={{ underline: true, fg: props.theme.caret }}>{paint().marked}</span>
           </Show>
           {empty() ? placeholder() : paint().after}
         </text>
@@ -88,7 +96,12 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
 }
 
 /** The only persistent chrome: one line under the composer (docs/13). */
-export function Footer(props: { controller: AppController; theme: Theme; width: number }) {
+export function Footer(props: {
+  controller: AppController;
+  theme: Theme;
+  width: number;
+  segments?: readonly FooterName[] | undefined;
+}) {
   const state = props.controller.state;
   const activate = useActivate();
   // One projection per reactive revision: segments and their colours share this value
@@ -138,7 +151,7 @@ export function Footer(props: { controller: AppController; theme: Theme; width: 
           }),
     };
   });
-  const segments = createMemo(() => footerSegments(facts(), props.width - 2));
+  const segments = createMemo(() => footerSegments(facts(), props.width - 2, props.segments));
   const segmentColor = (segment: FooterSegment): string => {
     if (segment.kind === 'agent') return agentColor(facts().agent, props.theme);
     if (segment.kind === 'context') {

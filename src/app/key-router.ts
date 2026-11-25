@@ -18,7 +18,14 @@ import {
   moveWordLeft,
   moveWordRight,
 } from '../domain/composer.ts';
-import { actionFor, type ActionID, type Keymap, type KeyPress } from '../domain/keymap.ts';
+import {
+  actionFor,
+  type ActionID,
+  canonicalizeKey,
+  canonicalText,
+  type Keymap,
+  type KeyPress,
+} from '../domain/keymap.ts';
 import type { AppController } from './controller.ts';
 
 /** A decoded key: identity, modifiers and the printable text it would insert, if any. */
@@ -53,9 +60,14 @@ export type RouterServices = Readonly<{
 export function routeKey(
   controller: AppController,
   keymap: Keymap,
-  key: KeyInput,
+  rawKey: KeyInput,
   services: RouterServices,
 ): boolean {
+  // Configured key roles are translated once here; every downstream handler keeps seeing
+  // the canonical key it was written against (docs/06: no raw keys in view components).
+  const canonical = canonicalizeKey(keymap, rawKey);
+  const text = canonicalText(canonical);
+  const key: KeyInput = { ...canonical, ...(text === undefined ? {} : { text }) };
   const state = controller.state;
   if (state.overlay.kind === 'help' && isPrintable(key)) {
     controller.closeOverlay();

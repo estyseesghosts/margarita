@@ -4,6 +4,8 @@
 
 Proposed frontend-specific settings: `~/.config/unnamed/config.jsonc` under XDG and `%LOCALAPPDATA%\unnamed\config.jsonc` on Windows (or a documented AppData-compatible override). Precedence: CLI flags > project-local frontend config **only if explicitly trusted/opted in** > user config > built-in defaults > server defaults for backend-managed values. Never override server permissions simply by loading an untrusted repository file.
 
+Margarita ships an annotated template at `src/config/config.template.jsonc`. On launch, if no config exists at the effective config path, that template is written there; an existing file is never replaced. The template is embedded into the compiled binary so packaging needs no external asset.
+
 ```jsonc
 {
   "$schema": "https://example.invalid/unnamed-config.schema.json",
@@ -99,6 +101,8 @@ Store last project, recent models, transcript fold states, drafts and goal/plan 
 ## Themes and minimalism
 
 Use terminal palette initially (normal text, dim secondary, error/attention accent); no imitation of proprietary Claude logo, icons or typography. Support `NO_COLOR`, dark/light and one `subtle` theme. Layout should work without any branding, header, repeated labels, separators or animated banner. Any footer customization cannot remove both token count and cost without explicit choice.
+
+The picked palette can be tinted with `ui.accent`, `ui.accentLight` and `ui.caret` (each a `#rrggbb` string). When `ui.accentLight` or `ui.caret` is omitted it follows the effective accent; `NO_COLOR` still wins over all three.
 
 ## Documentation and migration
 

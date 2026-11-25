@@ -5219,6 +5219,17 @@ function configFor(delivery: 'queue' | 'steer') {
     : { ...defaultConfig, input: { enterWhileRunning: 'steer' as const } };
 }
 
+test('configured transcript.detail seeds the initial detail state', () => {
+  const controller = makePromptController(
+    { ...defaultConfig, transcript: { ...defaultConfig.transcript, detailed: true } },
+    new FakeBackend(),
+  );
+  expect(controller.state.detailed).toBe(true);
+  controller.toggleDetails();
+  expect(controller.state.detailed).toBe(false);
+  controller.dispose();
+});
+
 function runningSessionBackend() {
   const backend = new FakeBackend();
   backend.sessions = [fakeSession('ses_a')];

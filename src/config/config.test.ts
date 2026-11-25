@@ -3,7 +3,7 @@ import { access, mkdtemp, readdir, readFile, rename, rm } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { pickTheme } from '../ui/theme.ts';
+import { pickTheme, withAccentOverrides } from '../ui/theme.ts';
 import { defaultConfig, loadConfig, parseConfig, stripJsonComments } from './config.ts';
 import {
   emptyState,
@@ -75,13 +75,108 @@ describe('config', () => {
   });
   test('ui theme and accessibility switches', () => {
     expect(parseConfig({ ui: { theme: 'high-contrast', ascii: true } }).config.ui).toEqual({
+      ...defaultConfig.ui,
       theme: 'high-contrast',
-      animation: true,
       ascii: true,
     });
     const bad = parseConfig({ ui: { theme: 'neon', animation: 'no' } });
     expect(bad.config.ui).toEqual(defaultConfig.ui);
     expect(bad.warnings).toHaveLength(2);
+  });
+  test('ui accent colours validate as #rrggbb, falling back per field', () => {
+    const parsed = parseConfig({
+      ui: { accent: '#00ff88', accentLight: 'peach', caret: '#ff0000' },
+    });
+    expect(parsed.config.ui).toEqual({
+      ...defaultConfig.ui,
+      accent: '#00ff88',
+      caret: '#ff0000',
+    });
+    expect(parsed.warnings).toEqual(['ui.accentLight must be a #rrggbb colour']);
+
+    const upper = parseConfig({ ui: { accent: '#00FF88' } });
+    expect(upper.config.ui.accent).toBe('#00FF88');
+    expect(upper.warnings).toEqual([]);
+  });
+  test('startup, footer and reduced-motion preferences validate', () => {
+    const parsed = parseConfig({
+      ui: {
+        defaultRoute: 'overview',
+        reducedMotion: true,
+        footer: ['agent', 'tokens', 'bogus', 'agent'],
+      },
+    });
+    expect(parsed.config.ui.defaultRoute).toBe('overview');
+    expect(parsed.config.ui.reducedMotion).toBe(true);
+    expect(parsed.config.ui.footer).toEqual(['agent', 'tokens']);
+    expect(parsed.warnings).toEqual(['ui.footer has unknown entry "bogus"']);
+    const bad = parseConfig({ ui: { defaultRoute: 'sideways', footer: 'tokens' } });
+    expect(bad.config.ui.defaultRoute).toBe('new');
+    expect(bad.config.ui.footer).toEqual(defaultConfig.ui.footer);
+    expect(bad.warnings).toEqual([
+      'ui.footer must be an array of strings',
+      'ui.defaultRoute must be one of new, overview',
+    ]);
+  });
+  test('transcript detail preferences validate with current defaults', () => {
+    expect(defaultConfig.transcript).toEqual({
+      toolOutputChars: 64_000,
+      detailed: false,
+      reasoning: 'details-only',
+      previewRows: 12,
+      groupTools: 'compact',
+    });
+    const parsed = parseConfig({
+      transcript: {
+        detailed: true,
+        reasoning: 'always',
+        previewRows: 40,
+        groupTools: 'none',
+      },
+    });
+    expect(parsed.config.transcript).toEqual({
+      toolOutputChars: 64_000,
+      detailed: true,
+      reasoning: 'always',
+      previewRows: 40,
+      groupTools: 'none',
+    });
+    const bad = parseConfig({
+      transcript: { reasoning: 'sometimes', previewRows: 0, groupTools: 5 },
+    });
+    expect(bad.config.transcript).toEqual(defaultConfig.transcript);
+    expect(bad.warnings).toEqual([
+      'transcript.reasoning must be one of hidden, details-only, always',
+      'transcript.previewRows must be a positive integer',
+      'transcript.groupTools must be one of compact, none',
+    ]);
+  });
+  test('servers, default model, debug log and array key overrides validate', () => {
+    const parsed = parseConfig({
+      servers: { launch: 'home', connect: ['home', 'work', 'home'] },
+      models: { default: 'anthropic/claude#high' },
+      debugLog: '/tmp/marg.log',
+      keys: { 'nav.cancel': ['escape', 'f12'], 'help.show': 'unbound' },
+    });
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.config.servers).toEqual({ launch: 'home', connect: ['home', 'work'] });
+    expect(parsed.config.models.default).toBe('anthropic/claude#high');
+    expect(parsed.config.debugLog).toBe('/tmp/marg.log');
+    expect(parsed.config.keys).toEqual({
+      'nav.cancel': ['escape', 'f12'],
+      'help.show': 'unbound',
+    });
+    const bad = parseConfig({
+      servers: { launch: 5, connect: 'home' },
+      models: { default: 'not a model!' },
+      keys: { up: 5 },
+    });
+    expect(bad.config.servers).toEqual({ launch: 'local' });
+    expect(bad.config.models.default).toBeUndefined();
+    expect(bad.config.keys).toEqual({});
+    expect(bad.warnings).toContain('servers.launch must be a non-empty string');
+    expect(bad.warnings).toContain('servers.connect must be an array of strings');
+    expect(bad.warnings).toContain('keys.up must be a single key or an array of keys');
   });
   test('clipboard preferences default on and validate as booleans (issue #4)', () => {
     expect(defaultConfig.clipboard).toEqual({
@@ -137,6 +232,30 @@ describe('themes', () => {
   });
   test('NO_COLOR overrides any configured theme', () => {
     expect(pickTheme({ NO_COLOR: '1' }, 'light').text).toBe('#ffffff');
+  });
+  test('accent overrides never mutate the built-in palette', () => {
+    const dark = pickTheme({}, 'dark');
+    const custom = withAccentOverrides(dark, { accent: '#00ff88' });
+    expect(custom).not.toBe(dark);
+    expect(custom.accent).toBe('#00ff88');
+    expect(custom.accentLight).toBe('#00ff88');
+    expect(custom.caret).toBe('#00ff88');
+    expect(dark.accent).toBe('#e4677e');
+    expect(dark.accentLight).toBe('#ffd3a8');
+    expect(dark.caret).toBe('#e4677e');
+  });
+  test('the caret follows the accent unless it has its own colour', () => {
+    const dark = pickTheme({}, 'dark');
+    expect(withAccentOverrides(dark, {})).toBe(dark);
+    const lightOnly = withAccentOverrides(dark, { accentLight: '#ffd3a8' });
+    expect(lightOnly.caret).toBe(dark.accent);
+    const custom = withAccentOverrides(dark, { accent: '#00ff88', caret: '#123456' });
+    expect(custom.caret).toBe('#123456');
+    expect(custom.accentLight).toBe('#00ff88');
+  });
+  test('NO_COLOR ignores configured accent colours', () => {
+    const plain = pickTheme({ NO_COLOR: '1' });
+    expect(withAccentOverrides(plain, { accent: '#00ff88', caret: '#ff0000' })).toBe(plain);
   });
 });
 

@@ -13,6 +13,18 @@ const facts = {
 };
 
 describe('formatFooter', () => {
+  test('a configured field subset is honoured before width degradation', () => {
+    expect(
+      footerSegments(facts, 120, ['tokens', 'cost'])
+        .map((part) => part.text)
+        .join(''),
+    ).toBe('42k in · 5k out · $0.38');
+    expect(
+      footerSegments(facts, 120, ['agent', 'state', 'tokens'])
+        .map((part) => part.text)
+        .join(''),
+    ).toBe('build · working · 42k in · 5k out');
+  });
   test('the agent is shown without a shortcut at common terminal widths', () => {
     expect(formatFooter(facts, 40)).toBe('build · high · working · 47k · $0.38');
     for (const width of [80, 100, 120]) {

@@ -1002,9 +1002,7 @@ function FormDialog(props: {
                 {'> '}
                 {paint().before}
                 <Show when={paint().marked !== ''}>
-                  <span style={{ underline: true, fg: props.theme.accentLight }}>
-                    {paint().marked}
-                  </span>
+                  <span style={{ underline: true, fg: props.theme.caret }}>{paint().marked}</span>
                 </Show>
                 {paint().after}
               </text>

@@ -142,10 +142,19 @@ function join(parts: readonly Part[]): FooterSegment[] {
 }
 
 /** Semantic segments for styled rendering; identical text to `formatFooter`. */
-export function footerSegments(facts: FooterFacts, width: number): FooterSegment[] {
+export function footerSegments(
+  facts: FooterFacts,
+  width: number,
+  enabled?: readonly FooterField[],
+): FooterSegment[] {
   let last: Part[] = [];
   for (const parts of partsFor(facts)) {
-    const present = parts.filter((part): part is Part => part !== undefined && part.text !== '');
+    const present = parts.filter(
+      (part): part is Part =>
+        part !== undefined &&
+        part.text !== '' &&
+        (enabled === undefined || enabled.includes(part.kind)),
+    );
     if (present.length === 0) continue;
     // Rows that drop the state exist to keep usage figures; with no usage they would only
     // lose information, so the state-bearing rows below take over (#193).
@@ -166,3 +175,9 @@ export function formatFooter(facts: FooterFacts, width: number): string {
     .map((segment) => segment.text)
     .join('');
 }
+
+/**
+ * Configured footer fields. Omitted means all fields; filtering happens before width
+ * degradation so excluded fields never consume space. `separator` is layout, not a field.
+ */
+export type FooterField = Exclude<FooterSegmentKind, 'separator'>;

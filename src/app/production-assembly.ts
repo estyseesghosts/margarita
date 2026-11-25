@@ -60,6 +60,8 @@ export type ProductionAssemblyInput = Readonly<{
   credentials: CredentialStore;
   /** The launch connection(s), already connected and verified by the caller. */
   connections: readonly AssemblyConnection[];
+  /** Paired servers to restore; undefined keeps today's "all paired servers" policy. */
+  restoreServerIDs?: readonly string[];
   profiles: ServerProfiles;
   localState: LocalState;
   /** True only for the directly configured launch connection; paired servers get their own. */
@@ -181,9 +183,14 @@ export async function createProductionAssembly(
   // overview can show the host without ever issuing a request. `auth: 'none'` profiles
   // restore anonymously: no stored secret exists by design and none is requested.
   const launchBase = baseOfUrl(launch.connection.baseUrl);
+  const restoreIDs = input.restoreServerIDs;
   const savedProfiles = profiles.profiles.filter(
     (profile) =>
-      servers.get(profile.serverID) === undefined && baseOfUrl(profile.baseUrl) !== launchBase,
+      (restoreIDs === undefined ||
+        restoreIDs.includes(profile.shortname) ||
+        restoreIDs.includes(profile.serverID)) &&
+      servers.get(profile.serverID) === undefined &&
+      baseOfUrl(profile.baseUrl) !== launchBase,
   );
 
   const keepFresh = (saved: ServerProfiles): ServerProfiles => {

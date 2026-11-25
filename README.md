@@ -183,21 +183,55 @@ services, tunnels, or filesystem sync, and exiting never interrupts a session.
 
 ### Config
 
-`%LOCALAPPDATA%\margarita\config.jsonc` on Windows, or your XDG config directory elsewhere:
+`%LOCALAPPDATA%\margarita\config.jsonc` on Windows, or your XDG config directory elsewhere. On first launch Margarita plants an annotated template there if the file is missing; an existing file is never overwritten. Restart after editing:
+
+`src/config/config.template.jsonc` is the fully annotated template — every default and every action ID is listed there.
 
 ```jsonc
 {
   "agents": { "default": "build", "cycle": ["build", "plan"] },
+  "sessions": {
+    "showArchived": false, "showChildren": false,
+    "sortBy": "activity",   // or "name"
+    "groupBy": "project"    // or "server"
+  },
   "input": { "enterWhileRunning": "queue" },       // or "steer"
+  "models": { "recentLimit": 8 },                  // optional "default": "provider/model#variant"
+  "history": { "limit": 200 },
+  "transcript": {
+    "toolOutputChars": 64000,
+    "detailed": false,             // initial Ctrl+O detail state
+    "reasoning": "details-only",   // hidden | details-only | always
+    "previewRows": 12,             // scales inline preview budgets
+    "groupTools": "compact"        // or "none"
+  },
   "clipboard": {
     "autoCopy": true,           // copy a nonempty drag selection on release
     "rightClickCopy": true,     // right-click copies an active selection
     "rightClickPaste": true     // right-click with no selection pastes
   },
-  "keys": { "tasks.toggle": "alt+t" },              // single keys only; F1 lists action IDs
-  "ui": { "theme": "dark", "animation": true, "ascii": false }  // dark | light | high-contrast
+  "keys": {
+    "tasks.toggle": "alt+t",    // one key, an array of keys, or "unbound"
+    "nav.cancel": ["escape", "f12"]
+  },                            // F1 lists every action ID and its effective binding
+  "servers": {
+    "launch": "local",          // "local" or a paired shortname/server ID
+    "connect": ["home", "work"] // omit to aggregate all paired servers
+  },
+  // "debugLog": "/path/to/margarita-debug.log",
+  "ui": {
+    "theme": "dark", "animation": true, "ascii": false,  // dark | light | high-contrast
+    "defaultRoute": "new",      // or "overview" when no CLI target is given
+    "reducedMotion": false,     // also keeps the blinking caret steady
+    "footer": ["agent", "model", "state", "queued", "goal", "context", "tokens", "cost"],
+    "accent": "#00ff88",       // optional #rrggbb; cat, throbber, selections, syntax
+    "accentLight": "#baffd9",  // optional; defaults to the accent
+    "caret": "#00ff88"         // optional; defaults to the accent
+  }
 }
 ```
+
+Explicit CLI flags beat config: `--local` forces the local service even if `servers.launch` names a remote, and `--remote`/`--server` override it entirely. Accent colours are ignored under `NO_COLOR`.
 
 Environment knobs: `NO_COLOR`, `MARGARITA_NO_ANIMATION=1`, `MARGARITA_ASCII=1`, and `MARGARITA_SERVER_PASSWORD` (for `--server`). The password is only sent over HTTPS or to a loopback host; reach a remote server through TLS or an SSH tunnel (`ssh -L 4096:localhost:4096 host`, then `--server http://localhost:4096`). `MARGARITA_ALLOW_INSECURE_HTTP=1` overrides this for trusted networks. Credentials in the `--server` URL are rejected.
 

@@ -16,7 +16,7 @@ type Overlay =
   | { type: 'modelPicker' | 'agentPicker' | 'help' | 'taskList' | 'permission' | 'diff' | 'transcript'; session?: SessionKey }
 ```
 
-Route transitions: `START → overview` when no positional prompt/resume; `START → conversation(new)` when positional prompt; `START → conversation(existing)` when `--continue`/`--resume`; `conversation → overview` on guarded Left; `overview → conversation(s)` on Enter; `overview → conversation(new)` when composer submitted; `conversation → overview` on `/sessions` or `/bg` alias if added. Overview remains open as long as user chooses. Event stream continues to update rows.
+Route transitions: `START → conversation(new)` when no positional prompt/resume (or `START → overview` when `ui.defaultRoute` is `"overview"`); `START → conversation(new)` when positional prompt; `START → conversation(existing)` when `--continue`/`--resume`; `conversation → overview` on guarded Left; `overview → conversation(s)` on Enter; `overview → conversation(new)` when composer submitted; `conversation → overview` on `/sessions` or `/bg` alias if added. Overview remains open as long as user chooses. Event stream continues to update rows.
 
 ## Guarded Left-arrow logic
 

@@ -87,6 +87,64 @@ async function makeAssembly() {
 }
 
 describe('production assembly (main-path wiring)', () => {
+  test('configured servers.connect narrows which paired servers are restored', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'margarita-restore-'));
+    const serversFile = join(directory, 'servers.json');
+    await writeFile(
+      serversFile,
+      JSON.stringify({
+        schemaVersion: 1,
+        profiles: [
+          {
+            serverID: 'srv_keep',
+            shortname: 'keep',
+            baseUrl: 'http://keep.test:4096',
+            auth: 'none',
+          },
+          {
+            serverID: 'srv_drop',
+            shortname: 'drop',
+            baseUrl: 'http://drop.test:4096',
+            auth: 'none',
+          },
+        ],
+      }),
+    );
+    const profiles = (await loadServerProfiles(serversFile)).profiles;
+    const assembly = await createProductionAssembly({
+      config: defaultConfig,
+      platform: 'linux',
+      cwd: '/work',
+      version: '0.0.1',
+      paths: {
+        stateFile: join(directory, 'state.json'),
+        serversFile,
+        stateDir: directory,
+      },
+      env: {},
+      credentials: memoryCredentialStore(),
+      connections: [
+        {
+          serverID: 'local',
+          connection: remoteConnection('http://local.test:4096'),
+          backend: new FakeBackend(),
+          remoteFilesystem: false,
+        },
+      ],
+      restoreServerIDs: ['keep'],
+      profiles,
+      localState: emptyState,
+      requestExit: () => {},
+    });
+    expect(
+      assembly.servers
+        .list()
+        .map((entry) => entry.serverID)
+        .toSorted(),
+    ).toEqual(['local', 'srv_keep']);
+    await assembly.servers.dispose();
+  });
+
   test('opens the remote row and routes its actions to the remote backend only', async () => {
     const { assembly, local, remote } = await makeAssembly();
     const { controller } = assembly;

@@ -9,6 +9,13 @@
 /** Time-of-day pools used to pick a greeting (mirrors `domain/greeting-time.ts`). */
 export type GreetingPeriod = 'morning' | 'afternoon' | 'evening' | 'night';
 
+/**
+ * One display wording, or a pool of interchangeable wordings. A plain string means "always
+ * say this"; an array lets the presentation layer rotate between variants slowly. Pools are
+ * only for words that describe the same state, never for different facts or commands.
+ */
+export type Variations = string | readonly string[];
+
 /** Tool categories whose running/completed activity is described to the user. */
 export type ToolCategory =
   'read' | 'search' | 'edit' | 'shell' | 'code' | 'web' | 'delegate' | 'other';
@@ -74,7 +81,8 @@ export interface GreetingStrings {
 export interface ThrobberStrings {
   readonly decorativeVerbs: readonly string[];
   readonly fallbackVerb: string;
-  readonly activity: Readonly<Record<ToolCategory, string>>;
+  /** Live state labels. Each value may be one wording or a slowly rotating pool. */
+  readonly activity: Readonly<Record<ToolCategory, Variations>>;
   readonly compacting: string;
   readonly thinking: string;
   readonly tipPrefix: string;
@@ -364,7 +372,8 @@ export interface TranscriptStrings {
     readonly externalCalls: (count: number) => string;
     readonly serverCalls: (server: string, count: number) => string;
   };
-  readonly live: Readonly<Record<ToolCategory, string>>;
+  /** Live label beneath a collapsed tool group; same variation rules as throbber activity. */
+  readonly live: Readonly<Record<ToolCategory, Variations>>;
   readonly history: {
     readonly loadingEarlier: string;
     readonly checkFailed: string;

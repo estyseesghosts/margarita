@@ -1,4 +1,6 @@
 import { strings } from '../i18n/index.ts';
+import type { Variations } from '../i18n/types.ts';
+import { resolveVariation, variationPeriodMs } from './variations.ts';
 
 /** Inline activity indicator for the active assistant turn (docs/21-throbber.md). */
 export const orbitFrames = ['◜', '◝', '◞', '◟'] as const;
@@ -13,7 +15,8 @@ export function throbberTickMs(running: boolean, animate: boolean): number | und
   if (!running) return undefined;
   return animate ? frameIntervalMs : idleTickMs;
 }
-const verbRotationMs = 20_000;
+/** Decorative verbs rotate on the same slow cadence as every other variety pool. */
+const verbRotationMs = variationPeriodMs;
 
 export type ThrobberPhase = 'running' | 'completed' | 'interrupted' | 'failed';
 
@@ -23,8 +26,10 @@ export type ThrobberFacts = Readonly<{
   completedAt?: number;
   /** Reported output tokens only; undefined when the server has not reported usage yet. */
   outputTokens?: number;
-  /** A label derived from real agent state (e.g. the running tool category), if known. */
-  activity?: string;
+  /** A label derived from real agent state (e.g. the running tool category), if known.
+   * A pool resolves against the current clock, so the state switches instantly while its
+   * wording rotates only every few minutes. */
+  activity?: Variations;
 }>;
 
 export function frameAt(elapsedMs: number, ascii: boolean): string {
@@ -35,10 +40,10 @@ export function frameAt(elapsedMs: number, ascii: boolean): string {
 
 /** Stable per-turn verb that rotates slowly; never claims a specific operation. */
 export function verbAt(seed: number, elapsedMs: number): string {
-  const verbs = strings.throbber.decorativeVerbs;
-  const step = Math.floor(Math.max(0, elapsedMs) / verbRotationMs);
-  const index = Math.abs(seed + step) % verbs.length;
-  return verbs[index] ?? strings.throbber.fallbackVerb;
+  return (
+    resolveVariation(strings.throbber.decorativeVerbs, elapsedMs, seed, verbRotationMs) ??
+    strings.throbber.fallbackVerb
+  );
 }
 
 /** Highlight intensity in [0,1] for each character of `length`, given time in the shimmer cycle. */
@@ -91,7 +96,10 @@ export function describeThrobber(
       : strings.throbber.tokens(compactTokens(facts.outputTokens));
   if (facts.phase === 'running') {
     const elapsed = now - facts.startedAt;
-    const label = `${facts.activity ?? verbAt(facts.startedAt, elapsed)}…`;
+    // Resolve against `now` rather than the marker's creation time: a real state change
+    // swaps pools immediately, while the wording within a pool advances only every few minutes.
+    const activity = resolveVariation(facts.activity, now, facts.startedAt);
+    const label = `${activity ?? verbAt(facts.startedAt, elapsed)}…`;
     const parts = [formatElapsed(elapsed), ...(tokens === undefined ? [] : [`↓ ${tokens}`])];
     return {
       label,

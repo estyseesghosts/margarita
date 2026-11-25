@@ -8,6 +8,7 @@ import {
   throbberTickMs,
   tipFor,
 } from './throbber.ts';
+import { variationPeriodMs } from './variations.ts';
 
 const clock = (at: number): string => `t${at}`;
 
@@ -70,5 +71,27 @@ describe('throbber', () => {
     expect(tipFor(3, 1000)).toBeUndefined();
     expect(tipFor(1, 60_000)).toBeUndefined();
     expect(tipFor(3, 60_000)).toBeDefined();
+  });
+});
+
+describe('throbber activity variation pools', () => {
+  const running = { phase: 'running' as const, startedAt: 0 };
+  const edit = ['vim-ing', 'editing', 'patching'];
+  const shell = ['running', 'executing', 'shelling'];
+
+  test('the current state pool is shown immediately, not a stale wording', () => {
+    const now = 3 * variationPeriodMs;
+    const editLabel = describeThrobber({ ...running, activity: edit }, now, 80, clock).label;
+    const shellLabel = describeThrobber({ ...running, activity: shell }, now, 80, clock).label;
+    expect(edit).toContain(editLabel.replace(/…$/, ''));
+    expect(shell).toContain(shellLabel.replace(/…$/, ''));
+    expect(editLabel).not.toBe(shellLabel);
+  });
+
+  test('a wording holds for minutes instead of flickering between frames', () => {
+    const facts = { ...running, activity: edit };
+    const first = describeThrobber(facts, 1_000, 80, clock).label;
+    expect(describeThrobber(facts, variationPeriodMs - 1, 80, clock).label).toBe(first);
+    expect(describeThrobber(facts, variationPeriodMs, 80, clock).label).not.toBe(first);
   });
 });

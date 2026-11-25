@@ -5,7 +5,60 @@
  * (kitty keyboard protocol — not every Windows Terminal build does). A config
  * override replaces the whole list for its action.
  */
+/**
+ * Key roles for keys that were previously hardcoded in the router and dialog handlers.
+ * They are excluded from `actionFor` (they are translations, not commands); a config
+ * override renames the physical key that produces the same canonical key downstream.
+ */
+export const keyRoleActionIDs = [
+  'nav.up',
+  'nav.down',
+  'nav.left',
+  'nav.right',
+  'nav.pageUp',
+  'nav.pageDown',
+  'nav.home',
+  'nav.end',
+  'nav.confirm',
+  'nav.cancel',
+  'nav.tab',
+  'nav.backspace',
+  'nav.delete',
+  'nav.space',
+  'nav.helpAlt',
+  'help.closeAlt',
+  'ui.exit',
+  'ui.forceExit',
+  'composer.moveToStart',
+  'composer.moveToEnd',
+  'composer.deleteWordLeft',
+  'composer.deleteToStart',
+  'composer.deleteToEnd',
+  'composer.historyPrevious',
+  'composer.historyNext',
+  'composer.wordLeft',
+  'composer.wordRight',
+  'composer.shiftNewline',
+  'queue.remove',
+  'queue.steer',
+  'form.decline',
+  'form.openUrl',
+  'form.copyUrl',
+  'inspector.search',
+  'confirmation.yes',
+  'confirmation.no',
+  'diff.info',
+  'tasks.propose',
+  'tasks.reject',
+  'tasks.backgroundAll',
+  'tasks.cancel',
+  'tasks.edit',
+] as const;
+
+export type KeyRoleActionID = (typeof keyRoleActionIDs)[number];
+
 export const actionIDs = [
+  ...keyRoleActionIDs,
   'agent.cycle',
   'agent.cyclePrevious',
   'agent.pick',
@@ -61,6 +114,48 @@ export type KeyPress = Readonly<{
 }>;
 
 export const defaultBindings: Readonly<Record<ActionID, readonly string[]>> = {
+  'nav.up': ['up'],
+  'nav.down': ['down'],
+  'nav.left': ['left'],
+  'nav.right': ['right'],
+  'nav.pageUp': ['pageup'],
+  'nav.pageDown': ['pagedown'],
+  'nav.home': ['home'],
+  'nav.end': ['end'],
+  'nav.confirm': ['enter'],
+  'nav.cancel': ['escape'],
+  'nav.tab': ['tab'],
+  'nav.backspace': ['backspace'],
+  'nav.delete': ['delete'],
+  'nav.space': ['space'],
+  'nav.helpAlt': ['?'],
+  'help.closeAlt': ['q'],
+  'ui.exit': ['ctrl+c'],
+  'ui.forceExit': ['ctrl+d'],
+  'composer.moveToStart': ['ctrl+a'],
+  'composer.moveToEnd': ['ctrl+e'],
+  'composer.deleteWordLeft': ['ctrl+w', 'alt+backspace'],
+  'composer.deleteToStart': ['ctrl+u'],
+  'composer.deleteToEnd': ['ctrl+k'],
+  'composer.historyPrevious': ['ctrl+p'],
+  'composer.historyNext': ['ctrl+n'],
+  'composer.wordLeft': ['alt+b', 'ctrl+left'],
+  'composer.wordRight': ['alt+f', 'ctrl+right'],
+  'composer.shiftNewline': ['shift+enter'],
+  'queue.remove': ['x'],
+  'queue.steer': ['s'],
+  'form.decline': ['ctrl+x'],
+  'form.openUrl': ['o'],
+  'form.copyUrl': ['c'],
+  'inspector.search': ['/'],
+  'confirmation.yes': ['y'],
+  'confirmation.no': ['n'],
+  'diff.info': ['t'],
+  'tasks.propose': ['a'],
+  'tasks.reject': ['r'],
+  'tasks.backgroundAll': ['b'],
+  'tasks.cancel': ['x'],
+  'tasks.edit': ['e'],
   'agent.cycle': ['shift+tab'],
   'agent.cyclePrevious': ['alt+shift+tab'],
   'agent.pick': ['f3'],
@@ -187,15 +282,57 @@ export function actionHint(keymap: Keymap, action: ActionID): string | undefined
   return binding === undefined ? undefined : bindingLabel(binding);
 }
 
+export type KeyOverride = string | readonly string[];
+
 export type Keymap = ReadonlyMap<ActionID, readonly KeyBinding[]>;
 
 export type KeymapBuild = Readonly<{ keymap: Keymap; errors: readonly string[] }>;
 
 /**
- * Builds the keymap from defaults plus overrides. Invalid or duplicate overrides are
+ * The input layer normalizes `enter` to `return`; key roles must emit that same name or
+ * downstream handlers (which compare against `return`) would stop seeing confirmation keys.
+ */
+const keyRoleNames: Partial<Record<KeyRoleActionID, string>> = { 'nav.confirm': 'return' };
+
+/** The canonical key a key role produces downstream, i.e. its shipped default binding. */
+function canonicalBinding(action: KeyRoleActionID): KeyBinding | undefined {
+  const spec = defaultBindings[action][0];
+  if (spec === undefined) return undefined;
+  const parsed = parseBinding(spec);
+  return parsed.ok ? parsed.binding : undefined;
+}
+
+/**
+ * Rewrites a configured key role to the key its handlers understand. Roles with identity
+ * defaults only change the key when the user remaps them, so ordinary typing is unaffected.
+ */
+export function canonicalizeKey(keymap: Keymap, press: KeyPress): KeyPress {
+  for (const action of keyRoleActionIDs) {
+    if (!keymap.get(action)?.some((binding) => matches(binding, press))) continue;
+    const canonical = canonicalBinding(action);
+    if (canonical !== undefined)
+      return {
+        name: keyRoleNames[action] ?? canonical.key,
+        ctrl: canonical.ctrl,
+        alt: canonical.alt,
+        shift: canonical.shift,
+      };
+  }
+  return press;
+}
+
+/** Text carried by a canonical key, when it is an unmodified printable character. */
+export function canonicalText(press: KeyPress): string | undefined {
+  if (press.ctrl || press.alt || press.shift || press.name.length !== 1) return undefined;
+  return press.name;
+}
+
+/**
+ * Builds the keymap from defaults plus overrides. An override may replace all bindings with
+ * one key, several keys, or `unbound` to remove them. Invalid or conflicting overrides are
  * reported and the default is kept, so a bad config never leaves an action unbound.
  */
-export function buildKeymap(overrides: Readonly<Record<string, string>>): KeymapBuild {
+export function buildKeymap(overrides: Readonly<Record<string, KeyOverride>>): KeymapBuild {
   const errors: string[] = [];
   const keymap = new Map<ActionID, readonly KeyBinding[]>();
   for (const action of actionIDs) {
@@ -209,26 +346,41 @@ export function buildKeymap(overrides: Readonly<Record<string, string>>): Keymap
   }
   const defaults = new Map(keymap);
   const requested = new Set<ActionID>();
-  for (const [action, spec] of Object.entries(overrides).toSorted(([a], [b]) =>
+  for (const [action, value] of Object.entries(overrides).toSorted(([a], [b]) =>
     a.localeCompare(b),
   )) {
     if (!isActionID(action)) {
       errors.push(`unknown action "${action}"`);
       continue;
     }
-    const parsed = parseBinding(spec);
-    if (!parsed.ok) {
-      errors.push(`${action}: ${parsed.error}`);
+    if (value === 'unbound') {
+      keymap.set(action, []);
+      requested.add(action);
       continue;
     }
-    keymap.set(action, [parsed.binding]);
+    const specs = typeof value === 'string' ? [value] : value;
+    const bindings: KeyBinding[] = [];
+    let invalid = false;
+    for (const spec of specs) {
+      const parsed = parseBinding(spec);
+      if (!parsed.ok) {
+        errors.push(`${action}: ${parsed.error}`);
+        invalid = true;
+      } else bindings.push(parsed.binding);
+    }
+    if (invalid) continue;
+    keymap.set(action, bindings);
     requested.add(action);
   }
-  // Restoring defaults can create further conflicts, so resolve until stable.
+  // Key roles are translations, not commands: they may share keys with commands and with
+  // each other because their contexts never overlap at dispatch time.
+  const roles = new Set<string>(keyRoleActionIDs);
   while (true) {
     const rejected = new Set<ActionID>();
     for (const [index, action] of actionIDs.entries()) {
+      if (roles.has(action)) continue;
       for (const other of actionIDs.slice(index + 1)) {
+        if (roles.has(other)) continue;
         const clash = keymap
           .get(action)
           ?.find((binding) =>
@@ -252,9 +404,14 @@ export function buildKeymap(overrides: Readonly<Record<string, string>>): Keymap
 
 export function actionFor(keymap: Keymap, press: KeyPress): ActionID | undefined {
   for (const [action, bindings] of keymap) {
+    if (isKeyRole(action)) continue;
     if (bindings.some((binding) => matches(binding, press))) return action;
   }
   return undefined;
+}
+
+function isKeyRole(value: string): value is KeyRoleActionID {
+  return (keyRoleActionIDs as readonly string[]).includes(value);
 }
 
 function isActionID(value: string): value is ActionID {

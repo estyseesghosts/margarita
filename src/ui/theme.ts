@@ -4,6 +4,8 @@ export type Theme = Readonly<{
   dim: string;
   accent: string;
   accentLight: string;
+  /** Blinking composer caret; follows the accent unless configured separately. */
+  caret: string;
   user: string;
   userBg: string;
   error: string;
@@ -26,6 +28,7 @@ const dark: Theme = {
   dim: '#8a8a8a',
   accent: '#e4677e',
   accentLight: '#ffd3a8',
+  caret: '#e4677e',
   user: '#f2f2f2',
   userBg: '#3a3a3a',
   error: '#ff6b6b',
@@ -47,6 +50,7 @@ const light: Theme = {
   dim: '#5f5f5f',
   accent: '#b0304a',
   accentLight: '#8a4b00',
+  caret: '#b0304a',
   user: '#1f1f1f',
   userBg: '#e6e6e6',
   error: '#b00020',
@@ -68,6 +72,7 @@ const highContrast: Theme = {
   dim: '#d0d0d0',
   accent: '#ffff00',
   accentLight: '#00ffff',
+  caret: '#ffff00',
   user: '#ffffff',
   userBg: '#000000',
   error: '#ff5555',
@@ -88,6 +93,7 @@ const plain: Theme = {
   dim: '#ffffff',
   accent: '#ffffff',
   accentLight: '#ffffff',
+  caret: '#ffffff',
   user: '#ffffff',
   userBg: '#000000',
   error: '#ffffff',
@@ -113,6 +119,31 @@ export function pickTheme(env: NodeJS.ProcessEnv, name: keyof typeof themes = 'd
 /** True for the collapsed no-colour theme (NO_COLOR). Filled labels must not be emitted. */
 export function isNoColorTheme(theme: Theme): boolean {
   return theme === plain;
+}
+
+/** User-supplied accent overrides from the `ui` config section. */
+export type AccentOverrides = Readonly<{
+  accent?: string;
+  accentLight?: string;
+  caret?: string;
+}>;
+
+/**
+ * Applies configured accents to a picked theme without mutating the shared theme constants.
+ * `NO_COLOR` is returned untouched. A missing light accent follows the effective accent so a
+ * custom accent never leaves the built-in lighter shade behind, and the caret follows the
+ * accent unless it has its own configured colour.
+ */
+export function withAccentOverrides(theme: Theme, overrides: AccentOverrides): Theme {
+  if (isNoColorTheme(theme)) return theme;
+  const accent = overrides.accent ?? theme.accent;
+  const accentLight =
+    overrides.accentLight ?? (overrides.accent === undefined ? theme.accentLight : accent);
+  const caret = overrides.caret ?? accent;
+  if (accent === theme.accent && accentLight === theme.accentLight && caret === theme.caret) {
+    return theme;
+  }
+  return { ...theme, accent, accentLight, caret };
 }
 
 /** Linear blend of two `#rrggbb` colours, `t` in [0,1]. */

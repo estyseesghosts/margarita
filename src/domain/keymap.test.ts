@@ -1,6 +1,6 @@
 ﻿import { expect, test } from 'bun:test';
 
-import { actionFor, buildKeymap } from './keymap.ts';
+import { actionFor, buildKeymap, canonicalizeKey, canonicalText } from './keymap.ts';
 
 test('accepts two-way and three-way swaps regardless of override order', () => {
   const overrides = {
@@ -72,4 +72,37 @@ test('rejects final conflicts while retaining unrelated overrides', () => {
   expect(actionFor(keymap, { name: 't', ctrl: false, alt: true, shift: false })).toBe(
     'tasks.toggle',
   );
+});
+
+test('an override may add several keys, or unbind an action', () => {
+  const { keymap, errors } = buildKeymap({
+    'help.show': ['f1', 'f12'],
+    'tasks.toggle': 'unbound',
+  });
+  expect(errors).toEqual([]);
+  expect(actionFor(keymap, { name: 'f12', ctrl: false, alt: false, shift: false })).toBe(
+    'help.show',
+  );
+  expect(actionFor(keymap, { name: 't', ctrl: true, alt: false, shift: false })).toBeUndefined();
+});
+
+test('key roles translate configured keys to the canonical handler key', () => {
+  const { keymap, errors } = buildKeymap({ 'nav.cancel': 'x', 'nav.confirm': 'f9' });
+  expect(errors).toEqual([]);
+  expect(canonicalizeKey(keymap, { name: 'x', ctrl: false, alt: false, shift: false })).toEqual({
+    name: 'escape',
+    ctrl: false,
+    alt: false,
+    shift: false,
+  });
+  expect(canonicalizeKey(keymap, { name: 'f9', ctrl: false, alt: false, shift: false })).toEqual({
+    name: 'return',
+    ctrl: false,
+    alt: false,
+    shift: false,
+  });
+  expect(canonicalText({ name: 'o', ctrl: false, alt: false, shift: false })).toBe('o');
+  expect(canonicalText({ name: 'c', ctrl: true, alt: false, shift: false })).toBeUndefined();
+  // Key roles never consume keys as commands; the router handles them downstream.
+  expect(actionFor(keymap, { name: 'x', ctrl: false, alt: false, shift: false })).toBeUndefined();
 });

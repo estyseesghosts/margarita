@@ -33,6 +33,10 @@ export type GroupOptions = Readonly<{
   serverLabelOf?: (serverID: string) => string | undefined;
   /** False when a server is offline/unauthorized but its cached sessions stay visible. */
   serverOnline?: (serverID: string) => boolean;
+  /** Group projects (default) or all sessions of one server together. */
+  groupBy?: 'project' | 'server';
+  /** Order groups by most recent activity (default) or by display name. */
+  sortBy?: 'activity' | 'name';
 }>;
 
 /**
@@ -47,10 +51,13 @@ export function groupSessions(
   for (const session of sessions) {
     if (session.archived && !options.showArchived) continue;
     if (session.parentID !== undefined && !options.showChildren) continue;
-    const key = projectKey(
-      { serverID: session.serverID, directory: session.directory },
-      options.platformFor(session.serverID),
-    );
+    const key =
+      options.groupBy === 'server'
+        ? `server:${session.serverID}`
+        : projectKey(
+            { serverID: session.serverID, directory: session.directory },
+            options.platformFor(session.serverID),
+          );
     const bucket = buckets.get(key);
     if (bucket === undefined) buckets.set(key, [session]);
     else bucket.push(session);
@@ -70,15 +77,24 @@ export function groupSessions(
       ...(serverLabel === undefined ? {} : { serverLabel }),
       remote: first.serverID !== localServerID,
       stale: options.serverOnline?.(first.serverID) === false,
-      name: directoryName(first.directory),
+      name:
+        options.groupBy === 'server' && serverLabel !== undefined
+          ? serverLabel
+          : directoryName(first.directory),
       directory: first.directory,
       sessions: sorted,
       latestAt: options.activityOf(first),
     });
   }
   return groups.toSorted((left, right) => {
-    const delta = right.latestAt - left.latestAt;
-    return delta !== 0 ? delta : left.key.localeCompare(right.key);
+    if (options.sortBy === 'name') {
+      const byName = left.name.localeCompare(right.name);
+      if (byName !== 0) return byName;
+    } else {
+      const delta = right.latestAt - left.latestAt;
+      if (delta !== 0) return delta;
+    }
+    return left.key.localeCompare(right.key);
   });
 }
 

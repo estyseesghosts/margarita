@@ -22,7 +22,7 @@ import type { ToolCallChild, TranscriptMessage } from '../domain/transcript.ts';
 import { formatCounts, resetFormatCounts, setFormatCounters } from '../perf/format-counts.ts';
 import { App } from './app.tsx';
 import { editExternally } from './external-editor.ts';
-import { pickTheme } from './theme.ts';
+import { pickTheme, type Theme, withAccentOverrides } from './theme.ts';
 
 const pageUp = '\u001b[5~';
 const pageDown = '\u001b[6~';
@@ -78,6 +78,7 @@ async function mount(
     serverInfo?: (serverID: string) => { label?: string; online: boolean } | undefined;
     config?: typeof defaultConfig;
     clipboard?: ControllerDeps['clipboard'];
+    theme?: Theme;
   } = {},
 ) {
   const controller = new AppController({
@@ -109,7 +110,7 @@ async function mount(
       App({
         controller,
         keymap: options.keymap ?? buildKeymap({}).keymap,
-        theme: pickTheme({}),
+        theme: options.theme ?? pickTheme({}),
         animate: false,
         ascii: false,
         env: {},
@@ -386,6 +387,22 @@ describe('app', () => {
     );
     expect(underlined[0]?.row).toBe(composerRow);
     expectWelcomeGreeting(frame);
+    controller.dispose();
+  });
+
+  test('the caret uses the configured accent colour', async () => {
+    const theme = withAccentOverrides(pickTheme({}), { accent: '#00ff88' });
+    const { controller, setup } = await mount(backendWithSession(), { theme });
+    controller.startNewSession('/work/kohjoh');
+    await settle(setup);
+    await setup.mockInput.typeText('hi');
+    await settle(setup);
+    const marked = setup
+      .captureSpans()
+      .lines.flatMap((line) => line.spans)
+      .filter((span) => (span.attributes & TextAttributes.UNDERLINE) !== 0);
+    expect(marked).toHaveLength(1);
+    expect(hexOf(marked[0]!.fg)).toBe('#00ff88');
     controller.dispose();
   });
 

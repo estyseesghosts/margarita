@@ -1,4 +1,5 @@
 import { strings } from '../i18n/index.ts';
+import type { Variations } from '../i18n/types.ts';
 import { formatBytes } from './attachment.ts';
 import type { ExecutionMarker } from './execution-segment.ts';
 import type { ModelSelection } from './model-ref.ts';
@@ -13,6 +14,7 @@ import {
   type ToolCategory,
   toolIdentity,
 } from './tool-classification.ts';
+import { resolveVariation } from './variations.ts';
 import type { WorkerJob } from './worker.ts';
 
 // Kept as temporary re-exports while callers migrate to the focused module (#319).
@@ -65,8 +67,12 @@ export function toolMetadataRowBudget(
   kind: 'error' | 'files',
   detailed: boolean,
   expanded = false,
+  baseRows = configuredPreviewRows,
 ): number {
-  return toolMetadataRows[expanded ? 'expanded' : detailed ? 'detailed' : 'compact'][kind];
+  return scaleBudget(
+    toolMetadataRows[expanded ? 'expanded' : detailed ? 'detailed' : 'compact'][kind],
+    baseRows,
+  );
 }
 
 /** First `rows` file references plus the exact number kept out of the inline window. */
@@ -290,8 +296,13 @@ export type TranscriptNode =
   /** Lifecycle marker attached after a turn's own output; static when the run finished. */
   | { kind: 'execution'; key: string; segment: ExecutionMarker };
 
+/** Configured visibility of authentic reasoning text; never a claim about token counts. */
+export type ReasoningMode = 'hidden' | 'details-only' | 'always';
+
 export type FoldOptions = Readonly<{
   detailed: boolean;
+  reasoningMode?: ReasoningMode;
+  groupTools?: 'compact' | 'none';
   /** Group keys the user expanded individually; see `groupKey`. */
   expandedGroups: ReadonlySet<string>;
   /** Tool IDs whose oversized inline diff the user expanded; see `clampDiffPatch`. */
@@ -461,9 +472,20 @@ function executionNode(marker: ExecutionMarker): TranscriptNode {
 }
 
 /** Cross-message passes applied to the concatenated per-message nodes. */
+/** Compact grouping can be disabled independently of the detailed view. */
+export function groupsEnabled(options: FoldOptions): boolean {
+  return options.groupTools !== 'none' && !options.detailed;
+}
+
+/** Authentic reasoning text is never inferred from token counts alone. */
+export function reasoningVisible(options: FoldOptions): boolean {
+  const mode = options.reasoningMode ?? 'details-only';
+  return mode === 'always' || (mode === 'details-only' && options.detailed);
+}
+
 function finishFoldedNodes(nodes: TranscriptNode[], options: FoldOptions): TranscriptNode[] {
   const consolidated = consolidateInterruptions(nodes);
-  return options.detailed ? consolidated : mergeAdjacentGroups(consolidated, options);
+  return groupsEnabled(options) ? mergeAdjacentGroups(consolidated, options) : consolidated;
 }
 
 /**
@@ -490,6 +512,8 @@ function foldOptionSignature(options: FoldOptions): string {
   // per-message cache. Detailed mode and the MCP catalog remain genuinely global (#354).
   return [
     options.detailed ? 'detailed' : 'compact',
+    options.reasoningMode ?? 'details-only',
+    options.groupTools ?? 'compact',
     (options.mcpServers ?? []).join('\u0001'),
   ].join('\u0000');
 }
@@ -524,7 +548,7 @@ function markerFingerprint(marker: ExecutionMarker): string {
     String(marker.startedAt),
     String(marker.completedAt ?? ''),
     String(marker.durationMs ?? ''),
-    marker.activity ?? '',
+    Array.isArray(marker.activity) ? marker.activity.join('\u0001') : (marker.activity ?? ''),
   ].join('\u0000');
 }
 
@@ -856,9 +880,9 @@ export function createTranscriptProjector(): TranscriptProjector {
 
     const tracker: MergeTracker = { computed: 0, reused: 0 };
     const consolidated = consolidateInterruptionsIndexed(indexed);
-    const finished = options.detailed
-      ? consolidated
-      : mergeAdjacentGroupsIndexed(consolidated, options, mergeCache, tracker);
+    const finished = groupsEnabled(options)
+      ? mergeAdjacentGroupsIndexed(consolidated, options, mergeCache, tracker)
+      : consolidated;
 
     const suffixNodes = finished.map((entry) => entry.node);
     const keptChunks = truncateChunks(chunks, prefixLength);
@@ -1133,8 +1157,8 @@ function foldAssistant(
       case 'reasoning':
         if (part.text.trim() !== '') sawReasoningText = true;
         // Live reasoning status is the throbber's job; the transcript only shows
-        // authentic reasoning text, and only in detailed mode.
-        if (options.detailed && part.text.trim() !== '') {
+        // authentic reasoning text, at the configured visibility.
+        if (reasoningVisible(options) && part.text.trim() !== '') {
           flush();
           out.push({
             kind: 'reasoning',
@@ -1150,7 +1174,7 @@ function foldAssistant(
   });
   flush();
   if (
-    options.detailed &&
+    reasoningVisible(options) &&
     !sawReasoningText &&
     message.reasoningTokens !== undefined &&
     message.reasoningTokens > 0
@@ -1232,7 +1256,7 @@ const liveToolNameMaxWidth = 48;
 
 const liveArgumentKeys = ['command', 'filePath', 'path', 'pattern', 'url', 'query', 'description'];
 
-const activityLabels: Readonly<Record<ToolCategory, string>> = strings.transcript.live;
+const activityLabels: Readonly<Record<ToolCategory, Variations>> = strings.transcript.live;
 
 /**
  * The one call to name beneath a collapsed group: the most recently started call that is
@@ -1314,6 +1338,7 @@ export const backgroundHintAfterMs = 10_000;
 export function liveToolLine(
   tools: readonly ToolCall[],
   mcpServers: readonly string[] = [],
+  nowMs: number = Date.now(),
 ): LiveTool | undefined {
   const active = activeTool(tools);
   if (active === undefined) return undefined;
@@ -1361,7 +1386,7 @@ export function liveToolLine(
         : ` ${truncatePrompt(sanitizeTerminalText(firstLine), liveToolNameMaxWidth)}`;
     return { text: name + arg, startedAt: active.startedAt, shell };
   }
-  const verb = activityLabels[category];
+  const verb = resolveVariation(activityLabels[category], nowMs) ?? '';
   const target = liveArgumentKeys
     .map((key) => active.input[key])
     .find((value): value is string => typeof value === 'string' && value.trim() !== '');
@@ -1523,6 +1548,13 @@ export function formatToolTiming(tool: ToolCall, formatClock: (at: number) => st
 
 export type PreviewKind = 'output' | 'shell' | 'diff' | 'code' | 'reasoning';
 
+/** Process-wide detail budget, set once from config at startup (default 12 rows). */
+let configuredPreviewRows = 12;
+
+export function configurePreviewRows(rows: number): void {
+  configuredPreviewRows = rows;
+}
+
 /**
  * Inline display rows per kind. Detailed mode is materially more generous than compact,
  * but both are bounded; the inspector is the route to full retained content (#219).
@@ -1537,9 +1569,22 @@ export const previewBudgets: Readonly<
 /** Hard ceiling for one inline item even when the user expands it. */
 export const maxInlinePreviewRows = 100;
 
-export function previewBudget(kind: PreviewKind, detailed: boolean, expanded = false): number {
+/**
+ * `baseRows` is the compact output budget (12 by default); every other budget scales from
+ * it, so one setting tunes detail without changing the shipped proportions.
+ */
+function scaleBudget(rows: number, baseRows: number): number {
+  return Math.max(1, Math.min(maxInlinePreviewRows, Math.round((rows * baseRows) / 12)));
+}
+
+export function previewBudget(
+  kind: PreviewKind,
+  detailed: boolean,
+  expanded = false,
+  baseRows = configuredPreviewRows,
+): number {
   if (expanded) return maxInlinePreviewRows;
-  return previewBudgets[detailed ? 'detailed' : 'compact'][kind];
+  return scaleBudget(previewBudgets[detailed ? 'detailed' : 'compact'][kind] ?? 12, baseRows);
 }
 
 /**

@@ -1,6 +1,23 @@
 import { describe, expect, test } from 'bun:test';
 
-import { isCrossPlatformPath, resolveWorkingDirectory } from './target.ts';
+import { isCrossPlatformPath, resolveWorkingDirectory, withDefaultRoute } from './target.ts';
+
+describe('configured startup route', () => {
+  test('only the implicit new-session target becomes the overview', () => {
+    expect(withDefaultRoute({ kind: 'new' }, 'overview')).toEqual({ kind: 'overview' });
+    expect(withDefaultRoute({ kind: 'new' }, 'new')).toEqual({ kind: 'new' });
+    expect(withDefaultRoute({ kind: 'new', prompt: 'hi' }, 'overview')).toEqual({
+      kind: 'new',
+      prompt: 'hi',
+    });
+    expect(withDefaultRoute({ kind: 'continue' }, 'overview')).toEqual({ kind: 'continue' });
+    expect(withDefaultRoute({ kind: 'overview' }, 'new')).toEqual({ kind: 'overview' });
+    expect(withDefaultRoute({ kind: 'resume', sessionID: 'ses_a' }, 'overview')).toEqual({
+      kind: 'resume',
+      sessionID: 'ses_a',
+    });
+  });
+});
 
 describe('working directory resolution', () => {
   test('local relative paths resolve against the shell directory', () => {

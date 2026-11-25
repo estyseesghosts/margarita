@@ -1,4 +1,5 @@
 import { strings } from '../i18n/index.ts';
+import type { Variations } from '../i18n/types.ts';
 import { assertNever } from './session.ts';
 import { classifyTool, type ToolCategory, type TranscriptMessage } from './transcript.ts';
 
@@ -23,8 +24,8 @@ export type ExecutionMarker = Readonly<{
   completedAt?: number;
   /** Reported wall time the run actually took; never queue dwell. */
   durationMs?: number;
-  /** While running: a truthful activity derived from agent state. */
-  activity?: string;
+  /** While running: a truthful activity derived from agent state (one wording or a pool). */
+  activity?: Variations;
 }>;
 
 /** A call that has not settled yet; its status genuinely means "working right now". */
@@ -153,7 +154,7 @@ function markerFrom(accum: SegmentAccum, isRunning: boolean): ExecutionMarker | 
     };
   }
   if (isRunning) {
-    let activity: string | undefined;
+    let activity: Variations | undefined;
     if (accum.compacting) activity = strings.throbber.compacting;
     // A finished call must not keep labelling the turn: only a genuinely running tool
     // names the phase, otherwise the throbber's own verb stands in (issue #75).

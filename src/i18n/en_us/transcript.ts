@@ -30,15 +30,17 @@ export const transcriptEnUs = {
     externalCalls: (count) => `Called ${count} external ${count === 1 ? 'tool' : 'tools'}`,
     serverCalls: (server, count) => `Called ${server} ${count} ${count === 1 ? 'time' : 'times'}`,
   },
+  // Same live states as the throbber, in sentence case for the transcript. Each pool is
+  // one state with several slowly rotating wordings, never several different states.
   live: {
-    read: 'Reading',
-    search: 'Searching',
-    edit: 'Editing',
-    shell: 'Running',
-    code: 'Running script',
-    web: 'Fetching',
-    delegate: 'Delegating',
-    other: 'Working',
+    read: ['Reading', 'Perusing', 'Scanning'],
+    search: ['Searching', 'Hunting', 'Digging'],
+    edit: ['Editing', 'Vim-ing', 'Patching', 'Tweaking'],
+    shell: ['Running', 'Executing', 'Shelling'],
+    code: ['Running script', 'Scripting', 'Computing'],
+    web: ['Fetching', 'Browsing', 'Loading'],
+    delegate: ['Delegating', 'Dispatching', 'Handing off'],
+    other: ['Working', 'Producing', 'Figuring'],
   },
   history: {
     loadingEarlier: ' … loading earlier messages',
