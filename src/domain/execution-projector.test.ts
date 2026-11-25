@@ -127,4 +127,26 @@ describe('incremental execution-marker projector (#349)', () => {
     expect(projection.markers).toEqual(reference(next, true));
     expect(projection.stats.messagesScanned).toBe(next.length);
   });
+
+  test('a tail update on 50k-message history reuses every closed marker, no full N-marker rebuild', () => {
+    const turns = 16_667; // 50,001 messages
+    const messages = history(turns);
+    const projector = createExecutionMarkerProjector();
+    const first = projector.project(messages, false, { kind: 'reset' });
+    expect(first.stats.messagesScanned).toBe(messages.length);
+    expect(first.stats.segmentsReused).toBe(0);
+
+    // Append one completed turn at the tail: only the new messages are scanned and every
+    // closed marker is reused by identity, so the afterMessageId lookup map built from the
+    // markers reuses the same ExecutionMarker objects rather than deriving N new ones.
+    const next = [...messages, ...turn(turns)];
+    const projection = projector.project(next, false, {
+      kind: 'replace',
+      firstChangedIndex: messages.length,
+    });
+    expect(projection.stats.messagesScanned).toBe(3);
+    expect(projection.stats.segmentsReused).toBe(turns);
+    expect(projection.markers[0]).toBe(first.markers[0]);
+    expect(projection.markers).toEqual(reference(next, false));
+  });
 });

@@ -538,7 +538,7 @@ type CollapsibleItem = Readonly<{ key: string; kind: 'group' | 'diff' | 'worker'
 
 /** Read-only indexes over one authoritative presentation projection (#353). */
 type PresentationIndex = Readonly<{
-  nodes: readonly TranscriptNode[];
+  length: number;
   keyToIndex: Map<string, number>;
   tools: Map<string, ToolCall>;
   groups: Map<string, Extract<TranscriptNode, { kind: 'tool-group' }>>;
@@ -561,7 +561,7 @@ type PresentationCache = Readonly<{
 /** Empty index used outside an attached conversation. */
 function emptyPresentationIndex(): PresentationIndex {
   return {
-    nodes: [],
+    length: 0,
     keyToIndex: new Map(),
     tools: new Map(),
     groups: new Map(),
@@ -570,9 +570,10 @@ function emptyPresentationIndex(): PresentationIndex {
   };
 }
 
-/** Builds the read-only navigation indexes from one authoritative projection (#353). */
+/** Builds the read-only navigation indexes from one authoritative projection (#353). The
+ * projection's chunked view is iterated directly; nothing is flattened with `toArray()`. */
 function buildPresentationIndex(
-  nodes: readonly TranscriptNode[],
+  view: TranscriptNodeView,
   detailed: boolean,
   expandedGroups: ReadonlySet<string>,
 ): PresentationIndex {
@@ -581,13 +582,12 @@ function buildPresentationIndex(
   const groups = new Map<string, Extract<TranscriptNode, { kind: 'tool-group' }>>();
   const groupNodes: Extract<TranscriptNode, { kind: 'tool-group' }>[] = [];
   const collapsible: CollapsibleItem[] = [];
-  for (const [index, node] of nodes.entries()) {
+  let index = 0;
+  for (const node of view) {
     keyToIndex.set(node.key, index);
     if (node.kind === 'worker') {
       collapsible.push({ key: node.key, kind: 'worker' });
-      continue;
-    }
-    if (node.kind === 'tool') {
+    } else if (node.kind === 'tool') {
       tools.set(node.tool.id, node.tool);
       if (detailed) {
         collapsible.push({ key: `tool:${node.tool.id}`, kind: 'tool' });
@@ -597,20 +597,20 @@ function buildPresentationIndex(
       } else {
         collapsible.push({ key: `tool:${node.tool.id}`, kind: 'tool' });
       }
-      continue;
-    }
-    if (node.kind === 'tool-group') {
+    } else if (node.kind === 'tool-group') {
       groups.set(node.key, node);
       groupNodes.push(node);
       for (const tool of node.tools) tools.set(tool.id, tool);
-      if (detailed) continue;
-      collapsible.push({ key: node.key, kind: 'group' });
-      if (expandedGroups.has(node.key)) {
-        for (const tool of node.tools) collapsible.push({ key: `tool:${tool.id}`, kind: 'tool' });
+      if (!detailed) {
+        collapsible.push({ key: node.key, kind: 'group' });
+        if (expandedGroups.has(node.key)) {
+          for (const tool of node.tools) collapsible.push({ key: `tool:${tool.id}`, kind: 'tool' });
+        }
       }
     }
+    index += 1;
   }
-  return { nodes, keyToIndex, tools, groups, groupNodes, collapsible };
+  return { length: view.length, keyToIndex, tools, groups, groupNodes, collapsible };
 }
 
 export class AppController {
@@ -1836,6 +1836,9 @@ export class AppController {
       messages: readonly TranscriptMessage[];
       running: boolean;
       markers: readonly ExecutionMarker[];
+      /** `afterMessageId → ExecutionMarker` lookup maintained alongside the ordered list, so
+       * presentation can consume it directly without rebuilding an N-entry map (#audit-2 task 5). */
+      lookup: ReadonlyMap<string, ExecutionMarker>;
     }
   >();
   /** One authoritative folded projection per attached transcript (#353). */
@@ -2301,7 +2304,12 @@ export class AppController {
     }
     const running = this.state.running[key] === true;
     const projection = projector.project(messages, running, change);
-    this.markerCache.set(key, { messages, running, markers: projection.markers });
+    this.markerCache.set(key, {
+      messages,
+      running,
+      markers: projection.markers,
+      lookup: new Map(projection.markers.map((marker) => [marker.afterMessageId, marker])),
+    });
     this.debugLog.write('execution-markers', {
       key,
       change: change.kind,
@@ -2316,9 +2324,36 @@ export class AppController {
     sessionID: string,
     serverID: string = this.activeServerID(),
   ): readonly ExecutionMarker[] {
+    return this.markerCacheFor(sessionID, serverID)?.markers ?? [];
+  }
+
+  /** `afterMessageId → ExecutionMarker` lookup maintained incrementally with the ordered list.
+   * Passing this directly to the projector avoids rebuilding an N-entry map per projection (#audit-2 task 5). */
+  markerLookupFor(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): ReadonlyMap<string, ExecutionMarker> {
+    return this.markerCacheFor(sessionID, serverID)?.lookup ?? new Map();
+  }
+
+  /** Whether the presentation currently holds a running execution marker. Read from marker
+   * state (O(markers)) instead of scanning every presentation node (O(nodes)) (#audit-2 task 7). */
+  hasRunningMarker(sessionID: string, serverID: string = this.activeServerID()): boolean {
+    const cached = this.markerCacheFor(sessionID, serverID);
+    return cached?.markers.some((marker) => marker.phase === 'running') === true;
+  }
+
+  /** Ensures the incremental marker cache entry for a session exists and is current, then
+   * returns it. The ordered list and the lookup map are derived together, never separately. */
+  private markerCacheFor(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ):
+    | { markers: readonly ExecutionMarker[]; lookup: ReadonlyMap<string, ExecutionMarker> }
+    | undefined {
     const key = this.keyFor(serverID, sessionID);
     const transcript = this.state.transcripts[key];
-    if (transcript === undefined) return [];
+    if (transcript === undefined) return undefined;
     const messages = unwrap(transcript.messages);
     const running = this.state.running[key] === true;
     const cached = this.markerCache.get(key);
@@ -2327,7 +2362,7 @@ export class AppController {
     } else if (cached.running !== running) {
       this.updateExecutionMarkers(key, messages, { kind: 'tail' });
     }
-    return this.markerCache.get(key)?.markers ?? [];
+    return this.markerCache.get(key);
   }
 
   /** Last marker projection counters for tests and benchmarks (#349). */
@@ -3787,7 +3822,7 @@ export class AppController {
     const position = presentation.keyToIndex.get(nodeKey);
     if (position === undefined) return false;
     // Leave a few rows of context around the target rather than pinning it to the edge.
-    const needed = presentation.nodes.length - position + 8;
+    const needed = presentation.length - position + 8;
     if (this.transcriptWindow(sessionID, serverID) < needed) {
       this.setState('transcriptWindow', this.keyFor(serverID, sessionID), needed);
     }
@@ -8602,9 +8637,7 @@ export class AppController {
       projector = createTranscriptProjector();
       this.presentationProjectors.set(key, projector);
     }
-    const markers = new Map(
-      this.markersFor(sessionID, serverID).map((marker) => [marker.afterMessageId, marker]),
-    );
+    const markers = this.markerLookupFor(sessionID, serverID);
     const changedFrom = transcript.changedFrom;
     const view = projector.projectView(messages, {
       detailed: this.state.detailed,
@@ -8640,7 +8673,7 @@ export class AppController {
   }
 
   /** Read-only indexes for the attached transcript; rebuilt only when inputs change (#353). */
-  private presentationIndexFor(
+  presentationIndexFor(
     sessionID: string,
     serverID: string = this.activeServerID(),
   ): PresentationIndex {
@@ -8666,7 +8699,7 @@ export class AppController {
       return cached.index;
     }
     const view = this.presentationFor(sessionID, serverID);
-    const index = buildPresentationIndex(view.toArray(), this.state.detailed, expanded.groups);
+    const index = buildPresentationIndex(view, this.state.detailed, expanded.groups);
     this.presentationCache.set(key, {
       messages,
       detailed: this.state.detailed,

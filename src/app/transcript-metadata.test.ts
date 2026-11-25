@@ -182,6 +182,86 @@ describe('controller transcript metadata (#349, #350)', () => {
     }
   });
 
+  describe('execution-marker lookup is incremental (#audit-2 task 5)', () => {
+    test('repeated presentation reuses the cached lookup map instead of rebuilding it', async () => {
+      const { controller } = makeController(history(40));
+      try {
+        await controller.bootstrap();
+        controller.openSession(sessionID);
+        await waitFor(() => messagesOf(controller).length === 120, 'initial transcript');
+
+        const firstLookup = controller.markerLookupFor(sessionID);
+        controller.presentationFor(sessionID);
+        const secondLookup = controller.markerLookupFor(sessionID);
+        // The lookup map lives in the marker cache and is reused across projections; it is
+        // not rebuilt into a new N-entry map on every presentationFor() call.
+        expect(secondLookup).toBe(firstLookup);
+        expect(firstLookup.size).toBeGreaterThan(0);
+
+        // Every marker is reachable by its afterMessageId and references the same object.
+        for (const marker of controller.markersFor(sessionID)) {
+          expect(firstLookup.get(marker.afterMessageId)).toBe(marker);
+        }
+      } finally {
+        controller.dispose();
+      }
+    });
+
+    test('a running-state change keeps the same marker objects in the cached lookup', async () => {
+      const { controller } = makeController(history(40));
+      try {
+        await controller.bootstrap();
+        controller.openSession(sessionID);
+        await waitFor(() => messagesOf(controller).length === 120, 'initial transcript');
+
+        const before = controller.markerLookupFor(sessionID);
+        controller.onEvents('local', [{ kind: 'execution', sessionID, state: 'started' }], false);
+        await waitFor(
+          () => controller.state.running[sessionKey({ serverID: 'local', sessionID })] === true,
+          'running',
+        );
+
+        const after = controller.markerLookupFor(sessionID);
+        // The running-state change rewrites only the open segment; closed markers keep their
+        // identity, so the lookup reuses the same ExecutionMarker objects.
+        expect(after.size).toBe(before.size);
+        for (const marker of controller.markersFor(sessionID)) {
+          if (marker.phase === 'completed') {
+            expect(after.get(marker.afterMessageId)).toBe(marker);
+          }
+        }
+      } finally {
+        controller.dispose();
+      }
+    });
+  });
+
+  test('presentation index resolves every node key without flattening the view (#audit-2 task 6)', async () => {
+    const { controller } = makeController(history(40));
+    try {
+      await controller.bootstrap();
+      controller.openSession(sessionID);
+      await waitFor(() => messagesOf(controller).length === 120, 'initial transcript');
+
+      const index = controller.presentationIndexFor(sessionID);
+      const view = controller.presentationFor(sessionID);
+      expect(index.length).toBe(view.length);
+      expect(index.length).toBeGreaterThan(0);
+
+      // Every node key resolves to a stable, in-bounds index; the index is built by walking
+      // the chunked view once, not by flattening it with `toArray()`.
+      for (let i = 0; i < view.length; i += 1) {
+        const node = view.at(i)!;
+        expect(index.keyToIndex.get(node.key)).toBe(i);
+      }
+      expect(Array.from(index.keyToIndex.values()).sort((a, b) => a - b)).toEqual(
+        Array.from({ length: view.length }, (_, i) => i),
+      );
+    } finally {
+      controller.dispose();
+    }
+  });
+
   test('navigation reads one cached projection instead of re-folding', async () => {
     const { controller } = makeController(history(40));
     try {

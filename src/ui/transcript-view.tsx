@@ -177,9 +177,12 @@ export function Transcript(props: TranscriptProps) {
   const queued = createMemo(() =>
     (state.inbox[sessionKeyValue()] ?? []).filter((item) => item.kind === 'user'),
   );
-  const hasRunningMarker = createMemo(() =>
-    nodes().some((node) => node.kind === 'execution' && node.segment.phase === 'running'),
-  );
+  const hasRunningMarker = createMemo(() => {
+    // Recompute whenever the projection changes; the controller answers from execution-marker
+    // state instead of scanning every presentation node (#audit-2 task 7).
+    nodes();
+    return props.controller.hasRunningMarker(props.sessionID, props.serverID);
+  });
   let box: ScrollBoxRenderable | undefined;
   const renderer = useRenderer();
   const syntax = createMemo(() => createSyntaxStyle(props.theme, renderer.nativeScene));
@@ -193,11 +196,7 @@ export function Transcript(props: TranscriptProps) {
     { key: string; offset: number } | undefined
   >(undefined);
   const nodeIndexFor = () =>
-    new Map(
-      nodes()
-        .toArray()
-        .map((node, index) => [node.key, index] as const),
-    );
+    props.controller.presentationIndexFor(props.sessionID, props.serverID).keyToIndex;
 
   /**
    * Recomputes which earlier prompt, if any, has scrolled out above the viewport. The
