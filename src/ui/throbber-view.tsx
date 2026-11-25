@@ -2,6 +2,7 @@ import type { Accessor } from 'solid-js';
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 
 import { graphemes } from '../domain/composer.ts';
+import { throbberStringsEnUs } from '../domain/throbber-strings-en_us.ts';
 import {
   describeThrobber,
   frameAt,
@@ -72,7 +73,9 @@ export function Throbber(props: ThrobberProps) {
         </span>
       </text>
       <Show when={tip()}>
-        {(text: Accessor<string>) => <text fg={props.theme.dim}>{`  └ Tip: ${text()}`}</text>}
+        {(text: Accessor<string>) => (
+          <text fg={props.theme.dim}>{`  └ ${throbberStringsEnUs.tipPrefix} ${text()}`}</text>
+        )}
       </Show>
     </box>
   );

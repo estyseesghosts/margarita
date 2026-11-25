@@ -1,4 +1,5 @@
 import { assertNever } from './session.ts';
+import { throbberStringsEnUs } from './throbber-strings-en_us.ts';
 import { classifyTool, type ToolCategory, type TranscriptMessage } from './transcript.ts';
 
 /**
@@ -25,17 +26,6 @@ export type ExecutionMarker = Readonly<{
   /** While running: a truthful activity derived from agent state. */
   activity?: string;
 }>;
-
-const activityByCategory: Readonly<Record<ToolCategory, string>> = {
-  read: 'Reading',
-  search: 'Searching',
-  edit: 'Editing',
-  shell: 'Running',
-  code: 'Running script',
-  web: 'Fetching',
-  delegate: 'Delegating',
-  other: 'Working',
-};
 
 /** A call that has not settled yet; its status genuinely means "working right now". */
 function isToolActive(status: string): boolean {
@@ -164,12 +154,12 @@ function markerFrom(accum: SegmentAccum, isRunning: boolean): ExecutionMarker | 
   }
   if (isRunning) {
     let activity: string | undefined;
-    if (accum.compacting) activity = 'Compacting conversation';
+    if (accum.compacting) activity = throbberStringsEnUs.compacting;
     // A finished call must not keep labelling the turn: only a genuinely running tool
     // names the phase, otherwise the throbber's own verb stands in (issue #75).
     else if (accum.lastTool !== undefined && isToolActive(accum.lastTool.status))
-      activity = activityByCategory[accum.lastTool.category];
-    else if (accum.reasoningOpen) activity = 'Thinking';
+      activity = throbberStringsEnUs.activity[accum.lastTool.category];
+    else if (accum.reasoningOpen) activity = throbberStringsEnUs.thinking;
     return {
       id: accum.id,
       afterMessageId: accum.lastMessageId,

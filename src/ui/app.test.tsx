@@ -267,6 +267,34 @@ describe('app', () => {
     expect(frame.includes('…')).toBe(true);
   });
 
+  test('overview rows adapt to narrow terminals without wrapping under the scrollbar (#344)', async () => {
+    for (const width of [28, 36, 44, 60]) {
+      const backend = new FakeBackend();
+      backend.sessions = Array.from({ length: 12 }, (_, index) => ({
+        id: `ses_${index}`,
+        serverID: 'local',
+        projectID: 'p',
+        directory: '/work/a/rather/deeply/nested/project/directory',
+        title: `Continue working on the long running refactor ${index}`,
+        createdAt: index,
+        updatedAt: index,
+        archived: false,
+      }));
+      const { setup } = await mount(backend, { width, height: 24 });
+      const lines = setup.captureCharFrame().split('\n');
+      // Overflowing content draws the scrollbar in the last column; nothing may spill past it.
+      expect(lines.some((line) => line.endsWith('█'))).toBe(true);
+      for (const line of lines) expect(cellWidth(line)).toBeLessThanOrEqual(width);
+      const dotRows = lines.filter((line) => line.includes('●'));
+      const titleRows = lines.filter((line) => line.includes('Contin'));
+      // Each visible session contributes exactly one dot row and one first title line.
+      expect(dotRows.length).toBeGreaterThan(0);
+      expect(titleRows).toHaveLength(dotRows.length);
+      expect(lines.some((line) => line.includes('·…'))).toBe(false);
+      expect(lines.some((line) => line.includes('All') && line.includes('12'))).toBe(true);
+    }
+  });
+
   test('attach shows welcome panel, transcript and footer; empty Left returns', async () => {
     const { controller, setup } = await mount(backendWithSession());
     setup.mockInput.pressArrow('up');

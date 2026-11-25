@@ -7,8 +7,9 @@ import { groupRows, loadMoreRowKey, type OverviewRow } from '../domain/overview-
 import {
   layoutOverviewRow,
   layoutOverviewTabs,
-  overviewDotCells,
-  overviewMarkerCells,
+  layoutProjectHeader,
+  overviewContentWidth,
+  overviewMarker,
 } from '../domain/overview-row-layout.ts';
 import { directoryKey, directoryName } from '../domain/path-identity.ts';
 import { projectLabel } from '../domain/project-label.ts';
@@ -82,7 +83,7 @@ export function Overview(props: {
               count: props.controller.tabCounts()[tab] ?? 0,
               selected: state.overview.tab === tab,
             })),
-            Math.max(8, props.width - 2),
+            overviewContentWidth(props.width),
           )}
         >
           {(tab, index) => (
@@ -112,79 +113,93 @@ export function Overview(props: {
         </text>
       </Show>
       <For each={groups()}>
-        {(group) => (
-          <box flexDirection="column" marginBottom={1}>
-            <text>
-              <Show
-                when={!isNoColorTheme(props.theme)}
-                fallback={
-                  <span style={{ fg: props.theme.text }}>
-                    <b>{group.name}</b>
-                  </span>
-                }
-              >
-                <span
-                  style={{
-                    bg: projectLabel(
-                      group.serverID,
-                      directoryKey(group.directory, props.controller.platformFor(group.serverID)),
-                    ).background,
-                    fg: projectLabel(
-                      group.serverID,
-                      directoryKey(group.directory, props.controller.platformFor(group.serverID)),
-                    ).foreground,
-                  }}
+        {(group) => {
+          const remoteLabel = () =>
+            group.remote
+              ? `  ${props.ascii === true ? '[remote]' : '🖥'} ${group.serverLabel ?? 'remote'}`
+              : '';
+          const staleLabel = () => (group.stale ? '  [offline]' : '');
+          const header = () =>
+            layoutProjectHeader({
+              name: group.name,
+              extras: `${remoteLabel()}${staleLabel()}`,
+              directory: group.directory,
+              contentWidth: overviewContentWidth(props.width),
+            });
+          return (
+            <box flexDirection="column" marginBottom={1}>
+              <text>
+                <Show
+                  when={!isNoColorTheme(props.theme)}
+                  fallback={
+                    <span style={{ fg: props.theme.text }}>
+                      <b>{header().name}</b>
+                    </span>
+                  }
                 >
-                  {' '}
-                  <b>{group.name}</b>{' '}
-                </span>
-              </Show>
-              <Show when={group.remote}>
-                <span style={{ fg: props.theme.accent }}>
-                  {`  ${props.ascii === true ? '[remote]' : '🖥'} ${group.serverLabel ?? 'remote'}`}
-                </span>
-              </Show>
-              <Show when={group.stale}>
-                <span style={{ fg: props.theme.dim }}>{'  [offline]'}</span>
-              </Show>
-              <span style={{ fg: props.theme.dim }}>{`  ${group.directory}`}</span>
-            </text>
-            <For each={groupRows(group, state.overview.expanded[group.key] === true)}>
-              {(row) => (
-                <Switch>
-                  <Match when={row.kind === 'session' ? row : undefined}>
-                    {(sessionRow: Accessor<RowOf<'session'>>) => (
-                      <SessionLine
-                        controller={props.controller}
-                        theme={props.theme}
-                        now={props.now}
-                        session={sessionRow().session}
-                        selected={selected(row.key)}
-                        id={rowID(row.key)}
-                        rowKey={row.key}
-                        width={props.width}
-                        ascii={props.ascii}
-                      />
-                    )}
-                  </Match>
-                  <Match when={row.kind === 'toggle' ? row : undefined}>
-                    {(toggle: Accessor<RowOf<'toggle'>>) => (
-                      <text
-                        id={rowID(row.key)}
-                        fg={selected(row.key) ? props.theme.accent : props.theme.dim}
-                        onMouseUp={activate(() => props.controller.clickOverviewRow(row.key))}
-                      >
-                        {`${selected(row.key) ? '  ❯ ' : '    '}${
-                          toggle().expanded ? '[Show less]' : `[Show more] ${toggle().hidden}`
-                        }`}
-                      </text>
-                    )}
-                  </Match>
-                </Switch>
-              )}
-            </For>
-          </box>
-        )}
+                  <span
+                    style={{
+                      bg: projectLabel(
+                        group.serverID,
+                        directoryKey(group.directory, props.controller.platformFor(group.serverID)),
+                      ).background,
+                      fg: projectLabel(
+                        group.serverID,
+                        directoryKey(group.directory, props.controller.platformFor(group.serverID)),
+                      ).foreground,
+                    }}
+                  >
+                    {' '}
+                    <b>{header().name}</b>{' '}
+                  </span>
+                </Show>
+                <Show when={group.remote}>
+                  <span style={{ fg: props.theme.accent }}>{remoteLabel()}</span>
+                </Show>
+                <Show when={group.stale}>
+                  <span style={{ fg: props.theme.dim }}>{staleLabel()}</span>
+                </Show>
+                <Show when={header().directory !== ''}>
+                  <span style={{ fg: props.theme.dim }}>{`  ${header().directory}`}</span>
+                </Show>
+              </text>
+              <For each={groupRows(group, state.overview.expanded[group.key] === true)}>
+                {(row) => (
+                  <Switch>
+                    <Match when={row.kind === 'session' ? row : undefined}>
+                      {(sessionRow: Accessor<RowOf<'session'>>) => (
+                        <SessionLine
+                          controller={props.controller}
+                          theme={props.theme}
+                          now={props.now}
+                          session={sessionRow().session}
+                          selected={selected(row.key)}
+                          id={rowID(row.key)}
+                          rowKey={row.key}
+                          width={props.width}
+                          ascii={props.ascii}
+                        />
+                      )}
+                    </Match>
+                    <Match when={row.kind === 'toggle' ? row : undefined}>
+                      {(toggle: Accessor<RowOf<'toggle'>>) => (
+                        <text
+                          id={rowID(row.key)}
+                          fg={selected(row.key) ? props.theme.accent : props.theme.dim}
+                          onMouseUp={activate(() => props.controller.clickOverviewRow(row.key))}
+                        >
+                          {`${overviewMarker(selected(row.key), overviewContentWidth(props.width))}${
+                            toggle().expanded ? '[Show less]' : `[Show more] ${toggle().hidden}`
+                          }`}
+                        </text>
+                      )}
+                    </Match>
+                  </Switch>
+                )}
+              </For>
+            </box>
+          );
+        }}
       </For>
       <Show when={deferred().length > 0}>
         <For each={deferred()}>
@@ -203,7 +218,7 @@ export function Overview(props: {
           id={rowID(loadMoreRowKey)}
           fg={selected(loadMoreRowKey) ? props.theme.accent : props.theme.dim}
         >
-          {`${selected(loadMoreRowKey) ? '  ❯ ' : '    '}${
+          {`${overviewMarker(selected(loadMoreRowKey), overviewContentWidth(props.width))}${
             state.sessionsLoading
               ? '[Loading more sessions…]'
               : state.sessionsError !== undefined
@@ -248,8 +263,8 @@ function SessionLine(props: {
     const count = props.controller.planProgress(props.session.id, props.session.serverID);
     return count === undefined ? '' : ` · ${count.done}/${count.total} tasks`;
   };
-  const status = () =>
-    `${executionLabel(execution())}${tasks()} · ${formatAge(props.controller.lastUsed(props.session), props.now)}`;
+  const age = () => formatAge(props.controller.lastUsed(props.session), props.now);
+  const status = () => `${executionLabel(execution())}${tasks()} · ${age()}`;
   const state = () => props.controller.statusOf(props.session);
   const dot = () =>
     props.ascii === true
@@ -270,8 +285,8 @@ function SessionLine(props: {
       dot: dot(),
       title: sanitizeSingleLine(props.session.title ?? props.session.id),
       status: sanitizeSingleLine(status()),
-      // The scrollbox reserves one cell of padding on each side.
-      contentWidth: Math.max(8, props.width - 2),
+      age: age(),
+      contentWidth: overviewContentWidth(props.width),
     });
   return (
     <box
@@ -287,16 +302,18 @@ function SessionLine(props: {
           </span>
           <span style={{ fg: dotColor() }}>{columns().dot}</span>
           <span style={{ fg: props.theme.text }}>{columns().titleLines[0] ?? ''}</span>
-          <span> </span>
-          <span style={{ fg: attention() ? props.theme.warn : props.theme.dim }}>
-            {columns().status}
-          </span>
+          <Show when={columns().statusMode !== 'none'}>
+            <span>{columns().gap}</span>
+            <span style={{ fg: attention() ? props.theme.warn : props.theme.dim }}>
+              {columns().status}
+            </span>
+          </Show>
         </text>
       </box>
       <Show when={columns().titleLines.length > 1}>
         <box flexDirection="row">
           <text fg={props.theme.text}>
-            {`${' '.repeat(overviewMarkerCells + overviewDotCells)}${columns().titleLines[1] ?? ''}`}
+            {`${' '.repeat(columns().indentCells)}${columns().titleLines[1] ?? ''}`}
           </text>
         </box>
       </Show>

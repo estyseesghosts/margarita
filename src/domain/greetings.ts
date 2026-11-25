@@ -1,20 +1,16 @@
+import { greetingStringsEnUs } from './greeting-strings-en_us.ts';
 import type { GreetingPeriod } from './greeting-time.ts';
 
 /**
- * Extensible greeting catalog. Only short, plain text lives here: no terminal escape
- * sequences and no server-provided content. Add an entry to a pool to make it available.
+ * Extensible greeting catalog for the active locale. Only short, plain text lives in the
+ * locale file: no terminal escape sequences and no server-provided content. Add an entry
+ * to a pool there to make it available.
  */
-export const greetingCatalog: Readonly<Record<GreetingPeriod | 'anytime', readonly string[]>> = {
-  morning: ['Good morning!', 'Morning!', 'Early start?'],
-  afternoon: ['Good afternoon!', 'Afternoon!', 'Back to work?'],
-  evening: ['Good evening!', 'Evening!', 'Back for more?'],
-  night: ['Up late?', 'Night owl!', 'Burning the midnight oil?'],
-  anytime: ['Welcome back!', 'Hello again!', 'Ready to build?', "Let's get started!"],
-};
+export const greetingCatalog = greetingStringsEnUs.catalog;
 
 const timedWeight = 0.7;
 const recentLimit = 4;
-const fallback = 'Welcome back!';
+const fallback = greetingStringsEnUs.fallback;
 
 /** Uniform pick from a pool, with an empty pool returning undefined. */
 function pick(pool: readonly string[], rng: () => number): string | undefined {

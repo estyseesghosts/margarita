@@ -52,6 +52,8 @@ New session in: kohjoh
 > _
 ```
 
+**Narrow terminals (#344).** Rows adapt to the terminal width instead of wrapping, following Claude Code's agent view, which drops its secondary column first and keeps the age. Row width is the terminal width minus the scrollbox padding (2) and one always-reserved scrollbar column, so rows never reflow when the scrollbar appears. The status column degrades in steps: full `state · age` while it fits unclipped (about 50+ content cells), then age only, right-aligned (the dot colour carries the state), then no status column below roughly 27 cells. The selection marker shrinks from `  ❯ ` to `❯ ` below 40 cells and is shared by session, Show more and Load more rows. Titles wrap by word to at most two lines. The filter tabs go full labels → compact labels → the active tab named with the others as letter+count (`[All 247] L247 R0 C1 N0`) → letter+count, never hiding a count. The project header clips the path from the left (keeping the directory name) and drops it rather than wrapping. Budgets live in `src/domain/overview-row-layout.ts`.
+
 No session tab strip; no badges that shout on every row; no animated per-row spinners. A single status icon/word suffices. A pending permission or failed session should be conspicuous by **text/status**, not an entire color-filled row. Separate stable `lastActivity` from transient tokens/events to avoid list jitter every streamed token.
 
 ## Grouping algorithm
