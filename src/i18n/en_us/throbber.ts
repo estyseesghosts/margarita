@@ -54,7 +54,7 @@ export const throbberEnUs = {
     'build something cool!',
     "if you're working on react, we'll delete your C:\\",
     '',
-    ''
+    '',
   ],
   tokens: (count) => `${count} tokens`,
   finishedAt: (time) => `done at ${time}`,

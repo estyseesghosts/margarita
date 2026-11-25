@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
+import { strings } from '../i18n/index.ts';
 import type { GreetingPeriod } from './greeting-time.ts';
 import { greetingCatalog, selectGreeting } from './greetings.ts';
 
@@ -28,10 +29,12 @@ describe('selectGreeting', () => {
   });
 
   test('avoids exact repeats across the last four, including across categories', () => {
-    const recent = greetingCatalog.morning;
+    // Exactly four recent greetings, drawn from both the timed and anytime pools. The
+    // selector may only look back four entries, so this is the full window it guards.
+    const recent = [...greetingCatalog.morning.slice(0, 2), ...greetingCatalog.anytime.slice(0, 2)];
     const chosen = selectGreeting('morning', recent, rng([0.0, 0.0]));
-    expect(greetingCatalog.anytime).toContain(chosen);
     expect(recent).not.toContain(chosen);
+    expect(Object.values(greetingCatalog).flat()).toContain(chosen);
   });
 
   test('relaxes gracefully when every pool is exhausted', () => {
@@ -43,7 +46,7 @@ describe('selectGreeting', () => {
     const originalAnytime = greetingCatalog.anytime;
     try {
       (greetingCatalog as { anytime: readonly string[] }).anytime = [];
-      expect(selectGreeting(undefined, [], rng([0.0, 0.0]))).toBe('Welcome back!');
+      expect(selectGreeting(undefined, [], rng([0.0, 0.0]))).toBe(strings.greetings.fallback);
     } finally {
       (greetingCatalog as { anytime: readonly string[] }).anytime = originalAnytime;
     }

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
+import { strings } from '../i18n/index.ts';
 import { executionMarkers } from './execution-segment.ts';
 import type { TranscriptMessage } from './transcript.ts';
 
@@ -172,7 +173,13 @@ describe('executionMarkers', () => {
       true,
     );
     expect(markers).toEqual([
-      { id: 'u', afterMessageId: 'a', phase: 'running', startedAt: 11, activity: 'Searching' },
+      {
+        id: 'u',
+        afterMessageId: 'a',
+        phase: 'running',
+        startedAt: 11,
+        activity: strings.throbber.activity.search,
+      },
     ]);
   });
 
@@ -187,7 +194,7 @@ describe('executionMarkers', () => {
         afterMessageId: 'c',
         phase: 'running',
         startedAt: 10,
-        activity: 'Compacting conversation',
+        activity: strings.throbber.compacting,
       },
     ]);
   });
@@ -208,7 +215,7 @@ describe('executionMarkers', () => {
       ],
       true,
     );
-    expect(markers[0]?.activity).toBe('Thinking');
+    expect(markers[0]?.activity).toBe(strings.throbber.thinking);
   });
 
   test('running → completed → reasoning never leaves a stale compaction status (#39)', () => {
@@ -220,11 +227,11 @@ describe('executionMarkers', () => {
         compactionRecord('c2', 'completed', 13),
         reasoningMessage('b', 14),
       ]),
-    ).toBe('Thinking');
+    ).toBe(strings.throbber.thinking);
     // Model output after a still-"running" record also ends the status.
     expect(
       activityOf([user('u', 10), compactionRecord('c', 'running', 12), reasoningMessage('b', 14)]),
-    ).toBe('Thinking');
+    ).toBe(strings.throbber.thinking);
     expect(
       activityOf([
         user('u', 10),
@@ -238,17 +245,19 @@ describe('executionMarkers', () => {
         compactionRecord('c', 'completed', 12),
         compactionRecord('c3', 'running', 20),
       ]),
-    ).toBe('Compacting conversation');
+    ).toBe(strings.throbber.compacting);
     expect(activityOf([user('u', 10), compactionRecord('c', 'completed', 12)])).toBeUndefined();
   });
 
   test('a finished tool never keeps labelling the running turn (issue #75)', () => {
     // A completed call leaves the phase to the throbber's own verb instead of "Running".
     expect(activityOf([user('u', 10), toolMessage('completed')])).toBeUndefined();
-    expect(activityOf([user('u', 10), toolMessage('streaming')])).toBe('Running');
+    expect(activityOf([user('u', 10), toolMessage('streaming')])).toBe(
+      strings.throbber.activity.shell,
+    );
     // Reasoning after the call is authoritative again.
     expect(activityOf([user('u', 10), toolMessage('completed'), reasoningMessage('r', 20)])).toBe(
-      'Thinking',
+      strings.throbber.thinking,
     );
   });
 

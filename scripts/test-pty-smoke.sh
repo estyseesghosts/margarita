@@ -19,7 +19,11 @@ while [ ! -s "$root/port" ] && [ "$i" -lt 40 ]; do
 done
 port=$(cat "$root/port")
 url="http://127.0.0.1:$port"
+# Derive the accepted clipboard wording from the authoritative i18n copy so the smoke test
+# cannot drift from the user-facing strings (#audit-2 task 1).
+clipboard_expect=$(bun run scripts/emit-clipboard-expectations.ts)
 for scenario in ctrl-c keys mouse clipboard editor editor-fail sigterm resize crash; do
-  STUB_LOG="$root/stub.log" python3 test/smoke/pty-smoke.py "$bin" "$url" "$scenario"
+  MARG_CLIPBOARD_EXPECT="$clipboard_expect" \
+    STUB_LOG="$root/stub.log" python3 test/smoke/pty-smoke.py "$bin" "$url" "$scenario"
 done
 echo "PTY scenario suite passed"

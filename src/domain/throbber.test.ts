@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
+import { strings } from '../i18n/index.ts';
 import {
   describeThrobber,
   formatElapsed,
@@ -56,9 +57,13 @@ describe('throbber', () => {
       80,
       clock,
     );
-    expect(line).toEqual({ label: '', meta: 'Finished at t5 · 1.2k tokens', animated: false });
+    expect(line).toEqual({
+      label: '',
+      meta: `${strings.throbber.finishedAt('t5')} · ${strings.throbber.tokens('1.2k')}`,
+      animated: false,
+    });
     expect(describeThrobber({ phase: 'interrupted', startedAt: 0 }, 9, 80, clock).meta).toBe(
-      'Interrupted',
+      strings.throbber.interrupted,
     );
   });
   test('shimmer peaks travel across the word', () => {

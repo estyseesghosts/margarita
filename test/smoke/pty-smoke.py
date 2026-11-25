@@ -25,6 +25,7 @@ and mouse reporting disabled. On failure the raw PTY transcript tail is printed 
 """
 
 import fcntl
+import json
 import os
 import pty
 import re
@@ -178,14 +179,12 @@ def main():
     elif scenario == 'clipboard':
         # Ctrl+V: no desktop clipboard exists in this minimal PTY environment, so the
         # application must say so instead of inserting anything or submitting the prompt.
+        # The accepted fragments come from the authoritative i18n copy, exported by
+        # scripts/test-pty-smoke.sh, so a wording change cannot silently desync this check.
+        expectations = json.loads(os.environ['MARG_CLIPBOARD_EXPECT'])
         send(b'\x16')
         expect_any(
-            (
-                'Cannot read the clipboard',
-                'The clipboard is empty',
-                'Clipboard read failed',
-                'Clipboard unavailable',
-            ),
+            tuple(expectations),
             'Ctrl+V acquisition feedback',
         )
         # Right-click without a selection goes through the same common paste entry point.

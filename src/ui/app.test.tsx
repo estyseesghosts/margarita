@@ -19,6 +19,7 @@ import { directoryKey } from '../domain/path-identity.ts';
 import { projectLabel } from '../domain/project-label.ts';
 import { cellWidth } from '../domain/text-width.ts';
 import type { ToolCallChild, TranscriptMessage } from '../domain/transcript.ts';
+import { strings } from '../i18n/index.ts';
 import { formatCounts, resetFormatCounts, setFormatCounters } from '../perf/format-counts.ts';
 import { App } from './app.tsx';
 import { editExternally } from './external-editor.ts';
@@ -26,6 +27,14 @@ import { pickTheme, type Theme, withAccentOverrides } from './theme.ts';
 
 const pageUp = '\u001b[5~';
 const pageDown = '\u001b[6~';
+
+/** Matches the live throbber's rotating decorative verbs, derived from the i18n catalog. */
+const runningVerbPattern = new RegExp(
+  `(?:${[strings.throbber.fallbackVerb, ...strings.throbber.decorativeVerbs]
+    .map((verb) => verb.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|')})…`,
+  'g',
+);
 
 function expectWelcomeGreeting(frame: string): void {
   const all = Object.values(greetingCatalog).flat();
@@ -1568,8 +1577,7 @@ describe('execution markers (issue #28)', () => {
     controller.openSession('ses_a');
     await settle(setup);
     const frame = setup.captureCharFrame();
-    const liveVerbs = /(Thinking|Tinkering|Pondering|Untangling|Mulling|Noodling)…/g;
-    expect(frame.match(liveVerbs)).toHaveLength(1);
+    expect(frame.match(runningVerbPattern)).toHaveLength(1);
     controller.dispose();
   });
 
@@ -1651,8 +1659,7 @@ describe('live activity indicator (issues 24, 25)', () => {
     await settle(setup);
     const frame = setup.captureCharFrame();
     expect(frame).not.toContain('∴');
-    const liveVerbs = /(Thinking|Tinkering|Pondering|Untangling|Mulling|Noodling)…/g;
-    expect(frame.match(liveVerbs)).toHaveLength(1);
+    expect(frame.match(runningVerbPattern)).toHaveLength(1);
   });
 
   test('detailed mode shows authentic in-progress reasoning with labeling', async () => {
@@ -1704,7 +1711,7 @@ describe('live activity indicator (issues 24, 25)', () => {
     controller.openSession('ses_a');
     await settle(setup);
     const frame = setup.captureCharFrame();
-    expect(frame.split('Compacting conversation…').length - 1).toBe(1);
+    expect(frame.split(`${strings.throbber.compacting}…`).length - 1).toBe(1);
     expect(frame).not.toContain('∴');
 
     // Server says the compaction landed: throbber resumes from agent state, one dim row.
@@ -1718,8 +1725,8 @@ describe('live activity indicator (issues 24, 25)', () => {
     await settle(setup);
     await settle(setup);
     const done = setup.captureCharFrame();
-    expect(done).toContain('Conversation compacted');
-    expect(done).not.toContain('Compacting conversation…');
+    expect(done).toContain(strings.transcript.notices.compacted);
+    expect(done).not.toContain(`${strings.throbber.compacting}…`);
   });
 });
 
@@ -2754,7 +2761,7 @@ function runningWithQueue(): FakeBackend {
 }
 
 describe('queued messages preview (issue #29)', () => {
-  const verb = /(Thinking|Tinkering|Pondering|Untangling|Mulling|Noodling)…/;
+  const verb = runningVerbPattern;
 
   test('queued follow-ups render above the active throbber and below the transcript, FIFO, with the send-now hint', async () => {
     const backend = runningWithQueue();
