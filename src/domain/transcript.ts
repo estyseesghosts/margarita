@@ -586,7 +586,15 @@ export interface TranscriptNodeView {
   some(predicate: (node: TranscriptNode) => boolean): boolean;
   /** Returns a view with `nodes` appended as one additional chunk. */
   append(nodes: readonly TranscriptNode[]): TranscriptNodeView;
+  /** Returns a view with `notices` inserted directly after the node that owns `toolID`
+   * (a tool or a tool-group). Only the affected chunk is rebuilt; every other chunk is
+   * shared by reference, so a background confirmation never copies the whole transcript.
+   * A notice for a tool absent from this view is dropped, never re-attached elsewhere (#135). */
+  insertAfterTool(toolID: string, notices: readonly BackgroundNotice[]): TranscriptNodeView;
   [Symbol.iterator](): IterableIterator<TranscriptNode>;
+  /** Pre-existing nodes re-copied by the last structural change that produced this view
+   * (0 for a plain projector view; the size of the affected chunk after an insertion). */
+  nodesCopied(): number;
 }
 
 export type TranscriptProjector = Readonly<{
@@ -620,7 +628,10 @@ const mergeCacheLimit = 512;
  */
 const latestMessageRegion = 120;
 
-function createNodeView(chunks: readonly (readonly TranscriptNode[])[]): TranscriptNodeView {
+function createNodeView(
+  chunks: readonly (readonly TranscriptNode[])[],
+  copied: number = 0,
+): TranscriptNodeView {
   const offsets: number[] = [];
   let total = 0;
   for (const chunk of chunks) {
@@ -669,7 +680,37 @@ function createNodeView(chunks: readonly (readonly TranscriptNode[])[]): Transcr
     tail,
     toArray: () => chunks.flat(),
     some: (predicate) => chunks.some((chunk) => chunk.some(predicate)),
-    append: (nodes) => createNodeView(nodes.length === 0 ? chunks : [...chunks, nodes]),
+    append: (nodes) => createNodeView(nodes.length === 0 ? chunks : [...chunks, nodes], copied),
+    insertAfterTool: (toolID, notices) => {
+      // Find the chunk and position of the node that owns this tool.
+      let targetChunk = -1;
+      let targetIndex = -1;
+      outer: for (let c = 0; c < chunks.length; c += 1) {
+        const chunk = chunks[c];
+        if (chunk === undefined) continue;
+        for (let i = 0; i < chunk.length; i += 1) {
+          const node = chunk[i];
+          if (node === undefined) continue;
+          if (nodeOwnsTool(node, toolID)) {
+            targetChunk = c;
+            targetIndex = i;
+            break outer;
+          }
+        }
+      }
+      // A notice for a tool outside this view is dropped, never re-attached elsewhere (#135).
+      if (targetChunk === -1) return createNodeView(chunks, copied);
+      const chunk = chunks[targetChunk]!;
+      const head = chunk.slice(0, targetIndex + 1);
+      const rest = chunk.slice(targetIndex + 1);
+      const rebuilt = [...head, ...notices.map(backgroundNoticeNode), ...rest];
+      const nextChunks = chunks.slice();
+      nextChunks[targetChunk] = rebuilt;
+      // Only the affected chunk's pre-existing nodes are re-copied; every other chunk,
+      // including the full 50k-node prefix, is shared by reference.
+      return createNodeView(nextChunks, chunk.length);
+    },
+    nodesCopied: () => copied,
     *[Symbol.iterator]() {
       for (const chunk of chunks) yield* chunk;
     },
@@ -1275,6 +1316,14 @@ export function activeTool(tools: readonly ToolCall[]): ToolCall | undefined {
  * `undefined` means the call is not in this window, so no confirmation may be attached —
  * never fall back to "the last tool-looking node" and mislabel an unrelated call.
  */
+/** True when `node` is the tool or tool-group node that owns `toolID`. */
+function nodeOwnsTool(node: TranscriptNode, toolID: string): boolean {
+  return (
+    (node.kind === 'tool' && node.tool.id === toolID) ||
+    (node.kind === 'tool-group' && node.tools.some((tool) => tool.id === toolID))
+  );
+}
+
 export function nodeIndexForTool(
   nodes: readonly TranscriptNode[],
   toolID: string,
@@ -1295,6 +1344,11 @@ export type BackgroundNotice = Readonly<{ toolID: string; text: string }>;
  * same node keep their input order; a notice whose tool is not in this window is dropped rather
  * than attached to an unrelated call. No "last tool-looking node" fallback (#135).
  */
+/** Builds a transient background-notice node for one confirmed backgrounded tool (#135). */
+function backgroundNoticeNode(notice: BackgroundNotice): TranscriptNode {
+  return { kind: 'notice', key: `background:${notice.toolID}`, text: notice.text, tone: 'dim' };
+}
+
 export function attachBackgroundNotices(
   nodes: readonly TranscriptNode[],
   notices: readonly BackgroundNotice[],

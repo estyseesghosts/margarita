@@ -46,14 +46,12 @@ import { type ThrobberFacts } from '../domain/throbber.ts';
 import { pagedToolChildren, toolChildBudget, type ToolChildPage } from '../domain/tool-children.ts';
 import {
   activeTool,
-  attachBackgroundNotices,
   backgroundHint,
   boundedPreview,
   boundedTailPreview,
   describeTool,
   formatToolTiming,
   type LiveTool,
-  nodeViewFromArray,
   previewBudget,
   type PreviewKind,
   type ProjectionStats,
@@ -155,7 +153,7 @@ export function Transcript(props: TranscriptProps) {
     const background = state.backgrounded[sessionKeyValue()] ?? [];
     const withBackground =
       background.length > 0 && state.running[sessionKeyValue()] === true
-        ? nodeViewFromArray(attachBackgroundNotices(folded.toArray(), background))
+        ? background.reduce((view, notice) => view.insertAfterTool(notice.toolID, [notice]), folded)
         : folded;
     // A failed worker/shell refresh keeps the last confirmed rows and adds one bounded stale
     // warning. The rows themselves are already part of the controller projection (#101, #230).

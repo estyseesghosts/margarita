@@ -352,7 +352,13 @@ async function navigationReport(fixture: StageFixture, sessionID: string) {
 
 /** One measured event: mutate the fixture, announce it, wait for commit, paint one frame. */
 type EventKind =
-  'append' | 'stream' | 'tool-status' | 'large-response' | 'large-diff' | 'many-tools';
+  | 'append'
+  | 'stream'
+  | 'tool-status'
+  | 'large-response'
+  | 'large-diff'
+  | 'many-tools'
+  | 'background-confirmation';
 
 async function runEvent(
   fixture: StageFixture,
@@ -490,6 +496,37 @@ async function runEvent(
       settled = () => messagesOf(controller, sessionID).at(-1)?.id === id;
       break;
     }
+    case 'background-confirmation': {
+      // Mark the newest tool running so the session has an active call to background.
+      let marked = false;
+      for (let index = messages.length - 1; index >= 0 && !marked; index -= 1) {
+        const message = messages[index];
+        if (message?.kind !== 'assistant') continue;
+        const partIndex = message.parts.findIndex((part) => part.kind === 'tool');
+        if (partIndex < 0) continue;
+        const parts: AssistantPart[] = message.parts.map((part, current) => {
+          if (current !== partIndex || part.kind !== 'tool') return part;
+          const tool: ToolCall = { ...part.tool, status: 'running' };
+          return { ...part, tool };
+        });
+        messages[index] = { ...message, parts };
+        marked = true;
+      }
+      if (!marked) throw new Error('soak: no tool to background');
+      // The transcript-changed announcement refetches and recomputes execution markers, which
+      // flips state.running; only then may the tool be backgrounded.
+      controller.onEvents(serverID, [{ kind: 'transcript-changed', sessionID }], false);
+      await waitFor(
+        () => controller.state.running[sessionKey({ serverID, sessionID })] === true,
+        'running marker',
+      );
+      void controller.backgroundTools();
+      settled = () => {
+        const backgrounded = controller.state.backgrounded[sessionKey({ serverID, sessionID })];
+        return backgrounded !== undefined && backgrounded.length > 0;
+      };
+      break;
+    }
     default: {
       const exhaustive: never = kind;
       throw new Error(`soak: unknown event ${String(exhaustive)}`);
@@ -507,7 +544,7 @@ async function runEvent(
 }
 
 function eventKind(index: number): EventKind {
-  switch (index % 17) {
+  switch (index % 18) {
     case 0:
       return 'large-response';
     case 1:
@@ -521,6 +558,8 @@ function eventKind(index: number): EventKind {
     case 9:
     case 13:
       return 'stream';
+    case 17:
+      return 'background-confirmation';
     default:
       return 'append';
   }

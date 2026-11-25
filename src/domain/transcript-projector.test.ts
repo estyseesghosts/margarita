@@ -373,6 +373,37 @@ describe('bounded chunked projection (#352)', () => {
     }
   });
 
+  test('a background confirmation on 50k history copies only the affected chunk, not the prefix', () => {
+    const baseMessages = history(12_500); // 50k messages, each turn carries a tool row
+    const appended = [...baseMessages, ...turn(12_500)];
+    const projector = createTranscriptProjector();
+    // First projection establishes the chunked prefix; the second reuses it and folds only
+    // the appended tail turn (mirrors a live tail update).
+    projector.projectView(baseMessages, { ...compact, markers: markerFor(baseMessages) });
+    const view = projector.projectView(appended, {
+      ...compact,
+      markers: markerFor(appended),
+      changedFrom: baseMessages.length,
+    });
+    expect(view.nodesCopied()).toBe(0);
+
+    const toolID = 't-t12500'; // the appended turn's tool, inside the fresh tail chunk
+    const annotated = view.insertAfterTool(toolID, [{ toolID, text: 'Moved to background' }]);
+    const flat = annotated.toArray();
+    const toolIndex = flat.findIndex(
+      (node) =>
+        (node.kind === 'tool' && node.tool.id === toolID) ||
+        (node.kind === 'tool-group' && node.tools.some((t) => t.id === toolID)),
+    );
+    expect(toolIndex).toBeGreaterThanOrEqual(0);
+    expect(flat[toolIndex + 1]?.key).toBe(`background:${toolID}`);
+
+    // Only the affected tail chunk's nodes were re-copied; the 50k-node prefix is shared
+    // by reference, never flattened.
+    expect(annotated.nodesCopied()).toBeGreaterThan(0);
+    expect(annotated.nodesCopied()).toBeLessThan(100);
+  });
+
   test('deep-equal reuse is restricted to the latest page', () => {
     const messages = history(100);
     const projector = createTranscriptProjector();
