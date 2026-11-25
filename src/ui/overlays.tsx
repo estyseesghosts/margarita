@@ -32,6 +32,7 @@ import { localCommands } from '../domain/slash-command.ts';
 import { cellWidth, sliceCells } from '../domain/text-width.ts';
 import { completenessLabel } from '../domain/transcript.ts';
 import { formatCost, formatTokenCount } from '../domain/usage-format.ts';
+import { strings } from '../i18n/index.ts';
 import { useActivate } from './pointer.ts';
 import type { Theme } from './theme.ts';
 
@@ -52,7 +53,7 @@ function pickerWindow(index: number, count: number, rows: number): { start: numb
 
 /** Percentage for compact analytics rows; `N/A` when there is no denominator. */
 function analyticsPercent(value: number | undefined): string {
-  return value === undefined ? 'N/A' : `${Math.round(value)}%`;
+  return value === undefined ? strings.overlays.usage.notApplicable : `${Math.round(value)}%`;
 }
 
 /** Bounded help rows: every action plus the two global fallbacks (#241). */
@@ -62,12 +63,15 @@ function helpRows(keymap: Keymap): { label: string; detail: string }[] {
       const bindings = keymap.get(action);
       const label =
         bindings === undefined || bindings.length === 0
-          ? 'unbound'
+          ? strings.overlays.keys.unbound
           : bindings.map(formatBinding).join(' / ');
       return { label, detail: action };
     }),
-    { label: 'Left', detail: 'overview (empty prompt only)' },
-    { label: 'Ctrl+C', detail: 'interrupt · clear · exit' },
+    { label: strings.overlays.keys.left, detail: strings.overlays.keys.leftDetail },
+    {
+      label: strings.overlays.keys.interrupt,
+      detail: strings.overlays.keys.interruptDetail,
+    },
   ];
 }
 
@@ -102,15 +106,19 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
   const usage = () => props.controller.usageAnalytics();
   const contextLine = (): string => {
     const context = usage().context;
-    if (context.status === 'pending') return 'Current context  pending after compaction…';
+    if (context.status === 'pending') return strings.overlays.usage.contextPending;
     if (context.status === 'unknown' || context.tokens === undefined) {
-      return 'Current context  unknown (no valid assistant step with usage)';
+      return strings.overlays.usage.contextUnknown;
     }
-    const tokens = `Current context  ${formatTokenCount(context.tokens)}`;
+    const tokens = strings.overlays.usage.contextLine(formatTokenCount(context.tokens));
     if (context.limit === undefined || context.occupancy === undefined) {
-      return `${tokens} · model limit unknown`;
+      return strings.overlays.usage.contextLimitUnknown(tokens);
     }
-    return `${tokens} / ${formatTokenCount(context.limit)} (${Math.round(context.occupancy)}%)`;
+    return strings.overlays.usage.contextWithLimit(
+      tokens,
+      formatTokenCount(context.limit),
+      Math.round(context.occupancy),
+    );
   };
 
   return (
@@ -127,7 +135,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
             );
           const shown = () => helpRows(props.keymap).slice(start(), start() + bodyRows());
           return (
-            <box {...frame('Keys · PgUp/PgDn scroll · Esc to close')}>
+            <box {...frame(strings.overlays.keys.helpTitle)}>
               <For each={shown()}>
                 {(row) => (
                   <text fg={props.theme.text}>
@@ -137,7 +145,11 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                 )}
               </For>
               <text fg={dim()}>
-                {`rows ${start() + 1}–${start() + shown().length} of ${helpRows(props.keymap).length} · PgUp/PgDn`}
+                {strings.overlays.keys.helpRows(
+                  start() + 1,
+                  start() + shown().length,
+                  helpRows(props.keymap).length,
+                )}
               </text>
               <text fg={dim()} marginTop={1}>
                 {Object.keys(localCommands)
@@ -165,7 +177,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
               border
               borderStyle="rounded"
               borderColor={props.theme.border}
-              title={` Inspector · ${overlay().title} · Esc returns `}
+              title={strings.overlays.inspector.title(overlay().title)}
               flexDirection="column"
               paddingLeft={1}
               paddingRight={1}
@@ -174,13 +186,19 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
             >
               <box flexDirection="row">
                 <text fg={props.theme.dim}>
-                  {`${view().total.toLocaleString()} lines · showing ${shown().offset + 1}–${shown().offset + shown().lines.length}`}
+                  {strings.overlays.inspector.lineSummary(
+                    view().total.toLocaleString(),
+                    shown().offset + 1,
+                    shown().offset + shown().lines.length,
+                  )}
                 </text>
-                <text
-                  fg={props.theme.dim}
-                >{` · source: ${completenessLabel(overlay().payload?.completeness ?? 'complete')}`}</text>
+                <text fg={props.theme.dim}>
+                  {strings.overlays.inspector.source(
+                    completenessLabel(overlay().payload?.completeness ?? 'complete'),
+                  )}
+                </text>
                 <Show when={overlay().loading}>
-                  <text fg={props.theme.accent}>{' · fetching original…'}</text>
+                  <text fg={props.theme.accent}>{strings.overlays.inspector.fetching}</text>
                 </Show>
               </box>
               <Show when={overlay().error}>
@@ -188,14 +206,13 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
               </Show>
               <Show
                 when={overlay().searching}
-                fallback={
-                  <text fg={props.theme.dim}>
-                    {'/ search · Enter next match · ←/→ scroll · Ctrl+Y copy · Ctrl+S save'}
-                  </text>
-                }
+                fallback={<text fg={props.theme.dim}>{strings.overlays.inspector.hints}</text>}
               >
                 <text fg={props.theme.accent}>
-                  {`/${overlay().query.slice(0, overlay().queryCursor)}▏${overlay().query.slice(overlay().queryCursor)}  · ${matchCount()} ${matchCount() === 1 ? 'match' : 'matches'} · Enter next · Esc clear/close`}
+                  {strings.overlays.inspector.searchPrompt(
+                    `${overlay().query.slice(0, overlay().queryCursor)}▏${overlay().query.slice(overlay().queryCursor)}`,
+                    matchCount(),
+                  )}
                 </text>
               </Show>
               <box flexDirection="column" flexGrow={1} flexShrink={1}>
@@ -217,7 +234,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                   }}
                 </For>
                 <Show when={view().total === 0}>
-                  <text fg={props.theme.dim}>{'  no retained text for this result'}</text>
+                  <text fg={props.theme.dim}>{strings.overlays.inspector.noRetainedText}</text>
                 </Show>
               </box>
             </box>
@@ -225,74 +242,106 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
         }}
       </Match>
       <Match when={state.overlay.kind === 'usage'}>
-        <box {...frame('Usage · session analytics')}>
+        <box {...frame(strings.overlays.usage.title)}>
           <text fg={props.theme.text}>
-            {`Session  ${usage().sessionID || 'none'} · ${usage().serverID}${usage().stale ? ' · stale' : ''}`}
+            {strings.overlays.usage.sessionLine(usage().sessionID, usage().serverID, usage().stale)}
           </text>
           <text fg={props.theme.text}>{contextLine()}</text>
           <Show when={usage().context.sinceCompaction !== undefined}>
             <text fg={dim()}>
-              {`Since last compaction  ${formatTokenCount(usage().context.sinceCompaction ?? 0)} · compactions ${usage().completedCompactions}`}
+              {strings.overlays.usage.sinceCompaction(
+                formatTokenCount(usage().context.sinceCompaction ?? 0),
+                usage().completedCompactions,
+              )}
             </text>
           </Show>
           <Show when={usage().lastCompactionAt !== undefined}>
             <text fg={dim()}>
-              {`Last compaction  ${new Date(usage().lastCompactionAt ?? 0).toISOString()}`}
+              {strings.overlays.usage.lastCompaction(
+                new Date(usage().lastCompactionAt ?? 0).toISOString(),
+              )}
             </text>
           </Show>
-          <text fg={props.theme.text}>{'Lifetime server totals (never reset on compaction)'}</text>
+          <text fg={props.theme.text}>{strings.overlays.usage.lifetimeHeading}</text>
           <Show
             when={usage().lifetime}
-            fallback={<text fg={dim()}>Token totals not reported.</text>}
+            fallback={<text fg={dim()}>{strings.overlays.usage.lifetimeUnreported}</text>}
           >
             {(tokens: Accessor<TokenUsage>) => (
               <>
                 <text fg={dim()}>
-                  {`  input ${formatTokenCount(tokens().input)} · output ${formatTokenCount(tokens().output)} · reasoning ${formatTokenCount(tokens().reasoning)}`}
+                  {strings.overlays.usage.lifetimeCounts(
+                    formatTokenCount(tokens().input),
+                    formatTokenCount(tokens().output),
+                    formatTokenCount(tokens().reasoning),
+                  )}
                 </text>
                 <text fg={dim()}>
-                  {`  cache read ${formatTokenCount(tokens().cacheRead)} · cache write ${formatTokenCount(tokens().cacheWrite)}`}
+                  {strings.overlays.usage.lifetimeCache(
+                    formatTokenCount(tokens().cacheRead),
+                    formatTokenCount(tokens().cacheWrite),
+                  )}
                 </text>
               </>
             )}
           </Show>
           <text fg={props.theme.text}>
-            {`Session spend  ${usage().cost === undefined ? 'not reported' : formatCost(usage().cost)} · server-reported, not an invoice`}
+            {strings.overlays.usage.spend(
+              usage().cost === undefined
+                ? strings.overlays.usage.notReported
+                : formatCost(usage().cost),
+            )}
           </text>
-          <text fg={props.theme.text}>{'Activity · loaded messages only'}</text>
+          <text fg={props.theme.text}>{strings.overlays.usage.activityHeading}</text>
           <text fg={dim()}>
-            {`  tool turns ${usage().toolUsingTurns}/${usage().completedUserTurns} (${analyticsPercent(usage().toolTurnPercent)} of user turns) · tool calls ${usage().toolCalls}`}
+            {strings.overlays.usage.toolTurns(
+              usage().toolUsingTurns,
+              usage().completedUserTurns,
+              analyticsPercent(usage().toolTurnPercent),
+              usage().toolCalls,
+            )}
           </text>
+          <text fg={dim()}>{strings.overlays.usage.toolCategoryLine(usage().toolCategories)}</text>
           <text fg={dim()}>
-            {`  read ${usage().toolCategories.read} · search ${usage().toolCategories.search} · edit ${usage().toolCategories.edit} · shell ${usage().toolCategories.shell} · code ${usage().toolCategories.code} · web ${usage().toolCategories.web} · delegate ${usage().toolCategories.delegate} · MCP ${usage().toolCategories.mcp} · other ${usage().toolCategories.other}`}
+            {strings.overlays.usage.outcomes(
+              usage().toolCompleted,
+              usage().toolFailed,
+              usage().toolRunning,
+              usage().toolOther,
+              analyticsPercent(usage().toolFailurePercent),
+            )}
           </text>
-          <text fg={dim()}>
-            {`  completed ${usage().toolCompleted} · failed ${usage().toolFailed} · running ${usage().toolRunning} · other ${usage().toolOther} · failure ${analyticsPercent(usage().toolFailurePercent)} of known outcomes`}
-          </text>
-          <text fg={dim()}>
-            {'Tool stats cover loaded messages only; context uses the step model limit.'}
-          </text>
+          <text fg={dim()}>{strings.overlays.usage.loadedOnly}</text>
         </box>
       </Match>
       <Match when={state.overlay.kind === 'status'}>
-        <box {...frame('Status')}>
-          <text fg={props.theme.text}>{`Server  ${props.controller.serverUrl}`}</text>
-          <text fg={props.theme.text}>{`Stream  ${state.stream}`}</text>
-          <text fg={props.theme.text}>{`Project ${props.controller.currentDirectory()}`}</text>
+        <box {...frame(strings.overlays.status.title)}>
+          <text fg={props.theme.text}>
+            {strings.overlays.status.server(props.controller.serverUrl)}
+          </text>
+          <text fg={props.theme.text}>{strings.overlays.status.stream(state.stream)}</text>
+          <text fg={props.theme.text}>
+            {strings.overlays.status.project(props.controller.currentDirectory())}
+          </text>
           <Show when={props.controller.currentSession()}>
             {(session: Accessor<SessionSummary>) => (
-              <text fg={props.theme.text}>{`Session ${session().id}`}</text>
+              <text fg={props.theme.text}>{strings.overlays.status.session(session().id)}</text>
             )}
           </Show>
-          <text fg={dim()}>{`margarita v${props.controller.version}`}</text>
+          <text fg={dim()}>{strings.chrome.productVersion(props.controller.version)}</text>
         </box>
       </Match>
       <Match when={state.overlay.kind === 'servers'}>
-        <box {...frame('Servers · /servers rename <old> <new> · /unpair <name> · Esc close')}>
+        <box {...frame(strings.overlays.servers.title)}>
           <For each={props.controller.serverList()}>
             {(server) => (
               <text fg={server.active ? props.theme.accent : props.theme.text}>
-                {`${server.active ? '❯' : ' '} ${server.label}  ${server.baseUrl}  [${server.state}]`}
+                {strings.overlays.servers.row(
+                  server.active ? '❯' : ' ',
+                  server.label,
+                  server.baseUrl,
+                  server.state,
+                )}
               </text>
             )}
           </For>
@@ -300,14 +349,11 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
       </Match>
       <Match when={state.overlay.kind === 'unpair-confirm' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'unpair-confirm' }>>) => (
-          <box {...frame('Unpair · Enter confirm · Esc cancel')}>
+          <box {...frame(strings.overlays.servers.unpairTitle)}>
             <text fg={props.theme.text}>
-              {`Remove local access to "${overlay().label}" and its saved credentials?`}
+              {strings.overlays.servers.unpairConfirm(overlay().label)}
             </text>
-            <text fg={dim()}>
-              Remote sessions keep running. Removing local credentials does not revoke an
-              already-issued server token.
-            </text>
+            <text fg={dim()}>{strings.overlays.servers.unpairDetail}</text>
           </box>
         )}
       </Match>
@@ -323,15 +369,19 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
             );
           const shown = () => queuedItems(props.controller).slice(start(), start() + bodyRows());
           return (
-            <box {...frame('Queue · ↑↓ PgUp/PgDn · x cancel · s steer · Esc close')}>
+            <box {...frame(strings.overlays.queue.title)}>
               <Show
                 when={queuedItems(props.controller).length > 0}
-                fallback={<text fg={dim()}>Nothing queued.</text>}
+                fallback={<text fg={dim()}>{strings.overlays.queue.empty}</text>}
               >
                 <For each={shown()}>
                   {(item, index) => {
                     const position = () => start() + index();
-                    const label = `${position() === overlay().index ? '❯' : ' '} [${item.delivery}] ${sanitizeTerminalText(item.text.split('\n')[0] ?? '')}`;
+                    const label = strings.overlays.queue.row(
+                      position() === overlay().index ? '❯' : ' ',
+                      item.delivery,
+                      sanitizeTerminalText(item.text.split('\n')[0] ?? ''),
+                    );
                     return (
                       <text
                         fg={position() === overlay().index ? props.theme.accent : props.theme.text}
@@ -342,7 +392,10 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                   }}
                 </For>
                 <text fg={dim()}>
-                  {`${overlay().index + 1} of ${queuedItems(props.controller).length} · PgUp/PgDn move ten`}
+                  {strings.overlays.queue.position(
+                    overlay().index + 1,
+                    queuedItems(props.controller).length,
+                  )}
                 </text>
               </Show>
             </box>
@@ -357,14 +410,14 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
             <box
               {...frame(
                 state.route.kind === 'conversation'
-                  ? 'Model · type to filter · Enter select'
-                  : 'Model for new sessions · type to filter · Enter select',
+                  ? strings.overlays.model.titleConversation
+                  : strings.overlays.model.titleNewSession,
               )}
             >
               <text fg={props.theme.text}>{`> ${overlay().query}`}</text>
               <Show
                 when={choices().length > 0}
-                fallback={<text fg={dim()}>No matching models.</text>}
+                fallback={<text fg={dim()}>{strings.overlays.model.empty}</text>}
               >
                 <For each={choices().slice(view().start, view().end)}>
                   {(choice, index) => {
@@ -390,7 +443,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                   }}
                 </For>
                 <text fg={dim()}>
-                  {`${overlay().index + 1} of ${choices().length} · type to filter`}
+                  {strings.overlays.model.position(overlay().index + 1, choices().length)}
                 </text>
               </Show>
             </box>
@@ -403,11 +456,11 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
           const view = () => pickerWindow(overlay().index, choices().length, pickerRows());
           const current = () => props.controller.currentEffort();
           return (
-            <box {...frame('Effort · type to filter · Enter select · Esc cancel')}>
+            <box {...frame(strings.overlays.effort.effortTitle)}>
               <text fg={props.theme.text}>{`> ${overlay().query}`}</text>
               <Show
                 when={choices().length > 0}
-                fallback={<text fg={dim()}>No variants available for this model.</text>}
+                fallback={<text fg={dim()}>{strings.overlays.effort.noVariants}</text>}
               >
                 <For each={choices().slice(view().start, view().end)}>
                   {(choice, index) => {
@@ -424,7 +477,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                       >
                         {
                           sliceCells(
-                            `${selected() ? '❯' : ' '} ${choice.label}${active() ? ' (current)' : ''}`,
+                            `${selected() ? '❯' : ' '} ${choice.label}${active() ? strings.overlays.effort.current : ''}`,
                             0,
                             Math.max(10, terminal().width - 6),
                           ).text
@@ -434,7 +487,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                   }}
                 </For>
                 <text fg={dim()}>
-                  {`${overlay().index + 1} of ${choices().length} · type to filter`}
+                  {strings.overlays.effort.position(overlay().index + 1, choices().length)}
                 </text>
               </Show>
             </box>
@@ -450,14 +503,14 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
             <box
               {...frame(
                 state.route.kind === 'conversation'
-                  ? 'Agent · type to filter · Enter select'
-                  : 'Agent for new sessions · type to filter · Enter select',
+                  ? strings.overlays.agent.titleConversation
+                  : strings.overlays.agent.titleNewSession,
               )}
             >
               <text fg={props.theme.text}>{`> ${overlay().query}`}</text>
               <Show
                 when={choices().length > 0}
-                fallback={<text fg={dim()}>No matching agents.</text>}
+                fallback={<text fg={dim()}>{strings.overlays.agent.empty}</text>}
               >
                 <For each={choices().slice(view().start, view().end)}>
                   {(agent, index) => {
@@ -474,7 +527,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                       >
                         {
                           sliceCells(
-                            `${selected() ? '❯' : ' '} ${agent.id}  ${active() ? '(current) ' : ''}${agent.description ?? ''}`,
+                            `${selected() ? '❯' : ' '} ${agent.id}  ${active() ? strings.overlays.agent.currentLabel : ''}${agent.description ?? ''}`,
                             0,
                             Math.max(10, terminal().width - 6),
                           ).text
@@ -484,7 +537,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                   }}
                 </For>
                 <text fg={dim()}>
-                  {`${overlay().index + 1} of ${choices().length} · type to filter`}
+                  {strings.overlays.agent.position(overlay().index + 1, choices().length)}
                 </text>
               </Show>
             </box>
@@ -496,13 +549,11 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
           const choices = () => props.controller.copyChoices(overlay().query);
           const view = () => pickerWindow(overlay().index, choices().length, pickerRows());
           return (
-            <box {...frame('Copy exact text · type to filter · Enter copy')}>
+            <box {...frame(strings.overlays.copy.title)}>
               <text fg={props.theme.text}>{`> ${overlay().query}`}</text>
               <Show
                 when={choices().length > 0}
-                fallback={
-                  <text fg={dim()}>No tool output, diff or code block in this session.</text>
-                }
+                fallback={<text fg={dim()}>{strings.overlays.copy.empty}</text>}
               >
                 <For each={choices().slice(view().start, view().end)}>
                   {(item, index) => {
@@ -527,10 +578,10 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                   }}
                 </For>
                 <text fg={dim()}>
-                  {`${overlay().index + 1} of ${choices().length} · type to filter`}
+                  {strings.overlays.copy.position(overlay().index + 1, choices().length)}
                 </text>
               </Show>
-              <text fg={dim()}>Unretained or server-truncated payloads are labelled above.</text>
+              <text fg={dim()}>{strings.overlays.copy.unretainedHint}</text>
             </box>
           );
         }}
@@ -551,9 +602,9 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
             props.controller.rewindChoices(overlay().sessionID, overlay().serverID);
           const view = () => pickerWindow(overlay().index, choices().length, pickerRows());
           return (
-            <box {...frame('Rewind · ↑↓ prompt · Enter stage · Esc cancel')}>
+            <box {...frame(strings.overlays.rewind.title)}>
               <text fg={props.theme.text}>
-                {`Earlier prompt to revert file changes to (${choices().length} in loaded history) · ${overlay().index + 1} of ${choices().length}:`}
+                {strings.overlays.rewind.promptPicker(choices().length, overlay().index + 1)}
               </text>
               <For each={choices().slice(view().start, view().end)}>
                 {(choice, index) => {
@@ -573,27 +624,32 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
                 }}
               </For>
               <text fg={props.theme.text}>
-                {`Scope: files changed after prompt #${choices()[overlay().index]?.ordinal ?? '?'} · ${overlay().loading ? 'reading…' : overlay().previewUnavailable ? 'file scope unavailable' : diffSummary(overlay().files)}`}
+                {strings.overlays.rewind.scope(
+                  String(choices()[overlay().index]?.ordinal ?? '?'),
+                  overlay().loading
+                    ? strings.overlays.rewind.reading
+                    : overlay().previewUnavailable
+                      ? strings.overlays.rewind.scopeUnavailable
+                      : diffSummary(overlay().files),
+                )}
               </text>
               <For each={overlay().files.slice(0, 4)}>
                 {(file) => (
                   <text fg={dim()}>{`  ${file.file}  +${file.additions} −${file.deletions}`}</text>
                 )}
               </For>
-              <text fg={dim()}>
-                Files only — the conversation is not rewritten; the server offers no redo.
-              </text>
-              <text fg={dim()}>Prompt times are shown in UTC.</text>
-              <text fg={dim()}>Enter stages the boundary; a separate confirmation applies it.</text>
+              <text fg={dim()}>{strings.overlays.rewind.filesOnly}</text>
+              <text fg={dim()}>{strings.overlays.rewind.utc}</text>
+              <text fg={dim()}>{strings.overlays.rewind.staging}</text>
             </box>
           );
         }}
       </Match>
       <Match when={state.overlay.kind === 'revert' ? state.overlay : undefined}>
         {(overlay: Accessor<Extract<Overlay, { kind: 'revert' }>>) => (
-          <box {...frame('Revert · Enter confirm · Esc restore files')}>
+          <box {...frame(strings.overlays.revert.title)}>
             <text fg={props.theme.text}>
-              {`Undo changes since your last message: ${diffSummary(overlay().files)}`}
+              {strings.overlays.revert.confirm(diffSummary(overlay().files))}
             </text>
             <For each={overlay().files.slice(0, pickerRows())}>
               {(file) => (
@@ -601,7 +657,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
               )}
             </For>
             <Show when={overlay().busy}>
-              <text fg={dim()}>Working…</text>
+              <text fg={dim()}>{strings.overlays.revert.working}</text>
             </Show>
           </box>
         )}
@@ -620,7 +676,7 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
         {(overlay: Accessor<Extract<Overlay, { kind: 'form' }>>) => (
           <Show
             when={props.controller.openFormRequest()}
-            fallback={<text fg={dim()}>This question was answered or withdrawn.</text>}
+            fallback={<text fg={dim()}>{strings.overlays.form.answeredOrWithdrawn}</text>}
           >
             {(form: Accessor<FormRequest>) => (
               <FormDialog
@@ -638,11 +694,13 @@ export function OverlayView(props: { controller: AppController; keymap: Keymap; 
         {(overlay: Accessor<Extract<Overlay, { kind: 'history-search' }>>) => (
           <box
             {...frame(
-              `History search · ${actionHint(props.keymap, 'history.search') ?? ''} older · Enter use`,
+              strings.overlays.history.title(actionHint(props.keymap, 'history.search') ?? ''),
             )}
           >
             <text fg={props.theme.text}>{`> ${overlay().query}`}</text>
-            <text fg={dim()}>{props.controller.historySearchMatch() ?? 'no match'}</text>
+            <text fg={dim()}>
+              {props.controller.historySearchMatch() ?? strings.overlays.history.noMatch}
+            </text>
           </box>
         )}
       </Match>
@@ -664,7 +722,8 @@ function DiffDialog(props: {
   const terminal = useTerminalDimensions();
   const activate = useActivate();
   const file = () => props.overlay.files[props.overlay.index];
-  const scopeLabel = () => (props.overlay.scope === 'turn' ? 'this turn' : 'session');
+  const scopeLabel = () =>
+    props.overlay.scope === 'turn' ? strings.overlays.diff.thisTurn : strings.overlays.diff.session;
   const width = () => Math.max(8, terminal().width - 6);
   /** Frame border/title is outside the row budget; the footer keeps totals visible. */
   const pageRows = () => diffWindowRows(terminal().height);
@@ -711,7 +770,7 @@ function DiffDialog(props: {
         {(current: Accessor<FileDiff>) => {
           const shown = () => Math.min(pageRows(), Math.max(0, lines().length - firstLine()));
           return (
-            <box {...title(`${current().file} · ↑↓ PgUp PgDn · ← files`)}>
+            <box {...title(strings.overlays.diff.title(current().file))}>
               <For each={lines().slice(firstLine(), firstLine() + pageRows())}>
                 {(line) => (
                   <text fg={lineColor(line.kind)}>
@@ -721,9 +780,18 @@ function DiffDialog(props: {
               </For>
               <text fg={props.theme.dim}>
                 {lines().length === 0
-                  ? `no patch lines · file ${props.overlay.index + 1}/${props.overlay.files.length}`
+                  ? strings.overlays.diff.noPatchLines(
+                      props.overlay.index + 1,
+                      props.overlay.files.length,
+                    )
                   : sliceCells(
-                      `${firstLine() + 1}–${firstLine() + shown()}/${lines().length} · file ${props.overlay.index + 1}/${props.overlay.files.length}${current().truncated ? ' · server-truncated' : ''}`,
+                      `${strings.overlays.diff.position(
+                        firstLine() + 1,
+                        firstLine() + shown(),
+                        lines().length,
+                        props.overlay.index + 1,
+                        props.overlay.files.length,
+                      )}${current().truncated ? strings.overlays.diff.serverTruncated : ''}`,
                       0,
                       width(),
                     ).text}
@@ -735,18 +803,24 @@ function DiffDialog(props: {
       <Match when={!props.overlay.open}>
         <box
           {...title(
-            `Changes in ${scopeLabel()} · ${diffSummary(props.overlay.files)} · t ${props.overlay.scope === 'turn' ? 'session' : 'turn'} · Esc close`,
+            strings.overlays.diff.changesTitle(
+              scopeLabel(),
+              diffSummary(props.overlay.files),
+              props.overlay.scope === 'turn'
+                ? strings.overlays.diff.session
+                : strings.overlays.diff.thisTurn,
+            ),
           )}
         >
           <Switch>
             <Match when={props.overlay.loading}>
-              <text fg={props.theme.dim}>Loading changes…</text>
+              <text fg={props.theme.dim}>{strings.overlays.diff.loading}</text>
             </Match>
             <Match when={props.overlay.error}>
               {(error: Accessor<string>) => <text fg={props.theme.error}>{error()}</text>}
             </Match>
             <Match when={props.overlay.files.length === 0}>
-              <text fg={props.theme.dim}>No file changes reported.</text>
+              <text fg={props.theme.dim}>{strings.overlays.diff.empty}</text>
             </Match>
             <Match when={props.overlay.files.length > 0}>
               <For each={props.overlay.files.slice(fileRows().start, fileRows().end)}>
@@ -769,9 +843,14 @@ function DiffDialog(props: {
               </For>
               <text fg={props.theme.dim}>
                 {fileRows().end === 0
-                  ? 'no files'
+                  ? strings.overlays.diff.noFiles
                   : sliceCells(
-                      `files ${fileRows().start + 1}–${fileRows().end} of ${props.overlay.files.length} · selected ${props.overlay.index + 1}`,
+                      strings.overlays.diff.filesPosition(
+                        fileRows().start + 1,
+                        fileRows().end,
+                        props.overlay.files.length,
+                        props.overlay.index + 1,
+                      ),
                       0,
                       width(),
                     ).text}
@@ -816,15 +895,25 @@ function FormDialog(props: {
       const chosen: readonly string[] = Array.isArray(raw) ? raw : [];
       return multiChoices(current, chosen).map((choice) => ({
         label: choice.label,
-        description: choice.custom ? 'custom value' : undefined,
+        description: choice.custom ? strings.overlays.copy.customValue : undefined,
         checked: chosen.includes(choice.value),
         custom: choice.custom,
       }));
     }
     if (current.kind === 'boolean') {
       return [
-        { label: 'Yes', description: undefined, checked: false, custom: false },
-        { label: 'No', description: undefined, checked: false, custom: false },
+        {
+          label: strings.overlays.form.yes,
+          description: undefined,
+          checked: false,
+          custom: false,
+        },
+        {
+          label: strings.overlays.form.no,
+          description: undefined,
+          checked: false,
+          custom: false,
+        },
       ];
     }
     return [];
@@ -905,7 +994,7 @@ function FormDialog(props: {
             </For>
             <Show when={choiceView().total > choiceView().items.length}>
               <text fg={props.theme.dim}>
-                {`choice ${props.editor.cursor + 1} of ${choiceView().total} · ↑↓ PgUp/PgDn Home/End`}
+                {strings.overlays.form.choicePosition(props.editor.cursor + 1, choiceView().total)}
               </text>
             </Show>
             <Show when={typed()}>
@@ -923,35 +1012,34 @@ function FormDialog(props: {
             <Show when={customChoice()}>
               <text fg={props.theme.dim}>
                 {props.editor.choiceFocus === 'custom'
-                  ? 'editing custom value · Enter submits it · ↑↓ return to listed options'
+                  ? strings.overlays.form.customEditing
                   : props.editor.text !== ''
-                    ? 'listed option will be submitted · Ctrl+E edit saved custom draft'
-                    : '↑↓ choose a listed option · type or Ctrl+E for a custom value'}
+                    ? strings.overlays.form.customListed
+                    : strings.overlays.form.customPrompt}
               </text>
             </Show>
             <Show when={current().kind === 'external' ? current() : undefined}>
               {(external: Accessor<FormField & { kind: 'external' }>) => (
                 <box flexDirection="column">
-                  <text fg={props.theme.text}>{`External step: ${external().url}`}</text>
+                  <text fg={props.theme.text}>
+                    {strings.overlays.form.externalStep(external().url)}
+                  </text>
                   <box flexDirection="row">
                     <text
                       fg={props.theme.accent}
                       onMouseUp={activate(() => void props.controller.openFormExternalUrl())}
                     >
-                      {'[ Open URL ]'}
+                      {strings.overlays.form.openUrl}
                     </text>
                     <text fg={props.theme.dim}>{'  '}</text>
                     <text
                       fg={props.theme.accent}
                       onMouseUp={activate(() => void props.controller.copyFormExternalUrl())}
                     >
-                      {'[ Copy URL ]'}
+                      {strings.overlays.form.copyUrl}
                     </text>
                   </box>
-                  <text fg={props.theme.dim}>
-                    Opening or copying is not an answer; keep this pending until the server
-                    completes it.
-                  </text>
+                  <text fg={props.theme.dim}>{strings.overlays.form.externalDetail}</text>
                 </box>
               )}
             </Show>
@@ -963,11 +1051,11 @@ function FormDialog(props: {
       </Show>
       <text fg={props.theme.dim}>
         {field()?.kind === 'external'
-          ? 'o open · c copy · Enter next · Shift+Tab back · Esc later · Ctrl+X decline'
-          : `Enter next · Shift+Tab back · ↑↓ choose${customChoice() ? ' · Ctrl+E custom' : ''} · Space toggle · Esc later · Ctrl+X decline`}
+          ? strings.overlays.form.externalHints
+          : strings.overlays.form.hints(customChoice() !== undefined)}
       </text>
       <Show when={customMulti()}>
-        <text fg={props.theme.dim}>a add custom value · x remove selected custom value</text>
+        <text fg={props.theme.dim}>{strings.overlays.form.multiCustomHints}</text>
       </Show>
     </box>
   );
@@ -999,9 +1087,9 @@ function TasksDialog(props: {
   const shown = () => doc()?.proposal ?? doc()?.plan;
   const proposal = () => doc()?.proposal !== undefined;
   const title = () => {
-    if (proposal()) return 'Proposed plan · a accept · r reject · Esc close';
+    if (proposal()) return strings.overlays.tasks.proposedTitle;
     const count = progress(shown());
-    return `Tasks ${count.done}/${count.total} · Space state · b blocked · x cancel · e evidence`;
+    return strings.overlays.tasks.title(count.done, count.total);
   };
   const nativeGoal = () => {
     const current = session();
@@ -1019,15 +1107,16 @@ function TasksDialog(props: {
     const known = nativeGoal();
     if (known?.status === 'verified') {
       const goal = known.goal;
-      const round = `round ${goal.rounds}/${goal.maxRounds}`;
-      if (goal.status === 'active') return `◎ active · ${round}`;
-      if (goal.status === 'complete') return `● complete · ${round}`;
-      return `◌ paused · ${round}${goal.reason === undefined ? '' : ` · ${goal.reason}`}`;
+      if (goal.status === 'active')
+        return strings.overlays.tasks.nativeActive(goal.rounds, goal.maxRounds);
+      if (goal.status === 'complete')
+        return strings.overlays.tasks.nativeComplete(goal.rounds, goal.maxRounds);
+      return strings.overlays.tasks.nativePaused(goal.rounds, goal.maxRounds, goal.reason ?? '');
     }
     if (known?.status === 'unavailable') {
       return known.last === undefined
-        ? `status unavailable (${known.reason}) · not a confirmed absence`
-        : `last known: ${known.last.status} · stale (${known.reason})`;
+        ? strings.overlays.tasks.nativeUnavailable(known.reason)
+        : strings.overlays.tasks.nativeLastKnown(known.last.status, known.reason);
     }
     return undefined;
   };
@@ -1042,7 +1131,9 @@ function TasksDialog(props: {
         <box flexDirection="column">
           <Show when={nativeGoalObject()}>
             {(goal: Accessor<NativeGoal>) => (
-              <text fg={props.theme.accentLight}>{`Goal: ${goal().objective}`}</text>
+              <text fg={props.theme.accentLight}>
+                {strings.overlays.tasks.goal(goal().objective)}
+              </text>
             )}
           </Show>
           <text fg={props.theme.dim}>{`  ${nativeLine() ?? ''}`}</text>
@@ -1051,7 +1142,9 @@ function TasksDialog(props: {
       <Show when={doc()?.goal}>
         {(goal: Accessor<Goal>) => (
           <box flexDirection="column">
-            <text fg={props.theme.accentLight}>{`Local goal: ${goal().title}`}</text>
+            <text fg={props.theme.accentLight}>
+              {strings.overlays.tasks.localGoal(goal().title)}
+            </text>
           </box>
         )}
       </Show>
@@ -1060,15 +1153,15 @@ function TasksDialog(props: {
         fallback={
           <text fg={props.theme.dim}>
             {session() === undefined
-              ? 'Select a session to view its tasks.'
-              : 'No plan. /plan step one; step two · or /plan propose'}
+              ? strings.overlays.tasks.selectSession
+              : strings.overlays.tasks.noPlan}
           </text>
         }
       >
         <For each={taskShown()}>
           {(task, index) => {
             const selected = () => taskStart() + index() === props.index;
-            const label = `${selected() ? '❯' : ' '} ${taskMarks[task.state]} ${task.title}${task.evidence.length > 0 ? ` · ${task.evidence.length} evidence` : ''}`;
+            const label = `${selected() ? '❯' : ' '} ${taskMarks[task.state]} ${task.title}${task.evidence.length > 0 ? strings.overlays.tasks.evidence(task.evidence.length) : ''}`;
             return (
               <text
                 fg={
@@ -1086,15 +1179,15 @@ function TasksDialog(props: {
             );
           }}
         </For>
-        <text fg={props.theme.dim}>{`${props.index + 1} of ${tasks().length} · ↑↓ PgUp/PgDn`}</text>
+        <text fg={props.theme.dim}>
+          {strings.overlays.tasks.position(props.index + 1, tasks().length)}
+        </text>
       </Show>
       {/* Criteria come after the task list so a short terminal never clips the selected
           task behind a long acceptance section (#241). */}
       <Show when={criteria().length > 0}>
         <box flexDirection="column">
-          <text fg={props.theme.dim}>
-            {`Acceptance${criteria().length > 4 ? ` (${criteria().length}, first 4 shown)` : ''}:`}
-          </text>
+          <text fg={props.theme.dim}>{strings.overlays.tasks.acceptance(criteria().length)}</text>
           <For each={criteria().slice(0, 4)}>
             {(criterion) => (
               <text fg={props.theme.dim}>

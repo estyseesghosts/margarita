@@ -1,5 +1,5 @@
+import { strings } from '../i18n/index.ts';
 import { assertNever } from './session.ts';
-import { throbberStringsEnUs } from './throbber-strings-en_us.ts';
 import { classifyTool, type ToolCategory, type TranscriptMessage } from './transcript.ts';
 
 /**
@@ -154,12 +154,12 @@ function markerFrom(accum: SegmentAccum, isRunning: boolean): ExecutionMarker | 
   }
   if (isRunning) {
     let activity: string | undefined;
-    if (accum.compacting) activity = throbberStringsEnUs.compacting;
+    if (accum.compacting) activity = strings.throbber.compacting;
     // A finished call must not keep labelling the turn: only a genuinely running tool
     // names the phase, otherwise the throbber's own verb stands in (issue #75).
     else if (accum.lastTool !== undefined && isToolActive(accum.lastTool.status))
-      activity = throbberStringsEnUs.activity[accum.lastTool.category];
-    else if (accum.reasoningOpen) activity = throbberStringsEnUs.thinking;
+      activity = strings.throbber.activity[accum.lastTool.category];
+    else if (accum.reasoningOpen) activity = strings.throbber.thinking;
     return {
       id: accum.id,
       afterMessageId: accum.lastMessageId,

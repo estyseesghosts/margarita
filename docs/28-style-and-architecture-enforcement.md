@@ -62,6 +62,12 @@ roots and may depend on every layer.
 | `src/domain/` | `app/`, `ui/`, `adapter/`, `config/`, `cli/`, `perf/`, `solid-js`, `@opentui/*`, `@opencode/*`, or Node I/O (`fs*`, `net`, `http*`, `https`, `tls`, `dgram`, `dns` — bare or `node:` — plus `bun:sqlite`) | Domain logic is pure and reusable; owning wire, storage or render state here is the coupling the audit asks to remove. |
 | `src/adapter/` | `app/`, `ui/`, `solid-js`, `@opentui/*` | The adapter owns wire conversion and transport. Calling upward into application or view state hides ownership in the transport layer. `@opencode/client` is expected here. |
 | `src/ui/` | `@opencode/*`, and Node network modules (`net`, `http*`, `https`, `tls`, `dgram`, `dns` — bare or `node:` — plus direct `fetch(...)`) | Views must not speak the wire protocol or issue transport RPCs; they call application actions. Solid and OpenTUI imports are expected in this layer. |
+| `src/i18n/` | `app/`, `domain/`, `ui/`, `adapter/`, `config/`, `cli/`, `perf/`, `solid-js`, `@opentui/*`, `@opencode/*`, or Node I/O | Human-authored prose is a leaf concern. Locale modules may import only other `i18n` modules, so the catalog can never drag application state or platform I/O into the shape of a translation. |
+
+**Literal ownership rule:** semantic and machine strings stay with code — protocol
+values, key names, command syntax, filenames, separators, regexes and MIME types.
+Human-authored, user-facing prose belongs in `src/i18n`. This is deliberately not a
+blanket ban on string literals; such a scanner would be dominated by false positives.
 
 These are the machine-checkable categories from issue #307. They are a ratchet,
 not a claim that architecture is already clean: the existing UI-to-`AppController`

@@ -4,6 +4,7 @@ import type { QueuedInput } from '../adapter/backend.ts';
 import { nextQueuedUser } from '../adapter/wire-mapping.ts';
 import { sanitizeTerminalText as sanitizeText } from '../domain/sanitize-text.ts';
 import { truncatePrompt } from '../domain/sticky-prompt.ts';
+import { strings } from '../i18n/index.ts';
 import type { Theme } from './theme.ts';
 
 const maxItems = 3;
@@ -24,9 +25,8 @@ export function QueuedPreview(props: {
 }) {
   const text = (item: QueuedInput) =>
     truncatePrompt(sanitizeText(item.text), Math.max(8, props.width - 6));
-  const steerHint = () => (props.steerKey === undefined ? '' : ` · ${props.steerKey} to steer now`);
   const nextSteerHint = () =>
-    props.steerKey === undefined ? '' : ` · ${props.steerKey} to steer the next now`;
+    props.steerKey === undefined ? '' : strings.transcript.queued.nextSteer(props.steerKey);
   const shown = () => props.items.slice(0, maxItems);
   const overflow = () => Math.max(0, props.items.length - maxItems);
   const hinted = () => nextQueuedUser(props.items);
@@ -46,14 +46,16 @@ export function QueuedPreview(props: {
               </text>
             </box>
             <Show when={item === hinted()}>
-              <text fg={props.theme.dim}>{`  └ Queued${steerHint()}`}</text>
+              <text fg={props.theme.dim}>
+                {strings.transcript.queued.label(props.steerKey ?? '')}
+              </text>
             </Show>
           </box>
         )}
       </For>
       <Show when={overflow() > 0}>
         <text fg={props.theme.dim}>
-          {`  └ … and ${overflow()} more queued${hintHidden() ? nextSteerHint() : ''}`}
+          {`${strings.transcript.queued.more(overflow())}${hintHidden() ? nextSteerHint() : ''}`}
         </text>
       </Show>
     </box>

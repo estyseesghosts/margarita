@@ -4,6 +4,7 @@
  * path on this machine. Binary clipboard data is never inserted into the text draft.
  */
 
+import { strings } from '../i18n/index.ts';
 import { baseServerPath } from './server-path.ts';
 
 export type Attachment = Readonly<{
@@ -100,13 +101,17 @@ export function makeAttachment(
   id: string = crypto.randomUUID(),
 ): AttachmentResult {
   if (!isSupportedAttachmentMime(mime)) {
-    return { ok: false, error: `Unsupported attachment type ${mime || 'unknown'}` };
+    return {
+      ok: false,
+      error: strings.notices.attachments.unsupportedType(mime || 'unknown'),
+    };
   }
-  if (bytes.byteLength === 0) return { ok: false, error: 'The attachment is empty' };
+  if (bytes.byteLength === 0)
+    return { ok: false, error: strings.notices.attachments.emptyAttachment };
   if (bytes.byteLength > attachmentLimitBytes) {
     return {
       ok: false,
-      error: `The attachment is larger than ${formatBytes(attachmentLimitBytes)}`,
+      error: strings.notices.attachments.tooLarge(formatBytes(attachmentLimitBytes)),
     };
   }
   return {

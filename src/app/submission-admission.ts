@@ -10,6 +10,7 @@
  */
 import { BackendError, type BackendErrorKind } from '../adapter/backend.ts';
 import type { Attachment } from '../domain/attachment.ts';
+import { strings } from '../i18n/index.ts';
 import type { Route } from './app-state.ts';
 import { errorText } from './error-text.ts';
 
@@ -278,5 +279,5 @@ export function localEffectLabel(command: AdmissionCommand): string {
 
 /** Reports a post-acknowledgment failure as a local sync failure, never a send failure. */
 export function localFailureNotice(effect: string, error: unknown): string {
-  return `The prompt was sent, but the local ${effect} update failed: ${errorText(error)}`;
+  return strings.notices.session.localFailure(effect, errorText(error));
 }

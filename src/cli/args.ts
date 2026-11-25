@@ -1,3 +1,5 @@
+import { strings } from '../i18n/index.ts';
+
 export type StartTarget =
   | { kind: 'overview' }
   | { kind: 'new'; prompt?: string }
@@ -84,10 +86,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     if (valueKey !== undefined) {
       const value = inline ?? argv[index + 1];
       if (value === undefined || (inline === undefined && value.startsWith('-'))) {
-        return { kind: 'error', message: `${flag} requires a value.` };
+        return { kind: 'error', message: strings.cli.args.requiresValue(flag) };
       }
       if (values[valueKey] !== undefined) {
-        return { kind: 'error', message: `${flag} was given more than once.` };
+        return { kind: 'error', message: strings.cli.args.duplicated(flag) };
       }
       values[valueKey] = value;
       if (inline === undefined) index += 1;
@@ -133,7 +135,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         continue;
       default:
         if (raw.startsWith('-') && raw !== '-') {
-          return { kind: 'error', message: `Unknown option ${flag}. See --help.` };
+          return { kind: 'error', message: strings.cli.args.unknownOption(flag) };
         }
         positional.push(raw);
     }
@@ -143,24 +145,24 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (version) return { kind: 'version' };
 
   const prompt = positional.length === 0 ? undefined : positional.join(' ');
-  if (json && !print) return { kind: 'error', message: '--json requires --print.' };
+  if (json && !print) return { kind: 'error', message: strings.cli.args.jsonRequiresPrint };
   if (continueLast && resume !== undefined) {
-    return { kind: 'error', message: '--continue and --resume cannot be combined.' };
+    return { kind: 'error', message: strings.cli.args.continueResumeConflict };
   }
   if (values.server !== undefined && startServer) {
-    return { kind: 'error', message: '--server and --start-server cannot be combined.' };
+    return { kind: 'error', message: strings.cli.args.serverStartServerConflict };
   }
   if (values.remote !== undefined && local) {
-    return { kind: 'error', message: '--remote and --local cannot be combined.' };
+    return { kind: 'error', message: strings.cli.args.remoteLocalConflict };
   }
   if (values.remote !== undefined && values.server !== undefined) {
-    return { kind: 'error', message: '--remote and --server cannot be combined.' };
+    return { kind: 'error', message: strings.cli.args.remoteServerConflict };
   }
   if (values.remote !== undefined && startServer) {
-    return { kind: 'error', message: '--remote and --start-server cannot be combined.' };
+    return { kind: 'error', message: strings.cli.args.remoteStartServerConflict };
   }
   if (local && values.server !== undefined) {
-    return { kind: 'error', message: '--local and --server cannot be combined.' };
+    return { kind: 'error', message: strings.cli.args.localServerConflict };
   }
 
   let target: StartTarget;
@@ -169,8 +171,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       if (prompt !== undefined) {
         return {
           kind: 'error',
-          message:
-            '--resume without an ID opens the overview; drop the prompt or pass a session ID.',
+          message: strings.cli.args.resumeNeedsId,
         };
       }
       target = { kind: 'overview' };
@@ -190,7 +191,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   }
 
   if (print && (target.kind === 'overview' || target.prompt === undefined)) {
-    return { kind: 'error', message: '--print needs a prompt.' };
+    return { kind: 'error', message: strings.cli.args.printNeedsPrompt };
   }
 
   return {
@@ -199,33 +200,4 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   };
 }
 
-export const helpText = `marg (margarita) — a conversation-first terminal frontend for OpenCode
-
-Usage:
-  marg [options] [prompt...]
-
-With no prompt, opens a new session in the current directory (Left on an empty
-prompt shows the overview). A prompt is sent as the first turn of that session.
-
-Options:
-  --provider <id>        Provider for --model
-  -m, --model <ref>      Model ID or provider/model[#variant]
-  --effort <variant>     Model variant (validated against the catalog)
-  --agent <id>           Initial agent (default: build)
-  --cwd <path>           Project directory for new sessions (default: current directory)
-  -c, --continue         Continue the most recent session in this directory
-  -r, --resume [ses_id]  Resume a session by ID, or open the overview
-  -p, --print            Noninteractive: send the prompt, print the answer, exit
-  --json                 With --print, print the turn's transcript messages as NDJSON once it ends (buffered, not live)
-  --server <url>         Connect to a specific OpenCode server (password: MARGARITA_SERVER_PASSWORD)
-  --remote <shortname>   Use a saved remote server profile
-  --local                Force the local OpenCode service
-  --start-server         Start \`opencode serve --service\` if none is running
-  --config <path>        Alternate config file
-  --debug-log <path>     Write redacted diagnostics to a file
-  -h, --help             Show this help
-  -v, --version          Show version
-
-With --continue or --resume <id>, a prompt is sent as a new turn in that session.
-Margarita never stops the OpenCode service; sessions keep running after you exit.
-`;
+export const helpText = strings.cli.help;

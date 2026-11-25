@@ -1,4 +1,4 @@
-import { greetingStringsEnUs } from './greeting-strings-en_us.ts';
+import { strings } from '../i18n/index.ts';
 import type { GreetingPeriod } from './greeting-time.ts';
 
 /**
@@ -6,11 +6,11 @@ import type { GreetingPeriod } from './greeting-time.ts';
  * locale file: no terminal escape sequences and no server-provided content. Add an entry
  * to a pool there to make it available.
  */
-export const greetingCatalog = greetingStringsEnUs.catalog;
+export const greetingCatalog = strings.greetings.catalog;
 
 const timedWeight = 0.7;
 const recentLimit = 4;
-const fallback = greetingStringsEnUs.fallback;
+const fallback = strings.greetings.fallback;
 
 /** Uniform pick from a pool, with an empty pool returning undefined. */
 function pick(pool: readonly string[], rng: () => number): string | undefined {

@@ -11,6 +11,7 @@
 import type { Backend } from '../adapter/backend.ts';
 import type { PermissionPrompt } from '../adapter/wire-mapping.ts';
 import type { FormRequest } from '../domain/form.ts';
+import { strings } from '../i18n/index.ts';
 import type { DescendantVerification } from './ancestry-verifier.ts';
 import {
   mergeLocationForms,
@@ -190,7 +191,7 @@ export class RequestInboxCoordinator {
     });
     const finalErrors: RequestErrors = { ...errors };
     if (checked.error !== undefined) {
-      finalErrors.forms ??= `Could not verify a child question's owner: ${checked.error}`;
+      finalErrors.forms ??= strings.notices.forms.childOwnerFailed(checked.error);
     }
     yield [
       { kind: 'set-forms', key, value: merged },

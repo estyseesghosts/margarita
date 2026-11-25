@@ -1,3 +1,4 @@
+import { strings } from '../i18n/index.ts';
 import type { ModelSelection } from './model-ref.ts';
 import type { TokenUsage } from './session.ts';
 import { formatCost, formatTokenCount } from './usage-format.ts';
@@ -49,14 +50,21 @@ function partsFor(facts: FooterFacts): (Part | undefined)[][] {
     facts.tokens === undefined
       ? undefined
       : {
-          text: `${mark}${formatTokenCount(facts.tokens.input)} in · ${formatTokenCount(facts.tokens.output)} out`,
+          text: strings.chrome.footer.tokensInOut(
+            mark,
+            formatTokenCount(facts.tokens.input),
+            formatTokenCount(facts.tokens.output),
+          ),
           kind: 'tokens',
         };
   const tokensShortPart: Part | undefined =
     facts.tokens === undefined
       ? undefined
       : {
-          text: `${mark}${formatTokenCount(facts.tokens.input + facts.tokens.output)}`,
+          text: strings.chrome.footer.tokensTotal(
+            mark,
+            formatTokenCount(facts.tokens.input + facts.tokens.output),
+          ),
           kind: 'tokens',
         };
   const costPart: Part | undefined =
@@ -81,20 +89,22 @@ function partsFor(facts: FooterFacts): (Part | undefined)[][] {
       : { text: facts.model.variant, kind: 'model', action: 'model' };
   const state: Part = { text: facts.state, kind: 'state' };
   const queued: Part | undefined =
-    facts.queued > 0 ? { text: `${facts.queued} queued`, kind: 'queued' } : undefined;
+    facts.queued > 0
+      ? { text: strings.chrome.footer.queued(facts.queued), kind: 'queued' }
+      : undefined;
   const goal: Part | undefined =
     facts.goal === undefined || facts.goal === '' ? undefined : { text: facts.goal, kind: 'goal' };
   const context: Part | undefined =
     facts.contextOccupancy !== undefined
       ? {
-          text: `${Math.round(facts.contextOccupancy)}% context`,
+          text: strings.chrome.footer.contextPercent(Math.round(facts.contextOccupancy)),
           kind: 'context',
           action: 'context',
         }
       : facts.contextTokens === undefined
         ? undefined
         : {
-            text: `${formatTokenCount(facts.contextTokens)} ctx`,
+            text: strings.chrome.footer.contextTokens(formatTokenCount(facts.contextTokens)),
             kind: 'context',
             action: 'context',
           };
@@ -118,8 +128,8 @@ function partsFor(facts: FooterFacts): (Part | undefined)[][] {
 }
 
 const modelStatusText = {
-  loading: 'Loading model…',
-  unavailable: 'model unavailable',
+  loading: strings.chrome.footer.loadingModel,
+  unavailable: strings.chrome.footer.modelUnavailable,
 } as const;
 
 function join(parts: readonly Part[]): FooterSegment[] {

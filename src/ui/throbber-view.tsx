@@ -2,7 +2,6 @@ import type { Accessor } from 'solid-js';
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 
 import { graphemes } from '../domain/composer.ts';
-import { throbberStringsEnUs } from '../domain/throbber-strings-en_us.ts';
 import {
   describeThrobber,
   frameAt,
@@ -11,6 +10,7 @@ import {
   throbberTickMs,
   tipFor,
 } from '../domain/throbber.ts';
+import { strings } from '../i18n/index.ts';
 import { blend, type Theme } from './theme.ts';
 
 export type ThrobberProps = Readonly<{
@@ -74,7 +74,7 @@ export function Throbber(props: ThrobberProps) {
       </text>
       <Show when={tip()}>
         {(text: Accessor<string>) => (
-          <text fg={props.theme.dim}>{`  └ ${throbberStringsEnUs.tipPrefix} ${text()}`}</text>
+          <text fg={props.theme.dim}>{`  └ ${strings.throbber.tipPrefix} ${text()}`}</text>
         )}
       </Show>
     </box>

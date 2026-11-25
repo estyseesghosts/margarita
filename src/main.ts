@@ -27,6 +27,7 @@ import { loadServerProfiles } from './config/server-profiles.ts';
 import { buildKeymap } from './domain/keymap.ts';
 import type { ModelSelection } from './domain/model-ref.ts';
 import type { SessionRef } from './domain/server-identity.ts';
+import { strings } from './i18n/index.ts';
 import { createStartupTimeline } from './perf/startup.ts';
 import { App } from './ui/app.tsx';
 import { pickTheme } from './ui/theme.ts';
@@ -61,10 +62,10 @@ async function main(argv: readonly string[]): Promise<number> {
       process.stdout.write(helpText);
       return exitCodes.ok;
     case 'version':
-      process.stdout.write(`marg ${version}\n`);
+      process.stdout.write(`${strings.cli.version(version)}\n`);
       return exitCodes.ok;
     case 'error':
-      process.stderr.write(`marg: ${parsed.message}\nRun marg --help for usage.\n`);
+      process.stderr.write(`${strings.cli.prefix}: ${parsed.message}\n${strings.cli.usageHint}\n`);
       return exitCodes.usage;
     case 'run':
       return run(parsed.options, version);
@@ -80,7 +81,7 @@ async function run(options: CliOptions, version: string): Promise<number> {
   if (options.debugLog !== undefined) {
     const created = createDebugLog(options.debugLog);
     if (!created.ok) {
-      process.stderr.write(`marg: ${created.message}\n`);
+      process.stderr.write(`${strings.cli.prefix}: ${created.message}\n`);
       return exitCodes.usage;
     }
     debugLog = created.log;
@@ -105,7 +106,7 @@ async function run(options: CliOptions, version: string): Promise<number> {
       launchMargin: options.remote === undefined ? 'local' : 'remote',
     });
     debugLog.write('crash', { errorName: error instanceof Error ? error.name : 'unknown' });
-    process.stderr.write(`marg: ${errorText(error)}\n`);
+    process.stderr.write(`${strings.cli.prefix}: ${errorText(error)}\n`);
     return exitCodes.failed;
   } finally {
     debugLog.close();
@@ -147,9 +148,11 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
   const paths = appPaths(env, platform);
   const configLoad = await loadConfig(options.config ?? paths.configFile);
   startupTimeline.mark('config-loaded');
-  for (const warning of configLoad.warnings) process.stderr.write(`config: ${warning}\n`);
+  for (const warning of configLoad.warnings)
+    process.stderr.write(`${strings.cli.configWarning(warning)}\n`);
   const keymapBuild = buildKeymap(configLoad.config.keys);
-  for (const error of keymapBuild.errors) process.stderr.write(`keys: ${error}\n`);
+  for (const error of keymapBuild.errors)
+    process.stderr.write(`${strings.cli.keyWarning(error)}\n`);
 
   const profileLoad = await loadServerProfiles(paths.serversFile);
   startupTimeline.mark('profiles-loaded');
@@ -171,12 +174,12 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
         (entry) => entry.shortname.toLowerCase() === alias.toLowerCase(),
       );
       if (profile === undefined) {
-        process.stderr.write(`marg: unknown server "${alias}". Use /servers or pair it first.\n`);
+        process.stderr.write(`${strings.cli.prefix}: ${strings.cli.unknownServer(alias)}\n`);
         return exitCodes.notFound;
       }
       const remote = await remoteConnectionFor(profile, credentials);
       if (!remote.ok) {
-        process.stderr.write(`marg: ${remote.message}\n`);
+        process.stderr.write(`${strings.cli.prefix}: ${remote.message}\n`);
         return exitCodes.unauthorized;
       }
       connection = remote.connection;
@@ -189,7 +192,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
         platform,
       });
       if (!resolved.ok) {
-        process.stderr.write(`marg: ${resolved.message}\n`);
+        process.stderr.write(`${strings.cli.prefix}: ${resolved.message}\n`);
         return exitCodes.usage;
       }
       cwd = resolved.directory;
@@ -215,7 +218,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
           ? {}
           : { remotePassword: env['MARGARITA_SERVER_PASSWORD'] }),
         ...(env['MARGARITA_ALLOW_INSECURE_HTTP'] === '1' ? { allowInsecureHttp: true } : {}),
-        onStarting: () => process.stderr.write('Starting OpenCode service…\n'),
+        onStarting: () => process.stderr.write(`${strings.cli.startingService}\n`),
       });
       serverID = serverIDForConnection(connection);
       remoteFilesystem = connection.origin === 'remote';
@@ -226,7 +229,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
         platform,
       });
       if (!resolved.ok) {
-        process.stderr.write(`marg: ${resolved.message}\n`);
+        process.stderr.write(`${strings.cli.prefix}: ${resolved.message}\n`);
         return exitCodes.usage;
       }
       cwd = resolved.directory;
@@ -265,11 +268,9 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
     debugLog.write('connect-failed', {
       errorName: error instanceof Error ? error.name : 'unknown',
     });
-    process.stderr.write(`marg: ${errorText(error)}\n`);
+    process.stderr.write(`${strings.cli.prefix}: ${errorText(error)}\n`);
     if (error instanceof ConnectionError) {
-      process.stderr.write(
-        'Start OpenCode yourself, pass --server <url>, or use --start-server to launch it.\n',
-      );
+      process.stderr.write(`${strings.cli.prefix}: ${strings.cli.connectFailedAdvice}\n`);
     }
     return exitCodes.unavailable;
   }
@@ -338,7 +339,11 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
       .then(() => startupTimeline.mark('post-mount-maintenance'))
       .catch((error: unknown) => {
         debugLog.write('post-mount-maintenance-failed', { error: errorText(error) });
-        controller.showNotice(`Post-mount maintenance failed: ${errorText(error)}`, 'error', false);
+        controller.showNotice(
+          strings.cli.postMountMaintenanceFailed(errorText(error)),
+          'error',
+          false,
+        );
       });
   };
   const shutdown = async () => {
@@ -446,7 +451,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
       errorKind: error instanceof BackendError ? error.kind : 'unknown',
     });
     process.stderr.write(
-      `marg: could not load from ${redactUrl(backend.baseUrl)}: ${errorText(error)}\n`,
+      `${strings.cli.prefix}: ${strings.cli.couldNotLoad(redactUrl(backend.baseUrl), errorText(error))}\n`,
     );
     await shutdown();
     return error instanceof BackendError && error.kind === 'unauthorized'
@@ -463,9 +468,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
       (target.kind === 'new' && target.prompt !== undefined) ||
       (options.print && target.kind === 'new')
     ) {
-      process.stderr.write(
-        'marg: --remote needs --cwd <absolute path on the remote host> to start or continue a session.\n',
-      );
+      process.stderr.write(`${strings.cli.prefix}: ${strings.cli.remoteNeedsCwd}\n`);
       await shutdown();
       return exitCodes.usage;
     }
@@ -495,12 +498,14 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
         sessionRef = { serverID: latest.serverID, sessionID: latest.id };
         resolvedDirectory = latest.directory;
       } else if (options.print) {
-        process.stderr.write('marg: no session to continue in this project.\n');
+        process.stderr.write(`${strings.cli.prefix}: ${strings.cli.noSessionToContinue}\n`);
         await shutdown();
         return exitCodes.notFound;
       }
     } catch (error) {
-      process.stderr.write(`marg: could not continue in this project: ${errorText(error)}\n`);
+      process.stderr.write(
+        `${strings.cli.prefix}: ${strings.cli.couldNotContinue(errorText(error))}\n`,
+      );
       await shutdown();
       return exitCodes.failed;
     }
@@ -547,7 +552,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
   if (options.print) {
     const prompt = 'prompt' in target ? target.prompt : undefined;
     if (prompt === undefined || prompt.trim() === '') {
-      process.stderr.write('marg: --print needs a prompt.\n');
+      process.stderr.write(`${strings.cli.prefix}: ${strings.cli.printNeedsPrompt}\n`);
       await shutdown();
       return exitCodes.usage;
     }
@@ -572,7 +577,7 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
         signal: abort.signal,
       });
     } catch (error) {
-      process.stderr.write(`marg: ${errorText(error)}\n`);
+      process.stderr.write(`${strings.cli.prefix}: ${errorText(error)}\n`);
       await shutdown();
       return exitCodes.failed;
     }
@@ -594,11 +599,13 @@ async function execute(options: CliOptions, debugLog: DebugLog, version: string)
   try {
     await controller.flushLocalState();
   } catch (error) {
-    process.stderr.write(`marg: local state was not fully saved: ${errorText(error)}\n`);
+    process.stderr.write(
+      `${strings.cli.prefix}: ${strings.cli.localStateNotSaved(errorText(error))}\n`,
+    );
   }
   const revertError = await controller.flushRevertOnExit();
   if (revertError !== undefined) {
-    process.stderr.write(`marg: could not cancel the staged revert: ${revertError}\n`);
+    process.stderr.write(`${strings.cli.prefix}: ${strings.cli.revertNotCancelled(revertError)}\n`);
   }
   controller.dispose();
   await clipboard.dispose();

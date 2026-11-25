@@ -1,6 +1,7 @@
 import type { Backend, QueuedInput } from '../adapter/backend.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
+import { strings } from '../i18n/index.ts';
 
 export type PrintRequest = Readonly<{
   backend: Backend;
@@ -94,6 +95,11 @@ const gracePolls = 3;
 const reconcileEvery = 120;
 const eol = String.fromCharCode(10);
 
+/** One human diagnostic line, with the single `marg:` prefix policy applied in one place. */
+function marg(text: string): string {
+  return `${strings.cli.prefix}: ${text}${eol}`;
+}
+
 /**
  * Keeps the messages from admission onward. A normal poll reads only the newest page and
  * merges it by ID into the cache; older pages are fetched only until they overlap what is
@@ -148,9 +154,7 @@ export async function runPrint(request: PrintRequest): Promise<number> {
       ...(request.model === undefined ? {} : { model: request.model }),
     });
     if (request.signal.aborted) {
-      request.diagnostic(
-        `marg: cancelled while creating the session; no prompt was submitted (session ${created.id} may exist).${eol}`,
-      );
+      request.diagnostic(marg(strings.cli.print.cancelledCreatingSession(created.id)));
       return exitCodes.interrupted;
     }
     sessionID = created.id;
@@ -163,9 +167,7 @@ export async function runPrint(request: PrintRequest): Promise<number> {
     admitted = await backend.prompt(sessionID, { text: request.prompt, files: [] });
   } catch (error) {
     if (request.signal.aborted) {
-      request.diagnostic(
-        `marg: cancelled while submitting to session ${sessionID}; the prompt may have been accepted and server work may continue: ${String(error)}${eol}`,
-      );
+      request.diagnostic(marg(strings.cli.print.cancelledSubmitting(sessionID, String(error))));
       return exitCodes.interrupted;
     }
     throw error;
@@ -173,9 +175,7 @@ export async function runPrint(request: PrintRequest): Promise<number> {
   // Past admission the server owns the turn: report the ambiguity honestly instead of
   // implying nothing started or submitting again. The CLI never interrupts it here.
   if (request.signal.aborted) {
-    request.diagnostic(
-      `marg: cancelled after the prompt was submitted to session ${sessionID}; server work may continue.${eol}`,
-    );
+    request.diagnostic(marg(strings.cli.print.cancelledAfterSubmit(sessionID)));
     return exitCodes.interrupted;
   }
 
@@ -202,10 +202,7 @@ export async function runPrint(request: PrintRequest): Promise<number> {
         // e.g. a declined permission ends the run with an errored reply and no idle marker.
         const stopped = progress.messages.findLast((m) => m.kind === 'assistant');
         const cause = stopped?.kind === 'assistant' ? stopped.error : undefined;
-        return fail(
-          request,
-          `session stopped before the turn finished${cause === undefined ? '' : `: ${cause}`}`,
-        );
+        return fail(request, strings.cli.print.sessionStopped(cause));
       }
       continue;
     }
@@ -213,16 +210,16 @@ export async function runPrint(request: PrintRequest): Promise<number> {
     const queued = (await backend.listInbox(sessionID)).some((item) => item.id === admitted.id);
     vanished = queued ? 0 : vanished + 1;
     if (vanished >= gracePolls) {
-      return fail(request, 'the prompt left the queue without starting (cancelled?)');
+      return fail(request, strings.cli.print.promptLeftQueue);
     }
     if (!active && Date.now() - waitStarted > startTimeoutMs) {
-      return fail(request, `the prompt did not start within ${startTimeoutMs} ms`);
+      return fail(request, strings.cli.print.promptDidNotStart(startTimeoutMs));
     }
   }
 }
 
 function fail(request: PrintRequest, reason: string): number {
-  request.diagnostic(`marg: ${reason}${eol}`);
+  request.diagnostic(marg(reason));
   return exitCodes.failed;
 }
 
@@ -240,7 +237,7 @@ function report(
   }
   if (progress.outcome === 'succeeded') return exitCodes.ok;
   const detail = progress.error === undefined ? '' : `: ${progress.error}`;
-  request.diagnostic(`marg: turn ${progress.outcome}${detail}${eol}`);
+  request.diagnostic(marg(strings.cli.print.turnFinished(progress.outcome, detail)));
   return exitCodes.failed;
 }
 

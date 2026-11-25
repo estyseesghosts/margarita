@@ -15,6 +15,7 @@ import {
 import { goalBadge } from '../domain/native-goal.ts';
 import { directoryName } from '../domain/path-identity.ts';
 import { executionLabel } from '../domain/session.ts';
+import { strings } from '../i18n/index.ts';
 import { agentColor } from './agent-color.ts';
 import { useActivate } from './pointer.ts';
 import type { Theme } from './theme.ts';
@@ -41,10 +42,10 @@ export function ComposerView(props: { controller: AppController; theme: Theme; w
   const empty = () => state.composer.text === '';
   const placeholder = () =>
     state.route.kind === 'overview'
-      ? `New session in ${directoryName(state.overview.project.directory)}`
+      ? strings.chrome.composer.newSessionIn(directoryName(state.overview.project.directory))
       : state.route.kind === 'new'
-        ? `New session in ${directoryName(state.route.directory)} · ← overview`
-        : '← overview · Shift+Tab agent · Ctrl+O details';
+        ? strings.chrome.composer.newSessionWithOverview(directoryName(state.route.directory))
+        : strings.chrome.composer.conversationPlaceholder;
   const rule = () => '─'.repeat(Math.max(0, props.width));
 
   return (

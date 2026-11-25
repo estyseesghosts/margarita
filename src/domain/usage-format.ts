@@ -1,3 +1,4 @@
+import { strings } from '../i18n/index.ts';
 import type { TokenUsage } from './session.ts';
 
 /** `$0.38`; sub-cent nonzero values show `<$0.01`; unknown cost shows `—`, never `$0.00`. */
@@ -19,14 +20,18 @@ export function formatTokenCount(count: number): string {
  * overlap with input differs between providers; summing would double count.
  */
 export function formatTokens(tokens: TokenUsage | undefined): string {
-  if (tokens === undefined) return '— tok';
-  return `${formatTokenCount(tokens.input)} in · ${formatTokenCount(tokens.output)} out`;
+  if (tokens === undefined) return strings.chrome.footer.tokensUnknown;
+  return strings.chrome.footer.tokensInOut(
+    '',
+    formatTokenCount(tokens.input),
+    formatTokenCount(tokens.output),
+  );
 }
 
 /** Relative age for overview rows, from a fixed `now` so it is testable. */
 export function formatAge(timestamp: number, now: number): string {
   const seconds = Math.max(0, Math.round((now - timestamp) / 1000));
-  if (seconds < 60) return 'now';
+  if (seconds < 60) return strings.overview.now;
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.round(minutes / 60);

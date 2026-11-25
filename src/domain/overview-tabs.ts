@@ -13,14 +13,6 @@ export const overviewTabs: readonly OverviewTab[] = [
   'needs-input',
 ];
 
-export const overviewTabLabels: Readonly<Record<OverviewTab, string>> = {
-  all: 'All',
-  local: 'Local',
-  remotes: 'Remotes',
-  active: 'Active',
-  'needs-input': 'Needs input',
-};
-
 export type TabContext = Readonly<{
   statusOf: (session: SessionSummary) => SessionStatus;
   online: (serverID: string) => boolean;

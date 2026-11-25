@@ -13,6 +13,7 @@ import {
   validateShortname,
 } from '../config/server-profiles.ts';
 import { PairingError, type PairRequest, suggestShortname } from '../domain/pairing.ts';
+import { strings } from '../i18n/index.ts';
 
 export type PairingServiceDeps = Readonly<{
   servers: ServerConnectionManager;
@@ -121,8 +122,7 @@ export async function pairServer(
         ...(deps.allowInsecureHttp === undefined
           ? {}
           : { allowInsecureHttp: deps.allowInsecureHttp }),
-        unauthorizedText:
-          'The server rejected those credentials. Check MARGARITA_SERVER_PASSWORD and pair again.',
+        unauthorizedText: strings.notices.pairing.credentialsRejected,
       });
       platform = info.platform;
       connection = {
@@ -140,8 +140,7 @@ export async function pairServer(
         ...(deps.allowInsecureHttp === undefined
           ? {}
           : { allowInsecureHttp: deps.allowInsecureHttp }),
-        unauthorizedText:
-          'The server requires credentials. Set MARGARITA_SERVER_PASSWORD and pair again.',
+        unauthorizedText: strings.notices.pairing.credentialsRequired,
       });
       platform = info.platform;
       connection = { baseUrl: normalized, headers: {}, origin: 'remote' };

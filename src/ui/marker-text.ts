@@ -1,4 +1,5 @@
 import { formatElapsed } from '../domain/throbber.ts';
+import { strings } from '../i18n/index.ts';
 
 const timeFormat = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
 
@@ -10,18 +11,25 @@ export type FinishedMarker = Readonly<{
 
 /** Text of a finished task marker. The single status glyph is added by the view, not here. */
 export function markerText(marker: FinishedMarker): string {
+  const stringsForMarker = strings.transcript.marker;
   const status =
     marker.phase === 'completed'
-      ? 'Completed'
+      ? stringsForMarker.completed
       : marker.phase === 'failed'
-        ? 'Failed'
-        : 'Interrupted';
-  const preposition = marker.phase === 'completed' ? 'in' : 'after';
-  const event =
+        ? stringsForMarker.failed
+        : stringsForMarker.interrupted;
+  const preposition =
     marker.durationMs === undefined
-      ? status
-      : `${status} ${preposition} ${formatElapsed(marker.durationMs)}`;
+      ? undefined
+      : marker.phase === 'completed'
+        ? stringsForMarker.in
+        : stringsForMarker.after;
+  const event = stringsForMarker.event(
+    status,
+    preposition,
+    marker.durationMs === undefined ? '' : formatElapsed(marker.durationMs),
+  );
   return marker.completedAt === undefined
     ? event
-    : `${event} · done ${timeFormat.format(new Date(marker.completedAt))}`;
+    : stringsForMarker.done(event, timeFormat.format(new Date(marker.completedAt)));
 }

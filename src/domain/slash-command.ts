@@ -1,39 +1,7 @@
+import { strings } from '../i18n/index.ts';
+
 /** Frontend-local slash commands. These always win over server commands of the same name. */
-export const localCommands = {
-  sessions: 'Return to the session overview',
-  bg: 'Return to the session overview',
-  new: 'Start a new session in this project',
-  resume: 'Open the overview to pick a session',
-  agent: 'Switch agent: /agent <id>',
-  model: 'Pick or set model: /model [provider/model#variant]',
-  effort: 'Set variant for the current model: /effort <variant>',
-  transcript: 'Toggle detailed transcript',
-  copy: 'Copy exact tool output, diff, code block or response: /copy · /copy last',
-  diff: 'Files changed: /diff (session) or /diff turn (since your last message)',
-  usage: 'Show token and spend breakdown',
-  // Side questions are a desktop-only feature; the v2.3.x HTTP API has no equivalent.
-  // Recognized only so we can say so truthfully instead of reporting "unknown command".
-  btw: 'Side questions are not available over the OpenCode HTTP API',
-  interrupt: 'Stop the running turn',
-  queue: 'Show queued inputs',
-  compact: 'Compact the conversation now: /compact',
-  export: 'Save the whole chat log as JSON: /export [file]',
-  criteria: 'Acceptance criteria for the session (local): /criteria a; b',
-  plan: 'Plan: /plan <steps> · /plan propose · /plan adopt · /plan accept|reject|clear',
-  rename: 'Rename this session: /rename <title>',
-  fork: 'Fork this session into a new one',
-  revert: 'Undo file changes since your last message (asks to confirm)',
-  rewind: 'Choose an earlier prompt and preview its file scope before reverting',
-  steer: 'Send text with steer delivery: /steer <text>',
-  status: 'Connection and session details',
-  keys: 'Show key bindings',
-  help: 'Show help',
-  quit: 'Exit (the session keeps running on the server)',
-  server: 'Run a server command explicitly: /server <name> [args]',
-  pair: 'Pair a remote server: /pair <link> [--as name] or /pair --url <url> --as name',
-  servers: 'List or rename paired servers: /servers · /servers rename <old> <new>',
-  unpair: 'Remove a paired server and its local credentials: /unpair <name>',
-} as const;
+export const localCommands = strings.commands.descriptions;
 
 export type LocalCommandName = keyof typeof localCommands;
 
@@ -85,7 +53,7 @@ export function completeCommand(
     .filter((command) => command.name.startsWith(prefix) && !isLocalCommand(command.name))
     .map((command) => ({
       name: command.name,
-      description: command.description ?? 'server command',
+      description: command.description ?? strings.commands.serverCommandFallback,
     }));
   return [...local, ...server];
 }

@@ -5,6 +5,8 @@ import { join } from 'node:path';
 
 import type { CliRenderer } from '@opentui/core';
 
+import { strings } from '../i18n/index.ts';
+
 /**
  * Line-ending policy for editor round trips (#158): CRLF is deliberately converted to LF, but
  * no content is removed — notably a trailing newline the user saved (or never touched).
@@ -24,7 +26,7 @@ export async function editExternally(
 ): Promise<{ ok: true; text: string } | { ok: false; message: string }> {
   const editor = env['VISUAL'] ?? env['EDITOR'];
   if (editor === undefined || editor.trim() === '') {
-    return { ok: false, message: 'Set $VISUAL or $EDITOR to edit prompts externally.' };
+    return { ok: false, message: strings.chrome.composer.externalEditorMissing };
   }
   const directory = await mkdtemp(join(tmpdir(), 'margarita-'));
   const file = join(directory, 'prompt.md');
@@ -36,7 +38,8 @@ export async function editExternally(
       child.once('error', reject);
       child.once('exit', resolve);
     });
-    if (code !== 0) return { ok: false, message: `Editor exited with code ${code ?? 'signal'}.` };
+    if (code !== 0)
+      return { ok: false, message: strings.chrome.composer.editorExited(String(code ?? 'signal')) };
     const edited = await readFile(file, 'utf8');
     return { ok: true, text: normalizeEditedText(edited) };
   } catch (error) {

@@ -1,3 +1,4 @@
+import { strings } from '../i18n/index.ts';
 import {
   effectiveVariant,
   type ModelSelection,
@@ -37,18 +38,22 @@ export function resolveModel(
 ): ModelResolution {
   if (request.model === undefined) {
     if (request.effort !== undefined) {
-      return { kind: 'error', message: '--effort requires --model.' };
+      return { kind: 'error', message: strings.cli.model.effortRequiresModel };
     }
     if (request.provider !== undefined) {
       return {
         kind: 'error',
-        message: `--provider ${request.provider} needs --model; available: ${listFor(catalog, request.provider)}`,
+        message: strings.cli.model.providerNeedsModel(
+          request.provider,
+          listFor(catalog, request.provider),
+        ),
       };
     }
     return { kind: 'default' };
   }
   const raw = parseModelRef(request.model);
-  if (raw === undefined) return { kind: 'error', message: `Invalid model "${request.model}".` };
+  if (raw === undefined)
+    return { kind: 'error', message: strings.cli.model.invalidModel(request.model) };
   const parsed = reinterpretWithProvider(raw, request.provider, catalog);
   if (
     parsed.providerID !== undefined &&
@@ -57,7 +62,7 @@ export function resolveModel(
   ) {
     return {
       kind: 'error',
-      message: `--model names provider "${parsed.providerID}" but --provider is "${request.provider}".`,
+      message: strings.cli.model.providerMismatch(parsed.providerID, request.provider),
     };
   }
   if (
@@ -67,31 +72,35 @@ export function resolveModel(
   ) {
     return {
       kind: 'error',
-      message: `--model pins variant "${parsed.variant}" but --effort is "${request.effort}".`,
+      message: strings.cli.model.variantMismatch(parsed.variant, request.effort),
     };
   }
   const variant = parsed.variant ?? request.effort;
   const candidates = findCandidates(catalog, parsed.providerID, parsed.modelID, request.provider);
   if (candidates.length === 0) {
-    return { kind: 'error', message: `Model "${request.model}" is not in the server catalog.` };
+    return { kind: 'error', message: strings.cli.model.notInCatalog(request.model) };
   }
   const [match, ...others] = candidates;
-  if (match === undefined) return { kind: 'error', message: 'No catalog match.' };
+  if (match === undefined) return { kind: 'error', message: strings.cli.model.noCatalogMatch };
   if (others.length > 0) {
     const providers = candidates.map((entry) => entry.providerID).join(', ');
     return {
       kind: 'error',
-      message: `Model "${match.modelID}" is offered by several providers (${providers}); pass --provider.`,
+      message: strings.cli.model.offeredBySeveral(match.modelID, providers),
     };
   }
   if (!match.enabled) {
-    return { kind: 'error', message: `Model ${match.providerID}/${match.modelID} is disabled.` };
-  }
-  if (variant !== undefined && !match.variants.includes(variant)) {
-    const available = match.variants.length === 0 ? 'none' : match.variants.join(', ');
     return {
       kind: 'error',
-      message: `Model ${match.providerID}/${match.modelID} has no variant "${variant}". Available: ${available}.`,
+      message: strings.cli.model.disabled(match.providerID, match.modelID),
+    };
+  }
+  if (variant !== undefined && !match.variants.includes(variant)) {
+    const available =
+      match.variants.length === 0 ? strings.cli.model.noneAvailable : match.variants.join(', ');
+    return {
+      kind: 'error',
+      message: strings.cli.model.noVariant(match.providerID, match.modelID, variant, available),
     };
   }
   return {
@@ -158,7 +167,7 @@ function listFor(catalog: readonly CatalogModel[], provider: string): string {
   const models = catalog
     .filter((entry) => entry.providerID === provider)
     .map((entry) => entry.modelID);
-  if (models.length === 0) return 'none (unknown provider)';
+  if (models.length === 0) return strings.cli.model.noneAvailable;
   const shown = models.slice(0, 8).join(', ');
   return models.length > 8 ? `${shown}, …` : shown;
 }
@@ -226,7 +235,7 @@ export function resolveEffectiveModel(input: EffectiveModelInput): EffectiveMode
       kind: 'blocked',
       model,
       source,
-      reason: `${source === 'selection' ? 'Selected' : 'Pinned'} model is not available for this project`,
+      reason: strings.cli.model.blocked(source === 'selection'),
     };
   }
   if (input.lastUsed !== undefined && isModelAvailable(input.catalog, input.lastUsed)) {

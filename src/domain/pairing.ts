@@ -4,6 +4,8 @@
  * the raw input only long enough to validate it and produces a redacted form for messages.
  */
 
+import { strings } from '../i18n/index.ts';
+
 export type PairRequest = Readonly<{
   /** Server origin plus base path, without the `/auth/connect/<code>` suffix. */
   baseUrl: string;
@@ -31,25 +33,25 @@ export function parsePairingUrl(raw: string): { baseUrl: string; code: string } 
   try {
     url = new URL(raw);
   } catch (cause) {
-    throw new PairingError('That is not a valid pairing URL.', { cause });
+    throw new PairingError(strings.errors.pairing.invalidUrl, { cause });
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new PairingError('Pairing URLs must use http or https.');
+    throw new PairingError(strings.errors.pairing.httpOnly);
   }
   if (url.username !== '' || url.password !== '') {
-    throw new PairingError('Pairing URLs cannot contain embedded credentials.');
+    throw new PairingError(strings.errors.pairing.embeddedCredentials);
   }
   if (url.search !== '' || url.hash !== '') {
-    throw new PairingError('A pairing URL cannot contain a query string or fragment.');
+    throw new PairingError(strings.errors.pairing.queryOrFragment);
   }
   const path = url.pathname;
   const at = path.lastIndexOf(connectPath);
   if (at === -1) {
-    throw new PairingError('A pairing URL must end with /auth/connect/<code>.');
+    throw new PairingError(strings.errors.pairing.missingConnectSuffix);
   }
   const code = path.slice(at + connectPath.length).replace(/\/+$/, '');
   if (code === '' || code.includes('/')) {
-    throw new PairingError('The pairing URL is missing its one-time code.');
+    throw new PairingError(strings.errors.pairing.missingCode);
   }
   const basePath = path.slice(0, at);
   url.pathname = basePath === '' ? '/' : basePath;
@@ -69,7 +71,7 @@ export function parsePairArgs(args: string): PairRequest {
     if (token === '--as' || token === '-a') {
       const value = tokens[index + 1];
       if (value === undefined || value.startsWith('-')) {
-        throw new PairingError('Usage: /pair <url> [--as <shortname>]');
+        throw new PairingError(strings.errors.pairing.usageShortname);
       }
       shortname = value;
       index += 1;
@@ -77,20 +79,18 @@ export function parsePairArgs(args: string): PairRequest {
     }
     if (token === '--url' || token === '-u') {
       const value = tokens[index + 1];
-      if (value === undefined) throw new PairingError('Usage: /pair --url <url> [--as <name>]');
-      if (url !== undefined) throw new PairingError('Only one pairing URL can be given.');
+      if (value === undefined) throw new PairingError(strings.errors.pairing.usageUrl);
+      if (url !== undefined) throw new PairingError(strings.errors.pairing.onlyOneUrl);
       url = value;
       index += 1;
       continue;
     }
-    if (token.startsWith('-')) throw new PairingError(`Unknown /pair option: ${token}`);
-    if (url !== undefined) throw new PairingError('Only one pairing URL can be given.');
+    if (token.startsWith('-')) throw new PairingError(strings.errors.pairing.unknownOption(token));
+    if (url !== undefined) throw new PairingError(strings.errors.pairing.onlyOneUrl);
     url = token;
   }
   if (url === undefined) {
-    throw new PairingError(
-      'Usage: /pair <https://host/auth/connect/code> [--as <shortname>], or /pair --url <https://host> --as <shortname>',
-    );
+    throw new PairingError(strings.errors.pairing.usageFull);
   }
   const parsed = isPairingUrl(url) ? parsePairingUrl(url) : parseManualOptions(url, shortname);
   return {
@@ -106,24 +106,22 @@ function parseManualOptions(
   shortname: string | undefined,
 ): { baseUrl: string; code: string } {
   if (shortname === undefined) {
-    throw new PairingError(
-      'A manual server URL needs a shortname: /pair --url <https://host> --as <shortname>',
-    );
+    throw new PairingError(strings.errors.pairing.manualNeedsShortname);
   }
   let url: URL;
   try {
     url = new URL(raw);
   } catch (cause) {
-    throw new PairingError('That is not a valid server URL.', { cause });
+    throw new PairingError(strings.errors.pairing.invalidServerUrl, { cause });
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new PairingError('Server URLs must use http or https.');
+    throw new PairingError(strings.errors.pairing.serverHttpOnly);
   }
   if (url.username !== '' || url.password !== '') {
-    throw new PairingError('Server URLs cannot contain embedded credentials.');
+    throw new PairingError(strings.errors.pairing.serverEmbeddedCredentials);
   }
   if (url.search !== '' || url.hash !== '') {
-    throw new PairingError('A server URL cannot contain a query string or fragment.');
+    throw new PairingError(strings.errors.pairing.serverQueryOrFragment);
   }
   url.pathname = url.pathname.replace(/\/+$/, '');
   return { baseUrl: url.toString().replace(/\/$/, ''), code: '' };

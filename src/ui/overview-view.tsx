@@ -17,6 +17,7 @@ import { sanitizeSingleLine } from '../domain/sanitize-text.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import { executionLabel } from '../domain/session.ts';
 import { formatAge } from '../domain/usage-format.ts';
+import { strings } from '../i18n/index.ts';
 import { useActivate } from './pointer.ts';
 import { isNoColorTheme, type Theme } from './theme.ts';
 
@@ -63,23 +64,15 @@ export function Overview(props: {
       paddingRight={1}
     >
       <text fg={props.theme.text} marginBottom={1}>
-        <b>Sessions</b>
+        <b>{strings.overview.title}</b>
       </text>
       <box flexDirection="row" marginBottom={1}>
         <For
           each={layoutOverviewTabs(
-            (
-              [
-                ['all', 'All', 'A'],
-                ['local', 'Local', 'L'],
-                ['remotes', 'Remote', 'R'],
-                ['active', 'Active', 'C'],
-                ['needs-input', 'Needs', 'N'],
-              ] as const
-            ).map(([tab, compactLabel, tinyLabel]) => ({
+            (['all', 'local', 'remotes', 'active', 'needs-input'] as const).map((tab) => ({
               label: props.controller.tabLabel(tab),
-              compactLabel,
-              tinyLabel,
+              compactLabel: strings.overview.compactTabs[tab],
+              tinyLabel: strings.overview.tinyTabs[tab],
               count: props.controller.tabCounts()[tab] ?? 0,
               selected: state.overview.tab === tab,
             })),
@@ -107,18 +100,16 @@ export function Overview(props: {
       </box>
       <Show when={groups().length === 0}>
         <text fg={props.theme.dim}>
-          {state.startup.phase === 'loading'
-            ? 'Loading sessions and project catalog…'
-            : 'No sessions yet. Type below to start one.'}
+          {state.startup.phase === 'loading' ? strings.overview.loading : strings.overview.empty}
         </text>
       </Show>
       <For each={groups()}>
         {(group) => {
           const remoteLabel = () =>
             group.remote
-              ? `  ${props.ascii === true ? '[remote]' : '🖥'} ${group.serverLabel ?? 'remote'}`
+              ? `  ${props.ascii === true ? strings.overview.remoteAsciiMarker : strings.overview.remoteGlyph} ${group.serverLabel ?? strings.overview.remoteFallbackLabel}`
               : '';
-          const staleLabel = () => (group.stale ? '  [offline]' : '');
+          const staleLabel = () => (group.stale ? `  ${strings.overview.offlineMarker}` : '');
           const header = () =>
             layoutProjectHeader({
               name: group.name,
@@ -189,7 +180,9 @@ export function Overview(props: {
                           onMouseUp={activate(() => props.controller.clickOverviewRow(row.key))}
                         >
                           {`${overviewMarker(selected(row.key), overviewContentWidth(props.width))}${
-                            toggle().expanded ? '[Show less]' : `[Show more] ${toggle().hidden}`
+                            toggle().expanded
+                              ? strings.overview.showLess
+                              : strings.overview.showMore(toggle().hidden)
                           }`}
                         </text>
                       )}
@@ -206,37 +199,37 @@ export function Overview(props: {
           {(server) => (
             <text fg={server.state === 'unauthorized' ? props.theme.warn : props.theme.dim}>
               {server.state === 'unauthorized'
-                ? `Paired server ${server.label} is unavailable (no usable credential).`
-                : `Restoring paired server ${server.label}…`}
+                ? strings.overview.pairedUnavailable(server.label)
+                : strings.overview.restoringPaired(server.label)}
             </text>
           )}
         </For>
       </Show>
       <Show when={!state.sessionsComplete}>
-        <text fg={props.theme.dim}>Showing recent sessions only.</text>
+        <text fg={props.theme.dim}>{strings.overview.recentOnly}</text>
         <text
           id={rowID(loadMoreRowKey)}
           fg={selected(loadMoreRowKey) ? props.theme.accent : props.theme.dim}
         >
           {`${overviewMarker(selected(loadMoreRowKey), overviewContentWidth(props.width))}${
             state.sessionsLoading
-              ? '[Loading more sessions…]'
+              ? strings.overview.loadingMore
               : state.sessionsError !== undefined
-                ? '[Retry loading sessions]'
-                : '[Load more sessions]'
+                ? strings.overview.retryLoadMore
+                : strings.overview.loadMore
           }`}
         </text>
         <Show when={state.sessionsError !== undefined}>
-          <text
-            fg={props.theme.warn}
-          >{`Could not load more sessions: ${state.sessionsError}`}</text>
+          <text fg={props.theme.warn}>
+            {strings.overview.couldNotLoadMore(state.sessionsError ?? '')}
+          </text>
         </Show>
       </Show>
       <Show when={state.sessionsComplete && groups().length > 0}>
-        <text fg={props.theme.dim}>All sessions loaded.</text>
+        <text fg={props.theme.dim}>{strings.overview.allLoaded}</text>
       </Show>
       <text fg={props.theme.dim} marginTop={1}>
-        {`New session in: ${directoryName(state.overview.project.directory)}`}
+        {strings.overview.newSessionIn(directoryName(state.overview.project.directory))}
       </text>
     </scrollbox>
   );
@@ -261,7 +254,7 @@ function SessionLine(props: {
   const execution = () => props.controller.executionOf(props.session.id, props.session.serverID);
   const tasks = () => {
     const count = props.controller.planProgress(props.session.id, props.session.serverID);
-    return count === undefined ? '' : ` · ${count.done}/${count.total} tasks`;
+    return count === undefined ? '' : strings.overview.tasksProgress(count.done, count.total);
   };
   const age = () => formatAge(props.controller.lastUsed(props.session), props.now);
   const status = () => `${executionLabel(execution())}${tasks()} · ${age()}`;

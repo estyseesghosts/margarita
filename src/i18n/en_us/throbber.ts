@@ -1,0 +1,49 @@
+import type { ThrobberStrings } from '../types.ts';
+
+/** English (United States) throbber text. Glyphs and animation frames are not localized. */
+export const throbberEnUs = {
+  decorativeVerbs: [
+    'thinking',
+    'combobulating',
+    'composing',
+    'ideating',
+    'dashing',
+    'snooping',
+    'tinkering',
+    'wondering',
+    'sketching',
+    'shivering',
+    'crawling',
+    "jorkin' it",
+  ],
+  fallbackVerb: 'thinking',
+  activity: {
+    read: 'reading',
+    search: 'searching',
+    edit: 'vim-ing',
+    shell: 'running',
+    code: 'scripting',
+    web: 'internetting',
+    delegate: 'delegating',
+    other: 'producing',
+  },
+  compacting: 'compacting',
+  thinking: 'thinking',
+  tipPrefix: 'tip:',
+  tips: [
+    'press shift+tab to cycle agents',
+    'press ctrl+o to show the detailed transcript',
+    'press ctrl+c to interrupt your session. press it twice to close the program.',
+    'press alt+enter to steer instead of queueing (f6, ctrl+enter)',
+    'press f1 for all key bindings',
+  ],
+  tokens: (count) => `${count} tokens`,
+  finishedAt: (time) => `done at ${time}`,
+  interrupted: 'interrupted - what should we do next?',
+  failed: 'failed!',
+  elapsed: {
+    hoursMinutes: (hours, minutes) => `${hours}h ${minutes}m`,
+    minutesSeconds: (minutes, seconds) => `${minutes}m ${seconds}s`,
+    seconds: (seconds) => `${seconds}s`,
+  },
+} satisfies ThrobberStrings;

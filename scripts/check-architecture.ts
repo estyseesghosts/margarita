@@ -94,6 +94,12 @@ export const ARCHITECTURE_POLICY = {
     forbiddenNodeModules: ['net', 'http', 'https', 'tls', 'dgram', 'dns'],
     forbiddenBareSpecifiers: [],
   },
+  i18n: {
+    forbiddenLayers: ['app', 'domain', 'ui', 'adapter', 'config', 'cli', 'perf'],
+    forbiddenPackages: ['solid-js', '@opentui', '@opencode'],
+    forbiddenNodeModules: ['fs', 'net', 'http', 'https', 'tls', 'dgram', 'dns'],
+    forbiddenBareSpecifiers: ['bun:sqlite'],
+  },
 } as const;
 
 function nodeModuleMatches(specifier: string, modules: readonly string[]): boolean {
@@ -175,6 +181,33 @@ const uiRule: BoundaryRule = {
   },
 };
 
+const i18nRule: BoundaryRule = {
+  applies: (path) => layerOf(path) === 'i18n' && !isTest(path),
+  forbids: (specifier, target) => {
+    const problems: ForbiddenSite[] = [];
+    const policy = ARCHITECTURE_POLICY.i18n;
+    if (targetsLayer(target, policy.forbiddenLayers)) {
+      problems.push({
+        line: 0,
+        target: specifier,
+        rule: 'i18n must not depend on app, domain, ui, adapter, config, cli or perf',
+      });
+    }
+    const external =
+      externalMatches(specifier, policy.forbiddenPackages) ||
+      nodeModuleMatches(specifier, policy.forbiddenNodeModules) ||
+      policy.forbiddenBareSpecifiers.some((value) => value === specifier);
+    if (external) {
+      problems.push({
+        line: 0,
+        target: specifier,
+        rule: 'i18n must stay dependency-light: no UI, wire or Node I/O imports',
+      });
+    }
+    return problems;
+  },
+};
+
 /** Direct fetch() calls in production UI code are transport RPCs, not imports. */
 function findFetchViolations(file: SourceFile): readonly ImportViolation[] {
   if (layerOf(file.path) !== 'ui' || isTest(file.path)) {
@@ -188,7 +221,7 @@ function findFetchViolations(file: SourceFile): readonly ImportViolation[] {
   }));
 }
 
-const boundaryRules: readonly BoundaryRule[] = [domainRule, adapterRule, uiRule];
+const boundaryRules: readonly BoundaryRule[] = [domainRule, adapterRule, uiRule, i18nRule];
 
 /** Marker for a computed module specifier the parser cannot resolve statically. */
 export const DYNAMIC_SPECIFIER = '(dynamic)';

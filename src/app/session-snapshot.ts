@@ -9,6 +9,7 @@
  * store, backend or controller.
  */
 import type { SessionSummary } from '../domain/session.ts';
+import { strings } from '../i18n/index.ts';
 
 /** The verified per-host result a refresh produces before it is committed. */
 export interface SnapshotResult {
@@ -71,7 +72,7 @@ export function sessionPage(result: Pick<SnapshotResult, 'ok' | 'cursor' | 'erro
     ...(result.cursor === undefined ? {} : { cursor: result.cursor }),
     complete: result.ok && result.cursor === undefined,
     loading: false,
-    ...(result.ok ? {} : { error: result.error ?? 'Could not reach the server' }),
+    ...(result.ok ? {} : { error: result.error ?? strings.notices.session.unreachable }),
   };
 }
 

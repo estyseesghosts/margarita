@@ -1,3 +1,4 @@
+import { strings } from '../i18n/index.ts';
 import { sanitizeTerminalText } from './sanitize-text.ts';
 import { toolFileLabel, type ToolResultPayload } from './transcript.ts';
 
@@ -8,11 +9,14 @@ export type InspectorKind = 'text' | 'diff';
 function metadataLines(payload: ToolResultPayload): string[] {
   const lines: string[] = [];
   if (payload.executionError !== undefined) {
-    lines.push('script failed:', ...sanitizeTerminalText(payload.executionError).split('\n'));
+    lines.push(
+      strings.errors.inspector.scriptFailed,
+      ...sanitizeTerminalText(payload.executionError).split('\n'),
+    );
   }
   if (payload.files.length > 0) {
     if (lines.length > 0) lines.push('');
-    lines.push(`files (${payload.files.length}):`);
+    lines.push(strings.errors.inspector.files(payload.files.length));
     for (const file of payload.files) lines.push(`  ${toolFileLabel(file)}`);
   }
   return lines;

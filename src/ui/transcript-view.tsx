@@ -70,6 +70,7 @@ import {
   windowNodeViewByRows,
 } from '../domain/transcript.ts';
 import { type WorkerStatus, workerStatusLabel } from '../domain/worker.ts';
+import { strings } from '../i18n/index.ts';
 import { countFormat } from '../perf/format-counts.ts';
 import { markerText } from './marker-text.ts';
 import { useActivate } from './pointer.ts';
@@ -110,10 +111,12 @@ function jobWarning(
   );
   if (failed.length === 0) return undefined;
   const retained = failed.some((status) => status.state === 'stale');
-  const detail = failed.find((status) => status.detail !== undefined)?.detail ?? 'refresh failed';
+  const detail =
+    failed.find((status) => status.detail !== undefined)?.detail ??
+    strings.transcript.background.refreshFailed;
   return retained
-    ? `  background jobs may be out of date · ${detail}`
-    : `  background job state unavailable · ${detail}`;
+    ? strings.transcript.background.retained(detail)
+    : strings.transcript.background.unavailable(detail);
 }
 
 export function Transcript(props: TranscriptProps) {
@@ -445,14 +448,14 @@ export function Transcript(props: TranscriptProps) {
         <Show when={windowed().hidden > 0 || transcript()?.olderCursor !== undefined}>
           <text fg={props.theme.dim}>
             {transcript()?.loading === true
-              ? ' … loading earlier messages'
+              ? strings.transcript.history.loadingEarlier
               : transcript()?.olderCheckFailed === true
-                ? ' … earlier history check failed · PageUp at the top to retry'
-                : ' … earlier messages · PageUp at the top to show them'}
+                ? strings.transcript.history.checkFailed
+                : strings.transcript.history.hidden}
           </text>
         </Show>
         <Show when={transcript()?.loading === true && nodes().length === 0}>
-          <text fg={props.theme.dim}> Loading conversation…</text>
+          <text fg={props.theme.dim}>{strings.transcript.history.loadingConversation}</text>
         </Show>
         {/* Row slots persist by index so a semantic prepend/reorder cannot remount every
             visible row. Unchanged nodes keep their object identity (#283), so a streamed
@@ -559,14 +562,14 @@ export function WelcomePanel(props: WelcomeProps) {
     props.model !== undefined
       ? formatModelRef(props.model)
       : props.modelStatus === 'loading'
-        ? 'Loading model…'
+        ? strings.chrome.welcome.loadingModel
         : props.modelStatus === 'unavailable'
-          ? 'model unavailable'
+          ? strings.chrome.welcome.modelUnavailable
           : undefined;
   const detail = () => {
     const current = model();
     const agent = props.agent;
-    if (agent === undefined) return current ?? 'agent unavailable';
+    if (agent === undefined) return current ?? strings.chrome.welcome.agentUnavailable;
     return current === undefined ? agent : `${agent} · ${current}`;
   };
   const directory = () => props.directory ?? props.controller.cwd;
@@ -587,14 +590,16 @@ export function WelcomePanel(props: WelcomeProps) {
           </text>
           <text fg={props.theme.dim}>{detail()}</text>
           <text fg={props.theme.dim}>{directory()}</text>
-          <text fg={props.theme.dim}>{`margarita v${props.controller.version}`}</text>
+          <text fg={props.theme.dim}>
+            {strings.chrome.productVersion(props.controller.version)}
+          </text>
         </box>
         <Show when={wide()}>
           {/* One row lower than the greeting so the hints align with the detail row. */}
           <box flexDirection="column" marginLeft={2} marginTop={1} flexShrink={0}>
-            <text fg={props.theme.dim}>← overview (empty prompt)</text>
-            <text fg={props.theme.dim}>Alt+P model</text>
-            <text fg={props.theme.dim}>Ctrl+O details · F1 help</text>
+            <text fg={props.theme.dim}>{strings.chrome.welcome.overviewHint}</text>
+            <text fg={props.theme.dim}>{strings.chrome.welcome.modelHint}</text>
+            <text fg={props.theme.dim}>{strings.chrome.welcome.detailsHint}</text>
           </box>
         </Show>
       </box>
@@ -700,7 +705,11 @@ function NodeView(props: {
           return (
             <box marginTop={1} flexDirection="column" paddingLeft={2}>
               <text fg={theme().dim}>
-                <i>{node().done ? '∴ Reasoning (model-provided)' : '∴ Reasoning (in progress…)'}</i>
+                <i>
+                  {node().done
+                    ? strings.transcript.reasoning.done
+                    : strings.transcript.reasoning.inProgress}
+                </i>
               </text>
               <box paddingLeft={1} flexDirection="column">
                 <MarkdownBody
@@ -710,7 +719,7 @@ function NodeView(props: {
                 />
                 <Show when={bounded().hiddenRows > 0}>
                   <text fg={theme().dim}>
-                    {`… ${bounded().hiddenRows} more rows · inspect to read the rest`}
+                    {strings.transcript.reasoning.hiddenRows(bounded().hiddenRows)}
                   </text>
                 </Show>
               </box>
@@ -720,9 +729,7 @@ function NodeView(props: {
       </Match>
       <Match when={props.node.kind === 'reasoning-unavailable' ? props.node : undefined}>
         {(node: Accessor<NodeOf<'reasoning-unavailable'>>) => (
-          <text
-            fg={theme().dim}
-          >{`  Reasoning text not available (${node().tokens} tokens reported)`}</text>
+          <text fg={theme().dim}>{strings.transcript.reasoning.unavailable(node().tokens)}</text>
         )}
       </Match>
       <Match when={props.node.kind === 'tool' ? props.node : undefined}>
@@ -781,7 +788,7 @@ function NodeView(props: {
             const key = props.backgroundKey;
             return key === undefined || !backgroundHint(node().live, props.now)
               ? undefined
-              : `${key} to move to background`;
+              : strings.transcript.backgroundHint(key);
           };
           return (
             <box flexDirection="column" marginTop={1}>
@@ -853,9 +860,9 @@ function NodeView(props: {
             node().status !== 'timeout'
               ? ''
               : background() === 'confirmed-running'
-                ? ' · still running in background'
+                ? strings.transcript.shell.stillRunning
                 : background() === 'last-known-running'
-                  ? ' · last reported running · connection unavailable'
+                  ? strings.transcript.shell.lastReportedRunning
                   : '';
           return (
             <box flexDirection="column" marginTop={1}>
@@ -871,20 +878,21 @@ function NodeView(props: {
                       : theme().dim
                 }
               >
-                {`  └ ${node().status}${node().exitCode === undefined ? '' : ` (exit ${node().exitCode})`}${backgroundNote()}`}
+                {`${strings.transcript.shell.status(node().status, node().exitCode)}${backgroundNote()}`}
               </text>
               <Show when={node().output}>
                 <box flexDirection="column">
                   <text fg={theme().dim}>{bounded().text.split('\n').join('\n    ')}</text>
                   <Show when={bounded().hiddenRows > 0}>
                     <text fg={theme().dim}>
-                      {`    … ${bounded().hiddenRows} more rows · ${props.detailed ? 'inspect' : 'Ctrl+O'} to read the rest`}
+                      {strings.transcript.shell.hiddenRows(
+                        bounded().hiddenRows,
+                        props.detailed ? 'inspect' : 'Ctrl+O',
+                      )}
                     </text>
                   </Show>
                   <Show when={node().outputTruncated === 'server'}>
-                    <text fg={theme().warn}>
-                      {'  └ output truncated by the server; full text not shown'}
-                    </text>
+                    <text fg={theme().warn}>{strings.transcript.shell.outputTruncated}</text>
                   </Show>
                 </box>
               </Show>
@@ -914,22 +922,34 @@ function NodeView(props: {
           return (
             <box flexDirection="column" marginTop={1}>
               <text fg={workerColor(worker().status, props.theme)}>
-                {`  ${props.focused ? '▸' : '◇'} ${sanitizeText(worker().agent)} · ${sanitizeText(worker().description)} — ${workerStatusLabel(worker().status)}${worker().status === 'running' ? '…' : ''}${props.workerStale ? ' · stale' : ''}${props.focused ? '  (Enter)' : ''}`}
+                {strings.transcript.worker.line(
+                  props.focused ? '▸' : '◇',
+                  sanitizeText(worker().agent),
+                  sanitizeText(worker().description),
+                  workerStatusLabel(worker().status),
+                  worker().status === 'running' ? '…' : '',
+                  props.workerStale ? ' · stale' : '',
+                  props.focused ? '  (Enter)' : '',
+                )}
               </text>
               <Show when={node().expanded}>
-                <text fg={theme().dim}>{`      child session ${worker().childSessionID}`}</text>
+                <text fg={theme().dim}>
+                  {strings.transcript.worker.childSession(worker().childSessionID)}
+                </text>
                 <Show when={worker().title !== undefined}>
                   <text fg={theme().dim}>{`      ${sanitizeText(worker().title ?? '')}`}</text>
                 </Show>
                 <text fg={theme().dim}>
-                  {`      started ${new Date(worker().startedAt).toISOString()}`}
+                  {strings.transcript.worker.started(new Date(worker().startedAt).toISOString())}
                 </text>
                 <Show when={worker().completedAt !== undefined}>
                   <text fg={theme().dim}>
-                    {`      completed ${new Date(worker().completedAt ?? 0).toISOString()}`}
+                    {strings.transcript.worker.completed(
+                      new Date(worker().completedAt ?? 0).toISOString(),
+                    )}
                   </text>
                 </Show>
-                <text fg={theme().dim}>{'      result lives in the child session transcript'}</text>
+                <text fg={theme().dim}>{strings.transcript.worker.resultLocation}</text>
               </Show>
             </box>
           );
@@ -1154,8 +1174,8 @@ function ToolView(props: {
   const showFullDiff = () => (clamped()?.hidden ?? 0) === 0;
   const clampHint = () =>
     props.detailed
-      ? `… ${clamped()?.hidden ?? 0} more lines · inspect to read the rest`
-      : `… ${clamped()?.hidden ?? 0} more lines · Enter to expand`;
+      ? strings.transcript.tool.clamps.detailed(String(clamped()?.hidden ?? 0))
+      : strings.transcript.tool.clamps.compact(String(clamped()?.hidden ?? 0));
   const resultPreview = createMemo(() => {
     const preview = semanticPreview(props.tool);
     const text = sanitizeText(preview.text);
@@ -1222,9 +1242,9 @@ function ToolView(props: {
             {truncateToWidth(
               sanitizeText(
                 edit() !== undefined
-                  ? `${props.tool.name === 'write' ? 'Write' : 'Update'}(${describeTool(props.tool, props.mcpServers).slice(props.tool.name.length + 1)})`
+                  ? `${props.tool.name === 'write' ? strings.transcript.tool.write : strings.transcript.tool.update}(${describeTool(props.tool, props.mcpServers).slice(props.tool.name.length + 1)})`
                   : unavailable() !== undefined
-                    ? `Changed(${unavailable()})`
+                    ? strings.transcript.tool.changed(unavailable() ?? 'unknown')
                     : describeTool(props.tool, props.mcpServers),
               ),
               lineWidth(),
@@ -1241,11 +1261,13 @@ function ToolView(props: {
       <Show when={scriptError()}>
         {(bounded: Accessor<{ text: string; hiddenRows: number }>) => (
           <>
-            <text fg={props.theme.error}>{`  └ script failed: ${indent(bounded().text)}`}</text>
+            <text fg={props.theme.error}>
+              {strings.transcript.tool.scriptFailed(indent(bounded().text))}
+            </text>
             <Show when={bounded().hiddenRows > 0}>
               <text fg={props.theme.error}>
                 {truncateToWidth(
-                  `    … ${bounded().hiddenRows} earlier error rows hidden · inspect for the full script error`,
+                  strings.transcript.tool.scriptRowsHidden(bounded().hiddenRows),
                   lineWidth(),
                 )}
               </text>
@@ -1263,10 +1285,7 @@ function ToolView(props: {
         </For>
         <Show when={fileView().hidden > 0}>
           <text fg={props.theme.dim}>
-            {truncateToWidth(
-              `    … ${fileView().hidden} more ${fileView().hidden === 1 ? 'file' : 'files'} · inspect for the full metadata`,
-              lineWidth(),
-            )}
+            {truncateToWidth(strings.transcript.tool.moreFiles(fileView().hidden), lineWidth())}
           </text>
         </Show>
       </Show>
@@ -1320,10 +1339,7 @@ function ToolView(props: {
                     </Show>
                     <Show when={row.missingReason}>
                       <text fg={props.theme.dim}>
-                        {truncateToWidth(
-                          '    ↳ the server did not report a separate reason for this child',
-                          lineWidth(),
-                        )}
+                        {truncateToWidth(strings.transcript.tool.childMissingReason, lineWidth())}
                       </text>
                     </Show>
                   </box>
@@ -1352,7 +1368,7 @@ function ToolView(props: {
       </Show>
       {/* Failures are never hidden, even in compact mode. */}
       <Show when={unavailable() !== undefined}>
-        <text fg={props.theme.dim}>{'  └ diff unavailable for this change'}</text>
+        <text fg={props.theme.dim}>{strings.transcript.tool.diffUnavailable}</text>
       </Show>
       <Show when={props.tool.error}>
         {(error: Accessor<string>) => {
@@ -1367,7 +1383,7 @@ function ToolView(props: {
               <text fg={props.theme.error}>{`  └ ${indent(bounded().text)}`}</text>
               <Show when={bounded().hiddenRows > 0}>
                 <text fg={props.theme.error}>
-                  {`    … ${bounded().hiddenRows} earlier rows hidden · inspect for the full error`}
+                  {strings.transcript.tool.earlierRowsHidden(bounded().hiddenRows)}
                 </text>
               </Show>
             </>
@@ -1426,7 +1442,7 @@ function ToolView(props: {
           <text fg={props.theme.dim}>{`  └ ${indent(resultPreview().text)}`}</text>
           <Show when={resultPreview().hiddenRows > 0}>
             <text fg={props.theme.dim}>
-              {`    … ${resultPreview().hiddenRows} more rows · inspect to read the rest`}
+              {strings.transcript.tool.moreRows(resultPreview().hiddenRows)}
             </text>
           </Show>
         </box>
@@ -1434,8 +1450,8 @@ function ToolView(props: {
       <Show when={props.tool.outputTruncated !== undefined}>
         <text fg={props.theme.warn}>
           {props.tool.outputTruncated === 'server'
-            ? '  └ output truncated by the server; the full text is not available here'
-            : '  └ output elided by this program (middle omitted); the full text was not retained'}
+            ? strings.transcript.tool.outputTruncated
+            : strings.transcript.tool.outputElided}
         </text>
       </Show>
     </box>
@@ -1480,15 +1496,20 @@ function childSummaryLine(view: ToolChildPage, width: number): string {
   const counts = [
     view.summary.failed === 0
       ? undefined
-      : visibleFailed === view.summary.failed
-        ? `${view.summary.failed} failed`
-        : `${view.summary.failed} failed (${visibleFailed} shown)`,
-    view.summary.running === 0 ? undefined : `${view.summary.running} running`,
-    view.summary.completed === 0 ? undefined : `${view.summary.completed} completed`,
+      : strings.transcript.tool.failedCount(
+          view.summary.failed,
+          visibleFailed === view.summary.failed ? undefined : visibleFailed,
+        ),
+    view.summary.running === 0
+      ? undefined
+      : strings.transcript.tool.runningCount(view.summary.running),
+    view.summary.completed === 0
+      ? undefined
+      : strings.transcript.tool.completedCount(view.summary.completed),
   ].filter((entry): entry is string => entry !== undefined);
   const suffix = counts.length === 0 ? '' : ` · ${counts.join(' · ')}`;
   return truncateToWidth(
-    `  … showing ${view.visible.length} of ${view.summary.total} nested calls${suffix}`,
+    strings.transcript.tool.childSummary(view.visible.length, view.summary.total, suffix),
     Math.max(8, width),
   );
 }
@@ -1502,8 +1523,11 @@ function childPageLine(
   const keys =
     paging?.previous === undefined || paging.next === undefined
       ? ''
-      : ` · ${paging.previous}/${paging.next} page`;
-  return truncateToWidth(`    page ${view.page + 1} of ${view.pages}${keys}`, Math.max(8, width));
+      : strings.transcript.tool.pageKeys(paging.previous, paging.next);
+  return truncateToWidth(
+    strings.transcript.tool.childPage(view.page + 1, view.pages, keys),
+    Math.max(8, width),
+  );
 }
 
 /** Compact-mode colours for a clipped patch line; semantics match the full <diff> view. */
@@ -1529,7 +1553,7 @@ function truncateToWidth(text: string, width: number): string {
 }
 
 function changeSummary(counts: { additions: number; deletions: number }): string {
-  return `Added ${plural(counts.additions)}, removed ${plural(counts.deletions)}`;
+  return strings.transcript.tool.changeSummary(plural(counts.additions), plural(counts.deletions));
 }
 
 function clock(at: number): string {
@@ -1545,7 +1569,7 @@ function PermissionCard(props: { controller: AppController; theme: Theme }) {
           border
           borderStyle="rounded"
           borderColor={props.theme.warn}
-          title=" Permission needed "
+          title={strings.transcript.permission.title}
           flexDirection="column"
           paddingLeft={1}
           paddingRight={1}
@@ -1559,7 +1583,9 @@ function PermissionCard(props: { controller: AppController; theme: Theme }) {
             {(resource) => <text fg={props.theme.dim}>{`  ${sanitizeSingleLine(resource)}`}</text>}
           </For>
           <Show when={request().resources.length > 6}>
-            <text fg={props.theme.dim}>{`  … and ${request().resources.length - 6} more`}</text>
+            <text fg={props.theme.dim}>
+              {strings.transcript.permission.more(request().resources.length - 6)}
+            </text>
           </Show>
           <Show when={request().message}>
             {(message: Accessor<string>) => (
@@ -1587,8 +1613,8 @@ function PermissionCard(props: { controller: AppController; theme: Theme }) {
           </text>
           <text fg={props.theme.dim}>
             {props.controller.state.permissionFocused
-              ? '←/→ choose · Enter confirm · Esc reject'
-              : 'Enter to review · Esc reject'}
+              ? strings.transcript.permission.focusedHints
+              : strings.transcript.permission.hints}
           </text>
         </box>
       )}
@@ -1613,7 +1639,7 @@ function FormCard(props: { controller: AppController; theme: Theme; keymap: Keym
           border
           borderStyle="rounded"
           borderColor={props.theme.warn}
-          title=" Question from the agent "
+          title={strings.transcript.formCard.title}
           flexDirection="column"
           paddingLeft={1}
           paddingRight={1}
@@ -1625,8 +1651,8 @@ function FormCard(props: { controller: AppController; theme: Theme; keymap: Keym
           </text>
           <text fg={props.theme.dim}>
             {fieldCount() === 0
-              ? `No questions to answer · ${openHint()} to acknowledge · Enter on an empty prompt also opens it`
-              : `${fieldCount()} field${fieldCount() === 1 ? '' : 's'} · ${openHint()} to answer · Enter on an empty prompt also opens it`}
+              ? strings.transcript.formCard.noQuestions(openHint())
+              : strings.transcript.formCard.fields(fieldCount(), openHint())}
           </text>
         </box>
       )}
@@ -1635,7 +1661,11 @@ function FormCard(props: { controller: AppController; theme: Theme; keymap: Keym
 }
 
 function label(choice: string): string {
-  return choice === 'once' ? 'Allow once' : choice === 'always' ? 'Always allow' : 'Reject';
+  return choice === 'once'
+    ? strings.transcript.permission.allowOnce
+    : choice === 'always'
+      ? strings.transcript.permission.alwaysAllow
+      : strings.transcript.permission.reject;
 }
 
 /**
@@ -1660,17 +1690,15 @@ function RequestStatusCard(props: { controller: AppController; theme: Theme; key
           border
           borderStyle="rounded"
           borderColor={props.theme.warn}
-          title=" Request refresh incomplete "
+          title={strings.transcript.requests.title}
           flexDirection="column"
           paddingLeft={1}
           paddingRight={1}
           marginTop={1}
           flexShrink={0}
         >
-          <text fg={props.theme.warn}>
-            {`Some questions or permissions may be missing: ${text()}`}
-          </text>
-          <text fg={props.theme.dim}>{`Cached requests stay visible · ${retry()} retry`}</text>
+          <text fg={props.theme.warn}>{strings.transcript.requests.missing(text())}</text>
+          <text fg={props.theme.dim}>{strings.transcript.requests.cached(retry())}</text>
         </box>
       )}
     </Show>

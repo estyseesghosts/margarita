@@ -1,3 +1,4 @@
+import { strings } from '../i18n/index.ts';
 /** Native OpenCode `opencode.goal` plugin state, decoded from the plugin's RPC wire shape. */
 
 export type GoalStatus = 'active' | 'paused' | 'complete';
@@ -79,11 +80,7 @@ const statusGlyph: Readonly<Record<GoalStatus, string>> = {
   complete: '●',
 };
 
-const statusWord: Readonly<Record<GoalStatus, string>> = {
-  active: 'goal',
-  paused: 'goal paused',
-  complete: 'goal complete',
-};
+const statusWord: Readonly<Record<GoalStatus, string>> = strings.chrome.goalBadge.statusWords;
 
 /**
  * The small footer badge. While a user-interrupt pause awaits a follow-up the badge says so
@@ -99,13 +96,14 @@ export function goalBadge(
   if (state.status === 'none') return '';
   if (state.status === 'unavailable') {
     if (state.last === undefined) return '';
-    return `${statusGlyph[state.last.status]} goal · stale`;
+    return strings.chrome.goalBadge.stale(statusGlyph[state.last.status]);
   }
   const goal = state.goal;
   if (awaitingSteer === goal.id && goal.status === 'paused')
-    return `${statusGlyph.paused} goal · follow-up`;
-  if (goal.status === 'active') return `${statusGlyph.active} goal · round ${goal.rounds}`;
-  return `${statusGlyph[goal.status]} ${statusWord[goal.status]}`;
+    return strings.chrome.goalBadge.followUp(statusGlyph.paused);
+  if (goal.status === 'active')
+    return strings.chrome.goalBadge.active(statusGlyph.active, goal.rounds);
+  return strings.chrome.goalBadge.status(statusGlyph[goal.status], statusWord[goal.status]);
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

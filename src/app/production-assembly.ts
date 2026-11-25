@@ -17,6 +17,7 @@ import {
   type ServerProfiles,
 } from '../config/server-profiles.ts';
 import { enqueueCredentialCleanup, reconcileCredentialCleanup } from '../config/unpair-recovery.ts';
+import { strings } from '../i18n/index.ts';
 import { type ClipboardService, createSystemClipboard } from './clipboard.ts';
 import { mapConcurrent } from './concurrency.ts';
 import { AppController, errorText, type ServerAdmin, type ServerListing } from './controller.ts';
@@ -487,7 +488,11 @@ export async function createProductionAssembly(
       } catch (error) {
         restoreError = errorText(error);
         debugLog.write('server-restore-failed', { error: restoreError });
-        controller.showNotice(`Could not restore paired servers: ${restoreError}`, 'error', false);
+        controller.showNotice(
+          strings.notices.servers.restoreAllFailed(restoreError),
+          'error',
+          false,
+        );
       }
       const cleanupStarted = clock();
       await runCredentialCleanup();

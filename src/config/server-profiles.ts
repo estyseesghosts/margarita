@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 
 import { isRecord } from '../domain/backend-event.ts';
 import { localServerID } from '../domain/server-identity.ts';
+import { strings } from '../i18n/index.ts';
 import { acquireFileLock } from './file-lock.ts';
 import {
   declaredVersion,
@@ -69,9 +70,7 @@ export function normalizePlatform(value: unknown): NodeJS.Platform | undefined {
 /** Shortnames are lowercase, URL-safe, and unique case-insensitively. */
 export function validateShortname(shortname: string): string {
   if (!shortnamePattern.test(shortname)) {
-    throw new ProfileError(
-      'A shortname must be 1-32 lowercase letters, digits, or single dashes, and cannot start or end with a dash.',
-    );
+    throw new ProfileError(strings.errors.profile.shortname);
   }
   return shortname;
 }
@@ -85,24 +84,24 @@ export function normalizeServerUrl(raw: string): string {
   try {
     url = new URL(raw);
   } catch (cause) {
-    throw new ProfileError('Invalid server URL.', { cause });
+    throw new ProfileError(strings.errors.profile.invalidUrl, { cause });
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ProfileError(`Unsupported URL protocol "${url.protocol}"; use http or https.`);
+    throw new ProfileError(strings.errors.profile.unsupportedProtocol(url.protocol));
   }
   if (url.username !== '' || url.password !== '') {
-    throw new ProfileError('Do not put credentials in a server URL.');
+    throw new ProfileError(strings.errors.profile.credentials);
   }
-  if (url.hash !== '') throw new ProfileError('A server URL cannot contain a fragment.');
+  if (url.hash !== '') throw new ProfileError(strings.errors.profile.fragment);
   url.search = '';
   url.pathname = url.pathname.replace(/\/+$/, '');
   return url.toString().replace(/\/$/, '');
 }
 
 function normalizeProfile(input: ProfileInput): ServerProfile {
-  if (input.serverID.trim() === '') throw new ProfileError('A server needs an identity.');
+  if (input.serverID.trim() === '') throw new ProfileError(strings.errors.profile.needsIdentity);
   if (input.serverID === localServerID) {
-    throw new ProfileError('The local server is reserved and cannot be paired as a remote.');
+    throw new ProfileError(strings.errors.profile.localReserved);
   }
   const aliases = (input.aliases ?? []).map((alias) => normalizeServerUrl(alias));
   const metadata =
@@ -129,10 +128,10 @@ export function assertUnique(profiles: readonly ServerProfile[], candidate: Serv
   for (const profile of profiles) {
     if (profile.serverID === candidate.serverID) continue;
     if (profile.shortname.toLowerCase() === name) {
-      throw new ProfileError(`The shortname "${candidate.shortname}" is already in use.`);
+      throw new ProfileError(strings.errors.profile.shortnameInUse(candidate.shortname));
     }
     if (profile.baseUrl === candidate.baseUrl) {
-      throw new ProfileError('That server address is already registered.');
+      throw new ProfileError(strings.errors.profile.alreadyRegistered);
     }
   }
 }
@@ -169,7 +168,7 @@ export function renameProfile(
     profile.serverID === serverID ? { ...profile, shortname } : profile,
   );
   const renamed = next.find((profile) => profile.serverID === serverID);
-  if (renamed === undefined) throw new ProfileError(`No server profile ${serverID}.`);
+  if (renamed === undefined) throw new ProfileError(strings.errors.profile.noProfile(serverID));
   assertUnique(
     next.filter((profile) => profile.serverID !== serverID),
     renamed,
@@ -323,7 +322,7 @@ export async function loadServerProfiles(path: string): Promise<LoadProfilesResu
     if (isRecord(cause) && cause['code'] === 'ENOENT') return { profiles: emptyServerProfiles };
     return {
       profiles: emptyServerProfiles,
-      warning: `Could not read paired servers: ${String(cause)}`,
+      warning: strings.errors.profile.unreadable(String(cause)),
     };
   }
   let raw: unknown;
@@ -333,7 +332,7 @@ export async function loadServerProfiles(path: string): Promise<LoadProfilesResu
     const backup = await preserveUnreadable(path);
     return {
       profiles: emptyServerProfiles,
-      warning: `Paired servers were unreadable; the original was preserved at ${backup}. ${String(cause)}`,
+      warning: strings.errors.profile.unreadablePreserved(backup, String(cause)),
     };
   }
   if (isIncompatibleVersion(raw)) {
@@ -352,13 +351,13 @@ export async function loadServerProfiles(path: string): Promise<LoadProfilesResu
     const backup = await preserveUnreadable(path);
     return {
       profiles: emptyServerProfiles,
-      warning: `Paired servers were unreadable; the original was preserved at ${backup}.`,
+      warning: strings.errors.profile.unreadablePreservedShort(backup),
     };
   }
   if (isMalformedRegistry(raw)) {
     return {
       profiles: emptyServerProfiles,
-      warning: `Paired servers file ${path} is malformed and was left untouched; paired servers are unavailable until it is repaired.`,
+      warning: strings.errors.profile.malformed(path),
       malformed: { path },
     };
   }
@@ -369,7 +368,7 @@ export async function loadServerProfiles(path: string): Promise<LoadProfilesResu
       ? {}
       : {
           skippedRecords: detailed.skipped,
-          warning: `${detailed.skipped} paired server record(s) in ${path} could not be read and were skipped; a backup is kept before the file is rewritten.`,
+          warning: strings.errors.profile.skipped(detailed.skipped, path),
         }),
   };
 }

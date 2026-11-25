@@ -1,3 +1,4 @@
+import { strings } from '../i18n/index.ts';
 import { formatBytes } from './attachment.ts';
 import type { ExecutionMarker } from './execution-segment.ts';
 import type { ModelSelection } from './model-ref.ts';
@@ -172,11 +173,11 @@ export function cachedToolResult(tool: ToolCall): ToolResultPayload {
 export function completenessLabel(completeness: SourceCompleteness): string {
   switch (completeness) {
     case 'complete':
-      return 'complete';
+      return strings.transcript.completeness.complete;
     case 'frontend-elided':
-      return 'preview only — the middle was elided by this client';
+      return strings.transcript.completeness.frontendElided;
     case 'server-truncated':
-      return 'truncated by the server';
+      return strings.transcript.completeness.serverTruncated;
     default:
       return assertNever(completeness);
   }
@@ -400,13 +401,17 @@ function foldMessageNodes(message: TranscriptMessage, options: FoldOptions): Tra
       });
       break;
     case 'agent-switched':
-      out.push({ kind: 'meta', key: message.id, text: `agent → ${message.agent}` });
+      out.push({
+        kind: 'meta',
+        key: message.id,
+        text: strings.transcript.meta.agentSwitched(message.agent),
+      });
       break;
     case 'model-switched':
       out.push({
         kind: 'meta',
         key: message.id,
-        text: `model → ${message.model.modelID}${message.model.variant === undefined ? '' : ` · ${message.model.variant}`}`,
+        text: strings.transcript.meta.modelSwitched(message.model.modelID, message.model.variant),
       });
       break;
     case 'idle':
@@ -414,11 +419,16 @@ function foldMessageNodes(message: TranscriptMessage, options: FoldOptions): Tra
         out.push({
           kind: 'notice',
           key: message.id,
-          text: `Run failed${message.error === undefined ? '' : `: ${message.error}`}`,
+          text: strings.transcript.notices.runFailed(message.error),
           tone: 'error',
         });
       } else if (message.outcome === 'interrupted') {
-        out.push({ kind: 'notice', key: message.id, text: 'Interrupted', tone: 'warn' });
+        out.push({
+          kind: 'notice',
+          key: message.id,
+          text: strings.transcript.notices.interrupted,
+          tone: 'warn',
+        });
       }
       break;
     case 'compaction':
@@ -428,7 +438,10 @@ function foldMessageNodes(message: TranscriptMessage, options: FoldOptions): Tra
       out.push({
         kind: 'notice',
         key: message.id,
-        text: message.state === 'failed' ? 'Compaction failed' : 'Conversation compacted',
+        text:
+          message.state === 'failed'
+            ? strings.transcript.notices.compactionFailed
+            : strings.transcript.notices.compacted,
         tone: message.state === 'failed' ? 'error' : 'dim',
       });
       break;
@@ -1153,16 +1166,7 @@ function foldAssistant(
   }
 }
 
-const verbs: Readonly<Record<ToolCategory, (count: number) => string>> = {
-  read: (count) => `Read ${count} ${count === 1 ? 'file' : 'files'}`,
-  search: (count) => `Searched for ${count} ${count === 1 ? 'pattern' : 'patterns'}`,
-  edit: (count) => `Edited ${count} ${count === 1 ? 'file' : 'files'}`,
-  shell: (count) => `Ran ${count} shell ${count === 1 ? 'command' : 'commands'}`,
-  code: (count) => `Ran ${count} code ${count === 1 ? 'script' : 'scripts'}`,
-  web: (count) => `Fetched ${count} ${count === 1 ? 'page' : 'pages'}`,
-  delegate: (count) => `Delegated ${count} ${count === 1 ? 'task' : 'tasks'}`,
-  other: (count) => `Ran ${count} other ${count === 1 ? 'tool' : 'tools'}`,
-};
+const verbs: Readonly<Record<ToolCategory, (count: number) => string>> = strings.transcript.tools;
 
 /** Nested Code Mode operations replace their `execute` wrapper in activity summaries. */
 function summaryEntries(tools: readonly ToolCall[]): readonly { name: string }[] {
@@ -1182,10 +1186,9 @@ function summaryEntries(tools: readonly ToolCall[]): readonly { name: string }[]
 }
 
 function callVerb(count: number, server: string | undefined): string {
-  const times = `${count} ${count === 1 ? 'time' : 'times'}`;
   // A known server keeps its name; unknown external tools are never attributed to one.
-  if (server === undefined) return `Called ${count} external ${count === 1 ? 'tool' : 'tools'}`;
-  return `Called ${server} ${times}`;
+  if (server === undefined) return strings.transcript.tools.externalCalls(count);
+  return strings.transcript.tools.serverCalls(server, count);
 }
 
 /**
@@ -1229,16 +1232,7 @@ const liveToolNameMaxWidth = 48;
 
 const liveArgumentKeys = ['command', 'filePath', 'path', 'pattern', 'url', 'query', 'description'];
 
-const activityLabels: Readonly<Record<ToolCategory, string>> = {
-  read: 'Reading',
-  search: 'Searching',
-  edit: 'Editing',
-  shell: 'Running',
-  code: 'Running script',
-  web: 'Fetching',
-  delegate: 'Delegating',
-  other: 'Working',
-};
+const activityLabels: Readonly<Record<ToolCategory, string>> = strings.transcript.live;
 
 /**
  * The one call to name beneath a collapsed group: the most recently started call that is

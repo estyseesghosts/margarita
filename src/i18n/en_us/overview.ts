@@ -1,0 +1,46 @@
+import type { OverviewStrings } from '../types.ts';
+
+/** English (United States) overview copy. Tab identities stay in `domain/overview-tabs.ts`. */
+export const overviewEnUs = {
+  title: 'Sessions',
+  tabs: {
+    all: 'All',
+    local: 'Local',
+    remotes: 'Remotes',
+    active: 'Active',
+    'needs-input': 'Needs input',
+  },
+  compactTabs: {
+    all: 'All',
+    local: 'Local',
+    remotes: 'Remote',
+    active: 'Active',
+    'needs-input': 'Needs',
+  },
+  tinyTabs: {
+    all: 'A',
+    local: 'L',
+    remotes: 'R',
+    active: 'C',
+    'needs-input': 'N',
+  },
+  loading: 'Loading sessions and project catalog…',
+  empty: 'No sessions yet. Type below to start one.',
+  remoteGlyph: '🖥',
+  remoteAsciiMarker: '[remote]',
+  remoteFallbackLabel: 'remote',
+  offlineMarker: '[offline]',
+  showLess: '[Show less]',
+  showMore: (hidden) => `[Show more] ${hidden}`,
+  pairedUnavailable: (label) => `Paired server ${label} is unavailable (no usable credential).`,
+  restoringPaired: (label) => `Restoring paired server ${label}…`,
+  recentOnly: 'Showing recent sessions only.',
+  loadingMore: '[Loading more sessions…]',
+  retryLoadMore: '[Retry loading sessions]',
+  loadMore: '[Load more sessions]',
+  couldNotLoadMore: (error) => `Could not load more sessions: ${error}`,
+  allLoaded: 'All sessions loaded.',
+  newSessionIn: (directory) => `New session in: ${directory}`,
+  tasksProgress: (done, total) => ` · ${done}/${total} tasks`,
+  now: 'now',
+} satisfies OverviewStrings;

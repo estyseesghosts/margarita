@@ -1,3 +1,4 @@
+import { strings } from '../i18n/index.ts';
 import { sanitizeTerminalText } from './sanitize-text.ts';
 
 /** One file's change as reported by `session.diff` (structured, never re-derived). */
@@ -79,10 +80,10 @@ export function diffWindowRows(terminalHeight: number): number {
 
 /** `3 files · +12 −4`, or `No changes`. */
 export function diffSummary(files: readonly FileDiff[]): string {
-  if (files.length === 0) return 'No changes';
+  if (files.length === 0) return strings.overlays.diff.noChanges;
   const additions = files.reduce((sum, file) => sum + file.additions, 0);
   const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
-  return `${files.length} file${files.length === 1 ? '' : 's'} · +${additions} −${deletions}`;
+  return strings.overlays.diff.summary(files.length, additions, deletions);
 }
 
 /** The message ID a `turn` diff starts from: the latest user message. */

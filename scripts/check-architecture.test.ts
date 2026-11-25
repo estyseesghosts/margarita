@@ -68,6 +68,18 @@ describe('architecture boundary gate', () => {
     expect(violations).toEqual([]);
   });
 
+  test('rejects a forbidden i18n -> application-layer import', () => {
+    const violations = findImportViolations([
+      source('src/domain/form.ts', 'export const form = 1;\n'),
+      source('src/i18n/en_us/forms.ts', "import type { FormField } from '../../domain/form.ts';\n"),
+      source('src/i18n/en_us/index.ts', "import { strings } from 'solid-js';\n"),
+    ]);
+    expect(violations.map((violation) => violation.rule)).toEqual([
+      'i18n must not depend on app, domain, ui, adapter, config, cli or perf',
+      'i18n must stay dependency-light: no UI, wire or Node I/O imports',
+    ]);
+  });
+
   test('parses multiline and type-only imports and ignores commented imports', () => {
     const sites = extractImports(
       [

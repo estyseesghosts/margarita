@@ -1,4 +1,4 @@
-import { throbberStringsEnUs } from './throbber-strings-en_us.ts';
+import { strings } from '../i18n/index.ts';
 
 /** Inline activity indicator for the active assistant turn (docs/21-throbber.md). */
 export const orbitFrames = ['◜', '◝', '◞', '◟'] as const;
@@ -35,10 +35,10 @@ export function frameAt(elapsedMs: number, ascii: boolean): string {
 
 /** Stable per-turn verb that rotates slowly; never claims a specific operation. */
 export function verbAt(seed: number, elapsedMs: number): string {
-  const verbs = throbberStringsEnUs.decorativeVerbs;
+  const verbs = strings.throbber.decorativeVerbs;
   const step = Math.floor(Math.max(0, elapsedMs) / verbRotationMs);
   const index = Math.abs(seed + step) % verbs.length;
-  return verbs[index] ?? throbberStringsEnUs.fallbackVerb;
+  return verbs[index] ?? strings.throbber.fallbackVerb;
 }
 
 /** Highlight intensity in [0,1] for each character of `length`, given time in the shimmer cycle. */
@@ -65,9 +65,9 @@ export function formatElapsed(ms: number): string {
   const hours = Math.floor(total / 3600);
   const minutes = Math.floor((total % 3600) / 60);
   const seconds = total % 60;
-  if (hours > 0) return throbberStringsEnUs.elapsed.hoursMinutes(hours, minutes);
-  if (minutes > 0) return throbberStringsEnUs.elapsed.minutesSeconds(minutes, seconds);
-  return throbberStringsEnUs.elapsed.seconds(seconds);
+  if (hours > 0) return strings.throbber.elapsed.hoursMinutes(hours, minutes);
+  if (minutes > 0) return strings.throbber.elapsed.minutesSeconds(minutes, seconds);
+  return strings.throbber.elapsed.seconds(seconds);
 }
 
 export type ThrobberLine = Readonly<{
@@ -88,7 +88,7 @@ export function describeThrobber(
   const tokens =
     facts.outputTokens === undefined
       ? undefined
-      : throbberStringsEnUs.tokens(compactTokens(facts.outputTokens));
+      : strings.throbber.tokens(compactTokens(facts.outputTokens));
   if (facts.phase === 'running') {
     const elapsed = now - facts.startedAt;
     const label = `${facts.activity ?? verbAt(facts.startedAt, elapsed)}…`;
@@ -101,10 +101,10 @@ export function describeThrobber(
   }
   const status =
     facts.phase === 'completed'
-      ? throbberStringsEnUs.finishedAt(formatTime(facts.completedAt ?? now))
+      ? strings.throbber.finishedAt(formatTime(facts.completedAt ?? now))
       : facts.phase === 'interrupted'
-        ? throbberStringsEnUs.interrupted
-        : throbberStringsEnUs.failed;
+        ? strings.throbber.interrupted
+        : strings.throbber.failed;
   const full = tokens === undefined ? status : `${status} · ${tokens}`;
   return { label: '', meta: fit('', full, width, status), animated: false };
 }
@@ -119,6 +119,6 @@ function fit(label: string, meta: string, width: number, shorter: string): strin
 /** At most one tip per turn, shown only on long turns and only on some of them. */
 export function tipFor(seed: number, elapsedMs: number): string | undefined {
   if (elapsedMs < 30_000 || seed % 3 !== 0) return undefined;
-  const tips = throbberStringsEnUs.tips;
+  const tips = strings.throbber.tips;
   return tips[Math.abs(seed) % tips.length];
 }

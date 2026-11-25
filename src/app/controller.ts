@@ -138,13 +138,7 @@ import {
   type OverviewRow,
   type ProjectGroup,
 } from '../domain/overview-groups.ts';
-import {
-  filterSessions,
-  nextTab,
-  type OverviewTab,
-  overviewTabLabels,
-  tabCounts,
-} from '../domain/overview-tabs.ts';
+import { filterSessions, nextTab, type OverviewTab, tabCounts } from '../domain/overview-tabs.ts';
 import {
   PairingError,
   type PairRequest,
@@ -208,6 +202,7 @@ import {
 } from '../domain/transcript.ts';
 import type { UsageAnalytics } from '../domain/usage-analytics.ts';
 import { type WorkerNode, workerNodes } from '../domain/worker.ts';
+import { strings } from '../i18n/index.ts';
 import { AdmissionGate } from './admission-gate.ts';
 import { AncestryVerifier, type DescendantCheck } from './ancestry-verifier.ts';
 import {
@@ -918,11 +913,11 @@ export class AppController {
         this.setState('pinnedModels', reconcile({ ...adopted.pinnedModels }));
       },
       onWarning: (warning) => {
-        this.showNotice(`Local state warning: ${warning}`, 'warn');
+        this.showNotice(strings.notices.session.localStateWarning(warning), 'warn');
       },
       onError: (message) => {
         this.debugLog.write('backend-error', { operation: 'save', kind: 'unknown' });
-        this.showNotice(`Could not persist local state: ${message}`, 'error');
+        this.showNotice(strings.notices.session.localStateNotSaved(message), 'error');
       },
       describeError: errorText,
     });
@@ -1290,7 +1285,7 @@ export class AppController {
   }
 
   tabLabel(tab: OverviewTab): string {
-    return overviewTabLabels[tab];
+    return strings.overview.tabs[tab];
   }
 
   groups(): ProjectGroup[] {
@@ -1553,7 +1548,7 @@ export class AppController {
         current.serverID === serverID &&
         !this.state.agents.some((agent) => agent.id === current.agent)
       ) {
-        const notice = `Agent "${current.agent}" is no longer available. Choose a new agent with Shift+Tab or /agent.`;
+        const notice = strings.notices.agent.unavailable(current.agent ?? '');
         if (this.unavailableAgentNotice !== notice) {
           this.unavailableAgentNotice = notice;
           this.showNotice(notice, 'warn');
@@ -1642,7 +1637,7 @@ export class AppController {
       // Do not admit a prompt against another project's model catalog.
       return this.catalogFresh(directory, serverID);
     } catch (error) {
-      this.showNotice(`Could not load project catalog: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.session.projectCatalogFailed(errorText(error)), 'error');
       return false;
     }
   }
@@ -2046,7 +2041,7 @@ export class AppController {
         serverID: entry.serverID,
         error: errorText(error),
       });
-      this.showNotice(`Session index: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.session.sessionIndexFailed(errorText(error)), 'error');
     });
     this.sessionPagination.add(run);
     void run.finally(() => this.sessionPagination.delete(run));
@@ -2461,7 +2456,7 @@ export class AppController {
       if (this.state.overlay.kind === 'diff' || this.state.overlay.kind === 'form') {
         this.closeOverlay();
       }
-      this.showNotice('This session was deleted on the server.', 'warn');
+      this.showNotice(strings.notices.session.deleted, 'warn');
     }
   }
 
@@ -2650,7 +2645,7 @@ export class AppController {
     const available = this.state.agents.map((agent) => agent.id).join(', ');
     return {
       ok: false,
-      message: `Agent "${requested}" is not selectable. Available: ${available}.`,
+      message: strings.cli.agentNotSelectable(requested, available),
     };
   }
 
@@ -2675,13 +2670,13 @@ export class AppController {
         ? await this.ensureSession(ref.sessionID, ref.serverID)
         : await this.ensureSession(ref.sessionID, ref.serverID, { onlyServer: true });
     if (session === undefined) {
-      return { ok: false, message: `session ${ref.sessionID} not found.` };
+      return { ok: false, message: strings.cli.sessionNotFound(ref.sessionID) };
     }
     // The resolved summary's owner is authoritative in both paths: a bare ID that resolved
     // on another host must still be mutated there, never at the launch host.
     const serverID = session.serverID;
     if (!(await this.ensureCatalog(session.directory, serverID))) {
-      return { ok: false, message: `could not load the catalog for ${session.directory}.` };
+      return { ok: false, message: strings.cli.catalogUnavailable(session.directory) };
     }
     let agent: string | undefined;
     if (flags.agent !== undefined) {
@@ -2703,10 +2698,10 @@ export class AppController {
       // Every mutation goes to the session's owning host, not the launch backend (#149).
       if (agent !== undefined) await this.backendFor(serverID).switchAgent(ref.sessionID, agent);
       if (model !== undefined && !(await this.switchSessionModel(session, model))) {
-        return { ok: false, message: 'The server did not confirm the requested model.' };
+        return { ok: false, message: strings.cli.modelNotConfirmed };
       }
     } catch (error) {
-      return { ok: false, message: `could not apply the requested selection: ${errorText(error)}` };
+      return { ok: false, message: strings.cli.selectionFailed(errorText(error)) };
     }
     await this.refreshSummary(ref.sessionID, serverID);
     return { ok: true };
@@ -2749,7 +2744,7 @@ export class AppController {
         this.setStateTouchingOverview('stream', command.status);
         return;
       case 'show-lost-notice':
-        this.showNotice('Connection lost · retrying', 'warn', false);
+        this.showNotice(strings.notices.session.connectionLost, 'warn', false);
         return;
       case 'resync':
         void this.track('resync', this.resync(command.serverID));
@@ -2878,7 +2873,10 @@ export class AppController {
     })) {
       this.setState('transcripts', command.key, 'stale', command.stale);
     }
-    if (serverID === this.serverID && this.state.notice?.text === 'Connection lost · retrying')
+    if (
+      serverID === this.serverID &&
+      this.state.notice?.text === strings.notices.session.connectionLost
+    )
       this.clearNotice();
   }
 
@@ -3083,7 +3081,7 @@ export class AppController {
       if (!this.disposed) {
         // A broken notice surface must not escape after a write that was already accepted.
         try {
-          this.showNotice(`Queue is out of date; refresh failed: ${errorText(error)}`, 'warn');
+          this.showNotice(strings.notices.session.queueOutOfDate(errorText(error)), 'warn');
         } catch {
           // Ignore a failing notice surface; the authoritative outcome is unchanged.
         }
@@ -4171,10 +4169,7 @@ export class AppController {
     if (this.disposed) return;
     if (this.state.overlay.kind === 'help') this.closeOverlay();
     if (this.state.overlay.kind !== origin.overlayKind) {
-      this.showNotice(
-        'The dialog changed before the clipboard paste landed; nothing was inserted.',
-        'warn',
-      );
+      this.showNotice(strings.notices.attachments.questionChangedClipboard, 'warn');
       return;
     }
     const metadata = {
@@ -4208,16 +4203,16 @@ export class AppController {
   private showClipboardReadNotice(read: ClipboardRead): void {
     switch (read.status) {
       case 'empty':
-        this.showNotice('The clipboard is empty.', 'dim');
+        this.showNotice(strings.notices.clipboard.empty, 'dim');
         return;
       case 'unsupported':
-        this.showNotice(`Cannot read the clipboard: ${read.detail}.`, 'warn');
+        this.showNotice(strings.notices.clipboard.cannotRead(read.detail), 'warn');
         return;
       case 'too-large':
-        this.showNotice(`Cannot paste: ${read.detail}.`, 'warn');
+        this.showNotice(strings.notices.clipboard.cannotPaste(read.detail), 'warn');
         return;
       case 'failed':
-        this.showNotice(`Clipboard read failed: ${read.detail}.`, 'error');
+        this.showNotice(strings.notices.clipboard.readFailed(read.detail), 'error');
         return;
       case 'read':
         return;
@@ -4271,15 +4266,12 @@ export class AppController {
 
       if (formOrigin !== undefined) {
         if (mime !== undefined || binaryDeclared) {
-          this.showNotice(
-            'Questions accept pasted text only; attach files from the composer.',
-            'warn',
-          );
+          this.showNotice(strings.notices.attachments.questionsTextOnly, 'warn');
           return;
         }
         const text = decodePastedText(bytes);
         if (text === undefined) {
-          this.showNotice('Pasted data is not text.', 'warn');
+          this.showNotice(strings.notices.attachments.notText, 'warn');
           return;
         }
         this.pasteIntoForm(text, formOrigin);
@@ -4312,7 +4304,7 @@ export class AppController {
           return;
         }
       }
-      this.showNotice('Pasted data is not text or a supported image.', 'warn');
+      this.showNotice(strings.notices.attachments.notTextOrImage, 'warn');
     };
     this.pasteChain = this.pasteChain.then(run).catch(() => undefined);
     await this.pasteChain;
@@ -4333,12 +4325,12 @@ export class AppController {
   private pasteIntoForm(text: string, origin: { token: number }): void {
     const overlay = this.state.overlay;
     if (overlay.kind !== 'form' || overlay.requestToken !== origin.token) {
-      this.showNotice('Question changed before the paste landed; nothing was inserted.', 'warn');
+      this.showNotice(strings.notices.attachments.questionChanged, 'warn');
       return;
     }
     const form = this.openFormRequest();
     if (form === undefined) {
-      this.showNotice('This question was answered or withdrawn.', 'dim');
+      this.showNotice(strings.notices.attachments.answeredOrWithdrawn, 'dim');
       return;
     }
     const clean = sanitizeTerminalText(text);
@@ -4350,7 +4342,7 @@ export class AppController {
     }
     this.setState('overlay', { ...overlay, editor: result.editor });
     if (bounded.length < clean.length) {
-      this.showNotice('Paste truncated to 65,536 characters.', 'warn');
+      this.showNotice(strings.notices.attachments.pasteTruncated(65536), 'warn');
     }
   }
 
@@ -4375,12 +4367,12 @@ export class AppController {
       metadata?.kind === 'text' || (declaredMime !== undefined && declaredMime.startsWith('text/'));
     const binaryDeclared = metadata?.kind === 'binary';
     if (binaryDeclared || (!textDeclared && declaredMime !== undefined)) {
-      this.showNotice('This dialog accepts pasted text only.', 'warn');
+      this.showNotice(strings.notices.attachments.dialogTextOnly, 'warn');
       return true;
     }
     const text = decodePastedText(bytes);
     if (text === undefined) {
-      this.showNotice('Pasted data is not text.', 'warn');
+      this.showNotice(strings.notices.attachments.notText, 'warn');
       return true;
     }
     // Search fields are single-line: newlines become spaces, never submit anything.
@@ -4417,7 +4409,7 @@ export class AppController {
         break;
     }
     if (bounded.length < clean.length) {
-      this.showNotice('Paste truncated to 4,096 characters.', 'warn');
+      this.showNotice(strings.notices.attachments.pasteTruncated(4096), 'warn');
     }
     return true;
   }
@@ -4450,10 +4442,7 @@ export class AppController {
     batch(() => {
       this.setState('draftAttachments', originKey, [...current, ...added]);
     });
-    this.showNotice(
-      `Paste stashed: the route changed while reading ${added.length} attachment(s); they await in the originating draft.`,
-      'warn',
-    );
+    this.showNotice(strings.notices.attachments.pasteStashedImages(added.length), 'warn');
   }
 
   /** Stashes pasted text into the originating draft when the route changed. */
@@ -4462,10 +4451,7 @@ export class AppController {
     batch(() => {
       this.setState('drafts', originKey, insertText(draft, text));
     });
-    this.showNotice(
-      'Paste stashed: the route changed before the text landed; it awaits in the originating draft.',
-      'warn',
-    );
+    this.showNotice(strings.notices.attachments.pasteStashedText, 'warn');
   }
 
   /** Attaches an image from any source that already decoded it (tests, future clipboards). */
@@ -4488,7 +4474,7 @@ export class AppController {
       'attachments',
       current.filter((attachment) => attachment.id !== last.id),
     );
-    this.showNotice(`${last.name} removed`, 'dim');
+    this.showNotice(strings.notices.attachments.removed(last.name), 'dim');
     return true;
   }
 
@@ -4535,8 +4521,8 @@ export class AppController {
     this.addAttachments(
       added,
       added.length === 1
-        ? `${added[0]?.name ?? 'File'} attached`
-        : `${added.length} files attached`,
+        ? strings.notices.attachments.attachedOne(added[0]?.name ?? 'File')
+        : strings.notices.attachments.attachedMany(added.length),
     );
     return true;
   }
@@ -4694,7 +4680,7 @@ export class AppController {
       this.matchesEditOrigin(draft, attachments, origin)
     ) {
       this.setState('drafts', origin.routeKey, composerFrom(text));
-      this.showNotice(`External edit saved to the ${origin.label} draft.`, 'dim');
+      this.showNotice(strings.notices.attachments.externalSaved(origin.label), 'dim');
       return 'draft';
     }
     await this.saveEditorRecovery(text, origin.label);
@@ -4749,15 +4735,9 @@ export class AppController {
         this.deps.writeFile ??
         (async (file: string, body: string) => void (await Bun.write(file, body)));
       await write(path, text);
-      this.showNotice(
-        `External edit for ${label} was not applied (its draft changed or disappeared); saved to ${path}.`,
-        'warn',
-      );
+      this.showNotice(strings.notices.attachments.externalNotApplied(label, path), 'warn');
     } catch (error) {
-      this.showNotice(
-        `External edit for ${label} was not applied and could not be saved: ${errorText(error)}`,
-        'error',
-      );
+      this.showNotice(strings.notices.attachments.externalFailed(label, errorText(error)), 'error');
     }
   }
 
@@ -4982,7 +4962,7 @@ export class AppController {
         this.writeComposer(emptyComposer);
         this.setState('attachments', []);
       });
-      this.showNotice('Draft stashed · Ctrl+S to restore', 'dim');
+      this.showNotice(strings.notices.session.draftStashed, 'dim');
     } else if (stash !== undefined) {
       batch(() => {
         this.writeComposer(restoreComposer(stash.composer));
@@ -5139,11 +5119,7 @@ export class AppController {
     ) {
       // A send to the SAME session is still in flight; never silently discard the new one
       // (#163). Other sessions and hosts stay independent.
-      this.showNotice(
-        'A prompt is still being sent from this session. Wait for confirmation before sending again.',
-        'dim',
-        false,
-      );
+      this.showNotice(strings.notices.session.sendInFlight, 'dim', false);
       return;
     }
     const text = this.state.composer.text;
@@ -5153,11 +5129,7 @@ export class AppController {
       // Local controls stay available; anything that needs an authoritative catalog or
       // session selection waits for startup instead of failing against partial state (#287).
       if (queuedName === undefined || !isLocalCommand(queuedName)) {
-        this.showNotice(
-          'Still loading sessions and the project catalog. Try again in a moment.',
-          'dim',
-          false,
-        );
+        this.showNotice(strings.notices.session.stillLoading, 'dim', false);
         return;
       }
     }
@@ -5190,12 +5162,12 @@ export class AppController {
       return;
     }
     if (parsed.kind === 'unknown-command') {
-      this.showNotice(`Unknown command /${parsed.name}. Type / to see commands.`, 'warn');
+      this.showNotice(strings.notices.session.unknownCommand(parsed.name), 'warn');
       return;
     }
     if (this.state.route.kind !== 'conversation') {
       if (parsed.kind !== 'prompt') {
-        this.showNotice('Start a session before running commands.', 'warn');
+        this.showNotice(strings.notices.session.noActiveSession, 'warn');
         return;
       }
       // The new-session branch has no session key for the normal admission gate. Check the
@@ -5204,11 +5176,7 @@ export class AppController {
       const project = this.currentProject();
       const creationKey = `${this.drafts.keyFor({ kind: 'new', ...project })}|${this.routeKey(this.state.route)}`;
       if (this.creations.isAdmitting(creationKey)) {
-        this.showNotice(
-          'A new session is already being created for this project. Wait for confirmation before sending again.',
-          'dim',
-          false,
-        );
+        this.showNotice(strings.notices.session.creatingSession, 'dim', false);
         return;
       }
       await this.createSessionWithPrompt(project, text);
@@ -5310,7 +5278,7 @@ export class AppController {
     text: string,
     directory: string,
     send: () => Promise<boolean>,
-    transportNotice = 'Delivery unknown (connection problem). Check the transcript before resending.',
+    transportNotice = strings.notices.delivery.unknown,
     sentAttachments: readonly Attachment[] = [],
   ): Promise<boolean> {
     const admitKey = this.keyFor(origin.serverID, origin.sessionID);
@@ -5668,10 +5636,7 @@ export class AppController {
   private reportUnresolved(missing: readonly string[], remote = false): void {
     if (missing.length === 0) return;
     const where = remote ? ' on the server' : '';
-    this.showNotice(
-      `Could not resolve${where}: ${missing.join(', ')}. The reference was not sent.`,
-      'warn',
-    );
+    this.showNotice(strings.notices.session.unresolvedReference(where, missing.join(', ')), 'warn');
   }
 
   /** Creates a session in `project`, sends the first prompt, then attaches. */
@@ -5697,11 +5662,7 @@ export class AppController {
     const creationKey = `${this.drafts.keyFor({ kind: 'new', serverID, directory })}|${originKey}`;
     const token = this.creations.beginOwned(creationKey);
     if (token === undefined) {
-      this.showNotice(
-        'A new session is already being created for this project. Wait for confirmation before sending again.',
-        'dim',
-        false,
-      );
+      this.showNotice(strings.notices.session.creatingSession, 'dim', false);
       return undefined;
     }
     this.setState('admitting', true);
@@ -5714,9 +5675,8 @@ export class AppController {
       const abandoned = (sessionID?: string): void => {
         this.showNotice(
           sessionID === undefined
-            ? 'The original server is no longer available. No prompt was sent.'
-            : `Session ${sessionID} was created on the original server, but that server is no ` +
-                'longer available here. No prompt was sent.',
+            ? strings.notices.session.originalServerGone
+            : strings.notices.session.originalServerGoneSession(sessionID),
           'warn',
         );
       };
@@ -5736,7 +5696,7 @@ export class AppController {
       const resolution = this.resolveModelFor(serverID, directory, model);
       if (resolution.kind === 'blocked') {
         this.showNotice(
-          `Model ${formatModelRef(resolution.model)} is unavailable for ${directory} on ${serverID}. No prompt sent.`,
+          strings.notices.model.unavailable(formatModelRef(resolution.model), directory, serverID),
           'error',
         );
         return undefined;
@@ -5804,7 +5764,11 @@ export class AppController {
           this.recordConfirmedModel(serverID, directory, confirmModel);
         } catch (error) {
           this.showNotice(
-            `Session ${session.id} created, but model ${formatModelRef(confirmModel)} was not confirmed. Prompt not sent: ${errorText(error)}`,
+            strings.notices.session.sessionCreatedModelUnconfirmed(
+              session.id,
+              formatModelRef(confirmModel),
+              errorText(error),
+            ),
             'error',
           );
           return session.id;
@@ -5886,8 +5850,8 @@ export class AppController {
         const uncertain = promptErrorKind === 'transport';
         this.showNotice(
           uncertain
-            ? `Session ${session.id} was created; the prompt may or may not have been delivered. Check the transcript before resending.`
-            : `Session ${session.id} was created but the prompt was not sent.`,
+            ? strings.notices.session.deliveryUncertain(session.id)
+            : strings.notices.session.promptNotSent(session.id),
           uncertain ? 'warn' : 'error',
         );
       }
@@ -5923,10 +5887,7 @@ export class AppController {
       // The user edited the parked draft after creation. Keep those bytes untouched and expose
       // the original envelope through an explicit recovery slot instead of merging into it.
       this.failedPromptRecoveries.set(key, { text, attachments: [...attachments] });
-      this.showNotice(
-        `Session ${sessionID} was created but the prompt was not sent. The original is preserved separately; the edited draft was kept.`,
-        'warn',
-      );
+      this.showNotice(strings.notices.session.sessionCreatedPromptNotSent(sessionID), 'warn');
       return;
     }
     const byId = new Map(attachments.map((attachment) => [attachment.id, attachment]));
@@ -6138,7 +6099,7 @@ export class AppController {
       return {
         ok: false,
         reason: 'unavailable',
-        message: `Server "${explicit}" is not registered. Use /servers to see available hosts.`,
+        message: strings.cli.serverNotRegistered(explicit),
       };
     }
     const cachedOn = (serverID: string): boolean =>
@@ -6152,7 +6113,11 @@ export class AppController {
       try {
         const summary = await this.ensureSession(sessionID, serverID, { onlyServer: true });
         if (summary === undefined) {
-          return { ok: false, reason: 'not-found', message: `session ${sessionID} not found.` };
+          return {
+            ok: false,
+            reason: 'not-found',
+            message: strings.cli.sessionNotFound(sessionID),
+          };
         }
         return {
           ok: true,
@@ -6163,7 +6128,7 @@ export class AppController {
         return {
           ok: false,
           reason: 'unavailable',
-          message: `could not resolve session ${sessionID}: ${errorText(error)}`,
+          message: strings.cli.resolveSessionFailed(sessionID, errorText(error)),
         };
       }
     };
@@ -6173,7 +6138,7 @@ export class AppController {
       return {
         ok: false,
         reason: 'ambiguous',
-        message: `Session ${sessionID} exists on multiple servers (${matches.join(', ')}). Use --remote <server> or --server to select one.`,
+        message: strings.cli.sessionAmbiguous(sessionID, matches.join(', ')),
       };
     }
     if (matches.length === 1) return finish(matches[0]!);
@@ -6261,7 +6226,7 @@ export class AppController {
       case 'copy':
         if (args === '') this.openCopyPicker();
         else if (args.trim() === 'last') await this.copyLastResponse();
-        else this.showNotice('Usage: /copy · /copy last', 'warn');
+        else this.showNotice(strings.notices.copy.usage, 'warn');
         return;
       case 'transcript':
         this.toggleDetails();
@@ -6270,10 +6235,7 @@ export class AppController {
         this.openUsage();
         return;
       case 'btw':
-        this.showNotice(
-          'Side questions (/btw) are desktop-only; the OpenCode HTTP API has no equivalent endpoint. Nothing was sent.',
-          'warn',
-        );
+        this.showNotice(strings.notices.copy.btwDesktopOnly, 'warn');
         return;
       case 'status':
         this.setOverlay({ kind: 'status' });
@@ -6317,7 +6279,7 @@ export class AppController {
         return;
       case 'steer':
         if (args === '') {
-          this.showNotice('Usage: /steer <text>', 'warn');
+          this.showNotice(strings.notices.delivery.steerUsage, 'warn');
           return;
         }
         this.writeComposer(composerFrom(args));
@@ -6352,19 +6314,19 @@ export class AppController {
       request = parsePairArgs(args);
     } catch (error) {
       this.showNotice(
-        error instanceof PairingError ? error.message : 'Invalid /pair arguments.',
+        error instanceof PairingError ? error.message : strings.notices.pairing.invalidArgs,
         'warn',
       );
       return;
     }
     if (this.deps.pair === undefined) {
-      this.showNotice('Pairing is not available in this build.', 'warn');
+      this.showNotice(strings.notices.pairing.unavailable, 'warn');
       return;
     }
-    this.showNotice(`Pairing ${request.baseUrl}…`, 'dim');
+    this.showNotice(strings.notices.pairing.pairing(request.baseUrl), 'dim');
     try {
       const result = await this.deps.pair(request);
-      this.showNotice(`Paired ${result.shortname}.`, 'dim');
+      this.showNotice(strings.notices.pairing.paired(result.shortname), 'dim');
     } catch (error) {
       this.showNotice(redactPairingCode(errorText(error), request.code), 'error');
     }
@@ -6388,7 +6350,7 @@ export class AppController {
   private async serversCommand(args: string): Promise<void> {
     const admin = this.deps.serverAdmin;
     if (admin === undefined) {
-      this.showNotice('Server management is not available in this build.', 'warn');
+      this.showNotice(strings.notices.servers.managementUnavailable, 'warn');
       return;
     }
     const tokens = args.split(/\s+/).filter((token) => token !== '');
@@ -6399,17 +6361,17 @@ export class AppController {
     const from = tokens[1];
     const to = tokens[2];
     if (from === undefined || to === undefined || tokens.length > 3) {
-      this.showNotice('Usage: /servers rename <old> <new>', 'warn');
+      this.showNotice(strings.notices.servers.renameUsage, 'warn');
       return;
     }
     const target = this.findServer(from);
     if (target === undefined) {
-      this.showNotice(`Unknown server "${from}".`, 'warn');
+      this.showNotice(strings.notices.pairing.unknownServer(from), 'warn');
       return;
     }
     try {
       await admin.rename(target.serverID, to);
-      this.showNotice(`Renamed ${target.label} to ${to}.`, 'dim');
+      this.showNotice(strings.notices.servers.renamed(target.label, to), 'dim');
     } catch (error) {
       this.showNotice(errorText(error), 'error');
     }
@@ -6418,28 +6380,24 @@ export class AppController {
   private async unpairCommand(args: string): Promise<void> {
     const admin = this.deps.serverAdmin;
     if (admin === undefined) {
-      this.showNotice('Server management is not available in this build.', 'warn');
+      this.showNotice(strings.notices.servers.managementUnavailable, 'warn');
       return;
     }
     const name = args.split(/\s+/).find((token) => token !== '');
     if (name === undefined) {
-      this.showNotice('Usage: /unpair <name>', 'warn');
+      this.showNotice(strings.notices.servers.unpairUsage, 'warn');
       return;
     }
     const target = this.findServer(name);
     if (target === undefined) {
-      this.showNotice(`Unknown server "${name}".`, 'warn');
+      this.showNotice(strings.notices.pairing.unknownServer(name), 'warn');
       return;
     }
     // Reject unpairing the launch/active server or the local service;
     // these are immutable backend assumptions and removing them would break
     // the controller's state and subsequent loads/interactions.
     if (target.serverID === this.serverID) {
-      this.showNotice(
-        'Cannot unpair the launch/server you are currently connected to. ' +
-          'Switch to another host or restart margarita without it first.',
-        'error',
-      );
+      this.showNotice(strings.notices.servers.cannotUnpairLaunch, 'error');
       return;
     }
     await this.performUnpair(target);
@@ -6494,15 +6452,15 @@ export class AppController {
     this.forgetServer(target.serverID);
     if (outcome?.credentialCleanup === 'pending') {
       this.showNotice(
-        `Unpaired ${target.label}, but its stored credential could not be deleted (${outcome.error ?? 'unknown error'}); deletion will be retried on next launch.`,
+        strings.notices.servers.unpairedCredentialFailed(
+          target.label,
+          outcome.error ?? 'unknown error',
+        ),
         'error',
       );
       return;
     }
-    this.showNotice(
-      `Unpaired ${target.label}. Remote sessions keep running; this only removed local access.`,
-      'dim',
-    );
+    this.showNotice(strings.notices.servers.unpaired(target.label), 'dim');
   }
 
   /** True when a key belongs to `serverID`'s qualified namespace (expansion keys). */
@@ -6642,7 +6600,7 @@ export class AppController {
     // quick cycle safely uses that full set rather than a guessed project-only subset (#123).
     const next = nextAgent(this.state.agents, current, direction);
     if (next === undefined) {
-      this.showNotice('No selectable agents on this server.', 'warn');
+      this.showNotice(strings.notices.agent.noneSelectable, 'warn');
       return;
     }
     await this.setAgent(next.id);
@@ -6651,19 +6609,11 @@ export class AppController {
   private agentDispatchBlocked(serverID: string, sessionID: string): boolean {
     const key = this.keyFor(serverID, sessionID);
     if (this.agentSwitches.has(key)) {
-      this.showNotice(
-        'Agent selection pending. Send again once the server confirms it.',
-        'dim',
-        false,
-      );
+      this.showNotice(strings.notices.agent.pending, 'dim', false);
       return true;
     }
     if (this.failedAgentSwitches.has(key)) {
-      this.showNotice(
-        'Agent selection is unconfirmed. Select an agent again before sending.',
-        'error',
-        false,
-      );
+      this.showNotice(strings.notices.agent.unconfirmed, 'error', false);
       return true;
     }
     return false;
@@ -6671,7 +6621,7 @@ export class AppController {
 
   private async setAgent(agentID: string): Promise<void> {
     if (!this.state.agents.some((agent) => agent.id === agentID)) {
-      this.showNotice(`Agent "${agentID}" is not selectable.`, 'warn');
+      this.showNotice(strings.notices.agent.notSelectable(agentID), 'warn');
       return;
     }
     const current = this.currentSession();
@@ -6717,7 +6667,7 @@ export class AppController {
         this.acceptServerAgent(key, confirmed.agent ?? agentID);
         this.failedAgentSwitches.delete(key);
         if (this.state.running[key] === true)
-          this.showNotice(`Agent: ${agentID} (next turn)`, 'dim');
+          this.showNotice(strings.notices.agent.switched(agentID), 'dim');
         return true;
       } catch (error) {
         // A failure from a retired lifetime is not evidence about the current one.
@@ -6726,11 +6676,7 @@ export class AppController {
         // write under exactOptionalPropertyTypes. refreshSummary below reconciles with the server.
         this.setStateTouchingOverview('sessions', key, session);
         this.failedAgentSwitches.add(key);
-        this.showNotice(
-          `Agent selection failed: ${errorText(error)}. Select an agent again before sending.`,
-          'error',
-          false,
-        );
+        this.showNotice(strings.notices.agent.failed(errorText(error)), 'error', false);
         return false;
       }
     })();
@@ -6946,7 +6892,7 @@ export class AppController {
     trigger: 'autocopy' | 'explicit' | 'right-click',
   ): Promise<void> {
     if (text === '') {
-      if (trigger !== 'autocopy') this.showNotice('No text is selected.', 'warn');
+      if (trigger !== 'autocopy') this.showNotice(strings.notices.clipboard.noSelection, 'warn');
       return;
     }
     if (trigger === 'autocopy') {
@@ -6964,7 +6910,7 @@ export class AppController {
    */
   async copyLastResponse(): Promise<void> {
     if (this.state.route.kind !== 'conversation') {
-      this.showNotice('Open a session before copying a response.', 'warn');
+      this.showNotice(strings.notices.clipboard.noSession, 'warn');
       return;
     }
     const transcript =
@@ -6976,8 +6922,8 @@ export class AppController {
     if (!result.ok) {
       this.showNotice(
         result.reason === 'history-incomplete'
-          ? 'No complete response is fully loaded; earlier history remains. Scroll to the top to load it.'
-          : 'No complete agent response in this session yet.',
+          ? strings.notices.clipboard.noCompleteResponseHistory
+          : strings.notices.clipboard.noCompleteResponse,
         'warn',
       );
       return;
@@ -7001,7 +6947,7 @@ export class AppController {
         outcome.status === 'unavailable' ? 'warn' : 'dim',
       );
     } catch (error) {
-      this.showNotice(`Copy failed: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.clipboard.copyFailed(errorText(error)), 'error');
     }
   }
 
@@ -7165,7 +7111,7 @@ export class AppController {
   private async setEffortChoice(variant: string | undefined): Promise<void> {
     const current = this.effectiveModel();
     if (current === undefined) {
-      this.showNotice('No model selected.', 'warn');
+      this.showNotice(strings.notices.model.noSelection, 'warn');
       return;
     }
     // Only authoritative confirmation changes the footer: setModel verifies with the server.
@@ -7190,14 +7136,17 @@ export class AppController {
     if (!(await this.ensureCurrentModelCatalog())) return;
     const current = this.effectiveModel();
     if (current === undefined) {
-      this.showNotice('No model selected.', 'warn');
+      this.showNotice(strings.notices.model.noSelection, 'warn');
       return;
     }
     const catalog = this.state.models.find(
       (model) => model.providerID === current.providerID && model.modelID === current.modelID,
     );
     if (variant === '') {
-      this.showNotice(`Variants: ${catalog?.variants.join(', ') || 'none'}`, 'dim');
+      this.showNotice(
+        strings.notices.model.variants(catalog?.variants.join(', ') || 'none'),
+        'dim',
+      );
       return;
     }
     if (variant === defaultVariant) {
@@ -7206,7 +7155,7 @@ export class AppController {
     }
     if (catalog === undefined || !catalog.variants.includes(variant)) {
       this.showNotice(
-        `No variant "${variant}". Available: ${catalog?.variants.join(', ') || 'none'}.`,
+        strings.notices.model.noVariant(variant, catalog?.variants.join(', ') || 'none'),
         'warn',
       );
       return;
@@ -7244,7 +7193,7 @@ export class AppController {
         : model;
     if (unsupported) {
       this.showNotice(
-        `Variant "${model.variant}" is not available for ${model.modelID}; using the server default.`,
+        strings.notices.model.variantUnavailable(model.variant ?? '', model.modelID),
         'dim',
       );
     }
@@ -7339,10 +7288,7 @@ export class AppController {
       extra.length > 0 ||
       (scopeWord !== undefined && scopeWord !== 'user' && !projectScope)
     ) {
-      this.showNotice(
-        'Usage: /model default [show] | set [user|project] | clear [user|project]',
-        'warn',
-      );
+      this.showNotice(strings.notices.model.pinUsage, 'warn');
       return;
     }
     if (!(await this.ensureCurrentModelCatalog())) return;
@@ -7367,39 +7313,39 @@ export class AppController {
             ? `${formatModelRef(resolution.model)} is unavailable (${resolution.source})`
             : 'no model yet';
       this.showNotice(
-        `New sessions use: ${current} · ${pinText.length === 0 ? 'nothing pinned' : pinText.join(' · ')}`,
+        strings.notices.model.newSessionsUse(
+          current,
+          pinText.length === 0 ? strings.notices.model.nothingPinned : pinText.join(' · '),
+        ),
         'dim',
       );
       return;
     }
     if (action === 'clear') {
       if (this.state.pinnedModels[key] === undefined) {
-        this.showNotice(`No model is pinned for ${label}.`, 'dim');
+        this.showNotice(strings.notices.model.noPin(label), 'dim');
         return;
       }
       this.mutatePin(key, null);
-      this.showNotice(
-        `Cleared the pinned model for ${label}; automatic selection restored.`,
-        'dim',
-      );
+      this.showNotice(strings.notices.model.clearedPin(label), 'dim');
       return;
     }
     const session = this.currentSession();
     if (session !== undefined) {
       const switchKey = this.keyFor(session.serverID, session.id);
       if (this.modelSwitches.has(switchKey) || this.failedModelSwitches.has(switchKey)) {
-        this.showNotice('A model selection is unconfirmed. Wait for it before pinning.', 'warn');
+        this.showNotice(strings.notices.model.pinUnconfirmed, 'warn');
         return;
       }
     }
     const resolution = this.resolveModelFor(serverID, directory);
     const model = session?.model ?? (resolution.kind === 'model' ? resolution.model : undefined);
     if (model === undefined) {
-      this.showNotice('No confirmed model to pin yet. Select one with /model first.', 'warn');
+      this.showNotice(strings.notices.model.noConfirmedModel, 'warn');
       return;
     }
     this.mutatePin(key, model);
-    this.showNotice(`Pinned ${formatModelRef(model)} as the default for ${label}.`, 'dim');
+    this.showNotice(strings.notices.model.pinned(formatModelRef(model), label), 'dim');
   }
 
   /**
@@ -7422,19 +7368,11 @@ export class AppController {
   private modelDispatchBlocked(serverID: string, sessionID: string): boolean {
     const key = this.keyFor(serverID, sessionID);
     if (this.modelSwitches.has(key)) {
-      this.showNotice(
-        'Model selection pending. Send again once the server confirms it.',
-        'dim',
-        false,
-      );
+      this.showNotice(strings.notices.model.pending, 'dim', false);
       return true;
     }
     if (this.failedModelSwitches.has(key)) {
-      this.showNotice(
-        'Model selection is unconfirmed. Select a model again before sending.',
-        'error',
-        false,
-      );
+      this.showNotice(strings.notices.model.unconfirmed, 'error', false);
       return true;
     }
     return false;
@@ -7455,7 +7393,7 @@ export class AppController {
     const epoch = this.sessionEpoch(key);
     const previous = this.modelSwitches.get(key);
     this.modelSwitchRevisions.set(key, (this.modelSwitchRevisions.get(key) ?? 0) + 1);
-    this.showNotice(`Confirming ${formatModelRef(model)} with the server…`, 'dim', false);
+    this.showNotice(strings.notices.model.confirming(formatModelRef(model)), 'dim', false);
     const operation = (async (): Promise<boolean> => {
       if (previous !== undefined) await previous;
       try {
@@ -7482,11 +7420,7 @@ export class AppController {
         // A failure from a retired lifetime is not evidence about the current one.
         if (!this.isSessionCurrent(key, epoch)) return false;
         this.failedModelSwitches.add(key);
-        this.showNotice(
-          `Model selection failed: ${errorText(error)}. Select a model again before sending.`,
-          'error',
-          false,
-        );
+        this.showNotice(strings.notices.model.failed(errorText(error)), 'error', false);
         return false;
       }
     })();
@@ -7497,7 +7431,7 @@ export class AppController {
       this.modelSwitchRevisions.set(key, (this.modelSwitchRevisions.get(key) ?? 0) + 1);
       if (confirmed) {
         this.recordConfirmedModel(session.serverID, session.directory, model);
-        this.showNotice(`Model confirmed: ${formatModelRef(model)}`, 'dim');
+        this.showNotice(strings.notices.model.confirmed(formatModelRef(model)), 'dim');
       }
     }
     return confirmed;
@@ -7511,7 +7445,7 @@ export class AppController {
       isModelAvailable(this.state.models, recent),
     );
     if (available.length === 0) {
-      this.showNotice('No recent models yet · Alt+P to pick one', 'dim');
+      this.showNotice(strings.notices.model.noRecent, 'dim');
       return;
     }
     const index =
@@ -7539,7 +7473,12 @@ export class AppController {
       // Bound to the session's owning host, never the launch backend (#178).
       const interrupted = await this.backendFor(session.serverID).interrupt(session.id);
       this.debugLog.write('action', { action: 'interrupt', ok: interrupted });
-      this.showNotice(interrupted ? 'Interrupted' : 'Nothing was running', 'dim');
+      this.showNotice(
+        interrupted
+          ? strings.notices.background.interrupted
+          : strings.notices.background.nothingWasRunning,
+        'dim',
+      );
       if (interrupted) await this.captureInterruptSteerIntent(session.id, session.serverID);
     } catch (error) {
       this.debugLog.write('action', {
@@ -7558,7 +7497,7 @@ export class AppController {
       session === undefined ||
       this.state.running[this.keyFor(session.serverID, session.id)] !== true
     ) {
-      this.showNotice('Nothing running to background.', 'dim');
+      this.showNotice(strings.notices.background.nothingRunning, 'dim');
       return;
     }
     // Capture request-time identity BEFORE the async RPC: the transcript and turn can change
@@ -7601,7 +7540,7 @@ export class AppController {
         ...events,
       ]);
     } catch (error) {
-      this.showNotice(`Background failed: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.background.failed(errorText(error)), 'error');
     }
   }
 
@@ -7630,7 +7569,7 @@ export class AppController {
   async exportChat(target: string): Promise<void> {
     const session = this.currentSession();
     if (session === undefined) {
-      this.showNotice('Open a session to export it.', 'warn');
+      this.showNotice(strings.notices.export.noSession, 'warn');
       return;
     }
     const clientCwd = this.deps.clientCwd ?? this.deps.cwd;
@@ -7648,8 +7587,7 @@ export class AppController {
       serverPathShape(target) !== nativeShape
     ) {
       this.showNotice(
-        `Refusing to export to "${target}": that looks like a ${serverPathShape(target)} path on the ` +
-          `remote server, but exports are written locally to ${clientCwd}. Use a local path.`,
+        strings.notices.export.remotePathRefused(target, serverPathShape(target), clientCwd),
         'warn',
       );
       return;
@@ -7721,9 +7659,9 @@ export class AppController {
         `${JSON.stringify(log, null, 2)}
 `,
       );
-      this.showNotice(`Exported ${log.messages.length} messages to ${outputPath}`, 'dim');
+      this.showNotice(strings.notices.export.saved(log.messages.length, outputPath), 'dim');
     } catch (error) {
-      this.showNotice(`Export failed: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.export.failed(errorText(error)), 'error');
     }
   }
 
@@ -7736,7 +7674,7 @@ export class AppController {
     const session = this.requireSession();
     if (session === undefined) return;
     if (args !== '') {
-      this.showNotice('Usage: /compact', 'warn');
+      this.showNotice(strings.notices.compaction.usage, 'warn');
       return;
     }
     // A pending compaction is already in the inbox; requesting again would be a no-op.
@@ -7745,7 +7683,7 @@ export class AppController {
       this.pendingCompactions.has(key) ||
       (this.state.inbox[key] ?? []).some((item) => item.kind === 'compaction');
     if (pending) {
-      this.showNotice('Compaction already pending', 'dim');
+      this.showNotice(strings.notices.compaction.pending, 'dim');
       return;
     }
     this.pendingCompactions.add(key);
@@ -7755,26 +7693,20 @@ export class AppController {
       await backend.compactSession(session.id);
     } catch (error) {
       this.pendingCompactions.delete(key);
-      this.showNotice(
-        `Compaction request could not be confirmed (connection problem): ${errorText(error)}`,
-        'warn',
-      );
+      this.showNotice(strings.notices.compaction.unconfirmed(errorText(error)), 'warn');
       return;
     }
     const current = this.currentSession();
     this.showNotice(
       current?.serverID === session.serverID && current.id === session.id
-        ? 'Compaction requested'
-        : `Compaction requested for ${session.id} on ${session.serverID}`,
+        ? strings.notices.compaction.requested
+        : strings.notices.compaction.requestedFor(session.id, session.serverID),
       'dim',
     );
     try {
       await this.refreshInbox(session.id, session.serverID, backend);
     } catch (error) {
-      this.showNotice(
-        `Compaction requested, but inbox refresh failed: ${errorText(error)}`,
-        'warn',
-      );
+      this.showNotice(strings.notices.compaction.requestedRefreshFailed(errorText(error)), 'warn');
     } finally {
       this.pendingCompactions.delete(key);
     }
@@ -7795,7 +7727,7 @@ export class AppController {
       return;
     }
     this.setState('exitArmed', true);
-    this.showNotice(`Press ${key} again to exit · sessions keep running`, 'dim');
+    this.showNotice(strings.notices.session.exitHint(key), 'dim');
   }
 
   async cancelQueued(inboxID: string): Promise<void> {
@@ -7835,7 +7767,7 @@ export class AppController {
         error instanceof BackendError &&
         (error.kind === 'not-found' || error.kind === 'conflict')
       ) {
-        this.showNotice('Already delivered; it could not be cancelled.', 'warn');
+        this.showNotice(strings.notices.session.alreadyDelivered, 'warn');
       } else {
         this.showNotice(errorText(error), 'error');
       }
@@ -7879,7 +7811,7 @@ export class AppController {
         composer: composerFrom(text),
         attachments: [...attachments],
       });
-      this.showNotice('Queued message parked · Ctrl+S to restore', 'dim');
+      this.showNotice(strings.notices.session.queuedParked, 'dim');
       return;
     }
     // Both slots are busy: keep the text in its own uniquely keyed recovery entry.
@@ -7901,10 +7833,7 @@ export class AppController {
         ...(attachments.length === 0 ? {} : { attachments: [...attachments] }),
       },
     ]);
-    this.showNotice(
-      'Queued message cancelled and kept aside · clear the composer, then Ctrl+S to restore',
-      'warn',
-    );
+    this.showNotice(strings.notices.session.queuedCancelled, 'warn');
   }
 
   /**
@@ -8124,7 +8053,7 @@ export class AppController {
       // The goal belongs to this session's host, never to whatever route is active now.
       await this.backendFor(serverID).runCommand(sessionID, 'goal', 'resume');
     } catch (error) {
-      this.showNotice(`Could not resume the goal: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.model.goalResumeFailed(errorText(error)), 'error');
     }
     await this.refreshNativeGoal(sessionID, serverID);
   }
@@ -8182,7 +8111,7 @@ export class AppController {
           error instanceof BackendError &&
           (error.kind === 'not-found' || error.kind === 'conflict')
         ) {
-          this.showNotice('Already answered elsewhere.', 'dim');
+          this.showNotice(strings.notices.forms.answeredElsewhere, 'dim');
         } else {
           this.showNotice(errorText(error), 'error');
         }
@@ -8195,7 +8124,7 @@ export class AppController {
       try {
         await this.refreshInputRequests(sessionID, serverID);
       } catch (error) {
-        this.showNotice(`Could not refresh permissions: ${errorText(error)}`, 'error');
+        this.showNotice(strings.notices.forms.permissionsRefreshFailed(errorText(error)), 'error');
       }
     } finally {
       // Only the owning flight may release its key; a retired scope or a replacement token
@@ -8209,7 +8138,7 @@ export class AppController {
   async openDiff(scope: DiffScope): Promise<void> {
     const session = this.currentSession();
     if (session === undefined) {
-      this.showNotice('Open a session to see its changes.', 'warn');
+      this.showNotice(strings.notices.forms.noSessionChanges, 'warn');
       return;
     }
     const range: DiffRange = {};
@@ -8218,7 +8147,7 @@ export class AppController {
         this.state.transcripts[this.keyFor(session.serverID, session.id)]?.messages ?? [],
       );
       if (from === undefined) {
-        this.showNotice('No turn yet; showing the whole session.', 'dim');
+        this.showNotice(strings.notices.forms.noTurnWholeSession, 'dim');
         await this.openDiff('session');
         return;
       }
@@ -8384,22 +8313,16 @@ export class AppController {
     if (field?.kind !== 'external') return;
     const url = parseExternalUrl(field.url);
     if (url === undefined) {
-      this.showNotice('Only http(s) URLs can be opened. Press c to copy the address.', 'warn');
+      this.showNotice(strings.notices.forms.openOnlyHttp, 'warn');
       return;
     }
     const open =
       this.deps.openUrl ?? ((target: URL) => openExternalUrl(target, this.deps.platform));
     const result = await open(url);
     if (result.ok) {
-      this.showNotice(
-        'Opened in your browser. Opening is not an answer; the question stays pending.',
-        'dim',
-      );
+      this.showNotice(strings.notices.forms.openedBrowser, 'dim');
     } else {
-      this.showNotice(
-        `Could not open a browser: ${result.error}. Press c to copy the URL.`,
-        'warn',
-      );
+      this.showNotice(strings.notices.forms.browserFailed(result.error), 'warn');
     }
   }
 
@@ -8453,11 +8376,7 @@ export class AppController {
       const visible = visibleFields(form, editor.answers);
       const hasAnswerableField = visible.some((field) => field.kind !== 'external');
       if (!hasAnswerableField && visible.some((field) => field.kind === 'external')) {
-        this.showNotice(
-          'This question is completed in the browser. Opening or copying the URL is not an answer; it stays pending until the server finishes it.',
-          'warn',
-          false,
-        );
+        this.showNotice(strings.notices.forms.completedInBrowser, 'warn', false);
         return;
       }
       const answer = buildAnswer(form, editor.answers);
@@ -8546,7 +8465,7 @@ export class AppController {
         (error.kind === 'not-found' || error.kind === 'conflict')
       ) {
         closeOrigin();
-        this.showNotice('Already answered elsewhere.', 'dim');
+        this.showNotice(strings.notices.forms.answeredElsewhere, 'dim');
       } else {
         this.showNotice(errorText(error), 'error');
       }
@@ -8554,7 +8473,7 @@ export class AppController {
     try {
       await this.refreshInputRequests(origin.sessionID, origin.serverID);
     } catch (error) {
-      this.showNotice(`Could not refresh form requests: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.forms.formsRefreshFailed(errorText(error)), 'error');
     } finally {
       this.answeringForms.delete(key);
     }
@@ -8970,7 +8889,7 @@ export class AppController {
     if (route.kind !== 'conversation') return false;
     const target = this.inspectableTool();
     if (target === undefined) {
-      this.showNotice('Nothing to inspect in this conversation yet.', 'warn');
+      this.showNotice(strings.notices.inspector.nothingToInspect, 'warn');
       return false;
     }
     const first = Object.values(target.tool.input).find(
@@ -9262,7 +9181,7 @@ export class AppController {
     if (overlay.kind !== 'inspector' || overlay.payload === undefined) return;
     const text = inspectorText(overlay.payload);
     if (text === '') {
-      this.showNotice('This result has no text to copy; file metadata is shown instead.', 'warn');
+      this.showNotice(strings.notices.inspector.noTextToCopy, 'warn');
       return;
     }
     const suffix = ` · ${completenessLabel(overlay.payload.completeness)}`;
@@ -9275,7 +9194,7 @@ export class AppController {
     if (overlay.kind !== 'inspector' || overlay.payload === undefined) return;
     const text = inspectorText(overlay.payload);
     if (text === '') {
-      this.showNotice('This result has no text to save; file metadata is shown instead.', 'warn');
+      this.showNotice(strings.notices.inspector.noTextToSave, 'warn');
       return;
     }
     const dir = this.deps.copyFallbackDir ?? this.deps.cwd;
@@ -9283,9 +9202,12 @@ export class AppController {
     const write = this.deps.writeFile ?? (async (file, body) => void (await Bun.write(file, body)));
     try {
       await write(path, text);
-      this.showNotice(`Saved ${path} · ${completenessLabel(overlay.payload.completeness)}.`, 'dim');
+      this.showNotice(
+        strings.notices.inspector.saved(path, completenessLabel(overlay.payload.completeness)),
+        'dim',
+      );
     } catch (error) {
-      this.showNotice(`Save failed: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.inspector.saveFailed(errorText(error)), 'error');
     }
   }
 
@@ -9389,12 +9311,12 @@ export class AppController {
     if (session === undefined) return;
     const key = this.keyFor(session.serverID, session.id);
     if (this.state.running[key] === true) {
-      this.showNotice('Wait for the current run to finish before rewinding.', 'warn');
+      this.showNotice(strings.notices.rewind.waitForRun, 'warn');
       return;
     }
     const choices = this.rewindChoices(session.id, session.serverID);
     if (choices.length === 0) {
-      this.showNotice('No earlier prompt to rewind to.', 'warn');
+      this.showNotice(strings.notices.rewind.noEarlierPrompt, 'warn');
       return;
     }
     this.rewindPreviewSeq += 1;
@@ -9531,13 +9453,13 @@ export class AppController {
       this.commitGoalUI(key, doc);
     } catch (error) {
       if (!this.isSessionCurrent(key, epoch)) return;
-      this.showNotice(`Goal file unreadable: ${errorText(error)}`, 'warn');
+      this.showNotice(strings.notices.goals.unreadable(errorText(error)), 'warn');
     }
   }
 
   private requireSession(): SessionSummary | undefined {
     const session = this.currentSession();
-    if (session === undefined) this.showNotice('Open a session first.', 'warn');
+    if (session === undefined) this.showNotice(strings.notices.goals.openSessionFirst, 'warn');
     return session;
   }
 
@@ -9552,7 +9474,7 @@ export class AppController {
     current = this.currentSession(),
   ): Promise<GoalPlanV1 | undefined> {
     if (current === undefined) {
-      this.showNotice('Open a session first.', 'warn');
+      this.showNotice(strings.notices.goals.openSessionFirst, 'warn');
       return undefined;
     }
     const serverID = current.serverID;
@@ -9599,22 +9521,16 @@ export class AppController {
         const saved = await this.goalStore.save(change(base));
         this.commitGoalUI(key, saved);
         if (notice !== undefined) {
-          this.showNotice(
-            `${notice}${rebased ? ' · merged with a change from another window' : ''}`,
-            'dim',
-          );
+          this.showNotice(rebased ? strings.notices.goals.merged(notice) : notice, 'dim');
         }
         return saved;
       } catch (error) {
         if (!(error instanceof GoalConflictError)) {
-          this.showNotice(`Goal not saved: ${errorText(error)}`, 'error');
+          this.showNotice(strings.notices.goals.notSaved(errorText(error)), 'error');
           return undefined;
         }
         if (attempt === maxAttempts - 1) {
-          this.showNotice(
-            `Goal not saved after ${maxAttempts} conflicting updates; keep your edits and retry.`,
-            'error',
-          );
+          this.showNotice(strings.notices.goals.conflict(maxAttempts), 'error');
           return undefined;
         }
         base = error.current;
@@ -9638,13 +9554,13 @@ export class AppController {
         const text = `Propose a short numbered plan${goal === undefined ? '' : ` for this goal: ${goal}`}. Reply with the numbered steps only; do not start working yet.`;
         this.writeComposer(composerFrom(text));
         await this.submit();
-        this.showNotice('When the reply arrives, /plan adopt to review it.', 'dim');
+        this.showNotice(strings.notices.goals.adoptHint, 'dim');
         return;
       }
       case 'adopt': {
         const steps = parseSteps(this.latestAssistantText(session.id));
         if (steps.length === 0) {
-          this.showNotice('No list found in the latest reply.', 'warn');
+          this.showNotice(strings.notices.goals.noListInReply, 'warn');
           return;
         }
         await this.changeGoal(
@@ -9780,7 +9696,7 @@ export class AppController {
     else if (key.text === 'e') {
       const messageID = this.latestAssistantID(session.id, session.serverID);
       if (messageID === undefined) {
-        this.showNotice('No agent message to link yet.', 'warn');
+        this.showNotice(strings.notices.goals.noAgentMessage, 'warn');
         return;
       }
       void this.changeGoal(
@@ -9797,7 +9713,7 @@ export class AppController {
     const session = this.requireSession();
     if (session === undefined) return;
     if (title === '') {
-      this.showNotice('Usage: /rename <title>', 'warn');
+      this.showNotice(strings.notices.rename.usage, 'warn');
       return;
     }
     try {
@@ -9810,9 +9726,9 @@ export class AppController {
         ...session,
         title,
       });
-      this.showNotice(`Renamed to ${title}`, 'dim');
+      this.showNotice(strings.notices.rename.renamed(title), 'dim');
     } catch (error) {
-      this.showNotice(`Rename failed: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.rename.failed(errorText(error)), 'error');
     }
   }
 
@@ -9858,12 +9774,12 @@ export class AppController {
       }
       this.showNotice(
         goalError === undefined
-          ? 'Forked into a new session'
-          : `Fork created, but its goal could not be saved: ${goalError}`,
+          ? strings.notices.rename.forked
+          : strings.notices.rename.forkedGoalFailed(goalError),
         goalError === undefined ? 'dim' : 'warn',
       );
     } catch (error) {
-      this.showNotice(`Fork failed: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.rename.forkFailed(errorText(error)), 'error');
     }
   }
 
@@ -9909,7 +9825,7 @@ export class AppController {
         files: staged.files === undefined ? [] : [...staged.files],
         busy: false,
       });
-      this.showNotice('A revert was staged on this session. Confirm or cancel it.', 'warn');
+      this.showNotice(strings.notices.rewind.stagedElsewhere, 'warn');
       return;
     }
     if (
@@ -9919,7 +9835,7 @@ export class AppController {
       !overlay.busy
     ) {
       this.closeOverlay();
-      this.showNotice('The staged revert was resolved elsewhere.', 'dim');
+      this.showNotice(strings.notices.rewind.resolvedElsewhere, 'dim');
     }
   }
 
@@ -9931,7 +9847,7 @@ export class AppController {
       this.state.transcripts[this.keyFor(session.serverID, session.id)]?.messages ?? [],
     );
     if (messageID === undefined) {
-      this.showNotice('Nothing to revert yet.', 'warn');
+      this.showNotice(strings.notices.rewind.nothingToRevert, 'warn');
       return;
     }
     await this.stageRevertAt(session.serverID, session.id, messageID);
@@ -9956,7 +9872,7 @@ export class AppController {
         route.serverID !== serverID ||
         route.sessionID !== sessionID
       ) {
-        this.showNotice('A revert was staged on this session. Return to it to confirm.', 'warn');
+        this.showNotice(strings.notices.rewind.returnToConfirm, 'warn');
         return;
       }
       this.setOverlay({
@@ -9968,7 +9884,7 @@ export class AppController {
         busy: false,
       });
     } catch (error) {
-      this.showNotice(`Revert unavailable: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.rewind.unavailable(errorText(error)), 'error');
     }
   }
 
@@ -9994,7 +9910,7 @@ export class AppController {
     // Verify the stage is still the one the dialog was opened for before acting on it.
     void this.verifyAndRunRevert(overlay, confirm).catch((error: unknown) => {
       this.releaseRevertOverlay(overlay);
-      this.showNotice(`Revert failed: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.rewind.failed(errorText(error)), 'error');
     });
   }
 
@@ -10046,7 +9962,7 @@ export class AppController {
       // Can't verify: do not act blindly on the worktree.
       this.releaseRevertOverlay(overlay);
       this.showNotice(
-        `Revert not ${confirm ? 'committed' : 'cancelled'}: could not verify the staged revert (${errorText(error)}).`,
+        strings.notices.rewind.unverified(confirm ? 'committed' : 'cancelled', errorText(error)),
         'error',
       );
       return;
@@ -10060,10 +9976,7 @@ export class AppController {
     if (staged?.messageID !== overlay.messageID) {
       // The stage changed or vanished under us (another client committed/cleared it).
       if (this.isRevertOverlayShown(overlay)) this.closeOverlay();
-      this.showNotice(
-        'The staged revert changed or was resolved elsewhere. Nothing was applied by this dialog.',
-        'warn',
-      );
+      this.showNotice(strings.notices.rewind.changed, 'warn');
       return;
     }
     try {
@@ -10071,11 +9984,14 @@ export class AppController {
       else await backend.clearRevert(overlay.sessionID);
     } catch (error) {
       this.releaseRevertOverlay(overlay);
-      this.showNotice(`Revert failed: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.rewind.failed(errorText(error)), 'error');
       return;
     }
     if (this.isRevertOverlayShown(overlay)) this.closeOverlay();
-    this.showNotice(confirm ? 'Reverted' : 'Revert cancelled; files restored', 'dim');
+    this.showNotice(
+      confirm ? strings.notices.rewind.reverted : strings.notices.rewind.revertCancelled,
+      'dim',
+    );
     if (confirm)
       void this.track('refresh', this.loadConversation(overlay.sessionID, overlay.serverID));
   }
@@ -10111,7 +10027,7 @@ export class AppController {
         kind: error instanceof BackendError ? error.kind : 'unknown',
       });
       if (this.disposed) return;
-      this.showNotice(`${label}: ${errorText(error)}`, 'error');
+      this.showNotice(strings.notices.generic.operationFailed(label, errorText(error)), 'error');
     }
   }
 }
@@ -10154,17 +10070,18 @@ function decodePastedText(bytes: Uint8Array): string | undefined {
  * OSC 52, and an unavailable clipboard says so instead of reporting a phantom copy.
  */
 function copyNotice(outcome: CopyOutcome, label: string, suffix: string): string {
+  const copy = strings.notices.clipboard;
   switch (outcome.status) {
     case 'written':
-      return `Copied ${label} to the system clipboard${suffix}.`;
+      return copy.copied(label, suffix);
     case 'unconfirmed':
-      return `Clipboard sequence emitted for ${label}${suffix} (no terminal acknowledgement).`;
+      return copy.unconfirmed(label, suffix);
     case 'file':
-      return `Clipboard unavailable; saved ${label} to ${outcome.path}${suffix}.`;
+      return copy.savedToFile(label, outcome.path, suffix);
     case 'unavailable':
-      return `Clipboard unavailable for ${label}: ${outcome.detail}${suffix}. Nothing was copied.`;
+      return copy.unavailable(label, outcome.detail, suffix);
     default:
-      return `Copy failed${suffix}.`;
+      return copy.failed(suffix);
   }
 }
 

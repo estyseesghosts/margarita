@@ -1,3 +1,4 @@
+import { strings } from '../i18n/index.ts';
 /**
  * Agent questions (`session.form`). A form is not a permission: it has no
  * "always" and its answer is a plain key → value map (docs/12).
@@ -126,32 +127,35 @@ export function parseNumber(
 /** A user-facing problem with one field's value, or undefined when it is acceptable. */
 export function validateField(field: FormField, value: FormValue | undefined): string | undefined {
   const empty = value === undefined || value === '' || (Array.isArray(value) && value.length === 0);
-  if (empty) return field.required && field.kind !== 'external' ? 'Required.' : undefined;
+  if (empty)
+    return field.required && field.kind !== 'external' ? strings.forms.required : undefined;
   switch (field.kind) {
     case 'text':
     case 'choice': {
       if (field.kind === 'choice' && !field.custom && typeof value === 'string') {
         if (!field.options.some((option) => option.value === value)) {
-          return 'Pick one of the options.';
+          return strings.forms.pickOneOfOptions;
         }
       }
       return typeof value === 'string' ? validateString(field, value) : undefined;
     }
     case 'number': {
       if (typeof value !== 'number')
-        return field.integer ? 'Enter a whole number.' : 'Enter a number.';
-      if (field.minimum !== undefined && value < field.minimum) return `At least ${field.minimum}.`;
-      if (field.maximum !== undefined && value > field.maximum) return `At most ${field.maximum}.`;
+        return field.integer ? strings.forms.expectedWholeNumber : strings.forms.expectedNumber;
+      if (field.minimum !== undefined && value < field.minimum)
+        return strings.forms.atLeast(field.minimum);
+      if (field.maximum !== undefined && value > field.maximum)
+        return strings.forms.atMost(field.maximum);
       return undefined;
     }
     case 'multi': {
       const values = Array.isArray(value) ? value : [];
       const count = values.length;
       if (field.minItems !== undefined && count < field.minItems) {
-        return `Pick at least ${field.minItems}.`;
+        return strings.forms.pickAtLeast(field.minItems);
       }
       if (field.maxItems !== undefined && count > field.maxItems) {
-        return `Pick at most ${field.maxItems}.`;
+        return strings.forms.pickAtMost(field.maxItems);
       }
       return undefined;
     }
@@ -170,27 +174,27 @@ function validateString(
   value: string,
 ): string | undefined {
   if (field.minLength !== undefined && value.length < field.minLength) {
-    return `Must be at least ${field.minLength} character${field.minLength === 1 ? '' : 's'}.`;
+    return strings.forms.minLength(field.minLength);
   }
   if (field.maxLength !== undefined && value.length > field.maxLength) {
-    return `Must be at most ${field.maxLength} character${field.maxLength === 1 ? '' : 's'}.`;
+    return strings.forms.maxLength(field.maxLength);
   }
   if (field.pattern !== undefined) {
     try {
-      if (!new RegExp(field.pattern).test(value)) return 'Does not match the requested format.';
+      if (!new RegExp(field.pattern).test(value)) return strings.forms.patternMismatch;
     } catch {
       // An unsupported pattern is the server's problem; do not block a plausible answer.
     }
   }
   switch (field.format) {
     case 'email':
-      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? undefined : 'Enter an email address.';
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? undefined : strings.forms.email;
     case 'uri':
-      return isUri(value) ? undefined : 'Enter a URI.';
+      return isUri(value) ? undefined : strings.forms.uri;
     case 'date':
-      return isValidDate(value, false) ? undefined : 'Enter a date (YYYY-MM-DD).';
+      return isValidDate(value, false) ? undefined : strings.forms.date;
     case 'date-time':
-      return isValidDate(value, true) ? undefined : 'Enter a date and time.';
+      return isValidDate(value, true) ? undefined : strings.forms.dateTime;
     default:
       return undefined;
   }
@@ -561,7 +565,7 @@ function editField(editor: FormEditor, field: FormField, key: FormKey): FormEdit
           addingCustom: false,
           customDraft: '',
           customCursor: 0,
-          problem: 'Already chosen.',
+          problem: strings.forms.alreadyChosen,
         };
       }
       return {
@@ -746,7 +750,7 @@ export function pasteFormText(
   text: string,
 ): { editor: FormEditor; error?: string } {
   const field = currentField(form, editor);
-  if (field === undefined) return { editor, error: 'No field is selected.' };
+  if (field === undefined) return { editor, error: strings.forms.noFieldSelected };
   if (field.kind === 'multi' && field.custom && editor.addingCustom === true) {
     const next = insertText({ text: editor.customDraft ?? '', cursor: editor.customCursor }, text);
     return { editor: { ...editor, customDraft: next.text, customCursor: next.cursor } };
@@ -774,8 +778,8 @@ export function pasteFormText(
   }
   const reason =
     field.kind === 'external'
-      ? 'Open external prompts in a browser.'
-      : 'This field does not accept text.';
+      ? strings.forms.openExternalInBrowser
+      : strings.forms.fieldDoesNotAcceptText;
   return { editor, error: reason };
 }
 

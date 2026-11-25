@@ -1,3 +1,4 @@
+import { strings } from '../i18n/index.ts';
 import type { FileDiff } from './diff.ts';
 import type { ModelSelection } from './model-ref.ts';
 
@@ -51,16 +52,18 @@ export function executionLabel(execution: Execution): string {
   switch (execution.state) {
     case 'idle':
       return execution.outcome === 'failed'
-        ? 'failed'
+        ? strings.chrome.execution.failed
         : execution.outcome === 'interrupted'
-          ? 'interrupted'
-          : 'idle';
+          ? strings.chrome.execution.interrupted
+          : strings.chrome.execution.idle;
     case 'working':
-      return 'working';
+      return strings.chrome.execution.working;
     case 'waiting':
-      return 'needs input';
+      return strings.chrome.execution['needs-input'];
     case 'unknown':
-      return execution.reason === 'disconnected' ? 'reconnecting' : '…';
+      return execution.reason === 'disconnected'
+        ? strings.chrome.execution.reconnecting
+        : strings.chrome.execution.unknown;
     default:
       return assertNever(execution);
   }
