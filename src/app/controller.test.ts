@@ -7127,6 +7127,102 @@ describe('background worker lifecycle (#101)', () => {
   });
 });
 
+describe('worker presentation cache invalidation (#audit-2 task 3)', () => {
+  test('same worker count, status transition refreshes the cached presentation', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    backend.jobs = { ses_a: [worker()] };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+
+    // Populate the cached presentation path.
+    const first = controller.presentationFor('ses_a', 'local');
+    const again = controller.presentationFor('ses_a', 'local');
+    expect(again).toBe(first); // cache hit: nothing changed
+
+    // Same job ID, count stays 1, but running → completed.
+    backend.jobs = { ses_a: [worker({ status: 'completed', completedAt: 2000 })] };
+    controller.onEvents(
+      'local',
+      [{ kind: 'transcript-changed', sessionID: 'ses_a', jobs: true }],
+      false,
+    );
+    await Bun.sleep(150);
+    await flush();
+
+    const refreshed = controller.presentationFor('ses_a', 'local');
+    expect(refreshed).not.toBe(first); // cache miss: worker array identity changed
+    expect(controller.workerNodes('ses_a', 'local')[0]?.worker.status).toBe('completed');
+    controller.dispose();
+  });
+
+  test('same count, two workers whose status transition flips sort order', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    backend.jobs = {
+      ses_a: [
+        worker({ id: 'job_a', status: 'running', startedAt: 1000 }),
+        worker({ id: 'job_b', status: 'completed', startedAt: 2000 }),
+      ],
+    };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+    expect(controller.workerNodes('ses_a', 'local').map((row) => row.worker.id)).toEqual([
+      'job_a',
+      'job_b',
+    ]);
+
+    // Flip which one is running; count is still 2 but sort order changes.
+    backend.jobs = {
+      ses_a: [
+        worker({ id: 'job_a', status: 'completed', startedAt: 1000 }),
+        worker({ id: 'job_b', status: 'running', startedAt: 2000 }),
+      ],
+    };
+    controller.onEvents(
+      'local',
+      [{ kind: 'transcript-changed', sessionID: 'ses_a', jobs: true }],
+      false,
+    );
+    await Bun.sleep(150);
+    await flush();
+
+    expect(controller.workerNodes('ses_a', 'local').map((row) => row.worker.id)).toEqual([
+      'job_b',
+      'job_a',
+    ]);
+    controller.dispose();
+  });
+
+  test('changed description with unchanged count and status still invalidates the cache', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [] };
+    backend.jobs = { ses_a: [worker({ description: 'review patch' })] };
+    const controller = makeController(async () => [], backend);
+    await attach(controller, 'ses_a');
+
+    const first = controller.presentationFor('ses_a', 'local');
+    expect(controller.presentationFor('ses_a', 'local')).toBe(first);
+
+    backend.jobs = { ses_a: [worker({ description: 'audit tests' })] };
+    controller.onEvents(
+      'local',
+      [{ kind: 'transcript-changed', sessionID: 'ses_a', jobs: true }],
+      false,
+    );
+    await Bun.sleep(150);
+    await flush();
+
+    const refreshed = controller.presentationFor('ses_a', 'local');
+    expect(refreshed).not.toBe(first);
+    expect(controller.workerNodes('ses_a', 'local')[0]?.worker.description).toBe('audit tests');
+    controller.dispose();
+  });
+});
+
 describe('failed transcript refresh retains and drains queued work (#295)', () => {
   test('an update received during a failed read lands after bounded recovery', async () => {
     const backend = new FakeBackend();
@@ -8255,6 +8351,18 @@ function reply(text: string): TranscriptMessage {
     agent: 'build',
     model: { providerID: 'p', modelID: 'm' },
     parts: [{ kind: 'text', text }],
+  };
+}
+
+function worker(overrides?: Partial<WorkerJob>): WorkerJob {
+  return {
+    id: 'job_a',
+    childSessionID: 'child_a',
+    agent: 'build',
+    description: 'review patch',
+    status: 'running' as const,
+    startedAt: 1000,
+    ...overrides,
   };
 }
 

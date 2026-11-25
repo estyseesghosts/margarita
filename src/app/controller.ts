@@ -201,7 +201,7 @@ import {
   transcriptWindowStep,
 } from '../domain/transcript.ts';
 import type { UsageAnalytics } from '../domain/usage-analytics.ts';
-import { type WorkerNode, workerNodes } from '../domain/worker.ts';
+import { type WorkerJob, type WorkerNode, workerNodes } from '../domain/worker.ts';
 import { strings } from '../i18n/index.ts';
 import { AdmissionGate } from './admission-gate.ts';
 import { AncestryVerifier, type DescendantCheck } from './ancestry-verifier.ts';
@@ -551,7 +551,9 @@ type PresentationCache = Readonly<{
   detailed: boolean;
   expanded: string;
   changedFrom: number | undefined;
-  workers: number;
+  /** Worker-array identity: refreshWorkers() always replaces the authoritative array, so a
+   * new reference invalidates the cached projection even when the count is unchanged. */
+  workers: readonly WorkerJob[];
   view: TranscriptNodeView;
   index: PresentationIndex;
 }>;
@@ -1846,7 +1848,8 @@ export class AppController {
       expanded: string;
       mcp: string;
       changedFrom: number | undefined;
-      workers: number;
+      /** Worker-array identity: refreshWorkers() always replaces the authoritative array. */
+      workers: readonly WorkerJob[];
       running: boolean;
       view: TranscriptNodeView;
     }
@@ -8579,7 +8582,7 @@ export class AppController {
       '\u0001',
     );
     const messages = unwrap(transcript.messages);
-    const workers = this.state.workers[key]?.length ?? 0;
+    const workers = this.state.workers[key] ?? [];
     const running = this.state.running[key] === true;
     const cached = this.presentationViewCache.get(key);
     if (
@@ -8650,7 +8653,7 @@ export class AppController {
       [...expanded.diffs].toSorted().join('\u0001'),
     ].join('\u0002');
     const messages = unwrap(transcript.messages);
-    const workers = this.state.workers[key]?.length ?? 0;
+    const workers = this.state.workers[key] ?? [];
     const cached = this.presentationCache.get(key);
     if (
       cached !== undefined &&
