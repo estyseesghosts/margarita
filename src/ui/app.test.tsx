@@ -11,14 +11,14 @@ import { AppController } from '../app/controller.ts';
 import type { ControllerDeps } from '../app/controller.ts';
 import { defaultConfig } from '../config/config.ts';
 import { emptyState } from '../config/local-state.ts';
-import { isRecord } from '../domain/backend-event.ts';
+import { isRecord, normalizeEvent } from '../domain/backend-event.ts';
 import { composerFrom } from '../domain/composer.ts';
 import { greetingCatalog } from '../domain/greetings.ts';
 import { buildKeymap } from '../domain/keymap.ts';
 import { directoryKey } from '../domain/path-identity.ts';
 import { projectLabel } from '../domain/project-label.ts';
 import { cellWidth } from '../domain/text-width.ts';
-import type { ToolCallChild, TranscriptMessage } from '../domain/transcript.ts';
+import type { AssistantPart, ToolCallChild, TranscriptMessage } from '../domain/transcript.ts';
 import { strings } from '../i18n/index.ts';
 import { formatCounts, resetFormatCounts, setFormatCounters } from '../perf/format-counts.ts';
 import { App } from './app.tsx';
@@ -27,6 +27,15 @@ import { pickTheme, type Theme, withAccentOverrides } from './theme.ts';
 
 const pageUp = '\u001b[5~';
 const pageDown = '\u001b[6~';
+
+/** Manual promise gate for race-sensitive render tests. */
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 /** Matches the live throbber's rotating decorative verbs, derived from the i18n catalog. */
 const runningVerbPattern = new RegExp(
@@ -5290,6 +5299,101 @@ describe('clipboard, selection and right click (tickets #1-#7)', () => {
     await setup.mockMouse.drag(point.x, point.y, point.x + 20, point.y);
     await setup.waitFor(() => fake.writes.length > 0);
     expect(fake.writes[0]).toContain('uniqueDiffLine');
+    controller.dispose();
+  });
+});
+
+describe('newest short assistant reply survives the live refetch race (#167 follow-up, #audit-2 task 2)', () => {
+  const model = { providerID: 'opencode', modelID: 'longcat' };
+  const userTurn = {
+    kind: 'user' as const,
+    id: 'm1',
+    createdAt: 1,
+    text: 'summarize the run',
+    attachments: [],
+  };
+  const reply = (parts: readonly AssistantPart[], completedAt?: number) => ({
+    kind: 'assistant' as const,
+    id: 'm2',
+    createdAt: 2,
+    ...(completedAt === undefined ? {} : { completedAt }),
+    agent: 'build',
+    model,
+    parts,
+  });
+
+  test('a final reply that lands behind an in-flight read is rendered, not lost', async () => {
+    const backend = backendWithSession();
+    backend.messages = { ses_a: [userTurn, reply([{ kind: 'text', text: '' }])] };
+    const real = backend.listMessages.bind(backend);
+    const gate = deferred();
+    let reads = 0;
+    backend.listMessages = async (sessionID, limit, cursor) => {
+      reads += 1;
+      // The very first read returns before the answer text becomes visible.
+      if (reads === 1) await gate.promise;
+      return real(sessionID, limit, cursor);
+    };
+
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    // The provider finalizes a very short answer while the read is still in flight.
+    backend.messages = { ses_a: [userTurn, reply([{ kind: 'text', text: 'Done.' }])] };
+    const streamed = normalizeEvent({
+      type: 'session.step.streamed',
+      data: { sessionID: 'ses_a' },
+    });
+    expect(streamed).toBeDefined();
+    controller.onEvents('local', [streamed!], false);
+    gate.resolve();
+    // Allow the coalesced follow-up pause (80ms) to elapse, then render.
+    await Bun.sleep(160);
+    await settle(setup);
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain('Done.');
+    // Prove the final assistant object reached canonical state, not just the view.
+    const canonical = (controller.state.transcripts['ses_a']?.messages ?? []).find(
+      (message) => message.id === 'm2',
+    );
+    expect(
+      canonical?.kind === 'assistant'
+        ? canonical.parts.map((part) => (part.kind === 'text' ? part.text : '')).join('')
+        : '',
+    ).toBe('Done.');
+    controller.dispose();
+  });
+
+  test('text after a tool call is displayed once the completed boundary refetches', async () => {
+    const backend = backendWithSession();
+    const tool = {
+      kind: 'tool' as const,
+      tool: { id: 't1', name: 'shell', status: 'completed' as const, input: {}, startedAt: 2 },
+    };
+    backend.messages = { ses_a: [userTurn, reply([tool, { kind: 'text', text: '' }], 5)] };
+    const real = backend.listMessages.bind(backend);
+    const gate = deferred();
+    let reads = 0;
+    backend.listMessages = async (sessionID, limit, cursor) => {
+      reads += 1;
+      if (reads === 1) await gate.promise;
+      return real(sessionID, limit, cursor);
+    };
+    const { controller, setup } = await mount(backend);
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    backend.messages = {
+      ses_a: [userTurn, reply([tool, { kind: 'text', text: 'Wrapped up.' }], 5)],
+    };
+    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    gate.resolve();
+    await Bun.sleep(160);
+    await settle(setup);
+
+    expect(setup.captureCharFrame()).toContain('Wrapped up.');
     controller.dispose();
   });
 });

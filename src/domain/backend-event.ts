@@ -39,6 +39,7 @@ export type BackendEvent =
 
 const transcriptEvents = new Set([
   'session.step.started',
+  'session.step.streamed',
   'session.step.ended',
   'session.step.failed',
   'session.step.first-token',

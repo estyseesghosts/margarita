@@ -43,6 +43,15 @@ describe('normalizeEvent', () => {
     });
   });
 
+  test('streamed body boundaries dirty the transcript without a job reconciliation', () => {
+    // `session.step.streamed` is a durable provider response-body boundary: it can carry the
+    // final assistant text, so it must refetch, but it is not a terminal execution/job signal.
+    expect(normalizeEvent({ type: 'session.step.streamed', data: { sessionID: 's' } })).toEqual({
+      kind: 'transcript-changed',
+      sessionID: 's',
+    });
+  });
+
   test('shell/completion events also reconcile server job lists (#284)', () => {
     expect(normalizeEvent({ type: 'session.shell.started', data: { sessionID: 's' } })).toEqual({
       kind: 'transcript-changed',

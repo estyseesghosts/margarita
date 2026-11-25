@@ -9,6 +9,7 @@ import { defaultConfig } from '../config/config.ts';
 import type { AppConfig } from '../config/config.ts';
 import { GoalConflictError, type GoalStore } from '../config/goal-store.ts';
 import { emptyState, type LocalState } from '../config/local-state.ts';
+import { normalizeEvent } from '../domain/backend-event.ts';
 import { composerFrom } from '../domain/composer.ts';
 import { emptyGoalPlan, type GoalPlanV1 } from '../domain/goal-plan.ts';
 import { buildKeymap } from '../domain/keymap.ts';
@@ -21,6 +22,7 @@ import type { WorkerJob } from '../domain/worker.ts';
 import { AppController } from './controller.ts';
 import type { ControllerDeps, ProjectFileListing } from './controller.ts';
 import { routeKey } from './key-router.ts';
+import type { TimerHandle, TimerScheduler } from './timer-scheduler.ts';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -8205,6 +8207,135 @@ describe('external editor result ownership (#271)', () => {
     expect(await controller.applyExternalEdit(origin, 'edited alpha')).toBe('composer');
     expect(controller.state.composer.text).toBe('edited alpha');
     expect(written).toEqual([]);
+    controller.dispose();
+  });
+});
+
+/**
+ * Deterministic timer boundary for the transcript coalescing delay (#audit-2 task 2).
+ * The follow-up read only runs when the test pumps it, so a dirty hint's fate is asserted
+ * explicitly instead of racing a wall-clock sleep.
+ */
+function manualScheduler() {
+  let next = 1;
+  const tasks = new Map<number, () => void>();
+  return {
+    scheduler: {
+      setTimeout: (handler: () => void) => {
+        const id = next++;
+        tasks.set(id, handler);
+        return id;
+      },
+      clearTimeout: (handle: TimerHandle) => {
+        if (typeof handle === 'number') tasks.delete(handle);
+      },
+    } satisfies TimerScheduler,
+    runAll(): void {
+      const pending = [...tasks.values()];
+      tasks.clear();
+      for (const task of pending) task();
+    },
+  };
+}
+
+function assistantText(messages: readonly TranscriptMessage[], id: string): string {
+  const message = messages.find((entry) => entry.id === id);
+  if (message?.kind !== 'assistant') return '';
+  return message.parts
+    .filter((part): part is { kind: 'text'; text: string } => part.kind === 'text')
+    .map((part) => part.text)
+    .join('');
+}
+
+function reply(text: string): TranscriptMessage {
+  return {
+    kind: 'assistant',
+    id: 'm2',
+    createdAt: 2,
+    agent: 'build',
+    model: { providerID: 'p', modelID: 'm' },
+    parts: [{ kind: 'text', text }],
+  };
+}
+
+describe('newest short assistant reply survives the streaming refetch race (#audit-2 task 2)', () => {
+  test('a streamed boundary after the first read exposes the final short answer', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    // The assistant already exists but its text has not reached this page yet.
+    backend.messages = { ses_a: [userMessage('m1', 'do it'), reply('')] };
+    const timer = manualScheduler();
+    const controller = makeController(
+      async () => [],
+      backend,
+      () => 10_000,
+      {
+        scheduler: timer.scheduler,
+      },
+    );
+    await attach(controller, 'ses_a');
+    expect(assistantText(controller.state.transcripts['ses_a']?.messages ?? [], 'm2')).toBe('');
+
+    // The provider finalizes a very short answer, then emits the durable body boundary.
+    backend.messages = { ses_a: [userMessage('m1', 'do it'), reply('Done.')] };
+    const streamed = normalizeEvent({
+      type: 'session.step.streamed',
+      data: { sessionID: 'ses_a' },
+    });
+    expect(streamed).toBeDefined();
+    controller.onEvents('local', [streamed!], false);
+    await flush();
+    timer.runAll();
+    await flush();
+
+    const messages = controller.state.transcripts['ses_a']?.messages ?? [];
+    expect(assistantText(messages, 'm2')).toBe('Done.');
+    controller.dispose();
+  });
+
+  test('an event during an in-flight read becomes one dirty follow-up that shows the answer', async () => {
+    const backend = new FakeBackend();
+    backend.sessions = [fakeSession('ses_a')];
+    backend.messages = { ses_a: [userMessage('m1', 'do it'), reply('')] };
+    const timer = manualScheduler();
+    const controller = makeController(
+      async () => [],
+      backend,
+      () => 10_000,
+      {
+        scheduler: timer.scheduler,
+      },
+    );
+    await attach(controller, 'ses_a');
+
+    const real = backend.listMessages.bind(backend);
+    const gate = deferred<void>();
+    let reads = 0;
+    backend.listMessages = async (sessionID, limit, cursor) => {
+      reads += 1;
+      // This first post-attach read returns before the final text becomes visible.
+      if (reads === 1) await gate.promise;
+      return real(sessionID, limit, cursor);
+    };
+
+    // The final text lands on the backend before the stale read resolves.
+    backend.messages = { ses_a: [userMessage('m1', 'do it'), reply('Done.')] };
+    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    await flush();
+    // A second boundary arrives while that read is still in flight: coalesced into one dirty
+    // hint rather than a second overlapping read.
+    controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+    await flush();
+    const readsDuringFlight = reads;
+    gate.resolve();
+    await flush();
+    // The coalesced hint reruns exactly once after the settling pause.
+    timer.runAll();
+    await flush();
+    expect(reads).toBe(readsDuringFlight + 1);
+
+    const messages = controller.state.transcripts['ses_a']?.messages ?? [];
+    expect(assistantText(messages, 'm2')).toBe('Done.');
     controller.dispose();
   });
 });
