@@ -1,4 +1,4 @@
-Current `master` is `213e7313`. I rechecked the earlier P0–P2 findings against that tree; all remain applicable. I’d work them roughly in this order.
+Current `master` is `c86bd45` (marg-audit-2 complete). P0/P1 tickets resolved by marg-audit-2 tasks 4–10 have been removed; the remainder below still apply.
 
 ## P0 — startup
 
@@ -134,97 +134,13 @@ Current `master` is `213e7313`. I rechecked the earlier P0–P2 findings against
 
 ---
 
-## P1 — measurement for long sessions
 
-### 6. `[P1][Performance][Long Sessions] Add a persistent soak benchmark for latency growth, GC and memory`
-
-**Problem:** the pure benchmark reaches 10k messages, but `bench:render` mounts only 1,000 short messages and performs a small number of tail updates. It does not answer the important question: *does event-to-frame latency increase after hours of one session continuously growing?* [`bench.ts:200-330`](https://github.com/estyseesghosts/margarita/blob/213e7313cd67fff68e6d2b3daf06ec14dc80a4fc/scripts/bench.ts#L200-L330) [`bench-render.ts:25-180`](https://github.com/estyseesghosts/margarita/blob/213e7313cd67fff68e6d2b3daf06ec14dc80a4fc/scripts/bench-render.ts#L25-L180)
-
-**Deliverables**
-- Keep one controller + mounted renderer alive for thousands of events rather than rebuilding per fixture.
-- Test at least 1k, 10k and 50k loaded messages.
-- Report event→commit→render p50/p95/p99 in successive windows, not only one aggregate.
-- Record heap, RSS and GC pause over time.
-- Include large responses, large diffs, many tools, tool-status streaming, pagination during streaming, expansion/collapse and session switching.
-- Add a 100-event burst case.
-- Track the projector's `messagesFolded`, `messagesReprocessed`, `prefixNodesReused` and related counters.
-- Add a controlled latency stage to validate measurements.
-
-**Avoidables**
-- Do not base conclusions on three samples.
-- Do not restart the app between each measured update.
-- Do not use private real transcripts.
-- Do not impose hard machine-specific millisecond thresholds in CI.
-
-**Regression traps**
-- Correct rendered output must be asserted alongside timing.
-- Fixture growth must not accidentally replace the whole history when testing an append.
-- Compare baseline/candidate on the same Bun/OpenTUI versions and dimensions.
-- Ensure benchmark instrumentation itself is disabled in production.
-
----
 
 ## P1 — long-session hot paths
 
-### 7. `[P1][Performance][Transcript] Make execution-marker derivation incremental by completed segment`
 
-**Problem:** every transcript projection currently calls `executionMarkers(messages, ...)`, which scans every loaded message and all assistant parts from the beginning. The incremental transcript projector therefore starts behind an O(total-history) pass. [`transcript-view.tsx:132-146`](https://github.com/estyseesghosts/margarita/blob/213e7313cd67fff68e6d2b3daf06ec14dc80a4fc/src/ui/transcript-view.tsx#L132-L146) [`execution-segment.ts:68-138`](https://github.com/estyseesghosts/margarita/blob/213e7313cd67fff68e6d2b3daf06ec14dc80a4fc/src/domain/execution-segment.ts#L68-L138)
 
-**Deliverables**
-- Maintain segment boundaries/indexes alongside canonical transcript state.
-- Treat closed `idle`-terminated segments as reusable immutable derivations.
-- Recompute only the current/open segment for ordinary streaming changes.
-- Invalidate the affected suffix for canonical replacement, older-page prepend, reorder or deletion.
-- Preserve marker IDs, activity, compaction status, durations and interruption outcomes.
-- Expose instrumentation for number of messages/segments rescanned per event.
-- Keep a pure full `executionMarkers()` implementation as a correctness reference if useful.
 
-**Avoidables**
-- Do not assume all server updates are append-only.
-- Do not infer execution state from UI nodes.
-- Do not cache solely by transcript length or newest ID.
-
-**Regression traps**
-- Steering while the same execution remains active.
-- Compaction running/completed/failed transitions.
-- Active tool → finished tool → reasoning transitions.
-- Interrupted/failed executions.
-- Older history prepend.
-- Replacement of a message inside the recent server page.
-- Same session IDs on different hosts.
-
----
-
-### 8. `[P1][Performance][Transcript] Bound incremental projector bookkeeping; stop scanning/copying the unchanged prefix`
-
-**Problem:** `createTranscriptProjector()` avoids expensive re-folding, but each projection still scans the common prefix, scans backward for segment boundaries, copies reusable `baseLists`, and rebuilds `nextFinal` with a copied prefix. Tail-update CPU/allocation therefore still scales with loaded history. [`transcript.ts:537-684`](https://github.com/estyseesghosts/margarita/blob/213e7313cd67fff68e6d2b3daf06ec14dc80a4fc/src/domain/transcript.ts#L537-L684)
-
-**Deliverables**
-- Give the projector an explicit changed-range/reconciliation boundary instead of rediscovering it from element identity every update.
-- Represent stable history in segment/chunk structures that can be reused without copying thousands of array references.
-- Keep finalized execution segments reusable as units.
-- Restrict `Bun.deepEquals()` fallback to the latest-page region rather than allowing it to become an accidental long-history path.
-- Preserve stable node identity for unchanged mounted rows.
-- Add allocation counters or equivalent evidence, not only wall-clock time.
-- Demonstrate bounded tail-update work between 1k and 50k loaded histories.
-
-**Avoidables**
-- Do not regress to a full fold.
-- Do not key a cache by serialized whole-transcript JSON.
-- Do not lose canonical replacement semantics.
-- Do not introduce a complicated rope/chunk layer unless it demonstrably reduces the existing copies.
-
-**Regression traps**
-- Recent page sends fresh DTO object identities for unchanged messages.
-- Open-turn marker changes without content changes.
-- New `idle` closes the previous open segment.
-- Tool groups split/merge at the changed boundary.
-- Global detailed-mode changes remain allowed to cause a broad rebuild.
-- Pagination prepend preserves scroll anchors.
-
-This should coordinate with existing [#319](https://github.com/estyseesghosts/margarita/issues/319).
-
----
 
 ### 9. `[P1][Performance][Transcript] Make latest-page reconciliation proportional to the page, not total loaded history`
 
@@ -286,40 +202,7 @@ Coordinate this with [#309](https://github.com/estyseesghosts/margarita/issues/3
 
 ---
 
-### 11. `[P1][Performance][Transcript UI] Remove the controller's second full transcript-fold path`
 
-**Problem:** the UI already owns an incremental projector, but controller presentation helpers independently call `foldTranscript()` across the entire loaded conversation. `collapsibleItems()`, tool lookup, focus navigation, child-tool lookup and `ensureTranscriptNodeVisible()` can therefore trigger expensive full folds during interaction. [`controller.ts:7955-8125`](https://github.com/estyseesghosts/margarita/blob/213e7313cd67fff68e6d2b3daf06ec14dc80a4fc/src/app/controller.ts#L7955-L8125)
-
-**Deliverables**
-- Establish one authoritative derived projection/index per attached transcript.
-- Expose lightweight indexes/selectors for:
-  - collapsible items in order;
-  - node key → index;
-  - tool ID → tool/node;
-  - group → member tools;
-  - focused child-bearing tool.
-- Make keyboard navigation/focus use those indexes rather than calling `foldTranscript()`.
-- Keep worker rows integrated without forcing canonical transcript re-folding.
-- Explicitly define ownership: domain/projector produces projection; controller consumes read-only indexes; UI renders it.
-- Benchmark Ctrl+Up/Down, Enter expansion and focus reveal at 10k/50k messages.
-
-**Avoidables**
-- Do not create a second independently invalidated derived cache.
-- Do not move UI render objects into controller state.
-- Do not make focus movement mutate canonical transcript state.
-- Do not sacrifice server-qualified IDs.
-
-**Regression traps**
-- Compact vs detailed mode.
-- Expanded groups, individual tools and oversized diffs.
-- Focused item outside the current render window.
-- Streaming while focus remains on an old tool.
-- Worker rows appearing/disappearing.
-- Pagination prepend must not change semantic focus identity.
-
-This overlaps [#319](https://github.com/estyseesghosts/margarita/issues/319) and should be designed with it rather than creating another projector abstraction.
-
----
 
 ### 12. `[P1][Performance][Rendering] Budget transcript rendering by physical cost, not only node count`
 
@@ -412,6 +295,6 @@ This belongs with the cache-invalidation work already contemplated by [#319](htt
 
 ### Order I would actually implement
 
-`#1 → #2/#3 → #4 → #5 → #6 → #7/#9/#10 → #8 → #11 → #14 → #12/#13`.
+`#1 → #2/#3 → #4 → #5 → #9 → #10 → #14 → #12/#13`.
 
 The important architectural boundary is that **#7–#11 should converge on one transcript repository/projection pipeline**, not produce five independent caches. Existing [#309](https://github.com/estyseesghosts/margarita/issues/309) and [#319](https://github.com/estyseesghosts/margarita/issues/319) are the natural umbrellas for that work; [#316](https://github.com/estyseesghosts/margarita/issues/316) matters where explicit reactive ownership/invalidation is required.
