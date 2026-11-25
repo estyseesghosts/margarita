@@ -236,6 +236,18 @@ async function createFixture(
   backend.serverID = serverID;
   backend.sessions = Object.keys(histories).map((id) => summary(id, `Soak ${id}`));
   for (const [id, messages] of Object.entries(histories)) backend.messages[id] = messages;
+  // A running worker on the main session so the soak can exercise worker status mutation
+  // with an unchanged worker count (#audit-2 tasks 3 and 10).
+  backend.jobs[mainSessionID] = [
+    {
+      id: 'soak-worker',
+      childSessionID: 'soak-worker-child',
+      agent: 'build',
+      description: 'review patch',
+      status: 'running' as const,
+      startedAt: 1,
+    },
+  ];
   const controller = new AppController({
     backend,
     config: defaultConfig,
@@ -358,14 +370,16 @@ type EventKind =
   | 'large-response'
   | 'large-diff'
   | 'many-tools'
-  | 'background-confirmation';
+  | 'background-confirmation'
+  | 'late-reply'
+  | 'worker-mutation';
 
 async function runEvent(
   fixture: StageFixture,
   sessionID: string,
   serial: number,
   kind: EventKind,
-): Promise<{ elapsedMs: number; stats: ProjectionStats | undefined }> {
+): Promise<{ elapsedMs: number; stats: ProjectionStats | undefined; nodesCopied: number }> {
   const { backend, controller, setup, stats } = fixture;
   const messages = backend.messages[sessionID];
   if (messages === undefined) throw new Error(`soak: no fixture for ${sessionID}`);
@@ -527,6 +541,68 @@ async function runEvent(
       };
       break;
     }
+    case 'late-reply': {
+      // Reproduces the newest-short-reply race at scale: an assistant placeholder exists
+      // before its content arrives, then the final short answer lands behind the early
+      // boundary and must be displayed (#audit-2 tasks 2 and 10).
+      const id = `soak-late${serial}`;
+      messages.push({
+        kind: 'assistant',
+        id,
+        createdAt: 10_000_000 + serial,
+        agent: 'build',
+        model,
+        parts: [{ kind: 'text', text: '' }],
+      });
+      controller.onEvents(serverID, [{ kind: 'transcript-changed', sessionID }], false);
+      await waitFor(
+        () => messagesOf(controller, sessionID).at(-1)?.id === id,
+        'late-reply placeholder committed',
+      );
+      const placeholder = messages.find((message) => message.id === id);
+      if (placeholder?.kind !== 'assistant') {
+        throw new Error('soak: late-reply placeholder vanished');
+      }
+      placeholder.parts = [{ kind: 'text', text: 'Done.' }];
+      placeholder.completedAt = 10_000_001 + serial;
+      controller.onEvents(serverID, [{ kind: 'transcript-changed', sessionID }], false);
+      settled = () => {
+        const current = messagesOf(controller, sessionID).at(-1);
+        return (
+          current?.kind === 'assistant' &&
+          current.id === id &&
+          current.parts.some((part) => part.kind === 'text' && part.text === 'Done.')
+        );
+      };
+      break;
+    }
+    case 'worker-mutation': {
+      // A worker finishes with an unchanged worker count: the cached presentation must
+      // reflect the new status without re-deriving unrelated rows (#audit-2 tasks 3 and 10).
+      controller.onEvents(serverID, [{ kind: 'transcript-changed', sessionID, jobs: true }], false);
+      await waitFor(
+        () => controller.workerNodes(sessionID, serverID)[0]?.worker.status === 'running',
+        'worker running',
+      );
+      const beforeCount = controller.workerNodes(sessionID, serverID).length;
+      backend.jobs[mainSessionID] = [
+        {
+          id: 'soak-worker',
+          childSessionID: 'soak-worker-child',
+          agent: 'build',
+          description: 'review patch',
+          status: 'completed' as const,
+          startedAt: 1,
+          completedAt: 2,
+        },
+      ];
+      controller.onEvents(serverID, [{ kind: 'transcript-changed', sessionID, jobs: true }], false);
+      settled = () => {
+        const nodes = controller.workerNodes(sessionID, serverID);
+        return nodes.length === beforeCount && nodes[0]?.worker.status === 'completed';
+      };
+      break;
+    }
     default: {
       const exhaustive: never = kind;
       throw new Error(`soak: unknown event ${String(exhaustive)}`);
@@ -540,11 +616,12 @@ async function runEvent(
   // Keyed by transcript identity so a route/session switch cannot collect another session's
   // counters. The callback only runs for the mounted transcript, which is this session here.
   const last = stats.at(-1);
-  return { elapsedMs, stats: last };
+  const view = controller.presentationFor(sessionID);
+  return { elapsedMs, stats: last, nodesCopied: view.nodesCopied() };
 }
 
 function eventKind(index: number): EventKind {
-  switch (index % 18) {
+  switch (index % 20) {
     case 0:
       return 'large-response';
     case 1:
@@ -560,6 +637,10 @@ function eventKind(index: number): EventKind {
       return 'stream';
     case 17:
       return 'background-confirmation';
+    case 18:
+      return 'late-reply';
+    case 19:
+      return 'worker-mutation';
     default:
       return 'append';
   }
@@ -574,6 +655,12 @@ type WindowReport = Readonly<{
     messagesReprocessed: number;
     prefixNodesReused: number;
     maxMessagesFolded: number;
+    /** Nodes the last structural change re-copied; 0 proves the chunked view shared its
+     * prefix instead of flattening it (#audit-2 tasks 4 and 10). */
+    nodesCopied: number;
+    /** Marker derivation counters for the tail update that produced this sample. */
+    markerMessagesScanned: number;
+    markerSegmentsReused: number;
   };
   render: {
     mountedNodes: number;
@@ -613,6 +700,9 @@ async function historyStage(loadedMessages: number) {
     let reprocessed = 0;
     let reused = 0;
     let maxFolded = 0;
+    let nodesCopiedTotal = 0;
+    let markerScanned = 0;
+    let markerReused = 0;
     let windowStart = 0;
     let serial = 2;
 
@@ -626,6 +716,12 @@ async function historyStage(loadedMessages: number) {
         reused += sample.stats.prefixNodesReused;
         maxFolded = Math.max(maxFolded, sample.stats.messagesFolded);
       }
+      nodesCopiedTotal += sample.nodesCopied;
+      const markerStats = controller.markerStatsOf(mainSessionID);
+      if (markerStats !== undefined) {
+        markerScanned += markerStats.messagesScanned;
+        markerReused += markerStats.segmentsReused;
+      }
       if (samples.length - windowStart >= windowSize || index === eventCount - 1) {
         const windowSamples = samples.slice(windowStart);
         windows.push({
@@ -637,6 +733,9 @@ async function historyStage(loadedMessages: number) {
             messagesReprocessed: reprocessed,
             prefixNodesReused: reused,
             maxMessagesFolded: maxFolded,
+            nodesCopied: nodesCopiedTotal,
+            markerMessagesScanned: markerScanned,
+            markerSegmentsReused: markerReused,
           },
           render: (() => {
             const view = controller.presentationFor(mainSessionID);
@@ -658,6 +757,9 @@ async function historyStage(loadedMessages: number) {
         reprocessed = 0;
         reused = 0;
         maxFolded = 0;
+        nodesCopiedTotal = 0;
+        markerScanned = 0;
+        markerReused = 0;
       }
     }
 
@@ -690,6 +792,20 @@ async function historyStage(loadedMessages: number) {
     await setup.renderOnce();
     const burstMs = performance.now() - burstStart;
     const burstStats = stats.at(-1);
+
+    // Structural regressions, not millisecond budgets (#audit-2 task 10):
+    // a 100-message tail burst must fold only the new tail, never reload the loaded prefix;
+    // and no event may flatten the loaded history (nodesCopied stays well below it).
+    if (burstStats !== undefined && burstStats.messagesFolded > 120) {
+      throw new Error(
+        `soak: 100-message tail burst folded ${burstStats.messagesFolded} messages, expected <= 120`,
+      );
+    }
+    if (nodesCopiedTotal > main.length) {
+      throw new Error(
+        `soak: events copied ${nodesCopiedTotal} prefix nodes for a ${main.length}-message history`,
+      );
+    }
 
     // Expansion/collapse: local disclosure must not lose the live tail or the mounted frame.
     const expansionSamples: number[] = [];
