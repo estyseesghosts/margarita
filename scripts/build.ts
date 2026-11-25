@@ -1,4 +1,6 @@
+import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import solidPlugin from '@opentui/solid/bun-plugin';
 
@@ -16,6 +18,37 @@ const windows = target === undefined ? process.platform === 'win32' : target.inc
 const outfile = `dist/marg${windows ? '.exe' : ''}`;
 const version = formatBuildVersion(sourceIdentity());
 const linux = target === undefined ? process.platform === 'linux' : target.includes('linux');
+
+// The OpenTUI native library lives in a separate per-platform package
+// (@opentui/core-<os>-<arch>) that is an optional dependency of @opentui/core.
+// A fresh checkout must run `bun install` to fetch it; fail early with a clear
+// message instead of a cryptic resolver error deep in the bundle (#build).
+function platformPackageName(t?: string): string {
+  const raw =
+    t ??
+    (process.platform === 'win32' ? 'bun-windows-x64' : `bun-${process.platform}-${process.arch}`);
+  const [os, arch, ...mod] = raw.slice('bun-'.length).split('-');
+  let osName: string;
+  if (os === undefined) {
+    osName = process.platform;
+  } else if (os === 'windows') {
+    osName = 'win32';
+  } else {
+    osName = os;
+  }
+  let name = `@opentui/core-${osName}-${arch ?? process.arch}`;
+  if (mod.includes('musl')) name += '-musl';
+  return name;
+}
+const platformPackage = platformPackageName(target);
+const platformPkgDir = join('node_modules', platformPackage);
+if (!existsSync(platformPkgDir)) {
+  console.error(
+    `Build requires the OpenTUI native package "${platformPackage}", but it is not installed.`,
+  );
+  console.error(`Run: bun install   (it is an optional dependency of @opentui/core)`);
+  process.exit(1);
+}
 // OpenTUI picks its Linux native package from this variable at run time, which would pull in
 // (and fail to resolve) the musl package inside a compiled glibc binary. Fixing it at compile
 // time embeds exactly one variant (#179).
