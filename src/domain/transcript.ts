@@ -597,6 +597,8 @@ export interface TranscriptNodeView {
   /** Pre-existing nodes re-copied by the last structural change that produced this view
    * (0 for a plain projector view; the size of the affected chunk after an insertion). */
   nodesCopied(): number;
+  /** Chunk start offsets, reused for the unchanged prefix when a projection is rebuilt. */
+  chunkOffsets(): readonly number[];
 }
 
 export type TranscriptProjector = Readonly<{
@@ -633,12 +635,27 @@ const latestMessageRegion = 120;
 function createNodeView(
   chunks: readonly (readonly TranscriptNode[])[],
   copied: number = 0,
+  offsetHint?: readonly number[],
 ): TranscriptNodeView {
   const offsets: number[] = [];
-  let total = 0;
-  for (const chunk of chunks) {
+  let reused = 0;
+  if (offsetHint !== undefined) {
+    // A tail update keeps the prefix chunks byte-for-byte; their starts need no recompute.
+    let hintTotal = 0;
+    while (
+      reused < chunks.length &&
+      reused < offsetHint.length &&
+      offsetHint[reused] === hintTotal
+    ) {
+      offsets.push(hintTotal);
+      hintTotal += chunks[reused]?.length ?? 0;
+      reused += 1;
+    }
+  }
+  let total = reused === 0 ? 0 : (offsets[reused - 1] ?? 0) + (chunks[reused - 1]?.length ?? 0);
+  for (let index = reused; index < chunks.length; index += 1) {
     offsets.push(total);
-    total += chunk.length;
+    total += chunks[index]?.length ?? 0;
   }
 
   function at(index: number): TranscriptNode | undefined {
@@ -703,7 +720,8 @@ function createNodeView(
     tail,
     toArray: () => chunks.flat(),
     some: (predicate) => chunks.some((chunk) => chunk.some(predicate)),
-    append: (nodes) => createNodeView(nodes.length === 0 ? chunks : [...chunks, nodes], copied),
+    append: (nodes) =>
+      createNodeView(nodes.length === 0 ? chunks : [...chunks, nodes], copied, offsets),
     insertAfterTool: (toolID, notices) => {
       // Find the chunk and position of the node that owns this tool.
       let targetChunk = -1;
@@ -722,7 +740,7 @@ function createNodeView(
         }
       }
       // A notice for a tool outside this view is dropped, never re-attached elsewhere (#135).
-      if (targetChunk === -1) return createNodeView(chunks, copied);
+      if (targetChunk === -1) return createNodeView(chunks, copied, offsets);
       const chunk = chunks[targetChunk]!;
       const head = chunk.slice(0, targetIndex + 1);
       const rest = chunk.slice(targetIndex + 1);
@@ -731,9 +749,10 @@ function createNodeView(
       nextChunks[targetChunk] = rebuilt;
       // Only the affected chunk's pre-existing nodes are re-copied; every other chunk,
       // including the full 50k-node prefix, is shared by reference.
-      return createNodeView(nextChunks, chunk.length);
+      return createNodeView(nextChunks, chunk.length, offsets);
     },
     nodesCopied: () => copied,
+    chunkOffsets: () => offsets,
     *[Symbol.iterator]() {
       for (const chunk of chunks) yield* chunk;
     },
@@ -782,6 +801,7 @@ export function createTranscriptProjector(): TranscriptProjector {
   let baseLists: (readonly TranscriptNode[])[] = [];
   let previousMessages: readonly TranscriptMessage[] = [];
   let chunks: readonly (readonly TranscriptNode[])[] = [];
+  let offsets: readonly number[] = [];
   let endOffsetByMessage: number[] = [];
   let stats: ProjectionStats | undefined;
   let disclosureSignature: string | undefined;
@@ -792,6 +812,7 @@ export function createTranscriptProjector(): TranscriptProjector {
     baseLists = [];
     previousMessages = [];
     chunks = [];
+    offsets = [];
     endOffsetByMessage = [];
     disclosureSignature = undefined;
   }
@@ -977,7 +998,9 @@ export function createTranscriptProjector(): TranscriptProjector {
     };
     previousMessages = messages;
     stats = nextStats;
-    return createNodeView(chunks);
+    const view = createNodeView(chunks, 0, offsets);
+    offsets = view.chunkOffsets();
+    return view;
   }
 
   function project(messages: readonly TranscriptMessage[], options: FoldOptions): TranscriptNode[] {
