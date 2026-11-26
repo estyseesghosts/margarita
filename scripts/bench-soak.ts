@@ -33,7 +33,7 @@ import type {
   ToolCall,
   TranscriptMessage,
 } from '../src/domain/transcript.ts';
-import { windowNodeView } from '../src/domain/transcript.ts';
+import { viewportNodeView } from '../src/domain/transcript.ts';
 import { summarizeSamples } from '../src/perf/measure.ts';
 import { App } from '../src/ui/app.tsx';
 import { pickTheme } from '../src/ui/theme.ts';
@@ -743,13 +743,14 @@ async function historyStage(loadedMessages: number) {
           render: (() => {
             // Measure the same logical node window production mounts, not an orphaned
             // physical-row estimator: a benchmark must never redefine scroll history.
-            const windowed = windowNodeView(
+            const windowed = viewportNodeView(
               controller.presentationFor(mainSessionID),
-              controller.transcriptWindow(mainSessionID),
+              controller.transcriptViewport(mainSessionID),
             );
             return {
               mountedNodes: windowed.visible.length,
               hiddenNodes: windowed.hidden,
+              hiddenAfterNodes: windowed.hiddenAfter,
               totalNodes: windowed.total,
             };
           })(),

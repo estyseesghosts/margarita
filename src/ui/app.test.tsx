@@ -2626,7 +2626,7 @@ describe('transcript rendering (docs/22, docs/23)', () => {
     controller.dispose();
   });
 
-  test('Ctrl+Home reveals every loaded node, not just the render window (#251)', async () => {
+  test('Ctrl+Home moves a bounded window to the earliest loaded node (#251)', async () => {
     const backend = backendWithSession();
     backend.messages = {
       ses_a: [
@@ -2649,12 +2649,17 @@ describe('transcript rendering (docs/22, docs/23)', () => {
     await controller.loadOlder('ses_a');
     await controller.loadOlder('ses_a');
     await settle(setup);
+    expect(controller.transcriptViewport('ses_a').mode).toBe('tail');
     expect(controller.transcriptWindow('ses_a')).toBe(200);
 
     setup.mockInput.pressKey('HOME', { ctrl: true });
     await settle(setup);
-    // All 301 loaded nodes fit in the window; the earliest prompt is reachable.
-    expect(controller.transcriptWindow('ses_a')).toBeGreaterThanOrEqual(301);
+    // The earliest prompt is reachable without mounting all 301 loaded nodes.
+    expect(controller.transcriptViewport('ses_a')).toMatchObject({
+      mode: 'history',
+      start: 0,
+      capacity: 200,
+    });
     expect(setup.captureCharFrame()).toContain('first loaded prompt');
     controller.dispose();
   });
@@ -2739,6 +2744,7 @@ describe('transcript rendering (docs/22, docs/23)', () => {
     await controller.loadOlder('ses_a');
     await settle(setup);
     expect(controller.collapsibleItems().length).toBeGreaterThan(200);
+    expect(controller.transcriptViewport('ses_a').mode).toBe('tail');
     expect(controller.transcriptWindow('ses_a')).toBe(200);
 
     for (let step = 0; step < 120; step += 1) {
@@ -2747,7 +2753,9 @@ describe('transcript rendering (docs/22, docs/23)', () => {
     await settle(setup);
     const focused = controller.state.focusedGroup;
     expect(focused).toBeDefined();
-    expect(controller.transcriptWindow('ses_a')).toBeGreaterThan(200);
+    // Focus reveal shifts the bounded window; it never grows the mounted set.
+    expect(controller.transcriptViewport('ses_a').mode).toBe('history');
+    expect(controller.transcriptWindow('ses_a')).toBe(200);
     expect(setup.captureCharFrame()).toContain('(Enter)');
     controller.dispose();
   }, 15_000);

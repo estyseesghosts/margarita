@@ -17,7 +17,11 @@ import type { ProjectRef } from '../domain/server-identity.ts';
 import { localServerID } from '../domain/server-identity.ts';
 import type { SessionSummary } from '../domain/session.ts';
 import type { ShellJob } from '../domain/shell-job.ts';
-import type { ToolResultPayload, TranscriptMessage } from '../domain/transcript.ts';
+import type {
+  ToolResultPayload,
+  TranscriptMessage,
+  TranscriptViewport,
+} from '../domain/transcript.ts';
 import type { WorkerJob } from '../domain/worker.ts';
 
 /** A transient Ctrl+B confirmation bound to one tool call of one session (#135). */
@@ -285,12 +289,11 @@ export type AppState = {
   catalogError?: string;
   detailed: boolean;
   /**
-   * How many folded transcript nodes from loaded history are eligible to be mounted, per
-   * session (see `windowNodeView`). Grows as the reader pages up. This is a logical node
-   * allowance, never a physical-row budget; server history availability lives in the
-   * transcript's `olderCursor`.
+   * Bounded reading viewport per session: tail-follow or a fixed-capacity history window
+   * anchored to a semantic node key. Never grows with the length of loaded history; server
+   * history availability lives in the transcript's `olderCursor`.
    */
-  transcriptWindow: Record<string, number>;
+  transcriptViewport: Record<string, TranscriptViewport>;
   expandedGroups: Record<string, true>;
   /** Tool IDs whose oversized inline diffs the user expanded; mirrors expandedGroups. */
   expandedDiffs: Record<string, true>;
@@ -400,7 +403,7 @@ export function initialState(directory: string, serverID: string = localServerID
     mcpCatalogs: {},
     catalogLoading: false,
     detailed: false,
-    transcriptWindow: {},
+    transcriptViewport: {},
     expandedGroups: {},
     expandedDiffs: {},
     expandedTools: {},

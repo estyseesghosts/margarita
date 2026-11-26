@@ -1,13 +1,12 @@
-import type { ScrollBoxRenderable, SyntaxStyle } from '@opentui/core';
+import type { Renderable, ScrollBoxRenderable, SyntaxStyle } from '@opentui/core';
 import { getTreeSitterClient } from '@opentui/core';
 import { useRenderer } from '@opentui/solid';
-import type { Accessor } from 'solid-js';
+import type { Accessor, JSX } from 'solid-js';
 import {
   createEffect,
   createMemo,
   createSignal,
   For,
-  Index,
   Match,
   onCleanup,
   onMount,
@@ -64,7 +63,7 @@ import {
   toolMetadataRowBudget,
   type TranscriptNode,
   type TranscriptNodeView,
-  windowNodeView,
+  viewportNodeView,
 } from '../domain/transcript.ts';
 import { type WorkerStatus, workerStatusLabel } from '../domain/worker.ts';
 import { strings } from '../i18n/index.ts';
@@ -185,11 +184,11 @@ export function Transcript(props: TranscriptProps) {
         : [{ kind: 'meta' as const, key: `job-status:${key}`, text: warning }],
     );
   });
-  // One logical history window: how many folded nodes from loaded history may be mounted.
-  // Physical row cost is handled by the scrollbox's viewport culling and by per-item caps,
-  // never by choosing a different set of nodes relative to the tail (#355 repair).
+  // One bounded reading window. Tail mode follows live output; history mode keeps a
+  // fixed-capacity set anchored to a semantic node, so streaming cannot replace historical
+  // rows and no amount of PageUp mounts the whole transcript (slow.txt tasks 2 and 6).
   const windowed = createMemo(() =>
-    windowNodeView(nodes(), props.controller.transcriptWindow(props.sessionID, props.serverID)),
+    viewportNodeView(nodes(), props.controller.transcriptViewport(props.sessionID, props.serverID)),
   );
   // Server-confirmed pending user follow-ups, FIFO (server order) — rendered in the
   // activity region right above the running task marker, never inside the composer.
@@ -216,6 +215,17 @@ export function Transcript(props: TranscriptProps) {
   const nodeIndexFor = () =>
     props.controller.presentationIndexFor(props.sessionID, props.serverID).keyToIndex;
 
+  // View-local, nonreactive registry of mounted rows. Renderables are ephemeral view state
+  // and must never enter AppState. The semantic-key fallback covers compact/detailed
+  // transitions, where a concrete renderable can legitimately be replaced (slow.txt task 4).
+  const mountedRows = new Map<string, Renderable>();
+  const registerRow = (key: string, element: Renderable | undefined): void => {
+    if (element === undefined) mountedRows.delete(key);
+    else mountedRows.set(key, element);
+  };
+  const rowFor = (key: string): Renderable | undefined =>
+    mountedRows.get(key) ?? box?.findDescendantById(nodeID(key));
+
   /** Captures an actual mounted row's key and offset, without reading raw `scrollTop`. */
   const captureAnchor = (
     key: string,
@@ -223,7 +233,7 @@ export function Transcript(props: TranscriptProps) {
     passes: number,
   ): SemanticAnchor | undefined => {
     if (box === undefined) return undefined;
-    const element = box.findDescendantById(nodeID(key));
+    const element = rowFor(key);
     if (element === undefined) return undefined;
     return { key, offset: element.y - box.y, holdWhileLoading, passes };
   };
@@ -298,9 +308,11 @@ export function Transcript(props: TranscriptProps) {
       setSticky(undefined);
       return;
     }
+    // One pass over the bounded mounted window. Row geometry comes from the registry, not
+    // from recursive render-tree searches (slow.txt task 5).
     const positions = windowed().visible.flatMap((node) => {
       if (node.kind !== 'user') return [];
-      const element = scrollbox.findDescendantById(nodeID(node.key));
+      const element = mountedRows.get(node.key);
       if (element === undefined) return [];
       // The wrapper starts with the prompt's top margin row.
       const top = element.y + 1 - scrollbox.y;
@@ -313,11 +325,11 @@ export function Transcript(props: TranscriptProps) {
       setSticky(found.text);
       return;
     }
-    // The user prompt may be older than every user node in the render window (#244).
+    // The user prompt may be older than every user node in the mounted window (#244).
     // Resolve the latest preceding prompt from the full folded conversation, not only the
     // mounted window, then require that the resolved node is actually above the viewport.
     const top = windowed().visible.find((node) => {
-      const element = scrollbox.findDescendantById(nodeID(node.key));
+      const element = mountedRows.get(node.key);
       return element !== undefined && element.y + element.height > scrollbox.y;
     });
     const index = top === undefined ? undefined : nodeIndexFor().get(top.key);
@@ -332,9 +344,20 @@ export function Transcript(props: TranscriptProps) {
     }
     setSticky(undefined);
   };
+  // One owner schedules sticky work: all scroll/key paths call this, and at most one
+  // post-layout update runs per frame (slow.txt task 5).
+  let stickyScheduled = false;
+  const scheduleSticky = () => {
+    if (stickyScheduled || box === undefined) return;
+    stickyScheduled = true;
+    box.afterLayout(() => {
+      stickyScheduled = false;
+      updateSticky();
+    });
+  };
   createEffect(() => {
     windowed();
-    box?.afterLayout(updateSticky);
+    scheduleSticky();
   });
 
   // A route/host switch must never carry the previous conversation's pinned prompt or anchor.
@@ -344,7 +367,7 @@ export function Transcript(props: TranscriptProps) {
     void props.serverID;
     setSticky(undefined);
     setPendingAnchor(undefined);
-    box?.afterLayout(updateSticky);
+    scheduleSticky();
   });
 
   /**
@@ -363,7 +386,7 @@ export function Transcript(props: TranscriptProps) {
     if (anchor === undefined || box === undefined) return;
     const scrollbox = box;
     scrollbox.afterLayout(() => {
-      const target = scrollbox.findDescendantById(nodeID(anchor.key));
+      const target = rowFor(anchor.key);
       if (target === undefined) {
         if (anchor.holdWhileLoading) return;
         if (anchor.passes > 0) setPendingAnchor({ ...anchor, passes: anchor.passes - 1 });
@@ -456,38 +479,43 @@ export function Transcript(props: TranscriptProps) {
         if (box.scrollTop > 0) {
           box.scrollBy(-page);
           updateSticky();
-          box.afterLayout(updateSticky);
           return;
         }
-        // At the true top: capture the first mounted semantic row *before* expanding the
+        // At the true top: capture the first mounted semantic row *before* moving the
         // window or requesting an older page, then put that same row back after layout (#243).
         const anchor = captureHistoryAnchor();
         if (!props.controller.revealEarlier(props.sessionID, windowed().hidden, props.serverID))
           return;
         if (anchor !== undefined) setPendingAnchor(anchor);
+        updateSticky();
         return;
       }
-      case 'pageDown':
+      case 'pageDown': {
+        // At the bottom of a history window, move it forward instead of only scrolling.
+        // Reaching the tail resets to the bounded live window (#slow task 2).
+        if (windowed().hiddenAfter === 0) {
+          props.controller.revealLater(props.sessionID, props.serverID);
+        }
         box.scrollBy(page);
         updateSticky();
-        box.afterLayout(updateSticky);
         return;
+      }
       case 'top':
-        // Ctrl+Home reaches the earliest loaded node, not just the top of the current
-        // render window. Any remaining server history stays advertised above (#251).
+        // Ctrl+Home moves a bounded window to the earliest loaded node; remaining server
+        // history stays advertised above (#251, #slow task 2).
         props.controller.revealAllLoaded(props.sessionID, windowed().hidden, props.serverID);
         box.afterLayout(() => {
           box?.scrollTo(0);
-          updateSticky();
+          scheduleSticky();
         });
         return;
       case 'bottom':
-        // Ctrl+End is an explicit return to live follow: clear the reading chrome and any
-        // in-flight anchor immediately, then jump to the tail. Future output follows.
+        // Ctrl+End returns immediately to the bounded tail and resumes live follow.
+        props.controller.returnToTranscriptTail(props.sessionID, props.serverID);
         setPendingAnchor(undefined);
         setSticky(undefined);
         box.scrollTo(box.scrollHeight);
-        box.afterLayout(updateSticky);
+        scheduleSticky();
         return;
       default:
         assertNever(move);
@@ -496,7 +524,7 @@ export function Transcript(props: TranscriptProps) {
   onMount(() => {
     props.onScrollHandle?.(scroll);
     props.onDetailsHandle?.(toggleDetails);
-    if (box !== undefined) box.verticalScrollBar.onChange = updateSticky;
+    if (box !== undefined) box.verticalScrollBar.onChange = scheduleSticky;
   });
   onCleanup(() => {
     props.onScrollHandle?.(undefined);
@@ -548,13 +576,13 @@ export function Transcript(props: TranscriptProps) {
         <Show when={transcript()?.loading === true && nodes().length === 0}>
           <text fg={props.theme.dim}>{strings.transcript.history.loadingConversation}</text>
         </Show>
-        {/* Row slots persist by index so a semantic prepend/reorder cannot remount every
-            visible row. Unchanged nodes keep their object identity (#283), so a streamed
-            tail update leaves those slots and their formatting untouched. */}
-        <Index each={windowed().visible}>
+        {/* Item-keyed rows: unchanged nodes keep both their node object and their mounted
+            component when the window shifts. A streamed open turn may replace one row, but
+            historical rows are never repurposed by array position (#slow task 3). */}
+        <For each={windowed().visible}>
           {(node) => (
             <>
-              <Show when={isRunningExecution(node()) && queued().length > 0}>
+              <Show when={isRunningExecution(node) && queued().length > 0}>
                 <QueuedPreview
                   items={queued()}
                   theme={props.theme}
@@ -562,15 +590,15 @@ export function Transcript(props: TranscriptProps) {
                   steerKey={actionHint(props.keymap, 'composer.steer')}
                 />
               </Show>
-              <box id={nodeID(node().key)} flexDirection="column" flexShrink={0}>
+              <RegisteredRow nodeKey={node.key} register={registerRow}>
                 <NodeView
                   controller={props.controller}
-                  node={node()}
+                  node={node}
                   theme={props.theme}
                   detailed={state.detailed}
                   syntax={syntax()}
                   width={props.width}
-                  focused={isNodeFocused(node(), state.focusedGroup)}
+                  focused={isNodeFocused(node, state.focusedGroup)}
                   animate={props.animate}
                   ascii={props.ascii}
                   mcpServers={mcpServers()}
@@ -587,10 +615,10 @@ export function Transcript(props: TranscriptProps) {
                     'stale'
                   }
                 />
-              </box>
+              </RegisteredRow>
             </>
           )}
-        </Index>
+        </For>
         {/* Fallback: no running marker to sit above (e.g. transcript not loaded). */}
         <Show when={!hasRunningMarker() && queued().length > 0}>
           <QueuedPreview
@@ -700,6 +728,25 @@ export function WelcomePanel(props: WelcomeProps) {
 
 function nodeID(key: string): string {
   return `node:${key}`;
+}
+
+/** Registers the real renderable for a semantic node key and releases it on unmount. */
+function RegisteredRow(props: {
+  nodeKey: string;
+  register: (key: string, element: Renderable | undefined) => void;
+  children: JSX.Element;
+}) {
+  onCleanup(() => props.register(props.nodeKey, undefined));
+  return (
+    <box
+      id={nodeID(props.nodeKey)}
+      flexDirection="column"
+      flexShrink={0}
+      ref={(element) => props.register(props.nodeKey, element)}
+    >
+      {props.children}
+    </box>
+  );
 }
 
 /** The node key a focused group/diff/tool/worker row names. */

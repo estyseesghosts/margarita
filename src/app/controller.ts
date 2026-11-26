@@ -198,11 +198,13 @@ import {
   findToolMessage,
   nodeViewFromArray,
   type ProjectionStats,
+  tailViewport,
   type ToolCall,
   type TranscriptMessage,
   type TranscriptNode,
   type TranscriptNodeView,
   type TranscriptProjector,
+  type TranscriptViewport,
   transcriptWindowStep,
 } from '../domain/transcript.ts';
 import type { UsageAnalytics } from '../domain/usage-analytics.ts';
@@ -2484,7 +2486,7 @@ export class AppController {
         delete state.awaitingSteer[key];
         delete state.running[key];
         delete state.openedAt[key];
-        delete state.transcriptWindow[key];
+        delete state.transcriptViewport[key];
         // A deleted session must not keep a live-looking worker or a stale background note.
         delete state.workers[key];
         delete state.workerStatus[key];
@@ -3811,20 +3813,30 @@ export class AppController {
     }
   }
 
-  /**
-   * How many folded nodes from loaded history may be mounted for a session. `hidden` from
-   * `windowNodeView` means exactly the loaded nodes outside this logical window; it says
-   * nothing about server history, which is advertised solely by `olderCursor` (#355 repair).
-   */
+  /** The current bounded reading viewport; absent means live-tail follow. */
+  transcriptViewport(
+    sessionID: string,
+    serverID: string = this.activeServerID(),
+  ): TranscriptViewport {
+    return this.state.transcriptViewport[this.keyFor(serverID, sessionID)] ?? tailViewport();
+  }
+
+  private writeTranscriptViewport(
+    sessionID: string,
+    serverID: string,
+    viewport: TranscriptViewport,
+  ): void {
+    this.setState('transcriptViewport', this.keyFor(serverID, sessionID), viewport);
+  }
+
+  /** Compatibility accessor: mounted capacity is fixed, never a grow-only allowance. */
   transcriptWindow(sessionID: string, serverID: string = this.activeServerID()): number {
-    return this.state.transcriptWindow[this.keyFor(serverID, sessionID)] ?? transcriptWindowStep;
+    return this.transcriptViewport(sessionID, serverID).capacity;
   }
 
   /**
-   * Grows the logical allowance until every currently *loaded* presentation node fits.
-   * Ctrl+Home uses this to reach the earliest loaded message while the existing "earlier
-   * messages" marker still tells the reader when server history remains (#251). No physical
-   * row slicer constrains this; no server page is fetched here.
+   * Ctrl+Home moves a same-size window to the earliest *loaded* node. Server history is
+   * still advertised by `olderCursor`; this never mounts every loaded node (#slow task 2).
    */
   revealAllLoaded(
     sessionID: string,
@@ -3832,17 +3844,21 @@ export class AppController {
     serverID: string = this.activeServerID(),
   ): boolean {
     if (hiddenNodes <= 0) return false;
-    const key = this.keyFor(serverID, sessionID);
-    const loaded = this.presentationFor(sessionID, serverID).length;
-    const needed = Math.max(this.transcriptWindow(sessionID, serverID) + hiddenNodes, loaded);
-    this.setState('transcriptWindow', key, needed);
+    const first = this.presentationFor(sessionID, serverID).at(0);
+    if (first === undefined) return false;
+    const capacity = this.transcriptViewport(sessionID, serverID).capacity;
+    this.writeTranscriptViewport(sessionID, serverID, {
+      mode: 'history',
+      anchorKey: first.key,
+      start: 0,
+      capacity,
+    });
     return true;
   }
 
   /**
-   * Expands the render window far enough to include one semantic node. Keyboard focus can
-   * move to an item older than the current window; that item must be rendered and scrolled
-   * into view before Enter can act on it (#242). Only loaded nodes are changed.
+   * Moves the bounded window so one semantic node is mounted. Keyboard focus can target an
+   * item outside the window; the window shifts around it instead of growing (#242).
    */
   ensureTranscriptNodeVisible(
     sessionID: string,
@@ -3855,17 +3871,27 @@ export class AppController {
     const presentation = this.presentationIndexFor(sessionID, serverID);
     const position = presentation.keyToIndex.get(nodeKey);
     if (position === undefined) return false;
-    // Leave a few rows of context around the target rather than pinning it to the edge.
-    const needed = presentation.length - position + 8;
-    if (this.transcriptWindow(sessionID, serverID) < needed) {
-      this.setState('transcriptWindow', this.keyFor(serverID, sessionID), needed);
-    }
+    const view = this.presentationFor(sessionID, serverID);
+    const current = this.transcriptViewport(sessionID, serverID);
+    const capacity = current.capacity;
+    const maxStart = Math.max(0, view.length - capacity);
+    const start = current.mode === 'tail' ? maxStart : Math.min(maxStart, current.start);
+    if (position >= start && position < start + capacity) return true;
+    // Leave a few rows of context before the target rather than pinning it to the edge.
+    const nextStart = Math.min(maxStart, Math.max(0, position - 8));
+    this.writeTranscriptViewport(sessionID, serverID, {
+      mode: 'history',
+      anchorKey: view.at(nextStart)?.key,
+      start: nextStart,
+      capacity,
+    });
     return true;
   }
 
   /**
-   * Paging past the top: first un-hide already loaded nodes, then fetch the next older
-   * page from the server. Returns false when there is nothing earlier.
+   * PageUp at the mounted top moves the same-size window earlier through loaded nodes
+   * before requesting another server page. The semantic anchor survives a slow prepend,
+   * so the reader's row does not jump (#243).
    */
   revealEarlier(
     sessionID: string,
@@ -3873,26 +3899,58 @@ export class AppController {
     serverID: string = this.activeServerID(),
   ): boolean {
     const key = this.keyFor(serverID, sessionID);
-    if (hiddenNodes > 0) {
-      // Loaded-but-windowed history comes from the logical node count. Expose it first, with
-      // no server request yet: PageUp at the top must walk loaded history before paging.
-      this.setState(
-        'transcriptWindow',
-        key,
-        this.transcriptWindow(sessionID, serverID) + transcriptWindowStep,
-      );
+    const current = this.transcriptViewport(sessionID, serverID);
+    const view = this.presentationFor(sessionID, serverID);
+    const capacity = current.capacity;
+    const maxStart = Math.max(0, view.length - capacity);
+    const top = current.mode === 'tail' ? maxStart : Math.min(maxStart, Math.max(0, current.start));
+    if (hiddenNodes > 0 || top > 0) {
+      const nextStart = Math.max(0, top - transcriptWindowStep);
+      this.writeTranscriptViewport(sessionID, serverID, {
+        mode: 'history',
+        anchorKey: view.at(nextStart)?.key,
+        start: nextStart,
+        capacity,
+      });
       return true;
     }
-    // Nothing loaded remains hidden; only a server cursor says more history exists.
+    // The earliest loaded node is mounted; only a server cursor can go further.
     const transcript = this.state.transcripts[key];
     if (transcript?.olderCursor === undefined) return false;
-    this.setState(
-      'transcriptWindow',
-      key,
-      this.transcriptWindow(sessionID, serverID) + transcriptWindowStep,
-    );
     void this.track('history', this.loadOlder(sessionID, serverID));
     return true;
+  }
+
+  /**
+   * PageDown at the mounted bottom moves the window later, returning to live tail at the
+   * end so the mounted set shrinks back to the baseline immediately.
+   */
+  revealLater(sessionID: string, serverID: string = this.activeServerID()): boolean {
+    const current = this.transcriptViewport(sessionID, serverID);
+    if (current.mode === 'tail') return false;
+    const capacity = current.capacity;
+    const view = this.presentationFor(sessionID, serverID);
+    const nextStart = current.start + transcriptWindowStep;
+    if (nextStart >= view.length - capacity) {
+      this.writeTranscriptViewport(sessionID, serverID, tailViewport(capacity));
+      return false;
+    }
+    this.writeTranscriptViewport(sessionID, serverID, {
+      mode: 'history',
+      anchorKey: view.at(nextStart)?.key,
+      start: nextStart,
+      capacity,
+    });
+    return true;
+  }
+
+  /** Ctrl+End: explicit, immediate return to bounded tail follow. */
+  returnToTranscriptTail(sessionID: string, serverID: string = this.activeServerID()): void {
+    this.writeTranscriptViewport(
+      sessionID,
+      serverID,
+      tailViewport(this.transcriptViewport(sessionID, serverID).capacity),
+    );
   }
 
   /**
@@ -6644,7 +6702,7 @@ export class AppController {
           state.openedAt,
           state.drafts,
           state.draftAttachments,
-          state.transcriptWindow,
+          state.transcriptViewport,
           state.workers,
           state.workerStatus,
           state.shellJobs,

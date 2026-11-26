@@ -581,6 +581,8 @@ export type ProjectionStats = Readonly<{
 export interface TranscriptNodeView {
   readonly length: number;
   at(index: number): TranscriptNode | undefined;
+  /** Copies the half-open index range once, in forward order, without flattening the view. */
+  range(start: number, end: number): readonly TranscriptNode[];
   tail(limit: number): readonly TranscriptNode[];
   toArray(): TranscriptNode[];
   some(predicate: (node: TranscriptNode) => boolean): boolean;
@@ -655,28 +657,49 @@ function createNodeView(
     return undefined;
   }
 
-  function tail(limit: number): readonly TranscriptNode[] {
-    const count = Math.max(0, Math.min(limit, total));
+  function range(start: number, end: number): readonly TranscriptNode[] {
+    const from = Math.max(0, Math.min(total, start));
+    const to = Math.max(from, Math.min(total, end));
+    const count = to - from;
     if (count === 0) return [];
     const result: TranscriptNode[] = [];
-    let needed = count;
-    for (let index = chunks.length - 1; index >= 0 && needed > 0; index -= 1) {
-      const chunk = chunks[index];
-      if (chunk === undefined || chunk.length === 0) continue;
-      if (chunk.length <= needed) {
-        result.unshift(...chunk);
-        needed -= chunk.length;
-      } else {
-        result.unshift(...chunk.slice(chunk.length - needed));
-        needed = 0;
+    result.length = count;
+    let low = 0;
+    let high = chunks.length - 1;
+    let chunkIndex = chunks.length;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      const chunkStart = offsets[middle] ?? 0;
+      if (from < chunkStart) high = middle - 1;
+      else {
+        chunkIndex = middle;
+        low = middle + 1;
       }
     }
+    let written = 0;
+    for (let index = chunkIndex; index < chunks.length && written < count; index += 1) {
+      const chunk = chunks[index];
+      if (chunk === undefined) continue;
+      const copyFrom = Math.max(0, from - (offsets[index] ?? 0));
+      const available = Math.min(chunk.length - copyFrom, count - written);
+      if (available <= 0) continue;
+      for (let offset = 0; offset < available; offset += 1) {
+        result[written + offset] = chunk[copyFrom + offset]!;
+      }
+      written += available;
+    }
     return result;
+  }
+
+  function tail(limit: number): readonly TranscriptNode[] {
+    const count = Math.max(0, Math.min(limit, total));
+    return range(total - count, total);
   }
 
   return {
     length: total,
     at,
+    range,
     tail,
     toArray: () => chunks.flat(),
     some: (predicate) => chunks.some((chunk) => chunk.some(predicate)),
@@ -1499,21 +1522,75 @@ export function windowNodes<T>(
 }
 
 /**
- * The one scroll-history window: the newest `limit` *folded nodes* from the loaded history.
- *
- * `transcriptWindow` is a logical node count, never a physical-row budget. `hidden` therefore
- * means exactly "loaded nodes outside this window", and is the sole signal that earlier
- * loaded history exists. Offscreen paint is bounded by the scrollbox's `viewportCulling` and by
- * the per-item preview caps elsewhere in this module — neither redefines which nodes are
- * reachable by paging (#355 repair). Reader anchoring lives in the view, not in this window.
+ * A bounded reading window over loaded folded nodes. `mode: 'tail'` follows live output;
+ * `mode: 'history'` keeps the same-capacity window anchored to `anchorKey`, so new tail
+ * activity cannot replace the rows the reader is looking at. `start` is a cached positional
+ * hint; `anchorKey` is the semantic source of truth and is re-resolved when history is
+ * prepended or the projection changes (#355 repair, slow.txt task 2).
  */
+export interface TranscriptViewport {
+  readonly mode: 'tail' | 'history';
+  readonly anchorKey: string | undefined;
+  readonly start: number;
+  readonly capacity: number;
+}
+
+/** Fresh tail viewport. Capacity never grows, no matter how far the reader travels. */
+export function tailViewport(capacity: number = transcriptWindowStep): TranscriptViewport {
+  return { mode: 'tail', anchorKey: undefined, start: 0, capacity: Math.max(1, capacity) };
+}
+
+/**
+ * Re-resolves a history anchor when a prepend or projection change moved it. Only the
+ * neighbourhood of the cached index is searched; the window is bounded, so the search is
+ * bounded too. Missing anchors fall back to a clamped index rather than mounting history.
+ */
+function resolveViewportStart(view: TranscriptNodeView, viewport: TranscriptViewport): number {
+  if (viewport.mode === 'tail') return Math.max(0, view.length - viewport.capacity);
+  const capacity = Math.max(1, viewport.capacity);
+  const upper = Math.max(0, view.length - capacity);
+  const hint = Math.max(0, Math.min(upper, viewport.start));
+  if (view.at(hint)?.key === viewport.anchorKey) return hint;
+  if (viewport.anchorKey === undefined) return hint;
+  const radius = capacity;
+  for (let delta = 1; delta <= radius; delta += 1) {
+    if (view.at(hint + delta)?.key === viewport.anchorKey) return hint + delta;
+    if (hint - delta >= 0 && view.at(hint - delta)?.key === viewport.anchorKey) return hint - delta;
+  }
+  return hint;
+}
+
+/** Resolves a bounded viewport against the current folded-node view. */
+export function viewportNodeView(
+  view: TranscriptNodeView,
+  viewport: TranscriptViewport,
+): {
+  visible: readonly TranscriptNode[];
+  hidden: number;
+  hiddenAfter: number;
+  total: number;
+  start: number;
+} {
+  const capacity = Math.max(1, viewport.capacity);
+  const start = resolveViewportStart(view, viewport);
+  const end = Math.min(view.length, start + capacity);
+  const visible = view.range(start, end);
+  return {
+    visible,
+    hidden: start,
+    hiddenAfter: view.length - end,
+    total: view.length,
+    start,
+  };
+}
+
+/** Tail-relative compatibility wrapper: `windowNodeView` still means "newest `limit` nodes". */
 export function windowNodeView(
   view: TranscriptNodeView,
   limit: number,
 ): { visible: readonly TranscriptNode[]; hidden: number; total: number } {
-  if (view.length <= limit) return { visible: view.toArray(), hidden: 0, total: view.length };
-  const visible = view.tail(limit);
-  return { visible, hidden: view.length - visible.length, total: view.length };
+  const windowed = viewportNodeView(view, tailViewport(limit));
+  return { visible: windowed.visible, hidden: windowed.hidden, total: windowed.total };
 }
 
 /** `14:03:07 · 1.2s` for detailed tool rows; duration omitted while running. */
