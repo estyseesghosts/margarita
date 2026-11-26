@@ -1,4 +1,4 @@
-import { closeSync, fstatSync, openSync, writeSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, write, writeSync } from 'node:fs';
 
 /**
  * Opt-in diagnostics for `--debug-log <path>`. Structured NDJSON, one object per line,
@@ -6,6 +6,10 @@ import { closeSync, fstatSync, openSync, writeSync } from 'node:fs';
  * counts and statuses — never prompt text, model output or tool stdout. Values that do
  * pass through are scrubbed (sensitive keys dropped, bearer tokens masked, long strings
  * truncated) as defense in depth.
+ *
+ * Writes are buffered off the synchronous interactive path: a bounded queue is flushed in
+ * batches through the asynchronous filesystem API. Shutdown drains explicitly; crash paths
+ * may use one last best-effort synchronous write.
  */
 export type DebugLog = Readonly<{
   readonly enabled: boolean;
@@ -26,6 +30,9 @@ const bearerPattern = /(bearer|basic)\s+[A-Za-z0-9._~+/=-]{6,}/gi;
 const maxStringLength = 300;
 const maxDepth = 4;
 const maxArrayLength = 50;
+/** Bounds memory if a pathological caller emits diagnostics faster than the disk accepts. */
+const maxQueuedLines = 512;
+const flushBatchLines = 64;
 
 function scrubString(value: string): string {
   const masked = value.replace(bearerPattern, '$1 [redacted]');
@@ -73,6 +80,11 @@ class FileDebugLog implements DebugLog {
   readonly enabled = true;
   private fd: number | undefined;
   private failed = false;
+  private readonly queue: string[] = [];
+  private dropped = 0;
+  private scheduled = false;
+  private inFlight: string | undefined;
+  private generation = 0;
 
   constructor(fd: number) {
     this.fd = fd;
@@ -80,7 +92,7 @@ class FileDebugLog implements DebugLog {
 
   write(kind: string, fields?: Record<string, unknown>): void {
     const fd = this.fd;
-    if (fd === undefined) return;
+    if (fd === undefined || this.failed) return;
     let line: string;
     try {
       const entry = {
@@ -92,23 +104,83 @@ class FileDebugLog implements DebugLog {
     } catch {
       line = `${JSON.stringify({ ts: new Date().toISOString(), kind, error: 'unserializable' })}\n`;
     }
-    try {
-      writeSync(fd, line);
-    } catch (error) {
-      if (!this.failed) {
-        this.failed = true;
-        process.stderr.write(
-          `marg: --debug-log write failed and diagnostics are disabled: ${errorMessage(error)}\n`,
-        );
-        this.close();
-      }
+    if (this.queue.length >= maxQueuedLines) {
+      this.dropped += 1;
+      return;
     }
+    this.queue.push(line);
+    this.scheduleFlush();
+  }
+
+  private scheduleFlush(): void {
+    if (this.scheduled || this.failed) return;
+    const fd = this.fd;
+    if (fd === undefined) return;
+    this.scheduled = true;
+    setImmediate(() => {
+      this.scheduled = false;
+      void this.flush(fd);
+    });
+  }
+
+  private async flush(fd: number): Promise<void> {
+    if (this.failed || this.fd === undefined || this.inFlight !== undefined) return;
+    const batch = this.queue.splice(0, flushBatchLines).join('');
+    if (batch === '') return;
+    const generation = ++this.generation;
+    this.inFlight = batch;
+    const dropped = this.dropped;
+    this.dropped = 0;
+    await new Promise<void>((resolve) => {
+      write(fd, batch, (error) => {
+        // A concurrent close may drain and close this batch; never write it twice.
+        if (this.generation === generation) {
+          this.inFlight = undefined;
+          if (error !== undefined) this.fail(error);
+          if (dropped > 0 && !this.failed) this.queue.push(this.droppedLine(dropped));
+        }
+        resolve();
+      });
+    });
+    if (!this.failed) this.scheduleFlush();
+  }
+
+  private droppedLine(count: number): string {
+    return `${JSON.stringify({
+      ts: new Date().toISOString(),
+      kind: 'debug-log-dropped',
+      count,
+    })}\n`;
+  }
+
+  private fail(error: unknown): void {
+    if (this.failed) return;
+    this.failed = true;
+    this.queue.length = 0;
+    process.stderr.write(
+      `marg: --debug-log write failed and diagnostics are disabled: ${errorMessage(error)}\n`,
+    );
   }
 
   close(): void {
     const fd = this.fd;
-    this.fd = undefined;
     if (fd === undefined) return;
+    this.fd = undefined;
+    this.generation += 1;
+    // Shutdown is not an interactive hot path: drain synchronously, including a batch that
+    // was about to be written asynchronously, so no accepted record is lost.
+    let pending = this.inFlight ?? this.queue.join('');
+    if (this.dropped > 0) pending += this.droppedLine(this.dropped);
+    this.dropped = 0;
+    this.inFlight = undefined;
+    this.queue.length = 0;
+    if (pending !== '') {
+      try {
+        writeSync(fd, pending);
+      } catch (error) {
+        process.stderr.write(`marg: --debug-log close failed: ${errorMessage(error)}\n`);
+      }
+    }
     try {
       closeSync(fd);
     } catch {

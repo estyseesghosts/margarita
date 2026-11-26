@@ -104,6 +104,31 @@ describe('createDebugLog', () => {
     expect(raw).toContain('[redacted]');
   });
 
+  test('buffered writes are drained in order on close', () => {
+    const path = tempLog();
+    const created = createDebugLog(path);
+    if (!created.ok) throw new Error('expected ok');
+    for (let index = 0; index < 200; index += 1) created.log.write(`entry-${index}`);
+    created.log.close();
+    const lines = readFileSync(path, 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(200);
+    const kinds = lines.map((line) => parseEntry(line)['kind']);
+    expect(kinds[0]).toBe('entry-0');
+    expect(kinds.at(-1)).toBe('entry-199');
+  });
+
+  test('a pathological write burst is bounded and reports dropped records', () => {
+    const path = tempLog();
+    const created = createDebugLog(path);
+    if (!created.ok) throw new Error('expected ok');
+    for (let index = 0; index < 1200; index += 1) created.log.write('burst', { index });
+    created.log.close();
+    const lines = readFileSync(path, 'utf8').trim().split('\n').map(parseEntry);
+    expect(lines.length).toBeLessThanOrEqual(600);
+    expect(lines.some((entry) => entry['kind'] === 'debug-log-dropped')).toBe(true);
+    expect(lines.some((entry) => entry['kind'] === 'burst')).toBe(true);
+  });
+
   test('noDebugLog creates nothing and never throws', () => {
     const path = tempLog();
     expect(noDebugLog.enabled).toBe(false);
