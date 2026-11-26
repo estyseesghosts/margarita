@@ -107,6 +107,8 @@ export interface OverviewStrings {
   readonly offlineMarker: string;
   readonly showLess: string;
   readonly showMore: (hidden: number) => string;
+  readonly older: (hidden: number) => string;
+  readonly newer: (hidden: number) => string;
   readonly pairedUnavailable: (label: string) => string;
   readonly restoringPaired: (label: string) => string;
   readonly recentOnly: string;

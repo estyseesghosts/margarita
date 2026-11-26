@@ -7,7 +7,17 @@ import {
   nextAgent,
   selectableAgents,
 } from './agent-cycle.ts';
-import { groupRows, groupSessions } from './overview-groups.ts';
+import {
+  collapsedGroupWindow,
+  collapsedSessionLimit,
+  groupPageSize,
+  groupRows,
+  groupSessions,
+  moveGroupWindow,
+  newerRowKey,
+  olderRowKey,
+  repairGroupWindow,
+} from './overview-groups.ts';
 import { directoryKey, directoryName, isWithin } from './path-identity.ts';
 import type { SessionSummary } from './session.ts';
 import { formatAge, formatCost, formatTokenCount, formatTokens } from './usage-format.ts';
@@ -180,7 +190,7 @@ describe('groupRows', () => {
 
   test('collapses past six sessions behind a toggle, newest first', () => {
     if (group === undefined) throw new Error('missing group');
-    const rows = groupRows(group, false);
+    const rows = groupRows(group, collapsedGroupWindow);
     expect(rows.map((row) => row.key)).toEqual([
       'session:ses_7',
       'session:ses_6',
@@ -190,18 +200,89 @@ describe('groupRows', () => {
       'session:ses_2',
       `toggle:${group.key}`,
     ]);
-    expect(rows.at(-1)).toMatchObject({ kind: 'toggle', expanded: false, hidden: 2 });
+    expect(rows.at(-1)).toMatchObject({ kind: 'toggle', action: 'showMore', hidden: 2 });
   });
 
-  test('expanded shows every session and a Show less toggle', () => {
+  test('show more exposes a bounded page and a Show less toggle', () => {
     if (group === undefined) throw new Error('missing group');
-    const rows = groupRows(group, true);
+    const expanded = moveGroupWindow(collapsedGroupWindow, 'showMore', group.sessions.length);
+    const rows = groupRows(group, expanded);
     expect(rows).toHaveLength(9);
-    expect(rows.at(-1)).toMatchObject({ kind: 'toggle', expanded: true });
+    expect(rows.at(-1)).toMatchObject({ kind: 'toggle', action: 'showLess' });
+    expect(moveGroupWindow(expanded, 'showLess', group.sessions.length)).toEqual(
+      collapsedGroupWindow,
+    );
   });
 
   test('no toggle at or below the limit', () => {
     if (group === undefined) throw new Error('missing group');
-    expect(groupRows({ ...group, sessions: group.sessions.slice(0, 6) }, false)).toHaveLength(6);
+    expect(
+      groupRows({ ...group, sessions: group.sessions.slice(0, 6) }, collapsedGroupWindow),
+    ).toHaveLength(6);
+  });
+});
+
+describe('bounded overview paging (slow.txt task 10)', () => {
+  const total = 2000;
+  const sessions = Array.from({ length: total }, (_unused, index) => ({
+    id: `ses_${index}`,
+    serverID: 'local',
+    projectID: 'p',
+    directory: '/work/big',
+    createdAt: 0,
+    updatedAt: index,
+    archived: false,
+  }));
+  const [group] = groupSessions(sessions, {
+    platformFor: () => 'linux' as const,
+    showArchived: false,
+    showChildren: false,
+    activityOf: (entry) => entry.updatedAt,
+  });
+
+  test('show more and older paging never mount the whole workdir', () => {
+    if (group === undefined) throw new Error('missing group');
+    let window = collapsedGroupWindow;
+    for (let step = 0; step < 20; step += 1) {
+      window = moveGroupWindow(window, step === 0 ? 'showMore' : 'older', total);
+      const rows = groupRows(group, window);
+      const sessionRows = rows.filter((row) => row.kind === 'session');
+      expect(sessionRows.length).toBeLessThanOrEqual(collapsedSessionLimit + groupPageSize);
+      expect(window.count).toBeLessThanOrEqual(collapsedSessionLimit + groupPageSize);
+    }
+    expect(window.start).toBeGreaterThan(0);
+    const rows = groupRows(group, window);
+    expect(rows.some((row) => row.key === olderRowKey(group.key))).toBe(true);
+    expect(rows.some((row) => row.key === newerRowKey(group.key))).toBe(true);
+  });
+
+  test('newer and older controls keep every session reachable', () => {
+    if (group === undefined) throw new Error('missing group');
+    let window = collapsedGroupWindow;
+    const seen = new Set<string>();
+    while (true) {
+      for (const row of groupRows(group, window)) {
+        if (row.kind === 'session') seen.add(row.key);
+      }
+      const next = moveGroupWindow(window, 'older', total);
+      if (next.start === window.start) break;
+      window = next;
+    }
+    expect(seen.size).toBeGreaterThan(total - groupPageSize);
+    while (window.start > 0) {
+      window = moveGroupWindow(window, 'newer', total);
+      for (const row of groupRows(group, window)) {
+        if (row.kind === 'session') seen.add(row.key);
+      }
+    }
+    expect(seen.size).toBe(total);
+  });
+
+  test('an invalidated stored window is clamped to the current group length', () => {
+    expect(repairGroupWindow({ start: 1900, count: 5000 }, 30)).toEqual({ start: 0, count: 30 });
+    expect(repairGroupWindow({ start: 1900, count: 30 }, total)).toEqual({
+      start: 1900,
+      count: 30,
+    });
   });
 });

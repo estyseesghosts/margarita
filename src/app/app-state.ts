@@ -10,6 +10,7 @@ import type { GoalPlanV1 } from '../domain/goal-plan.ts';
 import type { ModelSelection } from '../domain/model-ref.ts';
 import type { CatalogModel } from '../domain/model-resolution.ts';
 import type { NativeGoalState } from '../domain/native-goal.ts';
+import type { OverviewGroupWindow } from '../domain/overview-groups.ts';
 import type { PromptHistory } from '../domain/prompt-history.ts';
 import { createHistory } from '../domain/prompt-history.ts';
 import type { ProjectRef } from '../domain/server-identity.ts';
@@ -315,8 +316,8 @@ export type AppState = {
     tab: 'all' | 'local' | 'remotes' | 'active' | 'needs-input';
     /** Row key from `overviewRows()`: a session or a Show more/less toggle. */
     selectedRow?: string;
-    /** Project groups showing every session instead of the collapsed few. */
-    expanded: Record<string, true>;
+    /** Bounded per-project viewing windows; absent means the six newest sessions. */
+    groupWindows: Record<string, OverviewGroupWindow>;
     /** Owning project for the next session started from the composer. */
     project: ProjectRef;
     agent?: string;
@@ -414,7 +415,7 @@ export function initialState(directory: string, serverID: string = localServerID
       focus: 'composer',
       tab: 'all',
       project: { serverID, directory },
-      expanded: {},
+      groupWindows: {},
     },
     openedAt: {},
     history: createHistory([]),

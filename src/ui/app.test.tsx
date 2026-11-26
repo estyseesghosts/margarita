@@ -577,20 +577,21 @@ describe('app', () => {
       expect(selectedSession()).toBeDefined();
       expect(frame).toContain(selectedSession()?.title ?? 'no-selection');
     };
-    // Expand the group once so every session row is selectable.
+    // Expand the group once so a bounded page of session rows is selectable. Paging now
+    // mounts a window, never all 60 sessions (slow.txt task 10).
     for (let step = 0; step < 6; step += 1) setup.mockInput.pressArrow('down');
     setup.mockInput.pressEnter();
     await settle(setup);
-    // Clamp to the top row so the 50 downs below stay inside the list.
+    // Clamp to the top row so the moves below stay inside the mounted page.
     for (let step = 0; step < 61; step += 1) setup.mockInput.pressArrow('up');
     await settle(setup);
     expect(controller.state.overview.focus).toBe('list');
-    for (let step = 0; step < 50; step += 1) {
+    for (let step = 0; step < 24; step += 1) {
       setup.mockInput.pressArrow('down');
       await settle(setup);
       expectSelectedVisible();
     }
-    for (let step = 0; step < 50; step += 1) {
+    for (let step = 0; step < 24; step += 1) {
       setup.mockInput.pressArrow('up');
       await settle(setup);
       expectSelectedVisible();
@@ -4547,7 +4548,8 @@ test('overview tabs, rows and toggles respond to the mouse (#247)', async () => 
   x = lines[y]!.indexOf('[Show more]');
   await setup.mockMouse.click(x, y);
   await settle(setup);
-  expect(controller.state.overview.expanded['/work/kohjoh']).toBe(true);
+  expect(controller.state.overview.groupWindows['/work/kohjoh']?.start).toBe(0);
+  expect(controller.state.overview.groupWindows['/work/kohjoh']?.count).toBeGreaterThan(6);
   expect(setup.captureCharFrame()).toContain('Session number 0');
   controller.dispose();
 });

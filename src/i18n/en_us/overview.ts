@@ -32,6 +32,8 @@ export const overviewEnUs = {
   offlineMarker: '[offline]',
   showLess: '[Show less]',
   showMore: (hidden) => `[Show more] ${hidden}`,
+  older: (hidden) => `[Older] ${hidden}`,
+  newer: (hidden) => `[Newer] ${hidden}`,
   pairedUnavailable: (label) => `Paired server ${label} is unavailable (no usable credential).`,
   restoringPaired: (label) => `Restoring paired server ${label}…`,
   recentOnly: 'Showing recent sessions only.',

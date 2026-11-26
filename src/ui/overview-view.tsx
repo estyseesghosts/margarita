@@ -1,6 +1,6 @@
 import type { ScrollBoxRenderable } from '@opentui/core';
 import type { Accessor } from 'solid-js';
-import { createEffect, For, Match, Show, Switch } from 'solid-js';
+import { createEffect, createMemo, For, Match, Show, Switch } from 'solid-js';
 
 import type { AppController } from '../app/controller.ts';
 import { groupRows, loadMoreRowKey, type OverviewRow } from '../domain/overview-groups.ts';
@@ -24,8 +24,9 @@ import { isNoColorTheme, type Theme } from './theme.ts';
 type RowOf<K extends OverviewRow['kind']> = Extract<OverviewRow, { kind: K }>;
 
 /**
- * Project-grouped session list (docs/04), most recently used first. Each project shows
- * six sessions; the rest expand inline behind a Show more/less row. Rows never animate.
+ * Project-grouped session list (docs/04), most recently used first. Each project shows a
+ * bounded window (six sessions collapsed); Older/Newer move that window and Show less
+ * resets it. Rows never animate and no control can mount an entire workdir.
  */
 export function Overview(props: {
   controller: AppController;
@@ -40,8 +41,17 @@ export function Overview(props: {
   const selected = (key: string) =>
     state.overview.focus === 'list' && state.overview.selectedRow === key;
   let box: ScrollBoxRenderable | undefined;
-  /** Expansion changes row geometry without changing the selected key (#240). */
-  const expansion = () => Object.keys(state.overview.expanded).toSorted().join('|');
+  /** Window moves change row geometry without changing the selected key (#240). */
+  const expansion = () => {
+    const windows = state.overview.groupWindows;
+    return Object.keys(windows)
+      .toSorted()
+      .map((key) => {
+        const window = windows[key];
+        return `${key}:${window?.start ?? 0}:${window?.count ?? 0}`;
+      })
+      .join('|');
+  };
   /** Paired hosts whose credentials restore after the shell mounts (#346). */
   const deferred = () => props.controller.deferredServerList();
   /** Keeps the selected row visible; only scrolls when it has moved outside the viewport. */
@@ -110,13 +120,20 @@ export function Overview(props: {
               ? `  ${props.ascii === true ? strings.overview.remoteAsciiMarker : strings.overview.remoteGlyph} ${group.serverLabel ?? strings.overview.remoteFallbackLabel}`
               : '';
           const staleLabel = () => (group.stale ? `  ${strings.overview.offlineMarker}` : '');
-          const header = () =>
+          const header = createMemo(() =>
             layoutProjectHeader({
               name: group.name,
               extras: `${remoteLabel()}${staleLabel()}`,
               directory: group.directory,
               contentWidth: overviewContentWidth(props.width),
-            });
+            }),
+          );
+          const projectColors = createMemo(() =>
+            projectLabel(
+              group.serverID,
+              directoryKey(group.directory, props.controller.platformFor(group.serverID)),
+            ),
+          );
           return (
             <box flexDirection="column" marginBottom={1}>
               <text>
@@ -130,14 +147,8 @@ export function Overview(props: {
                 >
                   <span
                     style={{
-                      bg: projectLabel(
-                        group.serverID,
-                        directoryKey(group.directory, props.controller.platformFor(group.serverID)),
-                      ).background,
-                      fg: projectLabel(
-                        group.serverID,
-                        directoryKey(group.directory, props.controller.platformFor(group.serverID)),
-                      ).foreground,
+                      bg: projectColors().background,
+                      fg: projectColors().foreground,
                     }}
                   >
                     {' '}
@@ -154,7 +165,7 @@ export function Overview(props: {
                   <span style={{ fg: props.theme.dim }}>{`  ${header().directory}`}</span>
                 </Show>
               </text>
-              <For each={groupRows(group, state.overview.expanded[group.key] === true)}>
+              <For each={groupRows(group, props.controller.groupWindow(group))}>
                 {(row) => (
                   <Switch>
                     <Match when={row.kind === 'session' ? row : undefined}>
@@ -179,11 +190,7 @@ export function Overview(props: {
                           fg={selected(row.key) ? props.theme.accent : props.theme.dim}
                           onMouseUp={activate(() => props.controller.clickOverviewRow(row.key))}
                         >
-                          {`${overviewMarker(selected(row.key), overviewContentWidth(props.width))}${
-                            toggle().expanded
-                              ? strings.overview.showLess
-                              : strings.overview.showMore(toggle().hidden)
-                          }`}
+                          {`${overviewMarker(selected(row.key), overviewContentWidth(props.width))}${groupControlLabel(toggle())}`}
                         </text>
                       )}
                     </Match>
@@ -239,6 +246,21 @@ function rowID(key: string): string {
   return `overview-row:${key}`;
 }
 
+function groupControlLabel(toggle: RowOf<'toggle'>): string {
+  switch (toggle.action) {
+    case 'showLess':
+      return strings.overview.showLess;
+    case 'showMore':
+      return strings.overview.showMore(toggle.hidden);
+    case 'older':
+      return strings.overview.older(toggle.hidden);
+    case 'newer':
+      return strings.overview.newer(toggle.hidden);
+    default:
+      return '';
+  }
+}
+
 function SessionLine(props: {
   controller: AppController;
   theme: Theme;
@@ -251,28 +273,34 @@ function SessionLine(props: {
   ascii?: boolean | undefined;
 }) {
   const activate = useActivate();
-  const execution = () => props.controller.executionOf(props.session.id, props.session.serverID);
-  const tasks = () => {
+  // One execution projection per render: the status, dot and label all derive from it.
+  const execution = createMemo(() =>
+    props.controller.executionOf(props.session.id, props.session.serverID),
+  );
+  const tasks = createMemo(() => {
     const count = props.controller.planProgress(props.session.id, props.session.serverID);
     return count === undefined ? '' : strings.overview.tasksProgress(count.done, count.total);
-  };
-  const age = () => formatAge(props.controller.lastUsed(props.session), props.now);
-  const status = () => `${executionLabel(execution())}${tasks()} · ${age()}`;
-  const state = () => props.controller.statusOf(props.session);
-  const dot = () =>
+  });
+  const age = createMemo(() => formatAge(props.controller.lastUsed(props.session), props.now));
+  const status = createMemo(() => `${executionLabel(execution())}${tasks()} · ${age()}`);
+  const state = createMemo(() => props.controller.statusWithExecution(props.session, execution()));
+  const dot = createMemo(() =>
     props.ascii === true
       ? { idle: 'o', failed: '!', 'needs-input': '?', working: '*', unknown: '.' }[state()]
-      : { idle: '●', failed: '●', 'needs-input': '●', working: '●', unknown: '○' }[state()];
-  const attention = () => state() === 'needs-input' || state() === 'failed';
-  const dotColor = () =>
-    ({
-      idle: props.theme.dim,
-      failed: props.theme.error,
-      'needs-input': props.theme.warn,
-      working: props.theme.success,
-      unknown: props.theme.dim,
-    })[state()];
-  const columns = () =>
+      : { idle: '●', failed: '●', 'needs-input': '●', working: '●', unknown: '○' }[state()],
+  );
+  const attention = createMemo(() => state() === 'needs-input' || state() === 'failed');
+  const dotColor = createMemo(
+    () =>
+      ({
+        idle: props.theme.dim,
+        failed: props.theme.error,
+        'needs-input': props.theme.warn,
+        working: props.theme.success,
+        unknown: props.theme.dim,
+      })[state()],
+  );
+  const columns = createMemo(() =>
     layoutOverviewRow({
       selected: props.selected,
       dot: dot(),
@@ -280,7 +308,8 @@ function SessionLine(props: {
       status: sanitizeSingleLine(status()),
       age: age(),
       contentWidth: overviewContentWidth(props.width),
-    });
+    }),
+  );
   return (
     <box
       id={props.id}

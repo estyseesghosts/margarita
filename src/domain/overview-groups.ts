@@ -101,13 +101,40 @@ export function groupSessions(
 /** Sessions shown per project before the rest collapse behind a toggle row. */
 export const collapsedSessionLimit = 6;
 
+/** Additional sessions exposed by one `Show more`/`Older`/`Newer` step. */
+export const groupPageSize = 24;
+
+/**
+ * Bounded viewing window for one project. `start` indexes the oldest visible session (0 is
+ * the newest), and `count` never exceeds a page plus the collapsed rows. No expansion can
+ * mount an entire workdir: paging moves this window instead of growing it.
+ */
+export interface OverviewGroupWindow {
+  readonly start: number;
+  readonly count: number;
+}
+
+export const collapsedGroupWindow: OverviewGroupWindow = {
+  start: 0,
+  count: collapsedSessionLimit,
+};
+
+/** The action attached to an overview group control row. */
+export type GroupWindowAction = 'showMore' | 'showLess' | 'older' | 'newer';
+
 /** Row key for the pagination row rendered below the last group. */
 export const loadMoreRowKey = 'loadmore';
 
-/** One selectable overview line: a session, the inline toggle, or pagination. */
+/** One selectable overview line: a session, a group control, or global pagination. */
 export type OverviewRow =
   | Readonly<{ kind: 'session'; key: string; groupKey: string; session: SessionSummary }>
-  | Readonly<{ kind: 'toggle'; key: string; groupKey: string; expanded: boolean; hidden: number }>
+  | Readonly<{
+      kind: 'toggle';
+      key: string;
+      groupKey: string;
+      action: GroupWindowAction;
+      hidden: number;
+    }>
   | Readonly<{ kind: 'loadmore'; key: typeof loadMoreRowKey }>;
 
 export function sessionRowKey(ref: SessionRef): string {
@@ -118,23 +145,111 @@ export function toggleRowKey(groupKey: string): string {
   return `toggle:${groupKey}`;
 }
 
-/** Visible rows of one group: up to the limit when collapsed, plus a toggle when needed. */
-export function groupRows(group: ProjectGroup, expanded: boolean): OverviewRow[] {
-  const shown = expanded ? group.sessions : group.sessions.slice(0, collapsedSessionLimit);
-  const rows: OverviewRow[] = shown.map((session) => ({
-    kind: 'session',
-    key: sessionRowKey({ serverID: session.serverID, sessionID: session.id }),
-    groupKey: group.key,
-    session,
-  }));
-  const hidden = group.sessions.length - collapsedSessionLimit;
-  if (hidden > 0) {
+export function olderRowKey(groupKey: string): string {
+  return `older:${groupKey}`;
+}
+
+export function newerRowKey(groupKey: string): string {
+  return `newer:${groupKey}`;
+}
+
+/**
+ * Repairs a stored window after regrouping, filtering or pagination changes the group's
+ * length. Stale offsets are clamped to the current session count, and an over-wide window
+ * is reduced; a window from a project that no longer exists simply falls back to collapsed.
+ */
+export function repairGroupWindow(
+  window: OverviewGroupWindow | undefined,
+  total: number,
+): OverviewGroupWindow {
+  if (window === undefined || total <= collapsedSessionLimit) return collapsedGroupWindow;
+  const count = Math.max(collapsedSessionLimit, Math.min(total, window.count));
+  const start = Math.max(0, Math.min(total - count, window.start));
+  return { start, count };
+}
+
+/** Applies one control action to a window. The result always has bounded `count`. */
+export function moveGroupWindow(
+  window: OverviewGroupWindow,
+  action: GroupWindowAction,
+  total: number,
+): OverviewGroupWindow {
+  const bounded = repairGroupWindow(window, total);
+  const pageCount = Math.min(total, collapsedSessionLimit + groupPageSize);
+  switch (action) {
+    case 'showMore':
+      return { start: 0, count: pageCount };
+    case 'showLess':
+      return collapsedGroupWindow;
+    case 'older': {
+      // A collapsed window has no Older control; paging from it first exposes one page.
+      const current =
+        bounded.count > collapsedSessionLimit ? bounded : { start: 0, count: pageCount };
+      return {
+        start: Math.min(Math.max(0, total - current.count), current.start + groupPageSize),
+        count: current.count,
+      };
+    }
+    case 'newer': {
+      const current =
+        bounded.count > collapsedSessionLimit ? bounded : { start: 0, count: pageCount };
+      return {
+        start: Math.max(0, current.start - groupPageSize),
+        count: current.count,
+      };
+    }
+    default:
+      return collapsedGroupWindow;
+  }
+}
+
+/** Visible rows of one group: a bounded window plus controls for hidden sessions. */
+export function groupRows(group: ProjectGroup, window: OverviewGroupWindow): OverviewRow[] {
+  const bounded = repairGroupWindow(window, group.sessions.length);
+  const end = bounded.start + bounded.count;
+  const rows: OverviewRow[] = [];
+  if (bounded.start > 0) {
+    rows.push({
+      kind: 'toggle',
+      key: newerRowKey(group.key),
+      groupKey: group.key,
+      action: 'newer',
+      hidden: bounded.start,
+    });
+  }
+  for (const session of group.sessions.slice(bounded.start, end)) {
+    rows.push({
+      kind: 'session',
+      key: sessionRowKey({ serverID: session.serverID, sessionID: session.id }),
+      groupKey: group.key,
+      session,
+    });
+  }
+  // A collapsed window already has Show more; Older only makes sense once paging is open.
+  if (end < group.sessions.length && bounded.count > collapsedSessionLimit) {
+    rows.push({
+      kind: 'toggle',
+      key: olderRowKey(group.key),
+      groupKey: group.key,
+      action: 'older',
+      hidden: group.sessions.length - end,
+    });
+  }
+  if (bounded.count > collapsedSessionLimit) {
     rows.push({
       kind: 'toggle',
       key: toggleRowKey(group.key),
       groupKey: group.key,
-      expanded,
-      hidden,
+      action: 'showLess',
+      hidden: 0,
+    });
+  } else if (group.sessions.length > collapsedSessionLimit) {
+    rows.push({
+      kind: 'toggle',
+      key: toggleRowKey(group.key),
+      groupKey: group.key,
+      action: 'showMore',
+      hidden: group.sessions.length - collapsedSessionLimit,
     });
   }
   return rows;

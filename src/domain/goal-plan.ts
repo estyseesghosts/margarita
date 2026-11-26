@@ -355,8 +355,14 @@ export function forkGoalPlan(doc: GoalPlanV1, sessionID: string): GoalPlanV1 {
 // ---------- presentation ----------
 
 export function progress(plan: Plan | undefined): { done: number; total: number } {
-  const tasks = (plan?.tasks ?? []).filter((task) => task.state !== 'cancelled');
-  return { done: tasks.filter((task) => task.state === 'done').length, total: tasks.length };
+  let done = 0;
+  let total = 0;
+  for (const task of plan?.tasks ?? []) {
+    if (task.state === 'cancelled') continue;
+    total += 1;
+    if (task.state === 'done') done += 1;
+  }
+  return { done, total };
 }
 
 export const taskStateLabel: Record<TaskState, string> = {

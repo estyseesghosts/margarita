@@ -2297,8 +2297,12 @@ describe('session pagination', () => {
     before = snapshot();
     const group = controller.groups()[0];
     if (group !== undefined) {
+      // Expanding a project is presentation-only: it invalidates rows but must not
+      // regroup or recount sessions (slow.txt task 11).
       controller.toggleOverviewGroup(group.key);
-      expectInvalidated(before);
+      expect(controller.groups()).toBe(before.groups);
+      expect(controller.tabCounts()).toBe(before.tabs);
+      expect(controller.overviewRows()).not.toBe(before.rows);
     }
 
     // A running execution writes `running`, then the deletion performs a bulk produce that
@@ -2377,12 +2381,13 @@ describe('session pagination', () => {
     expect(group).toBeDefined();
     if (group === undefined) return;
     controller.toggleOverviewGroup(group.key);
-    expect(controller.state.overview.expanded[group.key]).toBe(true);
+    expect(controller.state.overview.groupWindows[group.key]).toBeDefined();
 
     await controller.loadMoreSessions();
 
     expect(controller.state.composer.text).toBe('keep this draft');
-    expect(controller.state.overview.expanded[group.key]).toBe(true);
+    // The project window survives pagination even when regrouping shrinks the group.
+    expect(controller.state.overview.groupWindows[group.key]?.start).toBe(0);
     expect(Object.keys(controller.state.sessions)).toHaveLength(6);
     controller.dispose();
   });

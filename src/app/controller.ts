@@ -132,11 +132,16 @@ import {
   verifiedGoal,
 } from '../domain/native-goal.ts';
 import {
+  collapsedGroupWindow,
   groupRows,
   groupSessions,
+  type GroupWindowAction,
   loadMoreRowKey,
+  moveGroupWindow,
+  type OverviewGroupWindow,
   type OverviewRow,
   type ProjectGroup,
+  repairGroupWindow,
 } from '../domain/overview-groups.ts';
 import { filterSessions, nextTab, type OverviewTab, tabCounts } from '../domain/overview-tabs.ts';
 import {
@@ -1106,9 +1111,14 @@ export class AppController {
 
   /** The single classifier for dots, counts, and tabs; never a per-view heuristic. */
   statusOf(session: SessionSummary): SessionStatus {
+    return this.statusWithExecution(session, this.executionOf(session.id, session.serverID));
+  }
+
+  /** Classifies a session from an execution projection the caller already owns. */
+  statusWithExecution(session: SessionSummary, execution: Execution): SessionStatus {
     return classifySessionStatus({
       online: this.deps.serverInfo?.(session.serverID)?.online ?? true,
-      execution: this.executionOf(session.id, session.serverID),
+      execution,
       archived: session.archived,
     });
   }
@@ -1282,12 +1292,15 @@ export class AppController {
   }
 
   cycleOverviewTab(direction: -1 | 1): void {
-    this.setStateTouchingOverview('overview', 'tab', nextTab(this.state.overview.tab, direction));
+    this.setStateTouchingOverview('overview', {
+      tab: nextTab(this.state.overview.tab, direction),
+      groupWindows: {},
+    });
     this.invalidateCompletion();
   }
 
   setOverviewTab(tab: OverviewTab): void {
-    this.setStateTouchingOverview('overview', 'tab', tab);
+    this.setStateTouchingOverview('overview', { tab, groupWindows: {} });
     this.invalidateCompletion();
   }
 
@@ -1322,13 +1335,16 @@ export class AppController {
     );
   }
 
+  /** The bounded window currently shown for one project, repaired against its live length. */
+  groupWindow(group: ProjectGroup): OverviewGroupWindow {
+    return repairGroupWindow(this.state.overview.groupWindows[group.key], group.sessions.length);
+  }
+
   /** Flattened selectable overview rows in display order, for keyboard navigation. */
   overviewRows(): OverviewRow[] {
     const complete = this.state.sessionsComplete;
     return this.overview.overviewRows(complete, () => {
-      const rows = this.groups().flatMap((group) =>
-        groupRows(group, this.state.overview.expanded[group.key] === true),
-      );
+      const rows = this.groups().flatMap((group) => groupRows(group, this.groupWindow(group)));
       // Offer pagination once the server says the first pages are not everything.
       if (!complete) rows.push({ kind: 'loadmore', key: loadMoreRowKey });
       return rows;
@@ -2194,11 +2210,12 @@ export class AppController {
       if (liveUsageAdvanced && existing !== undefined) {
         next = {
           ...session,
+          serverID,
           ...(existing.cost === undefined ? {} : { cost: existing.cost }),
           ...(existing.tokens === undefined ? {} : { tokens: existing.tokens }),
         };
       } else {
-        next = { ...session };
+        next = { ...session, serverID };
       }
       if (existing !== next) updates.push([key, next]);
     }
@@ -2616,16 +2633,8 @@ export class AppController {
           }));
           continue;
         }
-        this.setStateTouchingOverview('sessions', (current) => {
-          const merged = { ...current };
-          for (const session of result.page.sessions) {
-            merged[this.keyFor(result.serverID, session.id)] = {
-              ...session,
-              serverID: result.serverID,
-            };
-          }
-          return merged;
-        });
+        // One page's per-key updates, not a copy of the whole session map (#slow task 13).
+        this.commitSessionPageRows(result.serverID, result.page.sessions, result.snapshotSeq);
         this.setState('serverPages', result.serverID, {
           ...(result.page.nextCursor === undefined ? {} : { cursor: result.page.nextCursor }),
           complete: result.page.nextCursor === undefined,
@@ -4127,14 +4136,16 @@ export class AppController {
 
   selectedOverviewRow(): OverviewRow | undefined {
     const key = this.state.overview.selectedRow;
-    return key === undefined ? undefined : this.overviewRows().find((row) => row.key === key);
+    if (key === undefined) return undefined;
+    this.overviewRows();
+    return this.overview.rowByKey(key);
   }
 
   moveOverviewSelection(direction: -1 | 1): void {
     const rows = this.overviewRows();
     if (rows.length === 0) return;
     const current = this.state.overview.selectedRow;
-    const index = current === undefined ? -1 : rows.findIndex((row) => row.key === current);
+    const index = current === undefined ? -1 : (this.overview.rowPosition(current) ?? -1);
     let next: number;
     if (this.state.overview.focus === 'composer') {
       if (direction === 1) return;
@@ -4161,7 +4172,7 @@ export class AppController {
     const rows = this.overviewRows();
     if (rows.length === 0) return;
     const current = this.state.overview.selectedRow;
-    const index = current === undefined ? -1 : rows.findIndex((row) => row.key === current);
+    const index = current === undefined ? -1 : (this.overview.rowPosition(current) ?? -1);
     const start = index < 0 ? (direction === 1 ? -1 : rows.length) : index;
     const step = Math.max(1, Math.floor(pageRows));
     const next = Math.min(rows.length - 1, Math.max(0, start + direction * step));
@@ -4613,12 +4624,12 @@ export class AppController {
     return result.ok ? { attachment: result.attachment } : { error: result.error };
   }
 
-  /** Enter on a row: attach a session, expand/collapse a project, or page in more sessions. */
+  /** Enter on a row: attach a session, page a project window, or page in more sessions. */
   attachSelected(): void {
     const row = this.selectedOverviewRow();
     if (row === undefined) return;
     if (row.kind === 'toggle') {
-      this.toggleOverviewGroup(row.groupKey);
+      this.activateGroupWindow(row.groupKey, row.action);
       return;
     }
     if (row.kind === 'loadmore') {
@@ -4628,27 +4639,43 @@ export class AppController {
     this.openSession(row.session.id, row.session.serverID);
   }
 
-  toggleOverviewGroup(groupKey: string): void {
-    this.setStateTouchingOverview(
-      produce((state) => {
-        if (state.overview.expanded[groupKey] === true) delete state.overview.expanded[groupKey];
-        else state.overview.expanded[groupKey] = true;
-      }),
-    );
-    // Collapsing while a child row is selected would leave an invisible selection. Move
-    // it to the group's toggle, which remains on screen (#240).
+  /**
+   * Moves one project's bounded viewing window. Paging never mounts the whole group: the
+   * window keeps a fixed capacity and older/newer controls move it through loaded sessions.
+   */
+  activateGroupWindow(groupKey: string, action: GroupWindowAction): void {
+    const group = this.groups().find((entry) => entry.key === groupKey);
+    if (group === undefined) return;
+    const next = moveGroupWindow(this.groupWindow(group), action, group.sessions.length);
+    this.setState('overview', 'groupWindows', groupKey, next);
+    // Purely presentational: counts, filtering and groups are unchanged (#slow task 11).
+    this.overview.invalidateRowWindow();
+    // Collapsing or paging past a selected row would leave an invisible selection. Move it
+    // to a control that remains on screen (#240).
     if (this.state.overview.focus !== 'list') return;
     const selected = this.state.overview.selectedRow;
     const rows = this.overviewRows();
     if (selected !== undefined && rows.some((row) => row.key === selected)) return;
-    const toggle = rows.find((row) => row.kind === 'toggle' && row.groupKey === groupKey);
-    if (toggle !== undefined) this.selectRow(toggle);
+    const control =
+      rows.find(
+        (row) => row.kind === 'toggle' && row.groupKey === groupKey && row.action === 'showLess',
+      ) ?? rows.find((row) => row.kind === 'toggle' && row.groupKey === groupKey);
+    if (control !== undefined) this.selectRow(control);
     else this.setState('overview', 'selectedRow', undefined);
+  }
+
+  /** Legacy toggle entry point; derives the action from the current window. */
+  toggleOverviewGroup(groupKey: string): void {
+    const group = this.groups().find((entry) => entry.key === groupKey);
+    if (group === undefined) return;
+    const window = this.groupWindow(group);
+    this.activateGroupWindow(groupKey, window === collapsedGroupWindow ? 'showMore' : 'showLess');
   }
 
   /** One click on an overview row selects and activates it, matching Enter (#247). */
   clickOverviewRow(key: string): void {
-    const row = this.overviewRows().find((entry) => entry.key === key);
+    this.overviewRows();
+    const row = this.overview.rowByKey(key);
     if (row === undefined) return;
     batch(() => {
       this.selectRow(row);
