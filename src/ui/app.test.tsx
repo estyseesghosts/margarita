@@ -5575,6 +5575,40 @@ describe('scrollback contract: the mounted transcript must expose loaded history
     controller.dispose();
   });
 
+  test('history rows keep their place while new turns stream, and Ctrl+End shrinks immediately', async () => {
+    const backend = scrollbackBackend(120);
+    const { controller, setup } = await mount(backend, { width: 80, height: 18 });
+    controller.openSession('ses_a');
+    await settle(setup);
+    await controller.loadOlder('ses_a');
+    await controller.loadOlder('ses_a');
+    await settle(setup);
+    setup.mockInput.pressKey('HOME', { ctrl: true });
+    await settle(setup);
+    expect(controller.transcriptViewport('ses_a').mode).toBe('history');
+
+    const needle = 'anchor prompt 0';
+    const before = setup.captureCharFrame();
+    const row = frameRow(before, needle);
+    expect(row).toBeGreaterThanOrEqual(0);
+    appendScrollback(backend, controller, [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007]);
+    await Bun.sleep(200);
+    await settle(setup);
+    const after = setup.captureCharFrame();
+    expect(frameRow(after, needle)).toBe(row);
+    expect(controller.transcriptViewport('ses_a').mode).toBe('history');
+    expect(controller.transcriptViewport('ses_a').capacity).toBe(200);
+
+    setup.mockInput.pressKey('END', { ctrl: true });
+    await settle(setup);
+    expect(controller.transcriptViewport('ses_a')).toMatchObject({
+      mode: 'tail',
+      capacity: 200,
+    });
+    expect(setup.captureCharFrame()).toContain('answer 1007 line 59');
+    controller.dispose();
+  });
+
   test('a delayed older page keeps a visible message on the same row', async () => {
     // 180 turns: the initially loaded 120 messages fit the window while the full history is
     // well over 700 physical rows. The anchor sits inside the initially loaded prefix.

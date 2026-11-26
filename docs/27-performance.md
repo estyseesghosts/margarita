@@ -404,6 +404,38 @@ global permanent payload cache or second formatted copy.
   WeakMap key) is gone. That verifies eviction releases the preview and full source together,
   without a permanent payload cache.
 
+## Bounded reading windows under growth (slow.txt)
+
+The transcript no longer mounts "the newest N nodes" by raising N forever. A
+`TranscriptViewport` has a fixed capacity (200 folded nodes by default) and either follows the
+live tail or slides a same-size window through loaded nodes anchored to a semantic node key.
+Ctrl+Home moves that bounded window to the earliest loaded node; Ctrl+End resets it to tail
+mode immediately. Streaming while reading history leaves both the visible key sequence and
+the mounted node objects unchanged, because the window is anchored to what the reader is
+looking at rather than to the tail. Rows render with item identity (`<For>`), and each row
+registers its `Renderable` in a view-local map so sticky and anchor lookups stop walking the
+whole render tree.
+
+The overview applies the same discipline per project: six collapsed rows, a 24-session window
+on Show more, and explicit Older/Newer controls. Expanding a project invalidates only row
+presentation; tab counts and grouping are untouched. `loadMoreSessions()` commits one page's
+per-key updates instead of copying the session map.
+
+`bun run bench:soak` now reports two additional scenarios:
+
+- **Long scroll** (1k/10k/50k messages): PageUp/PageDown, Ctrl+Home/End, scrolling after deep
+  history, and streaming while in history. It records p50/p95, mounted/total node counts,
+  semantic-row lookups per scroll, and a bounded sticky update count. Structural checks reject
+  a mounted count above capacity, a Ctrl+Home that is not at earliest history, a Ctrl+End that
+  does not return to tail, and any streaming that replaces historical rows.
+- **Overview** (25/100/500/2,000 sessions in one workdir): initial render, Show more/less,
+  keyboard navigation, and a live status change with the group open. It records p50/p95 and
+  mounted session rows; the structural bound is six collapsed and at most thirty expanded,
+  never the whole workdir.
+
+As with the rest of this document, these numbers are for manual comparison on a pinned machine;
+there are no hard millisecond CI thresholds.
+
 ## Reproducibility rules
 
 - Use the same commit, machine, terminal size, Bun version and power mode for comparisons.
