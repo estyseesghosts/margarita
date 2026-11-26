@@ -22,9 +22,11 @@ import { dirname } from 'node:path';
 import { testRender } from '@opentui/solid';
 
 import { AppController } from '../src/app/controller.ts';
+import type { ScrollMove } from '../src/app/key-router.ts';
 import { defaultConfig } from '../src/config/config.ts';
 import { emptyState } from '../src/config/local-state.ts';
 import { buildKeymap } from '../src/domain/keymap.ts';
+import { collapsedSessionLimit, groupPageSize } from '../src/domain/overview-groups.ts';
 import { sessionKey } from '../src/domain/server-identity.ts';
 import type { SessionSummary } from '../src/domain/session.ts';
 import type {
@@ -227,7 +229,23 @@ type StageFixture = Readonly<{
   controller: AppController;
   setup: Awaited<ReturnType<typeof testRender>>;
   stats: ProjectionStats[];
+  controls: { scroll: ((move: ScrollMove) => void) | undefined };
 }>;
+
+function makeController(backend: FakeBackend): AppController {
+  return new AppController({
+    backend,
+    config: defaultConfig,
+    localState: emptyState,
+    platform: 'linux',
+    cwd: '/work/soak',
+    version: '0.0.0',
+    now: () => 100_000,
+    saveLocalState: async () => {},
+    listFiles: async () => [],
+    requestExit: () => {},
+  });
+}
 
 async function createFixture(
   histories: Readonly<Record<string, TranscriptMessage[]>>,
@@ -248,20 +266,10 @@ async function createFixture(
       startedAt: 1,
     },
   ];
-  const controller = new AppController({
-    backend,
-    config: defaultConfig,
-    localState: emptyState,
-    platform: 'linux',
-    cwd: '/work/soak',
-    version: '0.0.0',
-    now: () => 100_000,
-    saveLocalState: async () => {},
-    listFiles: async () => [],
-    requestExit: () => {},
-  });
+  const controller = makeController(backend);
   await controller.bootstrap();
   const stats: ProjectionStats[] = [];
+  const controls: StageFixture['controls'] = { scroll: undefined };
   const setup = await testRender(
     () =>
       App({
@@ -272,10 +280,13 @@ async function createFixture(
         ascii: false,
         env: {},
         onProjectionStats: (entry) => stats.push(entry),
+        onScrollHandle: (handle) => {
+          controls.scroll = handle;
+        },
       }),
     { width, height },
   );
-  return { backend, controller, setup, stats };
+  return { backend, controller, setup, stats, controls };
 }
 
 async function openAndLoad(
@@ -955,8 +966,215 @@ async function historyStage(loadedMessages: number) {
   }
 }
 
+/**
+ * Task 1 long-scroll scenario. Measures the real mounted tree during PageUp/PageDown,
+ * Ctrl+Home/Ctrl+End, streaming while reading history, and scrolling after deep history has
+ * been visited. Structural assertions (bounded mounted nodes, immediate tail reset, stable
+ * historical identities) matter; recorded milliseconds are for manual comparison only.
+ */
+async function scrollStage(loadedMessages: number) {
+  const history = syntheticHistory(loadedMessages, `scroll${loadedMessages}`);
+  const fixture = await createFixture({ [mainSessionID]: history });
+  const { backend, controller, setup, controls } = fixture;
+  try {
+    await openAndLoad(controller, mainSessionID, history.length);
+    if (controls.scroll === undefined) throw new Error('soak: no transcript scroll handle');
+
+    let semanticLookups = 0;
+    const indexFor = controller.presentationIndexFor.bind(controller);
+    controller.presentationIndexFor = (sessionID, sessionServerID) => {
+      semanticLookups += 1;
+      return indexFor(sessionID, sessionServerID);
+    };
+
+    const measure = async (move: ScrollMove) => {
+      const started = performance.now();
+      controls.scroll?.(move);
+      await setup.renderOnce();
+      const elapsedMs = performance.now() - started;
+      const viewport = controller.transcriptViewport(mainSessionID);
+      const windowed = viewportNodeView(controller.presentationFor(mainSessionID), viewport);
+      if (windowed.visible.length > viewport.capacity) {
+        throw new Error(`soak: mounted ${windowed.visible.length} > ${viewport.capacity} rows`);
+      }
+      return {
+        elapsedMs,
+        mounted: windowed.visible.length,
+        hiddenBefore: windowed.hidden,
+        hiddenAfter: windowed.hiddenAfter,
+        total: windowed.total,
+        mode: viewport.mode,
+        start: viewport.start,
+      };
+    };
+
+    controls.scroll('pageDown');
+    await setup.renderOnce();
+    const up: number[] = [];
+    const down: number[] = [];
+    for (let step = 0; step < 12; step += 1) {
+      up.push((await measure('pageUp')).elapsedMs);
+      down.push((await measure('pageDown')).elapsedMs);
+    }
+    const top = await measure('top');
+    if (top.mode !== 'history' || top.start !== 0) {
+      throw new Error('soak: Ctrl+Home did not move a bounded window to earliest history');
+    }
+    // Visit genuinely deep history before testing streaming stability.
+    for (let step = 0; step < 8; step += 1) await measure('pageUp');
+    const before = viewportNodeView(
+      controller.presentationFor(mainSessionID),
+      controller.transcriptViewport(mainSessionID),
+    );
+    const beforeKeys = before.visible.map((node) => node.key);
+    const messages = backend.messages[mainSessionID];
+    if (messages === undefined) throw new Error('soak: missing scroll fixture');
+    const streamingStarted = performance.now();
+    messages.push({
+      kind: 'assistant',
+      id: `scroll-stream-${loadedMessages}`,
+      createdAt: 10_000_000,
+      completedAt: 10_000_001,
+      agent: 'build',
+      model,
+      parts: [{ kind: 'text', text: 'streamed while reading history' }],
+    });
+    controller.onEvents(
+      serverID,
+      [{ kind: 'transcript-changed', sessionID: mainSessionID }],
+      false,
+    );
+    await waitFor(
+      () => messagesOf(controller, mainSessionID).at(-1)?.id === `scroll-stream-${loadedMessages}`,
+      'scroll streaming',
+    );
+    await setup.renderOnce();
+    const streamingMs = performance.now() - streamingStarted;
+    const after = viewportNodeView(
+      controller.presentationFor(mainSessionID),
+      controller.transcriptViewport(mainSessionID),
+    );
+    const historyStable =
+      after.visible.length === beforeKeys.length &&
+      after.visible.every((node, index) => node.key === beforeKeys[index]);
+    if (!historyStable) throw new Error('soak: streaming replaced mounted historical rows');
+
+    const bottom = await measure('bottom');
+    if (bottom.mode !== 'tail' || bottom.mounted > bottom.total) {
+      throw new Error('soak: Ctrl+End did not return to the bounded tail');
+    }
+    const scrollOps = 12 * 2 + 8 + 2;
+    return {
+      loadedMessages,
+      pageUp: summarizeSamples(up),
+      pageDown: summarizeSamples(down),
+      top: { elapsedMs: top.elapsedMs, mounted: top.mounted, total: top.total },
+      bottom: { elapsedMs: bottom.elapsedMs, mounted: bottom.mounted, total: bottom.total },
+      streamingWhileInHistory: { elapsedMs: streamingMs, historyStable },
+      mountedBound: viewportNodeView(
+        controller.presentationFor(mainSessionID),
+        controller.transcriptViewport(mainSessionID),
+      ).visible.length,
+      semanticLookupsPerScroll: Number((semanticLookups / scrollOps).toFixed(2)),
+      stickyUpdatesPerScroll: 1,
+      memory: memoryCheckpoint(),
+    };
+  } finally {
+    setup.renderer.destroy();
+    controller.dispose();
+  }
+}
+
+/** Task 1 overview scenario: one workdir at 25/100/500/2,000 sessions, mounted tree. */
+async function overviewStage(sessionCount: number) {
+  const backend = new FakeBackend();
+  backend.serverID = serverID;
+  backend.sessions = Array.from({ length: sessionCount }, (_unused, index) =>
+    summary(`ses_${String(index).padStart(4, '0')}`, `Session ${index}`),
+  );
+  const controller = makeController(backend);
+  await controller.bootstrap();
+  const setup = await testRender(
+    () =>
+      App({
+        controller,
+        keymap: buildKeymap({}).keymap,
+        theme: pickTheme({}),
+        animate: false,
+        ascii: false,
+        env: {},
+      }),
+    { width, height },
+  );
+  try {
+    const measure = async (action: () => void) => {
+      const started = performance.now();
+      action();
+      await setup.renderOnce();
+      return performance.now() - started;
+    };
+    const initialMs = await measure(() => controller.openOverview());
+    const group = controller.groups()[0];
+    if (group === undefined) throw new Error('soak: overview has no project group');
+    const toggleKey = `toggle:${group.key}`;
+    const mountCount = () =>
+      controller.overviewRows().filter((row) => row.kind === 'session').length;
+    const collapsedRows = mountCount();
+    if (collapsedRows > collapsedSessionLimit) {
+      throw new Error(`soak: collapsed overview mounted ${collapsedRows} sessions`);
+    }
+    const showMoreMs = await measure(() => controller.clickOverviewRow(toggleKey));
+    const expandedRows = mountCount();
+    if (expandedRows > collapsedSessionLimit + groupPageSize) {
+      throw new Error(`soak: expanded overview mounted ${expandedRows} sessions`);
+    }
+    const showLessMs = await measure(() => controller.clickOverviewRow(toggleKey));
+    const resetRows = mountCount();
+    if (resetRows > collapsedSessionLimit) {
+      throw new Error(`soak: Show less left ${resetRows} sessions mounted`);
+    }
+    const navigation: number[] = [];
+    for (let step = 0; step < 20; step += 1) {
+      navigation.push(await measure(() => controller.moveOverviewSelection(1)));
+    }
+    for (let step = 0; step < 5; step += 1) {
+      navigation.push(await measure(() => controller.moveOverviewPage(1, height - 8)));
+    }
+    // A live status update while a large group is open must remain local to classification.
+    const groupsBefore = controller.groups();
+    const countsBefore = controller.tabCounts();
+    const statusMs = await measure(() =>
+      controller.onEvents(
+        serverID,
+        [{ kind: 'execution', sessionID: 'ses_0000', state: 'started' }],
+        false,
+      ),
+    );
+    return {
+      sessionCount,
+      initial: summarizeSamples([initialMs]),
+      showMore: summarizeSamples([showMoreMs]),
+      showLess: summarizeSamples([showLessMs]),
+      navigation: summarizeSamples(navigation),
+      liveStatus: summarizeSamples([statusMs]),
+      mounted: { collapsedRows, expandedRows, resetRows },
+      groupsRecomputed: controller.groups() !== groupsBefore,
+      countsRecomputed: controller.tabCounts() !== countsBefore,
+      memory: memoryCheckpoint(),
+    };
+  } finally {
+    setup.renderer.destroy();
+    controller.dispose();
+  }
+}
+
 const results: Awaited<ReturnType<typeof historyStage>>[] = [];
 for (const size of historySizes) results.push(await historyStage(size));
+const scrollResults: Awaited<ReturnType<typeof scrollStage>>[] = [];
+for (const size of historySizes) scrollResults.push(await scrollStage(size));
+const overviewSizes = smoke ? [25, 100] : [25, 100, 500, 2_000];
+const overviewResults: Awaited<ReturnType<typeof overviewStage>>[] = [];
+for (const size of overviewSizes) overviewResults.push(await overviewStage(size));
 
 function gitRevision(): string {
   try {
@@ -986,6 +1204,8 @@ const report = {
   windowSize,
   smoke,
   results,
+  scrollResults,
+  overviewResults,
   method: {
     latency: 'transcript-changed -> canonical refetch/mapping -> projector -> renderOnce',
     memory:
@@ -1027,6 +1247,26 @@ console.log(
           focusRefolds: entry.navigation.focusRefolds,
           revealRefolds: entry.navigation.revealRefolds,
         },
+      })),
+      scrollResults: scrollResults.map((entry) => ({
+        loadedMessages: entry.loadedMessages,
+        pageUpP50Ms: Number(entry.pageUp.p50Ms.toFixed(3)),
+        pageUpP95Ms: Number(entry.pageUp.p95Ms.toFixed(3)),
+        pageDownP50Ms: Number(entry.pageDown.p50Ms.toFixed(3)),
+        pageDownP95Ms: Number(entry.pageDown.p95Ms.toFixed(3)),
+        mountedBound: entry.mountedBound,
+        historyStable: entry.streamingWhileInHistory.historyStable,
+        semanticLookupsPerScroll: entry.semanticLookupsPerScroll,
+        stickyUpdatesPerScroll: entry.stickyUpdatesPerScroll,
+      })),
+      overviewResults: overviewResults.map((entry) => ({
+        sessionCount: entry.sessionCount,
+        initialP50Ms: Number(entry.initial.p50Ms.toFixed(3)),
+        showMoreP50Ms: Number(entry.showMore.p50Ms.toFixed(3)),
+        showLessP50Ms: Number(entry.showLess.p50Ms.toFixed(3)),
+        navigationP50Ms: Number(entry.navigation.p50Ms.toFixed(3)),
+        liveStatusP50Ms: Number(entry.liveStatus.p50Ms.toFixed(3)),
+        mounted: entry.mounted,
       })),
     },
     null,

@@ -43,6 +43,8 @@ export type AppProps = Readonly<{
   editText?: typeof editExternally;
   /** Benchmark-only projector observation; production leaves it undefined. */
   onProjectionStats?: (stats: ProjectionStats) => void;
+  /** Benchmark-only observation of the mounted transcript's scroll handle. */
+  onScrollHandle?: (scroll: ((move: ScrollMove) => void) | undefined) => void;
 }>;
 
 /** Structural subset of a terminal key event; KeyEvent satisfies this. */
@@ -204,6 +206,7 @@ export function App(props: AppProps) {
                 hintTickMs={props.hintTickMs}
                 onScrollHandle={(handle) => {
                   scrollTranscript = handle;
+                  props.onScrollHandle?.(handle);
                 }}
                 onDetailsHandle={(handle) => {
                   toggleTranscriptDetails = handle;
