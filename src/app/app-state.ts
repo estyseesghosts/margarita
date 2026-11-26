@@ -283,7 +283,12 @@ export type AppState = {
   catalogLoading: boolean;
   catalogError?: string;
   detailed: boolean;
-  /** Rendered node count per session (see `windowNodes`); grows as the user pages up. */
+  /**
+   * How many folded transcript nodes from loaded history are eligible to be mounted, per
+   * session (see `windowNodeView`). Grows as the reader pages up. This is a logical node
+   * allowance, never a physical-row budget; server history availability lives in the
+   * transcript's `olderCursor`.
+   */
   transcriptWindow: Record<string, number>;
   expandedGroups: Record<string, true>;
   /** Tool IDs whose oversized inline diffs the user expanded; mirrors expandedGroups. */

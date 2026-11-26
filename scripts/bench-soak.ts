@@ -33,7 +33,7 @@ import type {
   ToolCall,
   TranscriptMessage,
 } from '../src/domain/transcript.ts';
-import { transcriptRowBudget, windowNodeViewByRows } from '../src/domain/transcript.ts';
+import { windowNodeView } from '../src/domain/transcript.ts';
 import { summarizeSamples } from '../src/perf/measure.ts';
 import { App } from '../src/ui/app.tsx';
 import { pickTheme } from '../src/ui/theme.ts';
@@ -663,9 +663,12 @@ type WindowReport = Readonly<{
     markerSegmentsReused: number;
   };
   render: {
+    /** Nodes the production logical window actually mounts (same call the view uses). */
     mountedNodes: number;
-    estimatedRows: number;
+    /** Loaded nodes outside the logical window, i.e. earlier reachable history. */
     hiddenNodes: number;
+    /** Total loaded folded nodes this window was taken from. */
+    totalNodes: number;
   };
   memory: ReturnType<typeof memoryCheckpoint>;
 }>;
@@ -738,16 +741,16 @@ async function historyStage(loadedMessages: number) {
             markerSegmentsReused: markerReused,
           },
           render: (() => {
-            const view = controller.presentationFor(mainSessionID);
-            const windowed = windowNodeViewByRows(view, {
-              nodeLimit: controller.transcriptWindow(mainSessionID),
-              rowBudget: transcriptRowBudget,
-              width,
-            });
+            // Measure the same logical node window production mounts, not an orphaned
+            // physical-row estimator: a benchmark must never redefine scroll history.
+            const windowed = windowNodeView(
+              controller.presentationFor(mainSessionID),
+              controller.transcriptWindow(mainSessionID),
+            );
             return {
               mountedNodes: windowed.visible.length,
-              estimatedRows: windowed.estimatedRows,
               hiddenNodes: windowed.hidden,
+              totalNodes: windowed.total,
             };
           })(),
           memory: memoryCheckpoint(),

@@ -121,6 +121,7 @@ export function App(props: AppProps) {
   };
 
   let scrollTranscript: ((move: ScrollMove) => void) | undefined;
+  let toggleTranscriptDetails: (() => void) | undefined;
 
   useKeyboard((event) => {
     if (editing || event.eventType === 'release') return;
@@ -136,6 +137,7 @@ export function App(props: AppProps) {
       openEditor,
       redraw: () => renderer.requestRender(),
       scroll: (move) => scrollTranscript?.(move),
+      toggleTranscriptDetails: () => toggleTranscriptDetails?.(),
       copySelection,
       // Overview chrome (title, tabs, composer, footer) is not part of the row viewport.
       overviewPageRows: Math.max(3, dimensions().height - 8),
@@ -202,6 +204,9 @@ export function App(props: AppProps) {
                 hintTickMs={props.hintTickMs}
                 onScrollHandle={(handle) => {
                   scrollTranscript = handle;
+                }}
+                onDetailsHandle={(handle) => {
+                  toggleTranscriptDetails = handle;
                 }}
                 onProjectionStats={props.onProjectionStats}
               />

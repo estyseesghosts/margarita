@@ -64,8 +64,7 @@ import {
   toolMetadataRowBudget,
   type TranscriptNode,
   type TranscriptNodeView,
-  transcriptRowBudget,
-  windowNodeViewByRows,
+  windowNodeView,
 } from '../domain/transcript.ts';
 import { type WorkerStatus, workerStatusLabel } from '../domain/worker.ts';
 import { strings } from '../i18n/index.ts';
@@ -90,6 +89,8 @@ export type TranscriptProps = Readonly<{
   hintTickMs?: number | undefined;
   /** Receives the scroll function for key routing while this transcript is mounted. */
   onScrollHandle?: (scroll: ((move: ScrollMove) => void) | undefined) => void;
+  /** Receives the viewport-preserving Ctrl+O transition for key routing. */
+  onDetailsHandle?: (handler: (() => void) | undefined) => void;
   /**
    * Benchmark-only observation hook. Production leaves it undefined; keeping it optional
    * means the projector does no extra work unless a caller explicitly asks for counters.
@@ -98,6 +99,25 @@ export type TranscriptProps = Readonly<{
 }>;
 
 type NodeOf<K extends TranscriptNode['kind']> = Extract<TranscriptNode, { kind: K }>;
+
+/**
+ * A semantic reading anchor: a stable transcript node key plus that row's vertical offset
+ * inside the scrollbox. Never a raw `scrollTop`, array index or `<Index>` slot — all three
+ * change when older history is prepended or compact/detailed projection changes (#243, #355).
+ */
+type SemanticAnchor = Readonly<{
+  key: string;
+  offset: number;
+  /** History prepend must survive several layouts while a slow page is in flight. */
+  holdWhileLoading: boolean;
+  /** Layout passes left for a projection change that has not mounted the target yet. */
+  passes: number;
+}>;
+
+/** Rows whose keys are derived from canonical message identity and survive a mode change. */
+function isCrossModeStable(node: TranscriptNode): boolean {
+  return node.kind === 'user' || node.kind === 'text';
+}
 
 /** One bounded warning for rows retained after a failed job refresh (#230). */
 function jobWarning(
@@ -165,12 +185,11 @@ export function Transcript(props: TranscriptProps) {
         : [{ kind: 'meta' as const, key: `job-status:${key}`, text: warning }],
     );
   });
+  // One logical history window: how many folded nodes from loaded history may be mounted.
+  // Physical row cost is handled by the scrollbox's viewport culling and by per-item caps,
+  // never by choosing a different set of nodes relative to the tail (#355 repair).
   const windowed = createMemo(() =>
-    windowNodeViewByRows(nodes(), {
-      nodeLimit: props.controller.transcriptWindow(props.sessionID, props.serverID),
-      rowBudget: transcriptRowBudget,
-      width: props.width,
-    }),
+    windowNodeView(nodes(), props.controller.transcriptWindow(props.sessionID, props.serverID)),
   );
   // Server-confirmed pending user follow-ups, FIFO (server order) — rendered in the
   // activity region right above the running task marker, never inside the composer.
@@ -188,15 +207,83 @@ export function Transcript(props: TranscriptProps) {
   const syntax = createMemo(() => createSyntaxStyle(props.theme, renderer.nativeScene));
   const [sticky, setSticky] = createSignal<string | undefined>(undefined);
   /**
-   * A semantic pagination anchor: the node key and its viewport offset before history was
-   * prepended. `<Index>` reuses row slots, so anchoring a renderable is not stable when a
-   * prepend changes which node occupies each slot (#243). The key is restored after layout.
+   * The single pending semantic anchor, captured and restored by the helpers below. It is
+   * used only for operations that deliberately change material before/around the viewport:
+   * history prepend and global compact/detailed reprojection. Ordinary streaming relies on
+   * the scrollbox and unchanged mounted rows instead (#355 repair).
    */
-  const [pendingAnchor, setPendingAnchor] = createSignal<
-    { key: string; offset: number } | undefined
-  >(undefined);
+  const [pendingAnchor, setPendingAnchor] = createSignal<SemanticAnchor | undefined>(undefined);
   const nodeIndexFor = () =>
     props.controller.presentationIndexFor(props.sessionID, props.serverID).keyToIndex;
+
+  /** Captures an actual mounted row's key and offset, without reading raw `scrollTop`. */
+  const captureAnchor = (
+    key: string,
+    holdWhileLoading: boolean,
+    passes: number,
+  ): SemanticAnchor | undefined => {
+    if (box === undefined) return undefined;
+    const element = box.findDescendantById(nodeID(key));
+    if (element === undefined) return undefined;
+    return { key, offset: element.y - box.y, holdWhileLoading, passes };
+  };
+
+  /** PageUp at the true top: remember the first mounted row before expanding/fetching. */
+  const captureHistoryAnchor = (): SemanticAnchor | undefined => {
+    const first = windowed().visible[0];
+    return first === undefined ? undefined : captureAnchor(first.key, true, 0);
+  };
+
+  /**
+   * Ctrl+O while reading history: prefer a mounted user/assistant-text row (its key comes
+   * from canonical message identity and exists in both modes). If the viewport holds only
+   * tool rows, use the nearest stable row and keep its relative position; if none is mounted,
+   * search backward through the loaded presentation for the nearest one.
+   */
+  const captureCrossModeAnchor = (): SemanticAnchor | undefined => {
+    if (box === undefined) return undefined;
+    const scrollbox = box;
+    let onScreen: SemanticAnchor | undefined;
+    let nearestAbove: SemanticAnchor | undefined;
+    for (const node of windowed().visible) {
+      if (!isCrossModeStable(node)) continue;
+      const anchor = captureAnchor(node.key, false, 6);
+      if (anchor === undefined) continue;
+      if (anchor.offset >= 0 && anchor.offset < scrollbox.height) {
+        onScreen ??= anchor;
+      } else if (anchor.offset <= 0) {
+        nearestAbove ??= anchor;
+      }
+    }
+    if (onScreen !== undefined) return onScreen;
+    if (nearestAbove !== undefined) return nearestAbove;
+    const top = windowed().visible[0];
+    const index = top === undefined ? undefined : nodeIndexFor().get(top.key);
+    if (index === undefined) return undefined;
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      const node = nodes().at(cursor);
+      if (node === undefined || !isCrossModeStable(node)) continue;
+      props.controller.ensureTranscriptNodeVisible(props.sessionID, node.key, props.serverID);
+      return { key: node.key, offset: 0, holdWhileLoading: false, passes: 6 };
+    }
+    return undefined;
+  };
+
+  /**
+   * The viewport-preserving Ctrl+O transition. The state mutation stays in the controller;
+   * only the view can capture the terminal viewport. At the live tail no anchor is needed —
+   * bottom-follow retains the tail. While reading history, restore the cross-mode anchor
+   * after the reprojected transcript has laid out.
+   */
+  const toggleDetails = (): void => {
+    if (box === undefined || followsLiveTail(box.scrollTop, box.scrollHeight, box.height)) {
+      props.controller.toggleDetails();
+      return;
+    }
+    const anchor = captureCrossModeAnchor();
+    props.controller.toggleDetails();
+    if (anchor !== undefined) setPendingAnchor(anchor);
+  };
 
   /**
    * Recomputes which earlier prompt, if any, has scrolled out above the viewport. The
@@ -250,36 +337,42 @@ export function Transcript(props: TranscriptProps) {
     box?.afterLayout(updateSticky);
   });
 
-  // A route/host switch must never carry the previous conversation's pinned prompt.
+  // A route/host switch must never carry the previous conversation's pinned prompt or anchor.
   createEffect(() => {
     // Track owner identity; the values themselves are read through props elsewhere.
     void props.sessionID;
     void props.serverID;
     setSticky(undefined);
+    setPendingAnchor(undefined);
     box?.afterLayout(updateSticky);
   });
 
   /**
-   * Restores the semantic anchor after every layout while an older page is in flight.
-   * A fixed timeout cannot cover a slow history response (#243). The anchor is released
-   * once loading settles and the target has been positioned.
+   * The single anchor-restore effect shared by history prepend and Ctrl+O reprojection.
+   * A history anchor stays alive across every layout while a slow page is in flight (#243),
+   * and is released only after the target has been restored and loading has settled. A
+   * cross-mode anchor gets a few bounded passes because culling may mount its row later; it
+   * is released as soon as the row is positioned. No raw `scrollTop` and no competing
+   * scrollTo/scrollBy effects are involved.
    */
   createEffect(() => {
     const anchor = pendingAnchor();
     const loading = transcript()?.loading === true;
-    // Read the window so a prepended page schedules another restoration.
+    // A prepended page or a compact/detailed projection schedules another restoration.
     windowed();
     if (anchor === undefined || box === undefined) return;
     const scrollbox = box;
     scrollbox.afterLayout(() => {
       const target = scrollbox.findDescendantById(nodeID(anchor.key));
       if (target === undefined) {
-        if (!loading) setPendingAnchor(undefined);
+        if (anchor.holdWhileLoading) return;
+        if (anchor.passes > 0) setPendingAnchor({ ...anchor, passes: anchor.passes - 1 });
+        else setPendingAnchor(undefined);
         return;
       }
       const offset = target.y - scrollbox.y;
       if (offset !== anchor.offset) scrollbox.scrollBy(offset - anchor.offset);
-      if (!loading) setPendingAnchor(undefined);
+      if (anchor.holdWhileLoading ? !loading : true) setPendingAnchor(undefined);
     });
   });
 
@@ -366,16 +459,12 @@ export function Transcript(props: TranscriptProps) {
           box.afterLayout(updateSticky);
           return;
         }
-        // At the top: remember the first node and its row, reveal earlier nodes, then put
-        // that same semantic node back at the same viewport row after layout (#243).
-        const first = windowed().visible[0];
-        const element = first === undefined ? undefined : box.findDescendantById(nodeID(first.key));
-        const offset = element === undefined ? undefined : element.y - box.y;
+        // At the true top: capture the first mounted semantic row *before* expanding the
+        // window or requesting an older page, then put that same row back after layout (#243).
+        const anchor = captureHistoryAnchor();
         if (!props.controller.revealEarlier(props.sessionID, windowed().hidden, props.serverID))
           return;
-        if (first !== undefined && offset !== undefined) {
-          setPendingAnchor({ key: first.key, offset });
-        }
+        if (anchor !== undefined) setPendingAnchor(anchor);
         return;
       }
       case 'pageDown':
@@ -393,8 +482,9 @@ export function Transcript(props: TranscriptProps) {
         });
         return;
       case 'bottom':
-        // Ctrl+End is an explicit return to the live tail, so the history strip clears
-        // immediately rather than waiting for another layout event.
+        // Ctrl+End is an explicit return to live follow: clear the reading chrome and any
+        // in-flight anchor immediately, then jump to the tail. Future output follows.
+        setPendingAnchor(undefined);
         setSticky(undefined);
         box.scrollTo(box.scrollHeight);
         box.afterLayout(updateSticky);
@@ -405,9 +495,13 @@ export function Transcript(props: TranscriptProps) {
   };
   onMount(() => {
     props.onScrollHandle?.(scroll);
+    props.onDetailsHandle?.(toggleDetails);
     if (box !== undefined) box.verticalScrollBar.onChange = updateSticky;
   });
-  onCleanup(() => props.onScrollHandle?.(undefined));
+  onCleanup(() => {
+    props.onScrollHandle?.(undefined);
+    props.onDetailsHandle?.(undefined);
+  });
 
   const sessionModel = (): { model?: ModelSelection; status?: 'loading' | 'unavailable' } => {
     const session = state.sessions[sessionKeyValue()];

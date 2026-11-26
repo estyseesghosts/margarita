@@ -1196,6 +1196,8 @@ describe('app', () => {
 
     setup.mockInput.pressKey('HOME', { ctrl: true });
     await settle(setup);
+    // The earliest *loaded* message must actually be on screen, not merely in state.
+    expect(setup.captureCharFrame()).toContain('message 180');
     setup.mockInput.pressKey(pageUp);
     await settle(setup);
     await settle(setup);
@@ -5394,6 +5396,257 @@ describe('newest short assistant reply survives the live refetch race (#167 foll
     await settle(setup);
 
     expect(setup.captureCharFrame()).toContain('Wrapped up.');
+    controller.dispose();
+  });
+});
+
+/**
+ * A turn whose answer is many physical rows (wrapped prose plus a foldable tool). `lines`
+ * controls the physical height, `tools` the compact/detailed height delta: compact folds the
+ * calls into one row while detailed expands every call and its output. The default fixture is
+ * comfortably over 700 physical rows so a tail-only 320-row slicer cannot accidentally pass.
+ */
+function scrollbackTurn(turn: number, lines: number, tools: number): TranscriptMessage[] {
+  const parts: AssistantPart[] = [
+    {
+      kind: 'text',
+      text: Array.from({ length: lines }, (_unused, line) => `answer ${turn} line ${line}`).join(
+        '\n',
+      ),
+    },
+    ...Array.from({ length: tools }, (_unused, index): AssistantPart => ({
+      kind: 'tool',
+      tool: {
+        id: `sb-tool-${turn}-${index}`,
+        name: 'read',
+        status: 'completed',
+        input: { filePath: `src/scrollback-${turn}-${index}.ts` },
+        output: Array.from(
+          { length: 10 },
+          (_lineUnused, line) => `tool ${turn}.${index} output ${line}`,
+        ).join('\n'),
+        startedAt: turn * 100 + 2,
+        completedAt: turn * 100 + 3,
+      },
+    })),
+  ];
+  return [
+    {
+      kind: 'user',
+      id: `sb-user-${turn}`,
+      createdAt: turn * 100 + 1,
+      text: `anchor prompt ${turn}`,
+      attachments: [],
+    },
+    {
+      kind: 'assistant',
+      id: `sb-assistant-${turn}`,
+      createdAt: turn * 100 + 2,
+      completedAt: turn * 100 + 3,
+      agent: 'build',
+      model: { providerID: 'opencode', modelID: 'longcat' },
+      parts,
+    },
+  ];
+}
+
+function scrollbackBackend(turns: number, lines = 62, tools = 1): FakeBackend {
+  const backend = backendWithSession();
+  backend.messages = {
+    ses_a: Array.from({ length: turns }, (_unused, turn) =>
+      scrollbackTurn(turn, lines, tools),
+    ).flat(),
+  };
+  return backend;
+}
+
+/** 0-indexed frame row of the first line containing `needle`, or -1. */
+function frameRow(frame: string, needle: string): number {
+  return frame.split('\n').findIndex((line) => line.includes(needle));
+}
+
+function appendScrollback(backend: FakeBackend, controller: AppController, turns: number[]): void {
+  backend.messages = {
+    ses_a: [
+      ...(backend.messages['ses_a'] ?? []),
+      ...turns.flatMap((turn) => scrollbackTurn(turn, 60, 1)),
+    ],
+  };
+  controller.onEvents('local', [{ kind: 'transcript-changed', sessionID: 'ses_a' }], false);
+}
+
+describe('scrollback contract: the mounted transcript must expose loaded history (#355 repair)', () => {
+  test('the live tail follows newly streamed assistant output', async () => {
+    const backend = scrollbackBackend(12);
+    const { controller, setup } = await mount(backend, { width: 80, height: 18 });
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    // The newest physical line of a >700-row transcript is visible at the tail.
+    expect(setup.captureCharFrame()).toContain('answer 11 line 61');
+
+    appendScrollback(backend, controller, [100]);
+    await Bun.sleep(200);
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('answer 100 line 59');
+    controller.dispose();
+  });
+
+  test('a historical row survives streaming that exceeds the old 320-row budget', async () => {
+    const backend = scrollbackBackend(12);
+    const { controller, setup } = await mount(backend, { width: 80, height: 18 });
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    // Page into history until a specific canonical answer is on screen, then remember its row.
+    const needle = 'answer 8 line 30';
+    let row = -1;
+    for (let step = 0; step < 60 && row < 0; step += 1) {
+      setup.mockInput.pressKey(pageUp);
+      await settle(setup);
+      row = frameRow(setup.captureCharFrame(), needle);
+    }
+    expect(row).toBeGreaterThanOrEqual(0);
+
+    // Eight more turns (~480 physical rows) push the tail far past the old row cap. The row
+    // the reader was looking at must not move or vanish just because new tokens arrived.
+    appendScrollback(backend, controller, [100, 101, 102, 103, 104, 105, 106, 107]);
+    await Bun.sleep(200);
+    await settle(setup);
+    expect(frameRow(setup.captureCharFrame(), needle)).toBe(row);
+    controller.dispose();
+  });
+
+  test('repeated PageUp reaches genuinely old messages above the old row cap', async () => {
+    const backend = scrollbackBackend(12);
+    const { controller, setup } = await mount(backend, { width: 80, height: 18 });
+    controller.openSession('ses_a');
+    await settle(setup);
+    expect(setup.captureCharFrame()).not.toContain('anchor prompt 0');
+
+    for (let step = 0; step < 120; step += 1) setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('anchor prompt 0');
+    controller.dispose();
+  });
+
+  test('Ctrl+Home reaches the earliest loaded message in a >700-row transcript', async () => {
+    const backend = scrollbackBackend(12);
+    const { controller, setup } = await mount(backend, { width: 80, height: 18 });
+    controller.openSession('ses_a');
+    await settle(setup);
+    expect(setup.captureCharFrame()).not.toContain('anchor prompt 0');
+
+    setup.mockInput.pressKey('HOME', { ctrl: true });
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('anchor prompt 0');
+    // The user prompt has not silently fetched the whole server history.
+    expect(controller.state.transcripts['ses_a']?.messages).toHaveLength(24);
+    controller.dispose();
+  });
+
+  test('Ctrl+End returns to the live tail and resumes following new output', async () => {
+    const backend = scrollbackBackend(12);
+    const { controller, setup } = await mount(backend, { width: 80, height: 18 });
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressKey('HOME', { ctrl: true });
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('anchor prompt 0');
+
+    setup.mockInput.pressKey('END', { ctrl: true });
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('answer 11 line 61');
+
+    appendScrollback(backend, controller, [100]);
+    await Bun.sleep(200);
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('answer 100 line 59');
+    controller.dispose();
+  });
+
+  test('a delayed older page keeps a visible message on the same row', async () => {
+    // 180 turns: the initially loaded 120 messages fit the window while the full history is
+    // well over 700 physical rows. The anchor sits inside the initially loaded prefix.
+    const backend = scrollbackBackend(180, 1, 1);
+    let releaseOlder: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseOlder = resolve;
+    });
+    const immediate = backend.listMessages.bind(backend);
+    backend.listMessages = async (sessionID, limit, cursor) => {
+      if (cursor !== undefined) await gate;
+      return immediate(sessionID, limit, cursor);
+    };
+    const { controller, setup } = await mount(backend, { width: 80, height: 18 });
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    setup.mockInput.pressKey('HOME', { ctrl: true });
+    await settle(setup);
+    // The first server page is the tail: turns 120..179 are the initially loaded prefix.
+    const needle = 'answer 120 line 0';
+    const before = setup.captureCharFrame();
+    const row = frameRow(before, needle);
+    expect(row).toBeGreaterThanOrEqual(0);
+
+    setup.mockInput.pressKey(pageUp);
+    await settle(setup);
+    releaseOlder?.();
+    await settle(setup);
+    await settle(setup);
+    expect(controller.state.transcripts['ses_a']?.messages).toHaveLength(240);
+    const after = setup.captureCharFrame();
+    expect(frameRow(after, needle)).toBe(row);
+    controller.dispose();
+  });
+
+  test('Ctrl+O preserves a history anchor across compact/detailed/compact projection', async () => {
+    // Five tools per turn make the compact-to-detailed height change material: compact folds
+    // them into one row, detailed expands each call and its ten-line output.
+    const backend = scrollbackBackend(10, 20, 5);
+    const { controller, setup } = await mount(backend, { width: 80, height: 18 });
+    controller.openSession('ses_a');
+    await settle(setup);
+    setup.mockInput.pressKey('HOME', { ctrl: true });
+    await settle(setup);
+
+    const needle = 'anchor prompt 0';
+    const compactRow = frameRow(setup.captureCharFrame(), needle);
+    expect(compactRow).toBeGreaterThanOrEqual(0);
+
+    setup.mockInput.pressKey('o', { ctrl: true });
+    await settle(setup);
+    expect(controller.state.detailed).toBe(true);
+    const detailedRow = frameRow(setup.captureCharFrame(), needle);
+    expect(detailedRow).toBeGreaterThanOrEqual(0);
+    expect(Math.abs(detailedRow - compactRow)).toBeLessThanOrEqual(2);
+
+    setup.mockInput.pressKey('o', { ctrl: true });
+    await settle(setup);
+    expect(controller.state.detailed).toBe(false);
+    expect(Math.abs(frameRow(setup.captureCharFrame(), needle) - compactRow)).toBeLessThanOrEqual(
+      2,
+    );
+    controller.dispose();
+  });
+
+  test('Ctrl+O at the live tail keeps following output in the new mode', async () => {
+    const backend = scrollbackBackend(12);
+    const { controller, setup } = await mount(backend, { width: 80, height: 18 });
+    controller.openSession('ses_a');
+    await settle(setup);
+
+    setup.mockInput.pressKey('o', { ctrl: true });
+    await settle(setup);
+    expect(controller.state.detailed).toBe(true);
+    // Detailed mode expands the tool, so the tail's last visible row is its output.
+    expect(setup.captureCharFrame()).toContain('tool 11.0 output 9');
+
+    appendScrollback(backend, controller, [100]);
+    await Bun.sleep(200);
+    await settle(setup);
+    expect(setup.captureCharFrame()).toContain('tool 100.0 output 9');
     controller.dispose();
   });
 });

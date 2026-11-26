@@ -371,15 +371,17 @@ message index maintained with the transcript metadata, so the projector rebuilds
 message and its bounded suffix. A test over 10,000 messages expands one old group and asserts a
 single message is folded while more than 9,000 keep their cached nodes.
 
-## Physical row budget (#355)
+## Transcript window and paint cost (#355 repair)
 
-The transcript window now enforces a physical layout budget (`transcriptRowBudget`, 320 rows)
-in addition to the configurable node limit. `estimatedNodeRows()` counts wrapped text, expanded
-tool/diff previews, groups, shell output, notices and worker rows without scanning megabyte-scale
-diffs. `windowNodeViewByRows()` walks backward from the live tail, always includes the newest
-node, and mounts a single node larger than the budget whole instead of looping, hiding or
-truncating it. The estimate is conservative and recalculated when the terminal width changes.
-The soak benchmark reports mounted node count, estimated rows and hidden nodes per window.
+`transcriptWindow` has one meaning: how many folded nodes from loaded history may be mounted.
+`windowNodeView()` selects the newest node window and its `hidden` count reports only loaded
+nodes outside that window; server history availability is tracked separately by `olderCursor`.
+There is no tail-relative physical-row slicer: a row cap made already-loaded messages impossible
+to reach and was removed. Paint cost is bounded locally instead — `viewportCulling` on the
+scrollbox avoids painting offscreen rows, and each expensive item keeps its own cap
+(`boundedPreview`, `toolMetadataRowBudget`, diff clamping, shell/reasoning caps and Code Mode
+child paging). The soak benchmark reports the same mounted/hidden/total node counts the view
+uses, so a benchmark can never redefine scrollback reachability.
 
 ## Large source payload retention (#356)
 

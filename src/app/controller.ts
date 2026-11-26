@@ -3802,15 +3802,20 @@ export class AppController {
     }
   }
 
-  /** Rendered node limit for a session's transcript. */
+  /**
+   * How many folded nodes from loaded history may be mounted for a session. `hidden` from
+   * `windowNodeView` means exactly the loaded nodes outside this logical window; it says
+   * nothing about server history, which is advertised solely by `olderCursor` (#355 repair).
+   */
   transcriptWindow(sessionID: string, serverID: string = this.activeServerID()): number {
     return this.state.transcriptWindow[this.keyFor(serverID, sessionID)] ?? transcriptWindowStep;
   }
 
   /**
-   * Reveals every already-loaded node without fetching an older page. Ctrl+Home uses this
-   * so it reaches the earliest *loaded* message while the existing "earlier messages"
-   * marker still tells the reader when server history remains (#251).
+   * Grows the logical allowance until every currently *loaded* presentation node fits.
+   * Ctrl+Home uses this to reach the earliest loaded message while the existing "earlier
+   * messages" marker still tells the reader when server history remains (#251). No physical
+   * row slicer constrains this; no server page is fetched here.
    */
   revealAllLoaded(
     sessionID: string,
@@ -3819,11 +3824,9 @@ export class AppController {
   ): boolean {
     if (hiddenNodes <= 0) return false;
     const key = this.keyFor(serverID, sessionID);
-    this.setState(
-      'transcriptWindow',
-      key,
-      this.transcriptWindow(sessionID, serverID) + hiddenNodes,
-    );
+    const loaded = this.presentationFor(sessionID, serverID).length;
+    const needed = Math.max(this.transcriptWindow(sessionID, serverID) + hiddenNodes, loaded);
+    this.setState('transcriptWindow', key, needed);
     return true;
   }
 
@@ -3861,11 +3864,9 @@ export class AppController {
     serverID: string = this.activeServerID(),
   ): boolean {
     const key = this.keyFor(serverID, sessionID);
-    // Hidden nodes can come from the node window or from the physical row budget. Only the
-    // former can be revealed by growing the node window; when every loaded node is already
-    // allowed, PageUp must fetch older history instead of looping on a row-bound window (#355).
-    const loadedNodes = this.presentationFor(sessionID, serverID).length;
-    if (hiddenNodes > 0 && this.transcriptWindow(sessionID, serverID) < loadedNodes) {
+    if (hiddenNodes > 0) {
+      // Loaded-but-windowed history comes from the logical node count. Expose it first, with
+      // no server request yet: PageUp at the top must walk loaded history before paging.
       this.setState(
         'transcriptWindow',
         key,
@@ -3873,6 +3874,7 @@ export class AppController {
       );
       return true;
     }
+    // Nothing loaded remains hidden; only a server cursor says more history exists.
     const transcript = this.state.transcripts[key];
     if (transcript?.olderCursor === undefined) return false;
     this.setState(

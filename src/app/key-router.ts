@@ -39,6 +39,12 @@ export type RouterServices = Readonly<{
   /** Scrolls the visible transcript; paging past the top loads earlier history. */
   scroll: (move: ScrollMove) => void;
   /**
+   * Viewport-preserving Ctrl+O orchestration, registered by the mounted transcript. The
+   * controller still owns the `detailed` state mutation; only the UI can capture/restore a
+   * semantic anchor because it owns the ScrollBoxRenderable.
+   */
+  toggleTranscriptDetails?: () => void;
+  /**
    * Rows one PageUp/PageDown moves the overview selection. Optional so non-UI callers
    * and tests get a sensible page without supplying terminal dimensions.
    */
@@ -153,7 +159,11 @@ function runAction(controller: AppController, action: ActionID, services: Router
       void controller.nextRecentModel();
       return true;
     case 'transcript.details':
-      controller.toggleDetails();
+      // One key-precedence chain: the router still decides *when* the action happens. The
+      // mounted view, when present, owns the viewport-preserving transition; headless callers
+      // keep the plain controller mutation.
+      if (services.toggleTranscriptDetails !== undefined) services.toggleTranscriptDetails();
+      else controller.toggleDetails();
       return true;
     case 'transcript.copy':
       controller.openCopyPicker();
