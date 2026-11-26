@@ -55,6 +55,8 @@ export interface TranscriptMessageView extends ReadonlyArray<TranscriptMessage> 
     changeBoundary?: number,
   ): TranscriptMessageView;
   prependOlder(older: readonly TranscriptMessage[], revision: number): TranscriptMessageView;
+  /** Drops `count` leading messages, keeping only whole trailing chunks (reloadable pages). */
+  evictPrefix(count: number, revision: number): TranscriptMessageView;
 }
 
 /** True when an array-like value is already a paged view. */
@@ -249,6 +251,11 @@ class PagedTranscriptMessages {
       revision,
       this.changeBoundary,
     );
+  }
+
+  evictPrefix(count: number, revision: number): TranscriptMessageView {
+    const chunks = this.chunkRange(Math.max(0, count), this.length);
+    return createTranscriptMessageViewFromChunks(chunks, revision, this.changeBoundary);
   }
 }
 

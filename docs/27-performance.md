@@ -416,6 +416,14 @@ looking at rather than to the tail. Rows render with item identity (`<For>`), an
 registers its `Renderable` in a view-local map so sticky and anchor lookups stop walking the
 whole render tree.
 
+Canonical transcripts are paged, not flat. `TranscriptMessageView` is an array-compatible facade
+over immutable message chunks: a latest-page refresh replaces one tail chunk and an older-page
+prepend inserts one chunk while every retained chunk is shared by reference. Active sessions are
+no longer pinned forever: once history exceeds the cache budget, whole off-window prefix pages
+are evicted only when their server cursor is known, and the reader's next backward move refetches
+them transparently. The live tail, the reader's window plus one page of context, and any
+inspected/copied message's page are never evicted.
+
 The overview applies the same discipline per project: six collapsed rows, a 24-session window
 on Show more, and explicit Older/Newer controls. Expanding a project invalidates only row
 presentation; tab counts and grouping are untouched. `loadMoreSessions()` commits one page's

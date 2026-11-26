@@ -23,6 +23,7 @@ import { AppController } from './controller.ts';
 import type { ControllerDeps, ProjectFileListing } from './controller.ts';
 import { routeKey } from './key-router.ts';
 import type { TimerHandle, TimerScheduler } from './timer-scheduler.ts';
+import { asTranscriptMessageView } from './transcript-store.ts';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -8450,5 +8451,106 @@ describe('newest short assistant reply survives the streaming refetch race (#aud
     const messages = controller.state.transcripts['ses_a']?.messages ?? [];
     expect(assistantText(messages, 'm2')).toBe('Done.');
     controller.dispose();
+  });
+});
+
+describe('active-history retention (slow.txt task 14)', () => {
+  const sessionID = 'ses_retain';
+
+  function backendWithHistory(): FakeBackend {
+    const backend = new FakeBackend();
+    backend.sessions = [
+      {
+        id: sessionID,
+        serverID: 'local',
+        projectID: 'retain',
+        directory: '/work/kohjoh',
+        title: 'Retention',
+        createdAt: 0,
+        updatedAt: 1,
+        archived: false,
+      },
+    ];
+    backend.messages = {
+      [sessionID]: Array.from({ length: 1200 }, (_unused, index) => ({
+        kind: 'user' as const,
+        id: `r${String(index).padStart(4, '0')}`,
+        createdAt: index,
+        text: `retained payload ${index} ${'x'.repeat(160)}`,
+        attachments: [],
+      })),
+    };
+    return backend;
+  }
+
+  test('keeps active history bounded and refetches evicted pages on demand', async () => {
+    const backend = backendWithHistory();
+    const controller = makeController(
+      () => Promise.resolve([]),
+      backend,
+      () => 10_000,
+      {
+        transcriptCacheBytes: 4096,
+      },
+    );
+    try {
+      await controller.bootstrap();
+      controller.openSession(sessionID);
+      await flush();
+      // Nine older-page reads against a 1,200-message server history. Retention keeps only
+      // the tail, the reader window and nearby pages; it never grows without bound.
+      for (let page = 0; page < 9; page += 1) await controller.loadOlder(sessionID);
+      const key = sessionKey({ serverID: 'local', sessionID });
+      const bounded = asTranscriptMessageView(controller.state.transcripts[key]?.messages ?? []);
+      expect(bounded.chunkCount()).toBeGreaterThan(1);
+      expect(bounded.length).toBeLessThan(1200);
+      expect(controller.state.transcripts[key]?.olderCursor).toBeDefined();
+      expect(controller.transcriptViewport(sessionID).capacity).toBe(200);
+
+      // The reader's semantic anchor survives further paging even as old chunks move out.
+      expect(controller.revealEarlier(sessionID, bounded.length - 200)).toBe(true);
+      const anchor = controller.transcriptViewport(sessionID).anchorKey;
+      expect(anchor).toBeDefined();
+      await controller.loadOlder(sessionID);
+      const after = asTranscriptMessageView(controller.state.transcripts[key]?.messages ?? []);
+      expect(after.some((message) => message.id === anchor)).toBe(true);
+      const retained = after.length;
+      await controller.loadOlder(sessionID);
+      const reloaded = asTranscriptMessageView(controller.state.transcripts[key]?.messages ?? []);
+      expect(reloaded.length).toBeGreaterThan(retained);
+      expect(reloaded.some((message) => message.id === anchor)).toBe(true);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('a pinned inspected message keeps its page loaded', async () => {
+    const backend = backendWithHistory();
+    const controller = makeController(
+      () => Promise.resolve([]),
+      backend,
+      () => 10_000,
+      {
+        transcriptCacheBytes: 4096,
+      },
+    );
+    try {
+      await controller.bootstrap();
+      controller.openSession(sessionID);
+      await flush();
+      const key = sessionKey({ serverID: 'local', sessionID });
+      for (let page = 0; page < 3; page += 1) await controller.loadOlder(sessionID);
+      const pinned = asTranscriptMessageView(controller.state.transcripts[key]?.messages ?? []).at(
+        0,
+      );
+      expect(pinned).toBeDefined();
+      controller.pinTranscriptMessage(sessionID, pinned?.id ?? '', 'local');
+      for (let page = 0; page < 6; page += 1) await controller.loadOlder(sessionID);
+      const after = asTranscriptMessageView(controller.state.transcripts[key]?.messages ?? []);
+      // A pinned page holding the inspected message is never evicted.
+      expect(after.some((message) => message.id === pinned?.id)).toBe(true);
+    } finally {
+      controller.dispose();
+    }
   });
 });

@@ -273,6 +273,8 @@ import {
   TranscriptRetryTracker,
 } from './transcript-retry.ts';
 import {
+  asTranscriptMessageView,
+  buildTranscriptIndex,
   ensureTranscriptIndex,
   indexOfMessage,
   isTranscriptMessageView,
@@ -1928,6 +1930,13 @@ export class AppController {
   private readonly pendingActivity = new Set<string>();
   /** Derived reconciliation metadata; never a second copy of the messages (#350, #351). */
   private readonly transcriptIndexes = new Map<string, TranscriptIndex>();
+  /**
+   * Server cursors for prepended pages, oldest-first. A prefix page can only be evicted when
+   * its refetch cursor is known; this is what makes active-history eviction safe (slow.txt 14).
+   */
+  private readonly transcriptChunkCursors = new Map<string, string[]>();
+  /** Message IDs that must not be evicted because the user is inspecting/copying them. */
+  private readonly pinnedMessageIDs = new Map<string, Set<string>>();
   /** One incremental execution-marker derivation per transcript (#349). */
   private readonly markerProjectors = new Map<
     string,
@@ -2523,6 +2532,8 @@ export class AppController {
     this.presentationProjectors.delete(key);
     this.presentationViewCache.delete(key);
     this.presentationCache.delete(key);
+    this.transcriptChunkCursors.delete(key);
+    this.pinnedMessageIDs.delete(key);
   }
 
   /** Drops every cached trace of a session the server no longer has. */
@@ -3814,6 +3825,7 @@ export class AppController {
       }),
     );
     this.touchTranscript(key);
+    this.enforceActiveHistoryRetention(key);
     this.transcriptGenerations.commit(key, generation);
     this.updateExecutionMarkers(key, merged, {
       kind: 'replace',
@@ -3838,6 +3850,7 @@ export class AppController {
     const transcript = this.state.transcripts[key];
     if (transcript?.olderCursor === undefined || transcript.loading) return;
     const epoch = this.sessionEpoch(key);
+    const fetchCursor = transcript.olderCursor;
     const backend = this.backendFor(serverID);
     this.setState('transcripts', key, 'loading', true);
     try {
@@ -3862,7 +3875,14 @@ export class AppController {
         this.transcriptIndexes.get(key),
         page.messages,
       );
-      if (outcome.added > 0) this.transcriptIndexes.set(key, outcome.index);
+      if (outcome.added > 0) {
+        this.transcriptIndexes.set(key, outcome.index);
+        // Remember the cursor that fetched this front page: it is the safe refetch boundary
+        // if retention later needs to evict it.
+        const cursors = this.transcriptChunkCursors.get(key) ?? [];
+        cursors.unshift(fetchCursor);
+        this.transcriptChunkCursors.set(key, cursors);
+      }
       // Replace via produce: a merging setter would keep a stale cursor after the last page.
       this.setState(
         'transcripts',
@@ -3888,6 +3908,7 @@ export class AppController {
         });
       }
       this.touchTranscript(key);
+      this.enforceActiveHistoryRetention(key);
     } catch (error) {
       // A failure from a retired lifetime says nothing about the current one; do not
       // surface it as a notice for a session the user no longer has.
@@ -4041,6 +4062,100 @@ export class AppController {
       serverID,
       tailViewport(this.transcriptViewport(sessionID, serverID).capacity),
     );
+  }
+
+  /** Pins one message so retention cannot evict the page an inspector/copy action holds. */
+  pinTranscriptMessage(
+    sessionID: string,
+    messageID: string,
+    serverID: string = this.activeServerID(),
+  ): void {
+    const key = this.keyFor(serverID, sessionID);
+    const pinned = this.pinnedMessageIDs.get(key) ?? new Set<string>();
+    pinned.add(messageID);
+    this.pinnedMessageIDs.set(key, pinned);
+  }
+
+  /**
+   * Retains the live tail, the reader's bounded window and one page of context before it.
+   * Older whole pages are evicted only when a server cursor can refetch them; the page holding
+   * the reader anchor or an inspected/copied message is never touched (slow.txt task 14).
+   */
+  private enforceActiveHistoryRetention(key: string): void {
+    const transcript = this.state.transcripts[key];
+    const index = this.transcriptIndexes.get(key);
+    if (transcript === undefined || index === undefined || transcript.olderCursor === undefined) {
+      return;
+    }
+    const budget = this.deps.transcriptCacheBytes ?? transcriptCacheByteLimit;
+    if (index.bytes.total <= budget) return;
+    const view = asTranscriptMessageView(this.canonicalMessages(transcript.messages));
+    const chunks = view.chunks();
+    if (chunks.length < 2) return;
+
+    const route = this.state.route;
+    const isActive =
+      route.kind === 'conversation' && this.keyFor(route.serverID, route.sessionID) === key;
+    const viewport = isActive
+      ? this.transcriptViewport(route.sessionID, route.serverID)
+      : tailViewport();
+    const windowStart =
+      viewport.mode === 'history' ? viewport.start : Math.max(0, view.length - viewport.capacity);
+    let limit = Math.max(0, windowStart - viewport.capacity);
+    for (const messageID of this.pinnedMessageIDs.get(key) ?? []) {
+      const position = indexOfMessage(index, messageID);
+      if (position !== undefined) limit = Math.min(limit, position);
+    }
+
+    const cursors = this.transcriptChunkCursors.get(key) ?? [];
+    let removed = 0;
+    let evictedChunks = 0;
+    for (const chunk of chunks) {
+      if (evictedChunks >= cursors.length || evictedChunks >= chunks.length - 1) break;
+      if (removed + chunk.length > limit) break;
+      removed += chunk.length;
+      evictedChunks += 1;
+    }
+    if (evictedChunks === 0) return;
+    const refetchCursor = cursors[evictedChunks - 1];
+    if (refetchCursor === undefined) return;
+
+    const nextView = view.evictPrefix(removed, view.revision + 1);
+    const nextIndex = buildTranscriptIndex(nextView);
+    nextIndex.revision = nextView.revision;
+    this.transcriptIndexes.set(key, nextIndex);
+    const remainingCursors = cursors.slice(evictedChunks);
+    if (remainingCursors.length === 0) this.transcriptChunkCursors.delete(key);
+    else this.transcriptChunkCursors.set(key, remainingCursors);
+
+    batch(() => {
+      this.setState(
+        'transcripts',
+        produce((draft) => {
+          const entry = draft[key];
+          if (entry === undefined) return;
+          entry.messages = nextView;
+          entry.changedFrom = 0;
+          entry.olderCursor = refetchCursor;
+          delete entry.olderCheckFailed;
+        }),
+      );
+      if (isActive && route.kind === 'conversation') {
+        this.writeTranscriptViewport(route.sessionID, route.serverID, {
+          mode: viewport.mode,
+          anchorKey: viewport.anchorKey,
+          start: Math.max(0, windowStart - removed),
+          capacity: viewport.capacity,
+        });
+      }
+    });
+    this.updateExecutionMarkers(key, nextView, { kind: 'reset' });
+    this.debugLog.write('active-history-evicted', {
+      key,
+      messages: removed,
+      chunks: evictedChunks,
+      bytesFreed: index.bytes.total - nextIndex.bytes.total,
+    });
   }
 
   /**
@@ -7112,6 +7227,21 @@ export class AppController {
     const item = this.copyChoices(overlay.query)[overlay.index];
     this.setOverlay({ kind: 'none' });
     if (item === undefined) return;
+    const route = this.state.route;
+    if (route.kind === 'conversation') {
+      const messageID = item.key.startsWith('response:')
+        ? item.key.slice('response:'.length)
+        : messageIDOfTool(
+            this.transcriptIndexFor(
+              this.keyFor(route.serverID, route.sessionID),
+              this.canonicalMessages(this.loadedMessages()),
+            ),
+            item.key,
+          );
+      if (messageID !== undefined) {
+        this.pinTranscriptMessage(route.sessionID, messageID, route.serverID);
+      }
+    }
     const suffix =
       item.truncation === 'none'
         ? ''
@@ -9170,6 +9300,7 @@ export class AppController {
       loading: true,
       payload: cachedToolResult(target.tool),
     });
+    this.pinTranscriptMessage(route.sessionID, target.messageID, route.serverID);
     void this.loadInspector(route.serverID, route.sessionID, target.messageID, target.tool.id);
     return true;
   }
