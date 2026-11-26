@@ -34,6 +34,8 @@ The result bundles the Bun runtime and OpenTUI's native library, so you can copy
 
 ### Option C: download a release
 
+published binary releases are often stale!! you are better off running marg from source!!
+
 [Releases](https://github.com/estyseesghosts/margarita/releases) publish one binary per target
 (`marg-windows-x64.exe`, `marg-linux-x64`) with a matching `.sha256` file. Tags use the build
 identity: `v26-11-<short commit>` matches what that binary prints for `marg --version`. Verify a
