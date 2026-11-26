@@ -304,7 +304,7 @@ function transcriptReconcileReport(): unknown {
   const pageSize = 120;
   const results: unknown[] = [];
   for (const size of sizes) {
-    let cached = messageCount(size);
+    let cached: readonly TranscriptMessage[] = messageCount(size);
     let index = buildTranscriptIndex(cached);
     const samples: number[] = [];
     let last = mergeLatestIndexed(cached, index, cached.slice(-pageSize));

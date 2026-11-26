@@ -275,6 +275,7 @@ import {
 import {
   ensureTranscriptIndex,
   indexOfMessage,
+  isTranscriptMessageView,
   mergeLatestIndexed,
   messageIDOfTool,
   prependOlderIndexed,
@@ -2398,9 +2399,17 @@ export class AppController {
     return this.sessionFetcher.reconcile(refs);
   }
 
+  /**
+   * Solid's `unwrap` would strip the array-compatible facade from a paged view and lose
+   * indexed access. Views are immutable value objects, so they are safe to keep unwrapped.
+   */
+  private canonicalMessages(messages: readonly TranscriptMessage[]): readonly TranscriptMessage[] {
+    return isTranscriptMessageView(messages) ? messages : unwrap(messages);
+  }
+
   /** Derived metadata for one transcript; rebuilds only when another owner replaced the array. */
   private transcriptIndexFor(key: string, messages: readonly TranscriptMessage[]): TranscriptIndex {
-    const raw = unwrap(messages);
+    const raw = this.canonicalMessages(messages);
     const existing = this.transcriptIndexes.get(key);
     const index = ensureTranscriptIndex(existing, raw);
     if (index !== existing) {
@@ -2475,7 +2484,7 @@ export class AppController {
     const key = this.keyFor(serverID, sessionID);
     const transcript = this.state.transcripts[key];
     if (transcript === undefined) return undefined;
-    const messages = unwrap(transcript.messages);
+    const messages = this.canonicalMessages(transcript.messages);
     const running = this.state.running[key] === true;
     const cached = this.markerCache.get(key);
     if (cached === undefined || cached.messages !== messages) {
@@ -2502,7 +2511,7 @@ export class AppController {
     const key = this.keyFor(serverID, sessionID);
     const transcript = this.state.transcripts[key];
     if (transcript === undefined) return undefined;
-    const messages = unwrap(transcript.messages);
+    const messages = this.canonicalMessages(transcript.messages);
     const index = this.transcriptIndexFor(key, messages);
     return { messages: messages.length, bytes: index.bytes.total };
   }
@@ -3772,7 +3781,8 @@ export class AppController {
     // A newer accepted page is a watermark: this older snapshot must not replace it.
     if (!this.transcriptGenerations.shouldCommit(key, generation)) return;
     const existing = this.state.transcripts[key];
-    const existingMessages = existing === undefined ? [] : unwrap(existing.messages);
+    const existingMessages =
+      existing === undefined ? [] : this.canonicalMessages(existing.messages);
     const outcome = mergeLatestIndexed(
       existingMessages,
       this.transcriptIndexes.get(key),
@@ -3848,7 +3858,7 @@ export class AppController {
       const current = this.state.transcripts[key];
       if (current === undefined) return;
       const outcome = prependOlderIndexed(
-        unwrap(current.messages),
+        this.canonicalMessages(current.messages),
         this.transcriptIndexes.get(key),
         page.messages,
       );
@@ -4045,7 +4055,8 @@ export class AppController {
       touched: key,
       sizes: (entry) => {
         const transcript = this.state.transcripts[entry];
-        const messages = transcript === undefined ? [] : unwrap(transcript.messages);
+        const messages =
+          transcript === undefined ? [] : this.canonicalMessages(transcript.messages);
         return this.transcriptIndexFor(entry, messages).bytes.total;
       },
       activeKey:
@@ -8805,7 +8816,7 @@ export class AppController {
     const mcp = this.mcpServersFor(serverID, this.state.sessions[key]?.directory ?? '').join(
       '\u0001',
     );
-    const messages = unwrap(transcript.messages);
+    const messages = this.canonicalMessages(transcript.messages);
     const workers = this.state.workers[key] ?? [];
     const running = this.state.running[key] === true;
     const cached = this.presentationViewCache.get(key);
@@ -8874,7 +8885,7 @@ export class AppController {
       [...expanded.groups].toSorted().join('\u0001'),
       [...expanded.diffs].toSorted().join('\u0001'),
     ].join('\u0002');
-    const messages = unwrap(transcript.messages);
+    const messages = this.canonicalMessages(transcript.messages);
     const workers = this.state.workers[key] ?? [];
     const cached = this.presentationCache.get(key);
     if (
@@ -9027,7 +9038,7 @@ export class AppController {
     const key = this.keyFor(route.serverID, route.sessionID);
     const transcript = this.state.transcripts[key];
     if (transcript === undefined) return;
-    const index = this.transcriptIndexFor(key, unwrap(transcript.messages));
+    const index = this.transcriptIndexFor(key, this.canonicalMessages(transcript.messages));
     let changedFrom = transcript.messages.length;
     for (const id of toolIDs) {
       const messageID = messageIDOfTool(index, id);

@@ -4,8 +4,11 @@ import type { TranscriptMessage } from '../domain/transcript.ts';
 import { approximateTranscriptBytes } from '../perf/memory.ts';
 import { mergeLatest } from './controller.ts';
 import {
+  asTranscriptMessageView,
   buildTranscriptIndex,
+  createTranscriptMessageView,
   indexOfMessage,
+  isTranscriptMessageView,
   mergeLatestIndexed,
   prependOlderIndexed,
 } from './transcript-store.ts';
@@ -32,7 +35,7 @@ describe('indexed latest-page reconciliation (#350)', () => {
   });
 
   test('randomized replacements, deletions and additions keep ids and bytes exact', () => {
-    let messages = Array.from({ length: 200 }, (_, index) =>
+    let messages: readonly TranscriptMessage[] = Array.from({ length: 200 }, (_, index) =>
       user(`m${index}`, index, `payload ${index}`),
     );
     let index = buildTranscriptIndex(messages);
@@ -114,7 +117,7 @@ describe('indexed older-page prepend (#350)', () => {
   });
 
   test('repeated prepends keep relative indices valid', () => {
-    let messages: TranscriptMessage[] = [user('m2', 2), user('m3', 3)];
+    let messages: readonly TranscriptMessage[] = [user('m2', 2), user('m3', 3)];
     let index = buildTranscriptIndex(messages);
     for (let round = 0; round < 20; round += 1) {
       const older = [user(`old${round}`, -round - 1)];
@@ -133,7 +136,7 @@ describe('indexed older-page prepend (#350)', () => {
     const cached = [user('a', 1, 'x'.repeat(200_000)), user('b', 2)];
     let index = buildTranscriptIndex(cached);
     const before = index.bytes.total;
-    let messages = cached;
+    let messages: readonly TranscriptMessage[] = cached;
     const smaller = mergeLatestIndexed(messages, index, [user('a', 1, 'tiny'), user('b', 2)]);
     expect(smaller.index.bytes.total).toBeLessThan(before);
     expect(smaller.index.bytes.total).toBe(approximateTranscriptBytes(smaller.messages).total);
@@ -144,5 +147,87 @@ describe('indexed older-page prepend (#350)', () => {
       user('b', 2),
     ]);
     expect(larger.index.bytes.total).toBe(approximateTranscriptBytes(larger.messages).total);
+  });
+});
+
+function makeMessages(from: number, count: number): TranscriptMessage[] {
+  return Array.from({ length: count }, (_unused, index) =>
+    user(`m${from + index}`, from + index, `payload ${from + index}`),
+  );
+}
+
+describe('paged TranscriptMessageView (slow.txt task 8)', () => {
+  test('is array-compatible but stores messages in shared chunks', () => {
+    const view = createTranscriptMessageView(makeMessages(0, 6));
+    expect(isTranscriptMessageView(view)).toBe(true);
+    expect(view.length).toBe(6);
+    expect(view[3]?.id).toBe('m3');
+    expect(view.at(-1)?.id).toBe('m5');
+    expect(ids(view)).toEqual(['m0', 'm1', 'm2', 'm3', 'm4', 'm5']);
+    expect(ids(view.slice(2, 5))).toEqual(['m2', 'm3', 'm4']);
+    expect(ids(view.range(1, 3))).toEqual(['m1', 'm2']);
+    expect([...view].length).toBe(6);
+    expect(view.chunkCount()).toBe(1);
+    expect(view.revision).toBe(0);
+  });
+
+  test('tail replacement shares the prefix chunk and only adds one page chunk', () => {
+    // Two page-sized chunks: the replacement boundary aligns with the chunk edge, so the
+    // older chunk is shared by reference rather than sliced.
+    const view = createTranscriptMessageView(makeMessages(990, 10), 3).prependOlder(
+      makeMessages(0, 990),
+      4,
+    );
+    const next = view.replaceTail(990, makeMessages(990, 20), 5, 990);
+    expect(next.length).toBe(1010);
+    expect(next.chunkCount()).toBe(2);
+    expect(next.chunks()[0]).toBe(view.chunks()[0]);
+    expect(next.revision).toBe(5);
+    expect(next.changeBoundary).toBe(990);
+    expect(next[989]?.id).toBe('m989');
+    expect(next[990]?.id).toBe('m990');
+  });
+
+  test('older prepend inserts one chunk and shares the cached chunks', () => {
+    const view = createTranscriptMessageView(makeMessages(100, 50), 2);
+    const next = view.prependOlder(makeMessages(0, 100), 3);
+    expect(next.length).toBe(150);
+    expect(next.chunkCount()).toBe(2);
+    expect(next.chunks()[1]).toBe(view.chunks()[0]);
+    expect(next.revision).toBe(3);
+    expect(next[0]?.id).toBe('m0');
+    expect(next[100]?.id).toBe('m100');
+  });
+
+  test('canonical reconciliation never flattens the retained prefix', () => {
+    // Page-sized chunks mirror how the controller builds canonical history over time.
+    let cached = createTranscriptMessageView(makeMessages(49_920, 80));
+    for (let start = 49_800; start >= 0; start -= 120) {
+      cached = cached.prependOlder(makeMessages(start, 120), cached.revision + 1);
+    }
+    const index = buildTranscriptIndex(cached);
+    expect(cached.length).toBe(50_000);
+    const prefixChunks = cached.chunks().slice();
+    const tail = makeMessages(49_920, 80);
+    tail[0] = user('m49920', 49_920, 'replaced');
+    const outcome = mergeLatestIndexed(cached, index, tail);
+    const mergedView = asTranscriptMessageView(outcome.messages);
+    expect(isTranscriptMessageView(outcome.messages)).toBe(true);
+    expect(outcome.firstChangedIndex).toBe(49_920);
+    expect(mergedView.chunkCount()).toBe(prefixChunks.length);
+    for (let position = 0; position < prefixChunks.length - 1; position += 1) {
+      expect(mergedView.chunks()[position]).toBe(prefixChunks[position]);
+    }
+    expect(outcome.index.revision).toBe(1);
+
+    const olderPage = Array.from({ length: 120 }, (_unused, position) =>
+      user(`older${position}`, -120 + position),
+    );
+    const prepended = prependOlderIndexed(outcome.messages, outcome.index, olderPage);
+    const prependedView = asTranscriptMessageView(prepended.messages);
+    expect(isTranscriptMessageView(prepended.messages)).toBe(true);
+    expect(prependedView.chunks()).toContain(prefixChunks[0]!);
+    expect(prepended.index.revision).toBe(2);
+    expect(prepended.messages.length).toBe(50_120);
   });
 });

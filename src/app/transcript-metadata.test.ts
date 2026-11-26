@@ -10,6 +10,7 @@ import type { SessionSummary } from '../domain/session.ts';
 import type { TranscriptMessage } from '../domain/transcript.ts';
 import { approximateTranscriptBytes } from '../perf/memory.ts';
 import { AppController } from './controller.ts';
+import { asTranscriptMessageView, isTranscriptMessageView } from './transcript-store.ts';
 
 const model = { providerID: 'p', modelID: 'm' };
 const sessionID = 'ses_metadata';
@@ -257,6 +258,35 @@ describe('controller transcript metadata (#349, #350)', () => {
       expect(Array.from(index.keyToIndex.values()).toSorted((a, b) => a - b)).toEqual(
         Array.from({ length: view.length }, (_, i) => i),
       );
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('canonical state keeps paged chunks across a latest-page refresh (slow.txt task 8)', async () => {
+    const { controller, backend } = makeController(history(120));
+    try {
+      await controller.bootstrap();
+      controller.openSession(sessionID);
+      await waitFor(() => messagesOf(controller).length === 120, 'initial transcript');
+      await controller.loadOlder(sessionID);
+      await controller.loadOlder(sessionID);
+      await waitFor(() => messagesOf(controller).length === 360, 'older pages');
+      const before = asTranscriptMessageView(messagesOf(controller));
+      expect(isTranscriptMessageView(before)).toBe(true);
+      const chunks = before.chunks().slice();
+      expect(chunks.length).toBeGreaterThan(1);
+
+      const messages = backend.messages[sessionID];
+      expect(messages).toBeDefined();
+      messages?.push({ ...assistant(120), id: 'a_new', createdAt: 100_000 });
+      controller.onEvents('local', [{ kind: 'transcript-changed', sessionID }], false);
+      await waitFor(() => messagesOf(controller).at(-1)?.id === 'a_new', 'latest-page refresh');
+      const after = asTranscriptMessageView(messagesOf(controller));
+      expect(isTranscriptMessageView(after)).toBe(true);
+      expect(after.chunkCount()).toBeLessThanOrEqual(chunks.length + 1);
+      expect(after.chunks()[0]).toBe(chunks[0]);
+      expect(after.revision).toBeGreaterThan(before.revision);
     } finally {
       controller.dispose();
     }

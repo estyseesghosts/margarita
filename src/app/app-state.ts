@@ -145,7 +145,8 @@ export type DiffOverlay = {
 export type Notice = Readonly<{ text: string; tone: 'dim' | 'warn' | 'error'; id: number }>;
 
 export type TranscriptState = {
-  messages: TranscriptMessage[];
+  /** Canonical paged view (array-compatible); never mutated in place. */
+  messages: readonly TranscriptMessage[];
   olderCursor?: string;
   /** The last older-history lookahead failed; the cursor is a retry path, not proof (#144). */
   olderCheckFailed?: boolean;

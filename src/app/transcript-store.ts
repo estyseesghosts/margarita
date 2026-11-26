@@ -22,10 +22,282 @@ export type TranscriptIndex = {
   readonly toolMessages: Map<string, string>;
   baseOffset: number;
   bytes: RetainedBytes;
+  /** Monotonic change revision; transferred to the produced message view. */
+  revision: number;
 };
 
+/**
+ * Canonical transcript storage as immutable pages rather than one flat array. The view is
+ * array-compatible for existing consumers (`length`, indexed access, iteration, `map`,
+ * `slice`, ...) but the message references live in shared chunks. Replacing the latest server
+ * page or prepending an older one creates new chunks at the edge only; the retained prefix is
+ * shared by reference, with no deep clone and no `toArray().slice()` flattening.
+ */
+export interface TranscriptMessageView extends ReadonlyArray<TranscriptMessage> {
+  /** Increments on every structural commit; an explicit change/robustness boundary. */
+  readonly revision: number;
+  /** First canonical index changed by the commit that produced this view. */
+  readonly changeBoundary: number | undefined;
+  /** Number of retained chunks; useful for asserting page sharing in tests/benchmarks. */
+  chunkCount(): number;
+  /** Direct read of the retained chunks (read-only). */
+  chunks(): readonly (readonly TranscriptMessage[])[];
+  /** Flattens explicitly. Callers that can use `at`/`range` should avoid this. */
+  toArray(): TranscriptMessage[];
+  /** Copies a half-open range with one allocation, in forward order. */
+  range(start: number, end: number): TranscriptMessage[];
+  /** Exact chunks for `[start, end)`, sharing whole chunks and slicing at most one edge. */
+  chunkRange(start: number, end: number): (readonly TranscriptMessage[])[];
+  replaceTail(
+    boundary: number,
+    page: readonly TranscriptMessage[],
+    revision: number,
+    changeBoundary?: number,
+  ): TranscriptMessageView;
+  prependOlder(older: readonly TranscriptMessage[], revision: number): TranscriptMessageView;
+}
+
+/** True when an array-like value is already a paged view. */
+export function isTranscriptMessageView(messages: unknown): messages is TranscriptMessageView {
+  return (
+    typeof messages === 'object' &&
+    messages !== null &&
+    'chunkCount' in messages &&
+    typeof messages.chunkCount === 'function'
+  );
+}
+
+/** Wraps an array once; an existing paged view is returned unchanged. */
+export function asTranscriptMessageView(
+  messages: readonly TranscriptMessage[],
+): TranscriptMessageView {
+  return isTranscriptMessageView(messages) ? messages : createTranscriptMessageView(messages);
+}
+
+class PagedTranscriptMessages {
+  readonly length: number;
+  private readonly offsets: number[] = [];
+
+  constructor(
+    private readonly parts: readonly (readonly TranscriptMessage[])[],
+    readonly revision: number,
+    readonly changeBoundary: number | undefined,
+  ) {
+    let total = 0;
+    for (const chunk of parts) {
+      this.offsets.push(total);
+      total += chunk.length;
+    }
+    this.length = total;
+  }
+
+  at(index: number): TranscriptMessage | undefined {
+    const position = index < 0 ? this.length + index : index;
+    if (position < 0 || position >= this.length) return undefined;
+    let low = 0;
+    let high = this.parts.length - 1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      const start = this.offsets[middle] ?? 0;
+      const chunk = this.parts[middle];
+      if (chunk === undefined) return undefined;
+      if (position < start) high = middle - 1;
+      else if (position >= start + chunk.length) low = middle + 1;
+      else return chunk[position - start];
+    }
+    return undefined;
+  }
+
+  range(start: number, end: number): TranscriptMessage[] {
+    const from = Math.max(0, Math.min(this.length, start));
+    const to = Math.max(from, Math.min(this.length, end));
+    const count = to - from;
+    if (count === 0) return [];
+    const result: TranscriptMessage[] = [];
+    result.length = count;
+    let written = 0;
+    for (let index = 0; index < this.parts.length && written < count; index += 1) {
+      const chunk = this.parts[index];
+      if (chunk === undefined) continue;
+      const chunkStart = this.offsets[index] ?? 0;
+      if (chunkStart + chunk.length <= from) continue;
+      if (chunkStart >= to) break;
+      const copyFrom = Math.max(0, from - chunkStart);
+      const available = Math.min(chunk.length - copyFrom, count - written);
+      for (let offset = 0; offset < available; offset += 1) {
+        result[written + offset] = chunk[copyFrom + offset]!;
+      }
+      written += available;
+    }
+    return result;
+  }
+
+  chunkRange(start: number, end: number): (readonly TranscriptMessage[])[] {
+    const from = Math.max(0, Math.min(this.length, start));
+    const to = Math.max(from, Math.min(this.length, end));
+    if (from === to) return [];
+    const chunks: (readonly TranscriptMessage[])[] = [];
+    for (let index = 0; index < this.parts.length; index += 1) {
+      const chunk = this.parts[index];
+      if (chunk === undefined) continue;
+      const chunkStart = this.offsets[index] ?? 0;
+      const chunkEnd = chunkStart + chunk.length;
+      if (chunkEnd <= from || chunkStart >= to) continue;
+      const sliceFrom = Math.max(0, from - chunkStart);
+      const sliceTo = Math.min(chunk.length, to - chunkStart);
+      chunks.push(
+        sliceFrom === 0 && sliceTo === chunk.length ? chunk : chunk.slice(sliceFrom, sliceTo),
+      );
+    }
+    return chunks;
+  }
+
+  toArray(): TranscriptMessage[] {
+    return this.parts.flat();
+  }
+
+  map<U>(callback: (message: TranscriptMessage, index: number) => U): U[] {
+    const out: U[] = [];
+    for (let index = 0; index < this.length; index += 1) {
+      const message = this.at(index);
+      if (message !== undefined) out.push(callback(message, index));
+    }
+    return out;
+  }
+
+  slice(start?: number, end?: number): TranscriptMessage[] {
+    return this.range(start ?? 0, end ?? this.length);
+  }
+
+  forEach(callback: (message: TranscriptMessage, index: number) => void): void {
+    for (let index = 0; index < this.length; index += 1) {
+      const message = this.at(index);
+      if (message !== undefined) callback(message, index);
+    }
+  }
+
+  find(predicate: (message: TranscriptMessage) => boolean): TranscriptMessage | undefined {
+    for (let index = 0; index < this.length; index += 1) {
+      const message = this.at(index);
+      if (message !== undefined && predicate(message)) return message;
+    }
+    return undefined;
+  }
+
+  filter(predicate: (message: TranscriptMessage) => boolean): TranscriptMessage[] {
+    const out: TranscriptMessage[] = [];
+    for (let index = 0; index < this.length; index += 1) {
+      const message = this.at(index);
+      if (message !== undefined && predicate(message)) out.push(message);
+    }
+    return out;
+  }
+
+  some(predicate: (message: TranscriptMessage) => boolean): boolean {
+    for (let index = 0; index < this.length; index += 1) {
+      const message = this.at(index);
+      if (message !== undefined && predicate(message)) return true;
+    }
+    return false;
+  }
+
+  flatMap<U>(callback: (message: TranscriptMessage, index: number) => U[]): U[] {
+    const out: U[] = [];
+    for (let index = 0; index < this.length; index += 1) {
+      const message = this.at(index);
+      if (message !== undefined) out.push(...callback(message, index));
+    }
+    return out;
+  }
+
+  *entries(): IterableIterator<[number, TranscriptMessage]> {
+    for (let index = 0; index < this.length; index += 1) {
+      const message = this.at(index);
+      if (message !== undefined) yield [index, message];
+    }
+  }
+
+  *[Symbol.iterator](): IterableIterator<TranscriptMessage> {
+    for (const chunk of this.parts) yield* chunk;
+  }
+
+  chunkCount(): number {
+    return this.parts.length;
+  }
+
+  chunks(): readonly (readonly TranscriptMessage[])[] {
+    return this.parts;
+  }
+
+  replaceTail(
+    boundary: number,
+    page: readonly TranscriptMessage[],
+    revision: number,
+    changeBoundary?: number,
+  ): TranscriptMessageView {
+    const prefix = this.chunkRange(0, boundary);
+    return createTranscriptMessageViewFromChunks(
+      [...prefix, ...(page.length === 0 ? [] : [page])],
+      revision,
+      changeBoundary,
+    );
+  }
+
+  prependOlder(older: readonly TranscriptMessage[], revision: number): TranscriptMessageView {
+    return createTranscriptMessageViewFromChunks(
+      [...(older.length === 0 ? [] : [older]), ...this.parts],
+      revision,
+      this.changeBoundary,
+    );
+  }
+}
+
+/** Creates a paged view from existing chunks, sharing every retained chunk by reference. */
+function createTranscriptMessageViewFromChunks(
+  chunks: readonly (readonly TranscriptMessage[])[],
+  revision: number,
+  changeBoundary: number | undefined,
+): TranscriptMessageView {
+  const store = new PagedTranscriptMessages(chunks, revision, changeBoundary);
+  const proxy: unknown = new Proxy(store, {
+    get(target, property) {
+      if (typeof property === 'string' && /^\d+$/.test(property)) {
+        return target.at(Number(property));
+      }
+      const value = Reflect.get(target, property, target);
+      if (value !== undefined) {
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+      // Full array compatibility for uncommon methods (indexOf, concat, join, ...).
+      const arrayMethod: unknown = Reflect.get(Array.prototype, property);
+      if (typeof arrayMethod === 'function') {
+        return (...args: unknown[]) => arrayMethod.apply(target.toArray(), args);
+      }
+      return value;
+    },
+  });
+  // The proxy target is intentionally private; only the array-compatible facade escapes.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
+  return proxy as TranscriptMessageView;
+}
+
+/** Creates a paged view from a flat array. The array is retained by reference, not cloned. */
+export function createTranscriptMessageView(
+  messages: readonly TranscriptMessage[],
+  revision = 0,
+  changeBoundary?: number,
+): TranscriptMessageView {
+  return createTranscriptMessageViewFromChunks(
+    messages.length === 0 ? [] : [messages],
+    revision,
+    changeBoundary,
+  );
+}
+
 export type MergeTranscriptOutcome = Readonly<{
-  messages: TranscriptMessage[];
+  /** Array-compatible paged view; assign this to canonical state, never `toArray()`. */
+  messages: TranscriptMessageView;
+  view: TranscriptMessageView;
   index: TranscriptIndex;
   /** First canonical index that differs from the cached array. */
   firstChangedIndex: number;
@@ -38,7 +310,9 @@ export type MergeTranscriptOutcome = Readonly<{
 }>;
 
 export type PrependTranscriptOutcome = Readonly<{
-  messages: TranscriptMessage[];
+  /** Array-compatible paged view; assign this to canonical state, never `toArray()`. */
+  messages: TranscriptMessageView;
+  view: TranscriptMessageView;
   index: TranscriptIndex;
   added: number;
 }>;
@@ -77,6 +351,7 @@ export function buildTranscriptIndex(messages: readonly TranscriptMessage[]): Tr
     toolMessages,
     baseOffset: 0,
     bytes: approximateTranscriptBytes(messages),
+    revision: 0,
   };
 }
 
@@ -145,9 +420,13 @@ export function mergeLatestIndexed(
   page: readonly TranscriptMessage[],
 ): MergeTranscriptOutcome {
   const index = ensureTranscriptIndex(currentIndex, cached);
+  const unchanged = asTranscriptMessageView(cached);
   if (page.length === 0) {
+    const messages = unchanged;
+    index.messages = messages;
     return {
-      messages: [...cached],
+      messages,
+      view: unchanged,
       index,
       firstChangedIndex: cached.length,
       reconciled: 0,
@@ -159,8 +438,11 @@ export function mergeLatestIndexed(
   const deduped = uniquePage(page);
   const first = deduped[0];
   if (first === undefined) {
+    const messages = unchanged;
+    index.messages = messages;
     return {
-      messages: [...cached],
+      messages,
+      view: unchanged,
       index,
       firstChangedIndex: cached.length,
       reconciled: 0,
@@ -214,20 +496,35 @@ export function mergeLatestIndexed(
   }
   index.bytes = subtractBytes(addBytes(index.bytes, addedBytes), removedBytes);
 
-  const messages = older.length === 0 ? canonical : [...older, ...canonical];
   let firstChangedIndex = boundary ?? 0;
-  if (boundary !== undefined) {
+  let view: TranscriptMessageView;
+  if (pageProportional) {
+    // Shared prefix chunks; only the latest page becomes a new chunk.
+    view = unchanged.replaceTail(older.length, canonical, index.revision + 1, firstChangedIndex);
     while (
       firstChangedIndex < cached.length &&
-      firstChangedIndex < messages.length &&
-      cached[firstChangedIndex] === messages[firstChangedIndex]
+      firstChangedIndex < view.length &&
+      cached[firstChangedIndex] === view[firstChangedIndex]
     ) {
       firstChangedIndex += 1;
     }
+    if (firstChangedIndex !== view.changeBoundary) {
+      view = unchanged.replaceTail(older.length, canonical, index.revision + 1, firstChangedIndex);
+    }
+  } else {
+    // Defensive malformed/disjoint page: filtering the prefix invalidates chunk boundaries.
+    view = createTranscriptMessageView(
+      [...older, ...canonical],
+      index.revision + 1,
+      firstChangedIndex,
+    );
   }
+  index.revision += 1;
+  const messages = view;
   index.messages = messages;
   return {
     messages,
+    view,
     index,
     firstChangedIndex,
     reconciled: removedMessages + canonical.length,
@@ -252,8 +549,11 @@ export function prependOlderIndexed(
     if (indexOfMessage(index, message.id) !== undefined) continue;
     older.push(message);
   }
+  const unchanged = asTranscriptMessageView(cached);
   if (older.length === 0) {
-    return { messages: [...cached], index, added: 0 };
+    const messages = unchanged;
+    index.messages = messages;
+    return { messages, view: unchanged, index, added: 0 };
   }
   const added = older.length;
   index.baseOffset += added;
@@ -268,7 +568,9 @@ export function prependOlderIndexed(
   let addedBytes = { total: 0, text: 0, structure: 0 };
   for (const message of older) addedBytes = addBytes(addedBytes, approximateMessageBytes(message));
   index.bytes = addBytes(index.bytes, addedBytes);
-  const messages = [...older, ...cached];
+  const view = unchanged.prependOlder(older, index.revision + 1);
+  index.revision += 1;
+  const messages = view;
   index.messages = messages;
-  return { messages, index, added };
+  return { messages, view, index, added };
 }
