@@ -555,6 +555,17 @@ type PresentationIndex = Readonly<{
   groups: Map<string, Extract<TranscriptNode, { kind: 'tool-group' }>>;
   groupNodes: Extract<TranscriptNode, { kind: 'tool-group' }>[];
   collapsible: CollapsibleItem[];
+  /** Node index behind each collapsible/group entry, for incremental suffix rebuilds. */
+  collapsibleAt: number[];
+  groupAt: number[];
+  /** collapsible key -> navigation position; avoids a copy plus findIndex per key press. */
+  collapsiblePositions: ReadonlyMap<string, number>;
+}>;
+
+type PreviousIndex = Readonly<{
+  index: PresentationIndex;
+  view: TranscriptNodeView;
+  prefixHint: number;
 }>;
 
 type PresentationCache = Readonly<{
@@ -578,50 +589,119 @@ function emptyPresentationIndex(): PresentationIndex {
     groups: new Map(),
     groupNodes: [],
     collapsible: [],
+    collapsibleAt: [],
+    groupAt: [],
+    collapsiblePositions: new Map(),
   };
 }
 
-/** Builds the read-only navigation indexes from one authoritative projection (#353). The
- * projection's chunked view is iterated directly; nothing is flattened with `toArray()`. */
+/**
+ * Builds the read-only navigation indexes from one authoritative projection (#353). The
+ * projector's unchanged-prefix boundary is reused: only the changed suffix is walked, and
+ * prefix entries in the maps/arrays are shared from the previous index. Nothing is flattened.
+ */
 function buildPresentationIndex(
   view: TranscriptNodeView,
   detailed: boolean,
   expandedGroups: ReadonlySet<string>,
+  previous?: PreviousIndex,
 ): PresentationIndex {
-  const keyToIndex = new Map<string, number>();
-  const tools = new Map<string, ToolCall>();
-  const groups = new Map<string, Extract<TranscriptNode, { kind: 'tool-group' }>>();
-  const groupNodes: Extract<TranscriptNode, { kind: 'tool-group' }>[] = [];
-  const collapsible: CollapsibleItem[] = [];
-  let index = 0;
-  for (const node of view) {
+  let reuse = 0;
+  if (previous !== undefined) {
+    const hint = Math.min(previous.view.length, view.length, Math.max(0, previous.prefixHint));
+    // O(1) identity check rejects a false boundary just as the projector does.
+    if (hint > 0 && previous.view.at(hint - 1) === view.at(hint - 1)) reuse = hint;
+  }
+  const keyToIndex = reuse > 0 ? new Map(previous!.index.keyToIndex) : new Map<string, number>();
+  const tools = reuse > 0 ? new Map(previous!.index.tools) : new Map<string, ToolCall>();
+  const groups =
+    reuse > 0
+      ? new Map(previous!.index.groups)
+      : new Map<string, Extract<TranscriptNode, { kind: 'tool-group' }>>();
+  const groupNodes =
+    reuse > 0
+      ? previous!.index.groupNodes.slice()
+      : ([] as Extract<TranscriptNode, { kind: 'tool-group' }>[]);
+  const collapsible = reuse > 0 ? previous!.index.collapsible.slice() : ([] as CollapsibleItem[]);
+  const collapsibleAt = reuse > 0 ? previous!.index.collapsibleAt.slice() : ([] as number[]);
+  const groupAt = reuse > 0 ? previous!.index.groupAt.slice() : ([] as number[]);
+
+  if (reuse > 0) {
+    // Drop entries owned by the previous suffix; their keys/indices may have changed.
+    for (let index = reuse; index < previous!.view.length; index += 1) {
+      const node = previous!.view.at(index);
+      if (node === undefined) continue;
+      keyToIndex.delete(node.key);
+      if (node.kind === 'tool') tools.delete(node.tool.id);
+      else if (node.kind === 'tool-group') {
+        groups.delete(node.key);
+        for (const tool of node.tools) tools.delete(tool.id);
+      }
+    }
+    const collapsibleCut = collapsibleAt.findIndex((position) => position >= reuse);
+    if (collapsibleCut >= 0) {
+      collapsible.length = collapsibleCut;
+      collapsibleAt.length = collapsibleCut;
+    }
+    const groupCut = groupAt.findIndex((position) => position >= reuse);
+    if (groupCut >= 0) {
+      groupNodes.length = groupCut;
+      groupAt.length = groupCut;
+    }
+  }
+
+  for (let index = reuse; index < view.length; index += 1) {
+    const node = view.at(index);
+    if (node === undefined) continue;
     keyToIndex.set(node.key, index);
     if (node.kind === 'worker') {
       collapsible.push({ key: node.key, kind: 'worker' });
+      collapsibleAt.push(index);
     } else if (node.kind === 'tool') {
       tools.set(node.tool.id, node.tool);
       if (detailed) {
         collapsible.push({ key: `tool:${node.tool.id}`, kind: 'tool' });
+        collapsibleAt.push(index);
       } else if (node.expanded || isEditLike(node.tool)) {
-        if (hasOversizedDiff(node.tool))
+        if (hasOversizedDiff(node.tool)) {
           collapsible.push({ key: `diff:${node.tool.id}`, kind: 'diff' });
+          collapsibleAt.push(index);
+        }
       } else {
         collapsible.push({ key: `tool:${node.tool.id}`, kind: 'tool' });
+        collapsibleAt.push(index);
       }
     } else if (node.kind === 'tool-group') {
       groups.set(node.key, node);
       groupNodes.push(node);
+      groupAt.push(index);
       for (const tool of node.tools) tools.set(tool.id, tool);
       if (!detailed) {
         collapsible.push({ key: node.key, kind: 'group' });
+        collapsibleAt.push(index);
         if (expandedGroups.has(node.key)) {
-          for (const tool of node.tools) collapsible.push({ key: `tool:${tool.id}`, kind: 'tool' });
+          for (const tool of node.tools) {
+            collapsible.push({ key: `tool:${tool.id}`, kind: 'tool' });
+            collapsibleAt.push(index);
+          }
         }
       }
     }
-    index += 1;
   }
-  return { length: view.length, keyToIndex, tools, groups, groupNodes, collapsible };
+  const collapsiblePositions = new Map(
+    collapsible.map((item, position) => [item.key, position] as const),
+  );
+  return {
+    length: view.length,
+    keyToIndex,
+    tools,
+    groups,
+    groupNodes,
+    collapsible,
+    collapsibleAt,
+    groupAt,
+    collapsiblePositions,
+  };
 }
 
 export class AppController {
@@ -8808,7 +8888,18 @@ export class AppController {
       return cached.index;
     }
     const view = this.presentationFor(sessionID, serverID);
-    const index = buildPresentationIndex(view, this.state.detailed, expanded.groups);
+    const index = buildPresentationIndex(
+      view,
+      this.state.detailed,
+      expanded.groups,
+      cached === undefined
+        ? undefined
+        : {
+            index: cached.index,
+            view: cached.view,
+            prefixHint: this.presentationStatsOf(sessionID, serverID)?.prefixNodesReused ?? 0,
+          },
+    );
     this.presentationCache.set(key, {
       messages,
       detailed: this.state.detailed,
@@ -8864,16 +8955,19 @@ export class AppController {
    * server-confirmed workers (keys `worker:<jobID>`). Detailed mode focuses individual
    * tool results (keys `tool:<toolID>`) because everything is already expanded (#222).
    */
-  collapsibleItems(): { key: string; kind: 'group' | 'diff' | 'worker' | 'tool' }[] {
-    return [...this.attachedPresentation().collapsible];
+  collapsibleItems(): readonly CollapsibleItem[] {
+    // Internal callers navigate by position; no defensive copy per key press (#slow task 9).
+    return this.attachedPresentation().collapsible;
   }
 
   /** Ctrl+↑/↓ while reading: move the lightweight selection between collapsible items. */
   moveGroupFocus(direction: -1 | 1): void {
-    const items = this.collapsibleItems();
+    const presentation = this.attachedPresentation();
+    const items = presentation.collapsible;
     if (items.length === 0) return;
     const current = this.state.focusedGroup;
-    const index = current === undefined ? -1 : items.findIndex((item) => item.key === current);
+    const index =
+      current === undefined ? -1 : (presentation.collapsiblePositions.get(current) ?? -1);
     const next =
       index === -1
         ? direction === -1
@@ -8888,7 +8982,8 @@ export class AppController {
   toggleFocusedGroup(): boolean {
     const key = this.state.focusedGroup;
     if (key === undefined) return false;
-    const item = this.collapsibleItems().find((entry) => entry.key === key);
+    const presentation = this.attachedPresentation();
+    const item = presentation.collapsible[presentation.collapsiblePositions.get(key) ?? -1];
     if (item === undefined) {
       this.setState('focusedGroup', undefined);
       return false;

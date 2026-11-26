@@ -262,6 +262,37 @@ describe('controller transcript metadata (#349, #350)', () => {
     }
   });
 
+  test('presentation index reuses prefix entries after a tail append (slow.txt task 9)', async () => {
+    const { controller, backend } = makeController(history(40));
+    try {
+      await controller.bootstrap();
+      controller.openSession(sessionID);
+      await waitFor(() => messagesOf(controller).length === 120, 'initial transcript');
+      const before = controller.presentationIndexFor(sessionID);
+      const groupsBefore = controller.toolGroups();
+      const collapsibleBefore = controller.collapsibleItems();
+      const firstKey = controller.presentationFor(sessionID).at(0)?.key;
+      expect(firstKey).toBeDefined();
+
+      const messages = backend.messages[sessionID];
+      expect(messages).toBeDefined();
+      messages?.push(user(40), assistant(40), idle(40));
+      controller.onEvents('local', [{ kind: 'transcript-changed', sessionID }], false);
+      await waitFor(() => messagesOf(controller).length === 123, 'tail append');
+
+      const after = controller.presentationIndexFor(sessionID);
+      expect(after).not.toBe(before);
+      expect(after.keyToIndex.get(firstKey ?? '')).toBe(0);
+      for (const group of groupsBefore) expect(controller.toolGroups()).toContain(group);
+      for (const item of collapsibleBefore) {
+        expect(after.collapsiblePositions.get(item.key)).toBeDefined();
+      }
+      expect(after.collapsiblePositions.size).toBe(controller.collapsibleItems().length);
+    } finally {
+      controller.dispose();
+    }
+  });
+
   test('navigation reads one cached projection instead of re-folding', async () => {
     const { controller } = makeController(history(40));
     try {
